@@ -734,7 +734,7 @@ impl Worker {
     /// Register advertised engine updates on the runtime system server.
     ///
     /// Updates are a sibling surface to controls for operations that mutate
-    /// engine-managed assets (e.g. vLLM dynamic LoRA). They register under
+    /// engine-managed assets. They register under
     /// `/engine/update/<name>` and, unlike controls, never toggle discovery
     /// registration — so no quiesce/resume policy wrapper or serialization lock.
     async fn register_engine_updates(
@@ -827,9 +827,8 @@ impl Worker {
         // join — snapshot writes are event-driven (engine pushes
         // synchronously); KV-event publishers own their own threads.
         self.publishers = None;
-        // Mark stopped even on failure so a follow-up call no-ops; engines
-        // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
-        // attempt can hang or raise.
+        // Mark stopped even on failure so a follow-up call no-ops. Cleanup may
+        // tear down process groups that cannot safely be destroyed twice.
         self.state = LifecycleState::Stopped;
     }
 
@@ -852,7 +851,7 @@ impl Worker {
         // with discovery. on_endpoint_ready is a fatal handoff: doing it first
         // means a failure leaves nothing published, so there is no stale
         // discovery entry to reclaim. Engines that publish their own discovery
-        // records (e.g. vLLM dynamic LoRA) stash the endpoint here, and this
+        // records stash the endpoint here, and this
         // still runs before `register_engine_controls`, so `/engine/*` cannot
         // fire before the engine has the endpoint.
         self.engine.on_endpoint_ready(endpoint.clone()).await?;
@@ -1278,11 +1277,8 @@ enum EngineControlPolicy {
 fn engine_control_policy(control: &str) -> EngineControlPolicy {
     // This policy only governs discovery (un)registration ordering. Draining
     // in-flight work before memory is freed is delegated to each backend's
-    // pause controller: vLLM calls pause_generation() before native sleep(),
-    // SGLang calls pause_generation() before release_memory_occupation(), and
-    // TRT-LLM rejects new requests and waits for inflight requests to finish. The
-    // UnregisterBefore step here is an additional guard (stop new routing), not
-    // the drain itself.
+    // pause controller. The UnregisterBefore step here is an additional guard
+    // that stops new routing, not the drain itself.
     match control {
         // Pause controls make the engine unsafe for new requests, so remove
         // the endpoint before they mutate engine state. Resume controls make
@@ -1625,7 +1621,7 @@ async fn build_local_model(
 
     // Decode workers don't host the WorkerKvQuery endpoint, so they must not
     // advertise the local indexer regardless of the operator-supplied flag.
-    // Mirrors the legacy non-unified vLLM path (worker_factory.py).
+    // Mirrors the vLLM worker-factory path.
     let enable_local_indexer = config.effective_enable_local_indexer();
 
     // None for raw engines → all-`None` fields → no KV/DP/bootstrap hints.
@@ -2502,8 +2498,7 @@ mod tests {
         worker.cleanup_once().await;
 
         // engine.cleanup() runs at most once even though cleanup_once was
-        // called three times — guards against the vLLM/TRT-LLM NCCL
-        // double-teardown hang.
+        // called three times — guards against native double-teardown hangs.
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
         assert_eq!(worker.state, LifecycleState::Stopped);
     }

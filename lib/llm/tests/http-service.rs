@@ -24,6 +24,7 @@ use dynamo_llm::{
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
+    error::DynamoError,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
@@ -1208,6 +1209,224 @@ async fn test_nvext_disabled_strips_request_and_response() {
     assert!(
         !body.contains("\"nvext\""),
         "nvext gate off: response must not contain an `nvext` field, got: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Audio engine whose only response frame is a `Backend(InvalidArgument)`
+/// error — models a worker rejecting the request during deserialization
+/// (e.g. a `task_type` value outside the backend's accepted set).
+struct InvalidArgumentAudiosEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        Error,
+    > for InvalidArgumentAudiosEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+    ) -> Result<
+        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        Error,
+    > {
+        use dynamo_runtime::error::{BackendError, ErrorType as DynErrorType};
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield Annotated::<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                        .message(
+                            "ValidationError: 1 validation error for NvCreateAudioSpeechRequest \
+                             task_type Input should be 'CustomVoice', 'VoiceDesign', 'Base'",
+                        )
+                        .build(),
+                ),
+            };
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// The `/v1/audio/speech` request schema is looser in the frontend than in the
+/// worker (the worker constrains e.g. `task_type` to a model-specific set), so
+/// out-of-range values can only be rejected worker-side. That rejection must
+/// reach the caller as a 4xx carrying the backend's message, not as a 500
+/// about folding the audio stream.
+#[tokio::test]
+async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let registry = Registry::new();
+    let card = ModelDeploymentCard::with_name_only("tts-model");
+    manager
+        .add_audios_model(
+            "tts-model",
+            card.mdcsum(),
+            Arc::new(InvalidArgumentAudiosEngine {}),
+        )
+        .unwrap();
+
+    let metrics = state.metrics_clone();
+    metrics.register(&registry).unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/audio/speech"))
+        .json(&serde_json::json!({
+            "model": "tts-model",
+            "input": "The quick brown fox jumps over the lazy dog.",
+            "voice": "vivian",
+            "language": "English",
+            "task_type": "NotARealTaskType",
+        }))
+        .send()
+        .await
+        .expect("POST /v1/audio/speech");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Backend(InvalidArgument) on /v1/audio/speech must land as HTTP 400; got {status}, body: {text}"
+    );
+    assert!(
+        text.contains("task_type"),
+        "expected the backend validation message to name the offending field; got: {text}"
+    );
+
+    // Backport divergence from main, which asserts `Validation` here.
+    // `ErrorMessage::metric_error_type` arrived with #12092 and is not on this
+    // release branch, so the label falls back to `classify_error_for_metrics`,
+    // which maps 400 to `Internal` unless the message begins with
+    // "Validation:" — the backend's text begins with "ValidationError:".
+    // The status code and message the caller sees are unaffected.
+    // If #12092 is ever backported, restore the `Validation` assertion.
+    compare_counter(
+        &metrics,
+        "tts-model",
+        &Endpoint::Audios,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Internal,
+        1,
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Audio engine that completes normally but reports `status: "failed"`, the
+/// shape a worker uses to signal it could not produce audio.
+struct FailedStatusAudiosEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        Error,
+    > for FailedStatusAudiosEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+    ) -> Result<
+        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        Error,
+    > {
+        use dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse;
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield Annotated::from_data(NvAudioSpeechResponse {
+                status: "failed".to_string(),
+                error: Some("voice cloning failed".to_string()),
+                ..NvAudioSpeechResponse::empty()
+            });
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// A worker-reported `status: "failed"` returns 400, so it must meter as a
+/// client error too. The inflight guard defaults to `internal` when unmarked,
+/// which would book this 400 as a server fault.
+#[tokio::test]
+async fn test_audio_speech_failed_status_meters_as_client_error() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let registry = Registry::new();
+    let card = ModelDeploymentCard::with_name_only("tts-model");
+    manager
+        .add_audios_model(
+            "tts-model",
+            card.mdcsum(),
+            Arc::new(FailedStatusAudiosEngine {}),
+        )
+        .unwrap();
+
+    let metrics = state.metrics_clone();
+    metrics.register(&registry).unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/audio/speech"))
+        .json(&serde_json::json!({"model": "tts-model", "input": "hello"}))
+        .send()
+        .await
+        .expect("POST /v1/audio/speech");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {text}");
+    assert!(
+        text.contains("voice cloning failed"),
+        "the worker's failure reason must reach the caller; got: {text}"
+    );
+
+    compare_counter(
+        &metrics,
+        "tts-model",
+        &Endpoint::Audios,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
     );
 
     cancel_token.cancel();

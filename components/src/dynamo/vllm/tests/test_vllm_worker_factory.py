@@ -16,6 +16,7 @@ from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
+    _DecodeWorkerLifecycle,
     _wait_and_load_benchmark,
 )
 
@@ -23,9 +24,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.core,
-    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
-    # runners with "Failed to infer device type" even for mock tests.
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -49,6 +48,203 @@ def _make_config(**overrides) -> Mock:
     }
     defaults.update(overrides)
     return Mock(**defaults)
+
+
+def _make_factory(**overrides) -> WorkerFactory:
+    defaults = {
+        "setup_vllm_engine_fn": Mock(),
+        "setup_kv_event_publisher_fn": Mock(return_value=None),
+        "register_vllm_model_fn": AsyncMock(),
+        "setup_fpm_relay_fn": Mock(return_value=None),
+        "setup_metrics_collection_fn": Mock(),
+    }
+    defaults.update(overrides)
+    return WorkerFactory(**defaults)
+
+
+def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
+    calls = []
+    shutdown_event = asyncio.Event()
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    resources = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=7.0),
+        handler=handler,
+        shutdown_event=shutdown_event,
+    )
+
+    resources.cleanup()
+
+    assert calls == ["handler", "engine"]
+    assert shutdown_event.is_set()
+    engine_client.shutdown.assert_called_once_with(timeout=7.0)
+
+
+def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
+    handler = Mock()
+    handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
+    engine_client = Mock()
+    resources = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        handler=handler,
+    )
+
+    with pytest.raises(RuntimeError, match="handler cleanup failed"):
+        resources.cleanup()
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
+    handler_error = RuntimeError("handler cleanup failed")
+    engine_error = RuntimeError("engine shutdown failed")
+    handler = Mock()
+    handler.cleanup.side_effect = handler_error
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = engine_error
+    lifecycle = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        handler=handler,
+    )
+
+    with pytest.raises(RuntimeError, match="engine shutdown failed") as exc_info:
+        lifecycle.cleanup()
+
+    assert exc_info.value is engine_error
+    assert exc_info.value.__context__ is handler_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog):
+    factory = _make_factory()
+    engine_client = Mock()
+    handler = Mock()
+    handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_resource_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise startup_error
+
+    factory._run_decode_worker = fail_after_resource_creation  # type: ignore[method-assign]
+    caplog.set_level(logging.ERROR)
+    config = SimpleNamespace(custom_encoder_class="encoder.Backend")
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert "Failed to clean up decode worker after an earlier failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_decode_worker_without_custom_encoder_uses_lifecycle():
+    factory = _make_factory()
+    engine_client = Mock()
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_engine_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        raise startup_error
+
+    factory._run_decode_worker = fail_after_engine_creation  # type: ignore[method-assign]
+    config = SimpleNamespace(custom_encoder_class=None)
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["configure", "handler"])
+async def test_custom_encoder_shutdown_engine_on_startup_failure(
+    monkeypatch, failure_stage, tmp_path
+):
+    engine_client = Mock()
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=1),
+        model_config=SimpleNamespace(max_model_len=1024),
+        shutdown_timeout=5.0,
+    )
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        str(tmp_path / "prometheus"),
+        Mock(),
+    )
+    factory = _make_factory(setup_vllm_engine_fn=Mock(return_value=engine_setup))
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    stat_logger = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory",
+        Mock(return_value=stat_logger),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.per_rank_kv_blocks",
+        lambda _num_blocks, _dp_size: 1,
+    )
+
+    async def configure_block_size(*_args, **_kwargs):
+        if failure_stage == "configure":
+            raise ValueError("decode startup rejected")
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size",
+        configure_block_size,
+    )
+    handler_constructor = Mock(
+        side_effect=(
+            ValueError("decode startup rejected")
+            if failure_stage == "handler"
+            else None
+        )
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler",
+        handler_constructor,
+    )
+
+    endpoint = Mock(connection_id=Mock(return_value="worker-id"))
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    config = SimpleNamespace(
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+        enable_multimodal=True,
+        custom_encoder_class="encoder.Backend",
+        use_vllm_tokenizer=False,
+        frontend_decoding=False,
+    )
+
+    with pytest.raises(ValueError, match="decode startup rejected"):
+        await factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    if failure_stage == "configure":
+        handler_constructor.assert_not_called()
 
 
 def _single_rank_benchmark_payload(

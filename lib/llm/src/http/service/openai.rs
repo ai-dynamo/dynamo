@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    error::HttpError,
+    error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -62,7 +62,10 @@ use crate::protocols::openai::{
     delta_common,
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
-    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    responses::{
+        NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
+        chat_completion_to_response,
+    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -160,6 +163,29 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
+}
+
+fn responses_conversion_error_type(error: &anyhow::Error) -> ErrorType {
+    match error.downcast_ref::<ResponsesConversionError>() {
+        Some(ResponsesConversionError::InvalidArgument(_)) => ErrorType::Validation,
+        Some(ResponsesConversionError::NotImplemented(_)) => ErrorType::NotImplemented,
+        None => ErrorType::Internal,
+    }
+}
+
+fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
+    const CONTEXT: &str = "Failed to convert responses request";
+
+    match error.downcast_ref::<ResponsesConversionError>() {
+        Some(ResponsesConversionError::InvalidArgument(message)) => ErrorMessage::from_anyhow(
+            invalid_argument(format!("{CONTEXT}: {message}")).into(),
+            CONTEXT,
+        ),
+        Some(ResponsesConversionError::NotImplemented(message)) => {
+            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        }
+        None => ErrorMessage::from_anyhow(error, CONTEXT),
+    }
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -2484,12 +2510,9 @@ async fn responses(
             error = %e,
             "Failed to convert NvCreateResponse to UnifiedRequest",
         );
-        let err_response = ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "Failed to convert responses request: "
-                + &e.to_string(),
-        );
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        let error_type = responses_conversion_error_type(&e);
+        let err_response = responses_conversion_error_response(e);
+        inflight_guard.mark_error(error_type);
         err_response
     })?;
     // Extract the API context before consuming the UnifiedRequest — this
@@ -2499,6 +2522,14 @@ async fn responses(
     let mut chat_request = unified_request.into_inner();
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+    if let Err(error) = chat_request.validate() {
+        let err_response = ErrorMessage::from_anyhow(
+            invalid_argument(error.to_string()).into(),
+            "Invalid responses request",
+        );
+        inflight_guard.mark_error(ErrorType::Validation);
         return Err(err_response);
     }
 
@@ -3618,10 +3649,16 @@ async fn audio_speech(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate audio"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Audios);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -3635,12 +3672,17 @@ async fn audio_speech(
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold audio stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold audio stream")
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     // Check for failure before marking success
     if response.status == "failed" {
+        // Without this the guard drops on its default and books this 400 as an
+        // internal error.
+        inflight.mark_error(ErrorType::Validation);
         return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
     }
 
@@ -5390,6 +5432,20 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn untyped_responses_conversion_errors_remain_internal() {
+        let response = responses_conversion_error_response(anyhow::anyhow!(
+            "internal response conversion details"
+        ));
+
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "Failed to convert responses request");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Internal
         );
     }
 
