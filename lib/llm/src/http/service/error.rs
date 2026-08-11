@@ -3,7 +3,7 @@
 
 use std::sync::LazyLock;
 
-use axum::http::StatusCode;
+use axum::{http::StatusCode, response::sse::Event};
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 use serde_json::Value;
@@ -71,6 +71,21 @@ pub(crate) struct ClassifiedHttpError {
     message: String,
     diagnostic: String,
     details: Option<Box<Value>>,
+}
+
+pub(crate) fn take_converted_stream_events(
+    events: &mut Vec<Result<Event, anyhow::Error>>,
+    protocol: &str,
+) -> Result<Vec<Event>, ClassifiedHttpError> {
+    std::mem::take(events)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            ClassifiedHttpError::internal(
+                INTERNAL_ERROR_MESSAGE,
+                format!("{protocol} stream event conversion failed: {error:#}"),
+            )
+        })
 }
 
 /// Construct a typed invalid-argument error for validation performed at an
@@ -465,6 +480,22 @@ fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 mod tests {
     use super::*;
     use dynamo_runtime::protocols::maybe_error::MaybeError;
+
+    #[test]
+    fn stream_event_conversion_failures_are_classified_and_drained() {
+        let mut events: Vec<Result<Event, anyhow::Error>> =
+            vec![Err(anyhow::anyhow!("serializer failed"))];
+
+        let problem = take_converted_stream_events(&mut events, "Responses").unwrap_err();
+
+        assert!(events.is_empty());
+        assert_eq!(problem.kind(), HttpErrorKind::Internal);
+        assert_eq!(problem.message(), INTERNAL_ERROR_MESSAGE);
+        assert_eq!(
+            problem.diagnostic(),
+            "Responses stream event conversion failed: serializer failed"
+        );
+    }
 
     #[test]
     fn typed_validation_is_safe_and_unknown_errors_are_sanitized() {

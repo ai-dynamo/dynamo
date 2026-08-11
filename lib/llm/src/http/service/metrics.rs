@@ -521,7 +521,7 @@ pub enum Status {
 pub enum ErrorType {
     /// No error (for successful requests)
     None,
-    /// Client validation error (4xx with "Validation:" prefix)
+    /// Client validation error (4xx)
     Validation,
     /// Model or resource not found (404)
     NotFound,

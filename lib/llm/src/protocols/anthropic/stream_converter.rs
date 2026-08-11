@@ -589,8 +589,20 @@ impl AnthropicStreamConverter {
         error: AnthropicErrorBody,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
-        let error_event = AnthropicStreamEvent::Error { error };
-        events.push(make_sse_event("error", &error_event));
+        events.push(Ok(self.error_event(error)));
+    }
+
+    /// Build a terminal error event without a fallible serialization step.
+    pub fn error_event(&mut self, error: AnthropicErrorBody) -> Event {
+        // The terminal fallback itself must not fail after another event failed
+        // to serialize. AnthropicErrorBody contains only strings, so building a
+        // JSON Value first gives us an infallible `Value::to_string` path.
+        let data = serde_json::json!({
+            "type": "error",
+            "error": error,
+        })
+        .to_string();
+        Event::default().event("error").data(data)
     }
 }
 

@@ -37,7 +37,10 @@ use super::{
         ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
         monitor_for_disconnects_with_rendered_errors,
     },
-    error::{ClassifiedHttpError, HttpError, HttpErrorKind, invalid_argument},
+    error::{
+        ClassifiedHttpError, HttpError, HttpErrorKind, invalid_argument,
+        take_converted_stream_events,
+    },
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -186,6 +189,13 @@ fn responses_error_code(kind: HttpErrorKind) -> &'static str {
         | HttpErrorKind::Unavailable
         | HttpErrorKind::NotImplemented
         | HttpErrorKind::Internal => "server_error",
+    }
+}
+
+fn responses_error_object(problem: &ClassifiedHttpError) -> ErrorObject {
+    ErrorObject {
+        code: responses_error_code(problem.kind()).to_string(),
+        message: problem.message().to_string(),
     }
 }
 
@@ -2867,8 +2877,16 @@ async fn responses(
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+            let start_events = match take_converted_stream_events(&mut events, "Responses") {
+                Ok(events) => events,
+                Err(problem) => {
+                    yield Ok(converter.error_event(responses_error_object(&problem)));
+                    yield Err(axum::Error::new(problem));
+                    return;
+                }
+            };
+            for event in start_events {
+                yield Ok(event);
             }
 
             while let Some(annotated_chunk) = engine_stream.next().await {
@@ -2879,16 +2897,7 @@ async fn responses(
                 );
 
                 if let Some(problem) = ClassifiedHttpError::from_annotated(&annotated_chunk) {
-                    converter.append_error_events(
-                        ErrorObject {
-                            code: responses_error_code(problem.kind()).to_string(),
-                            message: problem.message().to_string(),
-                        },
-                        &mut events,
-                    );
-                    for event in events.drain(..) {
-                        yield event.map_err(axum::Error::new);
-                    }
+                    yield Ok(converter.error_event(responses_error_object(&problem)));
                     // response.failed is terminal. Return the classification to
                     // the monitor for metrics without waiting for backend EOF.
                     yield Err(axum::Error::new(problem));
@@ -2900,14 +2909,30 @@ async fn responses(
                 };
 
                 converter.append_chunk_events(&stream_resp, &mut events);
-                for event in events.drain(..) {
-                    yield event.map_err(axum::Error::new);
+                let chunk_events = match take_converted_stream_events(&mut events, "Responses") {
+                    Ok(events) => events,
+                    Err(problem) => {
+                        yield Ok(converter.error_event(responses_error_object(&problem)));
+                        yield Err(axum::Error::new(problem));
+                        return;
+                    }
+                };
+                for event in chunk_events {
+                    yield Ok(event);
                 }
             }
 
             converter.append_end_events(&mut events);
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+            let end_events = match take_converted_stream_events(&mut events, "Responses") {
+                Ok(events) => events,
+                Err(problem) => {
+                    yield Ok(converter.error_event(responses_error_object(&problem)));
+                    yield Err(axum::Error::new(problem));
+                    return;
+                }
+            };
+            for event in end_events {
+                yield Ok(event);
             }
         };
 

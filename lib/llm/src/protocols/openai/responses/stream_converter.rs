@@ -791,13 +791,49 @@ impl ResponseStreamConverter {
         error: ErrorObject,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
+        events.push(Ok(self.error_event(error)));
+    }
+
+    /// Build a terminal error event, falling back to a minimal native event if
+    /// the full response state cannot be serialized.
+    pub fn error_event(&mut self, error: ErrorObject) -> Event {
         let mut response = self.make_response(Status::Failed, vec![]);
-        response.error = Some(error);
+        response.error = Some(error.clone());
+        let fallback_response_id = response.id.clone();
+        let fallback_object = response.object.clone();
+        let fallback_created_at = response.created_at;
+        let fallback_model = response.model.clone();
+        let sequence_number = self.next_seq();
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
-            sequence_number: self.next_seq(),
+            sequence_number,
             response,
         });
-        events.push(self.make_sse_event(&failed));
+        self.make_sse_event(&failed)
+            .unwrap_or_else(|serialization_error| {
+                tracing::error!(
+                    error = %serialization_error,
+                    "failed to serialize response.failed; using minimal terminal event"
+                );
+                let data = serde_json::json!({
+                    "type": "response.failed",
+                    "sequence_number": sequence_number,
+                    "response": {
+                        "id": fallback_response_id,
+                        "object": fallback_object,
+                        "created_at": fallback_created_at,
+                        "completed_at": serde_json::Value::Null,
+                        "status": "failed",
+                        "model": fallback_model,
+                        "output": [],
+                        "error": {
+                            "code": &error.code,
+                            "message": &error.message,
+                        }
+                    }
+                })
+                .to_string();
+                Event::default().event("response.failed").data(data)
+            })
     }
 }
 

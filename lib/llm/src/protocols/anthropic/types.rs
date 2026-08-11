@@ -56,27 +56,93 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
     }
 }
 
-fn validate_request(req: &AnthropicCreateMessageRequest) -> anyhow::Result<()> {
-    if req.messages.is_empty() {
-        anyhow::bail!("messages: field required");
-    }
-    if req.max_tokens == 0 {
-        anyhow::bail!("max_tokens: must be greater than 0");
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AnthropicRequestValidationError {
+    #[error("{0}")]
+    InvalidArgument(String),
+    #[error("{0}")]
+    NotImplemented(String),
+}
+
+pub(crate) fn validate_anthropic_messages(
+    messages: &[AnthropicMessage],
+) -> Result<(), AnthropicRequestValidationError> {
+    if messages.is_empty() {
+        return Err(AnthropicRequestValidationError::InvalidArgument(
+            "messages: field required".to_string(),
+        ));
     }
 
-    for (message_index, message) in req.messages.iter().enumerate() {
+    for (message_index, message) in messages.iter().enumerate() {
         let AnthropicMessageContent::Blocks { content } = &message.content else {
             continue;
         };
+        if content.is_empty() {
+            return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                "messages[{message_index}].content: must contain at least one content block"
+            )));
+        }
         for (block_index, block) in content.iter().enumerate() {
-            if let AnthropicContentBlock::Other(value) = block
-                && !value.is_object()
-            {
-                anyhow::bail!(
-                    "messages[{message_index}].content[{block_index}]: content blocks must be objects"
-                );
+            if let AnthropicContentBlock::Other(value) = block {
+                if !value.is_object() {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}]: content blocks must be objects"
+                    )));
+                }
+                let Some(block_type) = value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|block_type| !block_type.is_empty())
+                else {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}].type: must be a non-empty string"
+                    )));
+                };
+                return Err(AnthropicRequestValidationError::NotImplemented(format!(
+                    "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
+                )));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_anthropic_tools(
+    tools: Option<&[AnthropicTool]>,
+) -> Result<(), AnthropicRequestValidationError> {
+    for (tool_index, tool) in tools.unwrap_or_default().iter().enumerate() {
+        match tool.tool_type.as_deref() {
+            Some("") => {
+                return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                    "tools[{tool_index}].type: must be a non-empty string"
+                )));
+            }
+            Some("custom") | None => {
+                if tool.input_schema.is_none() {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "tools[{tool_index}].input_schema: field required for client tools"
+                    )));
+                }
+            }
+            Some(tool_type) => {
+                return Err(AnthropicRequestValidationError::NotImplemented(format!(
+                    "tools[{tool_index}]: server tool type \"{tool_type}\" is not supported"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_anthropic_request(
+    req: &AnthropicCreateMessageRequest,
+) -> Result<(), AnthropicRequestValidationError> {
+    validate_anthropic_messages(&req.messages)?;
+    validate_anthropic_tools(req.tools.as_deref())?;
+    if req.max_tokens == 0 {
+        return Err(AnthropicRequestValidationError::InvalidArgument(
+            "max_tokens: must be greater than 0".to_string(),
+        ));
     }
     Ok(())
 }
@@ -85,7 +151,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
     fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
-        validate_request(&req)?;
+        validate_anthropic_request(&req)?;
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -1328,6 +1394,23 @@ mod tests {
     }
 
     #[test]
+    fn test_unsupported_tool_type_is_rejected_during_conversion() {
+        let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "web_search_20260209", "name": "web_search"}]
+        }))
+        .unwrap();
+
+        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "tools[0]: server tool type \"web_search_20260209\" is not supported"
+        );
+    }
+
+    #[test]
     fn test_known_and_unknown_block_types() {
         let json = r#"{
             "model": "test",
@@ -1344,7 +1427,7 @@ mod tests {
                 ]
             }]
         }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let mut req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         match &req.messages[0].content {
             AnthropicMessageContent::Blocks { content } => {
                 assert_eq!(content.len(), 6);
@@ -1371,30 +1454,19 @@ mod tests {
             _ => panic!("expected blocks content"),
         }
 
-        // Conversion should succeed — server_tool_use becomes a tool call,
-        // redacted_thinking and web_search_tool_result are preserved gracefully
-        let chat_req: NvCreateChatCompletionRequest = AnthropicCreateMessageRequest {
-            model: "test".into(),
-            max_tokens: 100,
-            messages: req.messages,
-            nvext: None,
-            system: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: None,
-            stream: false,
-            metadata: None,
-            tools: None,
-            tool_choice: None,
-            cache_control: None,
-            thinking: None,
-            service_tier: None,
-            container: None,
-            output_config: None,
-        }
-        .try_into()
-        .unwrap();
+        let error = NvCreateChatCompletionRequest::try_from(req.clone()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "messages[0].content[4]: content block type \"future_block_type\" is not supported"
+        );
+
+        // Known server-side blocks remain convertible once the unsupported
+        // future block is removed.
+        let AnthropicMessageContent::Blocks { content } = &mut req.messages[0].content else {
+            unreachable!("content shape was checked above")
+        };
+        content.remove(4);
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         // server_tool_use becomes a tool call on the assistant message
         assert_eq!(chat_req.inner.messages.len(), 1);
         match &chat_req.inner.messages[0] {

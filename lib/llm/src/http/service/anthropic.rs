@@ -42,9 +42,9 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
-    AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
-    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
-    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
+    AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
+    AnthropicErrorBody, AnthropicErrorResponse, AnthropicRequestValidationError, SystemContent,
+    chat_completion_to_anthropic_response, validate_anthropic_messages, validate_anthropic_request,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -60,7 +60,9 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
-use super::error::{ClassifiedHttpError, HttpErrorKind, invalid_argument};
+use super::error::{
+    ClassifiedHttpError, HttpErrorKind, invalid_argument, take_converted_stream_events,
+};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
 
@@ -136,12 +138,6 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // Handlers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-enum AnthropicRequestValidationError {
-    InvalidArgument(String),
-    NotImplemented(String),
-}
-
 impl AnthropicRequestValidationError {
     fn status(&self) -> StatusCode {
         match self {
@@ -171,76 +167,6 @@ impl AnthropicRequestValidationError {
     }
 }
 
-fn validate_anthropic_messages(
-    messages: &[AnthropicMessage],
-) -> Result<(), AnthropicRequestValidationError> {
-    if messages.is_empty() {
-        return Err(AnthropicRequestValidationError::InvalidArgument(
-            "messages: field required".to_string(),
-        ));
-    }
-
-    for (message_index, message) in messages.iter().enumerate() {
-        let AnthropicMessageContent::Blocks { content } = &message.content else {
-            continue;
-        };
-        if content.is_empty() {
-            return Err(AnthropicRequestValidationError::InvalidArgument(format!(
-                "messages[{message_index}].content: must contain at least one content block"
-            )));
-        }
-        for (block_index, block) in content.iter().enumerate() {
-            if let AnthropicContentBlock::Other(value) = block {
-                if !value.is_object() {
-                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
-                        "messages[{message_index}].content[{block_index}]: content blocks must be objects"
-                    )));
-                }
-                let Some(block_type) = value
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|block_type| !block_type.is_empty())
-                else {
-                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
-                        "messages[{message_index}].content[{block_index}].type: must be a non-empty string"
-                    )));
-                };
-                return Err(AnthropicRequestValidationError::NotImplemented(format!(
-                    "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_anthropic_tools(
-    tools: Option<&[AnthropicTool]>,
-) -> Result<(), AnthropicRequestValidationError> {
-    for (tool_index, tool) in tools.unwrap_or_default().iter().enumerate() {
-        match tool.tool_type.as_deref() {
-            Some("") => {
-                return Err(AnthropicRequestValidationError::InvalidArgument(format!(
-                    "tools[{tool_index}].type: must be a non-empty string"
-                )));
-            }
-            Some("custom") | None => {
-                if tool.input_schema.is_none() {
-                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
-                        "tools[{tool_index}].input_schema: field required for client tools"
-                    )));
-                }
-            }
-            Some(tool_type) => {
-                return Err(AnthropicRequestValidationError::NotImplemented(format!(
-                    "tools[{tool_index}]: server tool type \"{tool_type}\" is not supported"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
@@ -262,28 +188,12 @@ async fn handler_anthropic_messages(
         &request_id,
     );
 
-    if let Err(error) = validate_anthropic_messages(&request.messages) {
+    if let Err(error) = validate_anthropic_request(&request) {
         inflight_guard.mark_error(error.metric_error_type());
         return Err(anthropic_error(
             error.status(),
             error.anthropic_error_type(),
             error.message(),
-        ));
-    }
-    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
-        inflight_guard.mark_error(error.metric_error_type());
-        return Err(anthropic_error(
-            error.status(),
-            error.anthropic_error_type(),
-            error.message(),
-        ));
-    }
-    if request.max_tokens == 0 {
-        inflight_guard.mark_error(ErrorType::Validation);
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "max_tokens: must be greater than 0",
         ));
     }
     gate_anthropic_nvext(&mut request, state.nvext_enabled());
@@ -570,8 +480,16 @@ async fn anthropic_messages(
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+            let start_events = match take_converted_stream_events(&mut events, "Anthropic") {
+                Ok(events) => events,
+                Err(problem) => {
+                    yield Ok(converter.error_event(anthropic_problem_body(&problem)));
+                    yield Err(axum::Error::new(problem));
+                    return;
+                }
+            };
+            for event in start_events {
+                yield Ok(event);
             }
 
             let mut cancelled = false;
@@ -597,13 +515,7 @@ async fn anthropic_messages(
                         );
 
                         if let Some(problem) = ClassifiedHttpError::from_annotated(&annotated_chunk) {
-                            converter.append_error_events(
-                                anthropic_problem_body(&problem),
-                                &mut events,
-                            );
-                            for event in events.drain(..) {
-                                yield event.map_err(axum::Error::new);
-                            }
+                            yield Ok(converter.error_event(anthropic_problem_body(&problem)));
                             // The native error event is terminal. Return the
                             // classification to the monitor for metrics without
                             // waiting for the backend transport to close.
@@ -616,8 +528,16 @@ async fn anthropic_messages(
                         };
 
                         converter.append_chunk_events(&stream_resp, &mut events);
-                        for event in events.drain(..) {
-                            yield event.map_err(axum::Error::new);
+                        let chunk_events = match take_converted_stream_events(&mut events, "Anthropic") {
+                            Ok(events) => events,
+                            Err(problem) => {
+                                yield Ok(converter.error_event(anthropic_problem_body(&problem)));
+                                yield Err(axum::Error::new(problem));
+                                return;
+                            }
+                        };
+                        for event in chunk_events {
+                            yield Ok(event);
                         }
                     }
                     _ = &mut stopped => {
@@ -632,8 +552,16 @@ async fn anthropic_messages(
             }
 
             converter.append_end_events(&mut events);
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+            let end_events = match take_converted_stream_events(&mut events, "Anthropic") {
+                Ok(events) => events,
+                Err(problem) => {
+                    yield Ok(converter.error_event(anthropic_problem_body(&problem)));
+                    yield Err(axum::Error::new(problem));
+                    return;
+                }
+            };
+            for event in end_events {
+                yield Ok(event);
             }
 
             if cancelled {
