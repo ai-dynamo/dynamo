@@ -2022,8 +2022,16 @@ where
                 metadata,
                 session_id,
                 turn_index,
+                logical_request_id,
+                authored_turn_index,
             } = ready;
             let session_metadata = session_id.clone().zip(turn_index);
+            let authored_identity = logical_request_id
+                .zip(session_id.clone())
+                .zip(authored_turn_index)
+                .map(|((logical_request_id, session_id), authored_turn_index)| {
+                    (logical_request_id, session_id, authored_turn_index)
+                });
             let uuid = self.on_external_arrival(
                 request,
                 arrival_time_ms,
@@ -2033,6 +2041,14 @@ where
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
+            }
+            if let Some((logical_request_id, session_id, authored_turn_index)) = authored_identity {
+                self.collector.on_authored_identity(
+                    uuid,
+                    logical_request_id,
+                    session_id,
+                    authored_turn_index,
+                );
             }
             released_any = true;
         }

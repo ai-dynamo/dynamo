@@ -3,15 +3,177 @@
 
 import json
 import os
-from typing import Any, Literal, TypedDict, overload
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, TypedDict, cast, overload
 
 from typing_extensions import Unpack
 
+from dynamo._core import MockEngineArgs
+from dynamo._core import _OfflineReplaySession as _NativeOfflineReplaySession
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+
+
+InteractiveRouter = Literal["external", "round_robin", "kv_router"]
+TerminalStatus = Literal["completed", "rejected", "canceled", "failed"]
+
+
+class ReplayStepStatus(TypedDict):
+    status: Literal["advanced", "quiescent", "drained"]
+    now_ms: float
+
+
+class ReplayEventData(TypedDict):
+    logical_request_id: str
+    internal_uuid: str
+    session_id: str
+    authored_turn_index: int
+    timestamp_ms: float
+    worker_id: int | None
+    dp_rank: int | None
+    terminal_status: TerminalStatus | None
+    input_length: int
+    requested_output_length: int
+    emitted_output_count: int
+    reused_input_tokens: int | None
+    ttft_ms: float | None
+    e2e_latency_ms: float | None
+
+
+class ReplayEvent(TypedDict):
+    event_type: Literal[
+        "placement_needed",
+        "routed",
+        "queued",
+        "admitted",
+        "first_token",
+        "terminal",
+    ]
+    event: ReplayEventData
+
+
+class ReplayPendingPlacement(TypedDict):
+    logical_request_id: str
+    internal_uuid: str
+    session_id: str
+    authored_turn_index: int
+    ready_at_ms: float
+
+
+class ReplayWorkerSnapshot(TypedDict):
+    worker_id: int
+    dp_rank: int
+    active: bool
+    draining: bool
+    in_flight_requests: int
+    queued_requests: int | None
+    queued_tokens: int | None
+    running_tokens: int | None
+
+
+class ReplaySnapshot(TypedDict):
+    now_ms: float
+    admission_open: bool
+    pending_request_count: int
+    pending_placement_count: int
+    workers: list[ReplayWorkerSnapshot]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerTarget:
+    """Stable logical worker and attention-DP rank selected by a controller."""
+
+    worker_id: int
+    dp_rank: int = 0
+
+    def to_native(self) -> dict[str, int]:
+        return {"worker_id": self.worker_id, "dp_rank": self.dp_rank}
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayRequestSpec:
+    """Compact authored request admitted to an interactive replay session."""
+
+    logical_request_id: str
+    session_id: str
+    authored_turn_index: int
+    input_length: int
+    hash_ids: Sequence[int]
+    trace_block_size: int
+    output_length: int
+    ready_time_ms: float = 0.0
+    internal_uuid: str | None = None
+    output_token_ids: Sequence[int] | None = None
+    priority: int = 0
+    strict_priority: int = 0
+    policy_class: str | None = None
+    target: WorkerTarget | None = None
+
+    def to_native(self) -> dict[str, Any]:
+        return {
+            "logical_request_id": self.logical_request_id,
+            "internal_uuid": self.internal_uuid,
+            "session_id": self.session_id,
+            "authored_turn_index": self.authored_turn_index,
+            "ready_time_ms": self.ready_time_ms,
+            "input_length": self.input_length,
+            "hash_ids": list(self.hash_ids),
+            "trace_block_size": self.trace_block_size,
+            "output_length": self.output_length,
+            "output_token_ids": (
+                None if self.output_token_ids is None else list(self.output_token_ids)
+            ),
+            "priority": self.priority,
+            "strict_priority": self.strict_priority,
+            "policy_class": self.policy_class,
+            "target": None if self.target is None else self.target.to_native(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayAgenticRequest:
+    """One request row and its causal DAG edge metadata."""
+
+    request: ReplayRequestSpec | Mapping[str, Any]
+    wait_for: Sequence[str] = ()
+    dependency_delay_ms: float = 0.0
+    prefix_reset: bool = False
+
+    def to_native(self) -> dict[str, Any]:
+        request = (
+            self.request.to_native()
+            if isinstance(self.request, ReplayRequestSpec)
+            else dict(self.request)
+        )
+        return {
+            "request": request,
+            "wait_for": list(self.wait_for),
+            "dependency_delay_ms": self.dependency_delay_ms,
+            "prefix_reset": self.prefix_reset,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayAgenticWorkflow:
+    """An appendable independent request DAG using one bundle block namespace."""
+
+    trace_block_size: int
+    requests: Sequence[ReplayAgenticRequest | Mapping[str, Any]]
+
+    def to_native(self) -> dict[str, Any]:
+        return {
+            "trace_block_size": self.trace_block_size,
+            "requests": [
+                request.to_native()
+                if isinstance(request, ReplayAgenticRequest)
+                else dict(request)
+                for request in self.requests
+            ],
+        }
 
 
 class _CommonReplayOptions(TypedDict, total=False):
@@ -80,6 +242,120 @@ def _materialize_offline_report(
         coverage=native.coverage,
         planner=planner,
     )
+
+
+def _request_payload(
+    request: ReplayRequestSpec | Mapping[str, Any],
+) -> dict[str, Any]:
+    if isinstance(request, ReplayRequestSpec):
+        return request.to_native()
+    return dict(request)
+
+
+def _workflow_payload(
+    workflow: ReplayAgenticWorkflow | Mapping[str, Any],
+) -> dict[str, Any]:
+    if isinstance(workflow, ReplayAgenticWorkflow):
+        return workflow.to_native()
+    return dict(workflow)
+
+
+def _target_payload(target: WorkerTarget | Mapping[str, int]) -> dict[str, int]:
+    if isinstance(target, WorkerTarget):
+        return target.to_native()
+    return dict(target)
+
+
+class OfflineReplaySession:
+    """Drive one long-lived Dynamo offline replay on an explicit virtual clock.
+
+    The session is synchronous and polling based. Placement decisions are made
+    after draining ``placement_needed`` events and supplied explicitly through
+    :meth:`assign`; the replay loop never invokes a Python callback.
+    """
+
+    def __init__(
+        self,
+        engine_args: MockEngineArgs,
+        trace_block_size: int,
+        num_workers: int = 1,
+        router: InteractiveRouter = "external",
+    ) -> None:
+        self._native = _NativeOfflineReplaySession(
+            engine_args=engine_args,
+            trace_block_size=trace_block_size,
+            num_workers=num_workers,
+            router=router,
+        )
+
+    def submit(self, request: ReplayRequestSpec | Mapping[str, Any]) -> None:
+        """Submit one independent request without predicting its completion."""
+        self._native.submit(_request_payload(request))
+
+    def append_agentic_workflow(
+        self,
+        workflow: ReplayAgenticWorkflow | Mapping[str, Any],
+        release_at_ms: float,
+    ) -> None:
+        """Append an independent causal workflow at a controller-selected time."""
+        self._native.append_agentic_workflow(
+            _workflow_payload(workflow),
+            release_at_ms,
+        )
+
+    def now_ms(self) -> float:
+        return self._native.now_ms()
+
+    def next_event_time_ms(self) -> float | None:
+        return self._native.next_event_time_ms()
+
+    def advance_next(self) -> ReplayStepStatus:
+        return cast(ReplayStepStatus, self._native.advance_next())
+
+    def advance_to(self, target_ms: float) -> ReplayStepStatus:
+        return cast(ReplayStepStatus, self._native.advance_to(target_ms))
+
+    def settle_current_time(self) -> ReplayStepStatus:
+        return cast(ReplayStepStatus, self._native.settle_current_time())
+
+    def drain_events(self) -> list[ReplayEvent]:
+        return cast(list[ReplayEvent], self._native.drain_events())
+
+    def pending_placements(self) -> list[ReplayPendingPlacement]:
+        return cast(
+            list[ReplayPendingPlacement],
+            self._native.pending_placements(),
+        )
+
+    def assign(
+        self,
+        logical_request_id: str,
+        target: WorkerTarget | Mapping[str, int],
+    ) -> None:
+        self._native.assign(logical_request_id, _target_payload(target))
+
+    def snapshot(self) -> ReplaySnapshot:
+        return cast(ReplaySnapshot, self._native.snapshot())
+
+    def close_admission(self) -> None:
+        self._native.close_admission()
+
+    def close(self) -> None:
+        """Alias used by service adapters when no more work will be appended."""
+        self.close_admission()
+
+    def is_quiescent(self) -> bool:
+        return self._native.is_quiescent()
+
+    def is_drained(self) -> bool:
+        return self._native.is_drained()
+
+    def finalize(self) -> ReplayReport:
+        """Consume a closed, drained replay and return its retained report."""
+        return _materialize_offline_report(
+            self._native.finalize(),
+            planner=None,
+        )
 
 
 @overload

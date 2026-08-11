@@ -18,6 +18,7 @@ use super::ObservedOffloadEffects;
 use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
+use crate::replay::offline::interactive::ReplayWorkerSnapshot;
 use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
@@ -535,6 +536,36 @@ where
     pub(in crate::replay::offline) fn rank_identity(&self, rank_id: usize) -> Option<(usize, u32)> {
         let (worker_id, dp_rank) = self.worker(rank_id)?.rank_identity();
         Some((usize::try_from(worker_id).ok()?, dp_rank))
+    }
+
+    /// Read-only controller view of live worker/rank state. Queue/token fields
+    /// remain absent until the shared scheduler exposes them without leaking
+    /// implementation-specific completion predictions.
+    pub(in crate::replay::offline) fn interactive_snapshots(&self) -> Vec<ReplayWorkerSnapshot> {
+        let mut snapshots = Vec::new();
+        for (worker_id, rank_ids) in self.worker_groups.iter().enumerate() {
+            let Some(rank_ids) = rank_ids else {
+                continue;
+            };
+            let starting = self.pending_startup.contains(&worker_id);
+            let draining = self.pending_removal.contains(&worker_id);
+            for (dp_rank, rank_id) in rank_ids.iter().copied().enumerate() {
+                let Some(worker) = self.worker(rank_id) else {
+                    continue;
+                };
+                snapshots.push(ReplayWorkerSnapshot {
+                    worker_id,
+                    dp_rank,
+                    active: !starting && !draining,
+                    draining,
+                    in_flight_requests: worker.in_flight(),
+                    queued_requests: None,
+                    queued_tokens: None,
+                    running_tokens: None,
+                });
+            }
+        }
+        snapshots
     }
 
     pub(in crate::replay::offline) fn has_active_workers(&self) -> bool {

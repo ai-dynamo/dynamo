@@ -14,6 +14,7 @@ pub(crate) mod events;
 pub(crate) mod evidence;
 mod executor;
 pub(crate) mod extensions;
+mod interactive;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod scaling;
@@ -52,6 +53,11 @@ pub use evidence::{
 };
 pub use extensions::kv_router::{
     CanonicalReplayRouterMode, CanonicalRouterMetadata, canonical_router_metadata,
+};
+pub use interactive::{
+    OfflineReplaySession, ReplayAgenticRequest, ReplayAgenticWorkflow, ReplayEvent,
+    ReplayEventData, ReplayPendingPlacement, ReplayRequestSpec, ReplaySessionRouter,
+    ReplaySnapshot, ReplayStepStatus, ReplayWorkerSnapshot, WorkerTarget,
 };
 
 #[cfg(test)]

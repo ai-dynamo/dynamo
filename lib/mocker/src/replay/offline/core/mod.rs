@@ -9,6 +9,7 @@
 use anyhow::Result;
 use uuid::Uuid;
 
+pub(crate) mod pinned;
 pub(crate) mod round_robin;
 
 pub(crate) trait RequestIdentity {
@@ -22,6 +23,8 @@ pub(crate) struct ReadyArrival<Request, Metadata> {
     pub(in crate::replay::offline) metadata: Metadata,
     pub(in crate::replay::offline) session_id: Option<String>,
     pub(in crate::replay::offline) turn_index: Option<usize>,
+    pub(in crate::replay::offline) logical_request_id: Option<String>,
+    pub(in crate::replay::offline) authored_turn_index: Option<usize>,
 }
 
 pub(crate) trait AdmissionSource {

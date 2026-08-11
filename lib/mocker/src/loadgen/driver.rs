@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_kv_router::protocols::RoutingConstraints;
@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use super::trace::validate_synthesizable_prompt;
 use super::types::{
-    AgenticTrace, ReadyReplayTurn, ReadyTurn, ReplayRequestHashes, ReplayRequestPayload, Trace,
+    AgenticTrace, CascadedWorkloadTerminal, ReadyReplayTurn, ReadyTurn, ReplayRequestHashes,
+    ReplayRequestPayload, Trace, WorkloadTerminalStatus,
 };
 use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
@@ -22,7 +23,7 @@ use crate::common::protocols::DirectRequest;
 enum SchedulingPolicy {
     Trace,
     Concurrency(ConcurrencyState),
-    Agentic(AgenticState),
+    Agentic(Box<AgenticState>),
 }
 
 #[derive(Debug)]
@@ -37,6 +38,17 @@ struct AgenticState {
     remaining_dependencies: Vec<usize>,
     ready_after_ms: Vec<f64>,
     dependents: FxHashMap<String, Vec<usize>>,
+    request_identities: FxHashMap<String, AuthoredIdentity>,
+    request_id_by_session_turn: FxHashMap<(String, usize), String>,
+    request_id_by_internal_uuid: FxHashMap<Uuid, String>,
+    output_rng: StdRng,
+    open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthoredIdentity {
+    session_id: String,
+    authored_turn_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,17 +57,11 @@ enum PromptMode {
     DeltaCumulative,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TurnOutcome {
-    Completed,
-    Rejected,
-    Cancelled,
-}
-
 #[derive(Debug)]
 struct TurnResolution {
-    request_id: Option<String>,
+    logical_request_id: Option<String>,
     session_ended: bool,
+    status: WorkloadTerminalStatus,
 }
 
 #[derive(Debug)]
@@ -80,9 +86,25 @@ enum PromptTokens {
     Materialized(Vec<u32>),
 }
 
+fn validate_exact_trace_hash_count(
+    input_length: usize,
+    hash_ids: &[u32],
+    trace_block_size: usize,
+) -> Result<()> {
+    validate_synthesizable_prompt(input_length, hash_ids, trace_block_size)?;
+    let required_hash_ids = input_length.div_ceil(trace_block_size);
+    if hash_ids.len() != required_hash_ids {
+        bail!(
+            "input_length {input_length} requires exactly {required_hash_ids} hash IDs at trace_block_size {trace_block_size}, got {}",
+            hash_ids.len()
+        );
+    }
+    Ok(())
+}
+
 impl PromptTokens {
     fn deferred(input_length: usize, hash_ids: Vec<u32>, trace_block_size: usize) -> Result<Self> {
-        validate_synthesizable_prompt(input_length, &hash_ids, trace_block_size)?;
+        validate_exact_trace_hash_count(input_length, &hash_ids, trace_block_size)?;
         Ok(Self::Deferred {
             input_length,
             hash_ids,
@@ -120,7 +142,8 @@ impl PromptTokens {
 
 #[derive(Debug)]
 struct TurnRuntime {
-    request_id: Option<String>,
+    logical_request_id: Option<String>,
+    authored_turn_index: Option<usize>,
     replay_key: Option<String>,
     prompt_tokens: PromptTokens,
     max_output_tokens: usize,
@@ -130,8 +153,20 @@ struct TurnRuntime {
     strict_priority: u32,
     policy_class: Option<String>,
     routing_constraints: RoutingConstraints,
-    #[cfg(any(test, feature = "replay-bench"))]
-    deterministic_request_id: Option<Uuid>,
+    internal_uuid: Option<Uuid>,
+    /// Reporting-only source metadata. Prompt tokens/hash ids, not this flag,
+    /// determine replay KV identity.
+    prefix_reset: bool,
+}
+
+#[derive(Debug)]
+struct StagedAgenticSession {
+    session: SessionRuntime,
+    logical_request_id: String,
+    identity: AuthoredIdentity,
+    dependencies: Vec<String>,
+    internal_uuid: Option<Uuid>,
+    root_ready_at_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -247,6 +282,19 @@ impl ConcurrencyState {
 }
 
 impl AgenticState {
+    fn new(open: bool) -> Self {
+        Self {
+            remaining_dependencies: Vec::new(),
+            ready_after_ms: Vec::new(),
+            dependents: FxHashMap::default(),
+            request_identities: FxHashMap::default(),
+            request_id_by_session_turn: FxHashMap::default(),
+            request_id_by_internal_uuid: FxHashMap::default(),
+            output_rng: StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED),
+            open,
+        }
+    }
+
     fn release_dependents(
         &mut self,
         sessions: &mut [SessionRuntime],
@@ -291,6 +339,83 @@ impl AgenticState {
                 turn_index,
             });
         }
+    }
+
+    fn cancel_descendants(
+        &mut self,
+        sessions: &mut [SessionRuntime],
+        request_id: &str,
+    ) -> Result<Vec<CascadedWorkloadTerminal>> {
+        let mut pending = VecDeque::new();
+        if let Some(dependent_sessions) = self.dependents.get(request_id) {
+            pending.extend(dependent_sessions.iter().copied());
+        }
+
+        let mut terminals = Vec::new();
+        while let Some(session_index) = pending.pop_front() {
+            let session = sessions
+                .get_mut(session_index)
+                .with_context(|| format!("unknown dependent workload session {session_index}"))?;
+            if session.next_turn_index >= session.turns.len() {
+                continue;
+            }
+            if let Some(in_flight) = session.in_flight {
+                bail!(
+                    "dependency-blocked session {} unexpectedly has in-flight request {in_flight}",
+                    session.session_id
+                );
+            }
+
+            let turn_index = session.next_turn_index;
+            let turn = session
+                .turns
+                .get_mut(turn_index)
+                .context("dependent workload turn disappeared during cancellation")?;
+            let logical_request_id = turn.logical_request_id.clone().ok_or_else(|| {
+                anyhow!(
+                    "agentic dependent session {} turn {turn_index} has no logical request ID",
+                    session.session_id
+                )
+            })?;
+            let authored_turn_index = turn.authored_turn_index.ok_or_else(|| {
+                anyhow!(
+                    "agentic dependent request {logical_request_id} has no authored turn index"
+                )
+            })?;
+            let request_uuid = if let Some(request_uuid) = turn.internal_uuid {
+                request_uuid
+            } else {
+                let request_uuid = loop {
+                    let candidate = Uuid::new_v4();
+                    if !self.request_id_by_internal_uuid.contains_key(&candidate) {
+                        break candidate;
+                    }
+                };
+                turn.internal_uuid = Some(request_uuid);
+                self.request_id_by_internal_uuid
+                    .insert(request_uuid, logical_request_id.clone());
+                request_uuid
+            };
+            let terminal = CascadedWorkloadTerminal {
+                request_uuid,
+                logical_request_id: logical_request_id.clone(),
+                session_id: session.session_id.clone(),
+                authored_turn_index,
+                input_length: turn.prompt_tokens.input_length(),
+                requested_output_length: turn.max_output_tokens,
+                emitted_output_count: 0,
+                status: WorkloadTerminalStatus::Canceled,
+            };
+
+            session.next_ready_at_ms = None;
+            session.next_turn_index = session.turns.len();
+            terminals.push(terminal);
+
+            if let Some(dependent_sessions) = self.dependents.get(&logical_request_id) {
+                pending.extend(dependent_sessions.iter().copied());
+            }
+        }
+        Ok(terminals)
     }
 }
 
@@ -419,97 +544,268 @@ impl WorkloadDriver {
         engine_block_size: usize,
         include_replay_hashes: bool,
     ) -> Result<Self> {
+        let trace_block_size = trace.block_size;
+        let mut driver = Self::new_open_agentic_with_replay_hashes(
+            trace_block_size,
+            engine_block_size,
+            include_replay_hashes,
+        )?;
+        driver.append_agentic_trace(trace, 0.0)?;
+        driver.close()?;
+        Ok(driver)
+    }
+
+    /// Create an agentic driver whose admission remains open while idle.
+    /// Appended traces must already share this driver's globally normalized
+    /// hash-id namespace and trace block size.
+    pub(crate) fn new_open_agentic(
+        trace_block_size: usize,
+        engine_block_size: usize,
+    ) -> Result<Self> {
+        Self::new_open_agentic_with_replay_hashes(trace_block_size, engine_block_size, true)
+    }
+
+    pub(crate) fn new_open_agentic_without_replay_hashes(
+        trace_block_size: usize,
+        engine_block_size: usize,
+    ) -> Result<Self> {
+        Self::new_open_agentic_with_replay_hashes(trace_block_size, engine_block_size, false)
+    }
+
+    fn new_open_agentic_with_replay_hashes(
+        trace_block_size: usize,
+        engine_block_size: usize,
+        include_replay_hashes: bool,
+    ) -> Result<Self> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
+        }
         if engine_block_size == 0 {
             bail!("engine_block_size must be greater than 0");
         }
         let engine_block_size_u32 =
             u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
-        let trace_block_size = trace.block_size;
+        Ok(Self {
+            policy: SchedulingPolicy::Agentic(Box::new(AgenticState::new(true))),
+            prompt_mode: PromptMode::Full,
+            emit_session_metadata: true,
+            trace_block_size,
+            engine_block_size: engine_block_size_u32,
+            include_replay_hashes,
+            sessions: Vec::new(),
+            in_flight: FxHashMap::default(),
+            ready_sessions: BinaryHeap::new(),
+        })
+    }
 
-        let mut dependents: FxHashMap<String, Vec<usize>> = FxHashMap::default();
-        let mut remaining_dependencies = Vec::with_capacity(trace.turns.len());
-        let mut ready_after_ms = Vec::with_capacity(trace.turns.len());
-        let mut sessions = Vec::with_capacity(trace.turns.len());
-        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
+    /// Atomically append one independent authored DAG. Dependencies are local
+    /// to the appended graph; authored request IDs, session/turn identities,
+    /// and supplied internal UUIDs are unique across the whole driver.
+    pub(crate) fn append_agentic_trace(
+        &mut self,
+        trace: AgenticTrace,
+        release_at_ms: f64,
+    ) -> Result<()> {
+        if !release_at_ms.is_finite() || release_at_ms < 0.0 {
+            bail!("release_at_ms must be finite and non-negative, got {release_at_ms}");
+        }
+        if trace.block_size != self.trace_block_size {
+            bail!(
+                "appended trace block_size {} does not match open driver block_size {}",
+                trace.block_size,
+                self.trace_block_size
+            );
+        }
+        if let Some(turn) = trace.turns.iter().find(|turn| turn.prefix_reset) {
+            bail!(
+                "request {} sets unsupported prefix_reset=true; causal replay does not mutate KV state from trace metadata",
+                turn.request_id
+            );
+        }
+        trace.validate()?;
 
-        for (session_index, mut turn) in trace.turns.into_iter().enumerate() {
-            for dependency in &turn.wait_for {
-                dependents
-                    .entry(dependency.clone())
-                    .or_default()
-                    .push(session_index);
+        let SchedulingPolicy::Agentic(state) = &self.policy else {
+            bail!("append_agentic_trace requires an agentic workload driver");
+        };
+        if !state.open {
+            bail!("cannot append an agentic workflow after admission is closed");
+        }
+        for turn in &trace.turns {
+            if let Some(existing) = state.request_identities.get(&turn.request_id) {
+                bail!(
+                    "request_id {} is already registered as session {} authored turn {}",
+                    turn.request_id,
+                    existing.session_id,
+                    existing.authored_turn_index
+                );
             }
-            remaining_dependencies.push(turn.wait_for.len());
-            ready_after_ms.push(0.0);
+            let session_turn = (turn.session_id.clone(), turn.authored_turn_index);
+            if let Some(existing) = state.request_id_by_session_turn.get(&session_turn) {
+                bail!(
+                    "request {} conflicts with existing request {existing} on session {} authored turn {}",
+                    turn.request_id,
+                    turn.session_id,
+                    turn.authored_turn_index
+                );
+            }
+            if let Some(internal_uuid) = turn.internal_uuid
+                && let Some(existing) = state.request_id_by_internal_uuid.get(&internal_uuid)
+            {
+                bail!(
+                    "request {} duplicates internal UUID {internal_uuid} already used by {existing}",
+                    turn.request_id
+                );
+            }
+        }
+
+        let first_session_index = self.sessions.len();
+        let mut output_rng = state.output_rng.clone();
+        let mut staged_internal_uuids: FxHashMap<Uuid, String> = FxHashMap::default();
+        let mut staged = Vec::with_capacity(trace.turns.len());
+        for mut turn in trace.turns {
+            let internal_uuid = turn.internal_uuid.or({
+                #[cfg(feature = "replay-bench")]
+                {
+                    let session_index = first_session_index
+                        .checked_add(staged.len())
+                        .context("agentic session index overflow")?;
+                    crate::replay::canonical_replay_active()
+                        .then(|| Uuid::from_u128(session_index as u128 + 1))
+                }
+                #[cfg(not(feature = "replay-bench"))]
+                {
+                    None
+                }
+            });
+            if let Some(internal_uuid) = internal_uuid {
+                if let Some(existing) = state.request_id_by_internal_uuid.get(&internal_uuid) {
+                    bail!(
+                        "request {} maps to internal UUID {internal_uuid} already used by {existing}",
+                        turn.request_id
+                    );
+                }
+                if let Some(existing) =
+                    staged_internal_uuids.insert(internal_uuid, turn.request_id.clone())
+                {
+                    bail!(
+                        "requests {existing} and {} map to duplicate internal UUID {internal_uuid}",
+                        turn.request_id
+                    );
+                }
+            }
 
             let prompt_tokens = PromptTokens::deferred(
                 turn.input_length,
                 std::mem::take(&mut turn.hash_ids),
-                trace_block_size,
+                self.trace_block_size,
             )?;
             let output_token_ids = Some(planned_output_token_ids(
                 turn.output_token_ids,
                 turn.max_output_tokens,
                 &mut output_rng,
             ));
-            let next_ready_at_ms = if turn.wait_for.is_empty() {
-                Some(turn.first_ready_timestamp_ms.unwrap_or(0.0))
+            let root_ready_at_ms = if turn.wait_for.is_empty() {
+                let root_offset_ms = turn.first_ready_timestamp_ms.unwrap_or(0.0);
+                let ready_at_ms = release_at_ms + root_offset_ms;
+                if !ready_at_ms.is_finite() {
+                    bail!(
+                        "request {} root readiness overflows virtual time",
+                        turn.request_id
+                    );
+                }
+                Some(ready_at_ms)
             } else {
                 None
             };
-            sessions.push(SessionRuntime {
-                session_id: turn.session_id,
-                turns: vec![TurnRuntime {
-                    request_id: Some(turn.request_id),
-                    replay_key: turn.replay_key,
-                    prompt_tokens,
-                    max_output_tokens: turn.max_output_tokens,
-                    output_token_ids,
-                    delay_after_previous_ms: turn.delay_after_dependencies_ms,
-                    priority: turn.priority,
-                    strict_priority: turn.strict_priority,
-                    policy_class: turn.policy_class,
-                    routing_constraints: turn.routing_constraints,
-                    #[cfg(feature = "replay-bench")]
-                    deterministic_request_id: crate::replay::canonical_replay_active()
-                        .then(|| Uuid::from_u128(session_index as u128 + 1)),
-                    #[cfg(all(test, not(feature = "replay-bench")))]
-                    deterministic_request_id: None,
-                }],
-                cumulative_tokens: Vec::new(),
-                next_turn_index: 0,
-                next_ready_at_ms,
-                in_flight: None,
+            let logical_request_id = turn.request_id;
+            let identity = AuthoredIdentity {
+                session_id: turn.session_id.clone(),
+                authored_turn_index: turn.authored_turn_index,
+            };
+            staged.push(StagedAgenticSession {
+                session: SessionRuntime {
+                    session_id: turn.session_id,
+                    turns: vec![TurnRuntime {
+                        logical_request_id: Some(logical_request_id.clone()),
+                        authored_turn_index: Some(turn.authored_turn_index),
+                        replay_key: turn.replay_key,
+                        prompt_tokens,
+                        max_output_tokens: turn.max_output_tokens,
+                        output_token_ids,
+                        delay_after_previous_ms: turn.delay_after_dependencies_ms,
+                        priority: turn.priority,
+                        strict_priority: turn.strict_priority,
+                        policy_class: turn.policy_class,
+                        routing_constraints: turn.routing_constraints,
+                        internal_uuid,
+                        prefix_reset: turn.prefix_reset,
+                    }],
+                    cumulative_tokens: Vec::new(),
+                    next_turn_index: 0,
+                    next_ready_at_ms: root_ready_at_ms,
+                    in_flight: None,
+                },
+                logical_request_id,
+                identity,
+                dependencies: turn.wait_for,
+                internal_uuid,
+                root_ready_at_ms,
             });
         }
 
-        let ready_sessions = sessions
-            .iter()
-            .enumerate()
-            .filter_map(|(session_index, session)| {
-                Some(ReadySession {
-                    ready_at_ms: session.next_ready_at_ms?,
+        let SchedulingPolicy::Agentic(state) = &mut self.policy else {
+            unreachable!("agentic policy was validated before staging")
+        };
+        state.output_rng = output_rng;
+        for (offset, staged_session) in staged.into_iter().enumerate() {
+            let session_index = first_session_index + offset;
+            state
+                .remaining_dependencies
+                .push(staged_session.dependencies.len());
+            state.ready_after_ms.push(0.0);
+            for dependency in &staged_session.dependencies {
+                state
+                    .dependents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .push(session_index);
+            }
+            state.request_identities.insert(
+                staged_session.logical_request_id.clone(),
+                staged_session.identity.clone(),
+            );
+            state.request_id_by_session_turn.insert(
+                (
+                    staged_session.identity.session_id.clone(),
+                    staged_session.identity.authored_turn_index,
+                ),
+                staged_session.logical_request_id.clone(),
+            );
+            if let Some(internal_uuid) = staged_session.internal_uuid {
+                state
+                    .request_id_by_internal_uuid
+                    .insert(internal_uuid, staged_session.logical_request_id.clone());
+            }
+            if let Some(ready_at_ms) = staged_session.root_ready_at_ms {
+                self.ready_sessions.push(ReadySession {
+                    ready_at_ms,
                     session_index,
-                    turn_index: session.next_turn_index,
-                })
-            })
-            .collect();
+                    turn_index: 0,
+                });
+            }
+            self.sessions.push(staged_session.session);
+        }
+        Ok(())
+    }
 
-        Ok(Self {
-            policy: SchedulingPolicy::Agentic(AgenticState {
-                remaining_dependencies,
-                ready_after_ms,
-                dependents,
-            }),
-            prompt_mode: PromptMode::Full,
-            emit_session_metadata: true,
-            trace_block_size,
-            engine_block_size: engine_block_size_u32,
-            include_replay_hashes,
-            sessions,
-            in_flight: FxHashMap::default(),
-            ready_sessions,
-        })
+    /// Close dynamic admission. Existing and dependency-blocked work remains
+    /// live; an empty closed driver becomes drained.
+    pub(crate) fn close(&mut self) -> Result<()> {
+        let SchedulingPolicy::Agentic(state) = &mut self.policy else {
+            bail!("close requires an agentic workload driver");
+        };
+        state.open = false;
+        Ok(())
     }
 
     fn new(
@@ -549,9 +845,16 @@ impl WorkloadDriver {
                                 std::mem::take(&mut turn.hash_ids),
                                 trace_block_size,
                             )?,
-                            PromptMode::DeltaCumulative => PromptTokens::Materialized(
-                                turn.synthesize_tokens(trace_block_size)?,
-                            ),
+                            PromptMode::DeltaCumulative => {
+                                validate_exact_trace_hash_count(
+                                    turn.input_length,
+                                    &turn.hash_ids,
+                                    trace_block_size,
+                                )?;
+                                PromptTokens::Materialized(
+                                    turn.synthesize_tokens(trace_block_size)?,
+                                )
+                            }
                         };
                         let output_token_ids = Some(planned_output_token_ids(
                             turn.output_token_ids,
@@ -559,7 +862,7 @@ impl WorkloadDriver {
                             &mut output_rng,
                         ));
                         #[cfg(feature = "replay-bench")]
-                        let deterministic_request_id = {
+                        let internal_uuid = {
                             next_deterministic_request_id.map(|next_id| {
                                 let request_id = Uuid::from_u128(next_id);
                                 next_deterministic_request_id = Some(
@@ -570,8 +873,11 @@ impl WorkloadDriver {
                                 request_id
                             })
                         };
+                        #[cfg(not(feature = "replay-bench"))]
+                        let internal_uuid = None;
                         Ok(TurnRuntime {
-                            request_id: None,
+                            logical_request_id: None,
+                            authored_turn_index: None,
                             prompt_tokens,
                             replay_key: turn.replay_key,
                             max_output_tokens: turn.max_output_tokens,
@@ -581,10 +887,8 @@ impl WorkloadDriver {
                             strict_priority: turn.strict_priority,
                             policy_class: turn.policy_class,
                             routing_constraints: turn.routing_constraints,
-                            #[cfg(feature = "replay-bench")]
-                            deterministic_request_id,
-                            #[cfg(all(test, not(feature = "replay-bench")))]
-                            deterministic_request_id: None,
+                            internal_uuid,
+                            prefix_reset: false,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -650,24 +954,57 @@ impl WorkloadDriver {
         let mut next_id = first_id;
         for session in &mut self.sessions {
             for turn in &mut session.turns {
-                turn.deterministic_request_id = Some(Uuid::from_u128(next_id));
+                turn.internal_uuid = Some(Uuid::from_u128(next_id));
                 next_id = next_id
                     .checked_add(1)
                     .expect("deterministic replay request UUID overflow");
             }
         }
+        if let SchedulingPolicy::Agentic(state) = &mut self.policy {
+            state.request_id_by_internal_uuid.clear();
+            for session in &self.sessions {
+                for turn in &session.turns {
+                    if let (Some(internal_uuid), Some(logical_request_id)) =
+                        (turn.internal_uuid, turn.logical_request_id.as_ref())
+                    {
+                        state
+                            .request_id_by_internal_uuid
+                            .insert(internal_uuid, logical_request_id.clone());
+                    }
+                }
+            }
+        }
         self
     }
 
-    fn request_uuid(&self, _session_index: usize, _turn_index: usize) -> Uuid {
-        #[cfg(any(test, feature = "replay-bench"))]
-        if let Some(request_id) =
-            self.sessions[_session_index].turns[_turn_index].deterministic_request_id
-        {
+    fn request_uuid(&mut self, session_index: usize, turn_index: usize) -> Uuid {
+        if let Some(request_id) = self.sessions[session_index].turns[turn_index].internal_uuid {
             return request_id;
         }
 
-        Uuid::new_v4()
+        let request_id = loop {
+            let candidate = Uuid::new_v4();
+            let registered = matches!(
+                &self.policy,
+                SchedulingPolicy::Agentic(state)
+                    if state.request_id_by_internal_uuid.contains_key(&candidate)
+            );
+            if !registered && !self.in_flight.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let logical_request_id = self.sessions[session_index].turns[turn_index]
+            .logical_request_id
+            .clone();
+        self.sessions[session_index].turns[turn_index].internal_uuid = Some(request_id);
+        if let (SchedulingPolicy::Agentic(state), Some(logical_request_id)) =
+            (&mut self.policy, logical_request_id)
+        {
+            state
+                .request_id_by_internal_uuid
+                .insert(request_id, logical_request_id);
+        }
+        request_id
     }
 
     pub(crate) fn without_session_metadata(mut self) -> Self {
@@ -683,11 +1020,10 @@ impl WorkloadDriver {
     /// deadlocking: `pop_ready` skips sessions with `in_flight.is_some()`, so a
     /// leaked session would leave `is_drained` stuck at `false` forever.
     pub fn release_cap_slot(&mut self, request_uuid: Uuid, now_ms: f64) {
-        let Ok(Some(resolution)) = self.resolve_turn(request_uuid, now_ms, TurnOutcome::Cancelled)
-        else {
-            return;
-        };
-        self.apply_resolution(resolution, now_ms);
+        // This legacy drop-guard helper cannot surface dependency-cascade
+        // evidence. Agentic runtimes must call `on_terminal(Canceled)` and
+        // consume the returned descriptors.
+        let _ = self.on_terminal(request_uuid, now_ms, WorkloadTerminalStatus::Canceled);
     }
 
     pub fn pop_ready(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyTurn> {
@@ -735,8 +1071,10 @@ impl WorkloadDriver {
                 continue;
             };
             let request_uuid = self.request_uuid(session_index, turn_index);
+            let is_agentic = matches!(&self.policy, SchedulingPolicy::Agentic(_));
             let session = &mut self.sessions[session_index];
             let turn = &mut session.turns[turn_index];
+            let authored_turn_index = turn.authored_turn_index.unwrap_or(turn_index);
             let arrival_timestamp_ms = self.policy.arrival_timestamp_ms(scheduled_ready_at_ms);
             let (request, replay_hashes) = match self.prompt_mode {
                 PromptMode::Full => {
@@ -744,7 +1082,11 @@ impl WorkloadDriver {
                     let request_metadata = DirectRequest {
                         tokens: Vec::new(),
                         max_output_tokens: turn.max_output_tokens,
-                        output_token_ids: turn.output_token_ids.take(),
+                        output_token_ids: if is_agentic {
+                            turn.output_token_ids.clone()
+                        } else {
+                            turn.output_token_ids.take()
+                        },
                         uuid: Some(request_uuid),
                         dp_rank: 0,
                         arrival_timestamp_ms,
@@ -811,11 +1153,14 @@ impl WorkloadDriver {
             );
             emitted.push(ReadyReplayTurn {
                 request_uuid,
+                logical_request_id: turn.logical_request_id.clone(),
                 session_id: session.session_id.clone(),
-                turn_index,
+                turn_index: authored_turn_index,
+                authored_turn_index,
                 replay_key: turn.replay_key.clone(),
                 scheduled_ready_at_ms,
                 replay_hashes,
+                prefix_reset: turn.prefix_reset,
                 emit_session_metadata: self.emit_session_metadata,
                 request,
             });
@@ -828,7 +1173,9 @@ impl WorkloadDriver {
     }
 
     pub fn on_output_token(&mut self, request_uuid: Uuid, token_id: u32) -> Result<()> {
-        if self.prompt_mode == PromptMode::Full {
+        if self.prompt_mode == PromptMode::Full
+            && !matches!(&self.policy, SchedulingPolicy::Agentic(_))
+        {
             return Ok(());
         }
         let in_flight = self
@@ -841,7 +1188,7 @@ impl WorkloadDriver {
         let planned_output_tokens = turn
             .output_token_ids
             .as_ref()
-            .expect("delta turns must have planned output tokens");
+            .expect("delta and agentic turns must have planned output tokens");
         let expected_token = planned_output_tokens
             .get(in_flight.emitted_output_tokens)
             .ok_or_else(|| {
@@ -870,34 +1217,47 @@ impl WorkloadDriver {
     }
 
     pub fn on_complete(&mut self, request_uuid: Uuid, now_ms: f64) -> Result<()> {
-        self.on_terminal(request_uuid, now_ms, false)
+        let cascaded = self.on_terminal(
+            request_uuid,
+            now_ms,
+            WorkloadTerminalStatus::Completed,
+        )?;
+        debug_assert!(cascaded.is_empty());
+        Ok(())
     }
 
-    pub fn on_terminal(&mut self, request_uuid: Uuid, now_ms: f64, rejected: bool) -> Result<()> {
-        let outcome = if rejected {
-            TurnOutcome::Rejected
-        } else {
-            TurnOutcome::Completed
+    /// Resolve one engine terminal and apply workload-level dependency rules.
+    ///
+    /// Completed requests alone release agentic dependencies. Any other
+    /// terminal status ends the owning workflow branch and returns every
+    /// recursively canceled descendant for the replay runtime to record and
+    /// emit exactly once.
+    pub fn on_terminal(
+        &mut self,
+        request_uuid: Uuid,
+        now_ms: f64,
+        status: WorkloadTerminalStatus,
+    ) -> Result<Vec<CascadedWorkloadTerminal>> {
+        let Some(resolution) = self.resolve_turn(request_uuid, now_ms, status)? else {
+            return Ok(Vec::new());
         };
-        let resolution = self
-            .resolve_turn(request_uuid, now_ms, outcome)?
-            .expect("completed turns require an in-flight request");
-        self.apply_resolution(resolution, now_ms);
-        Ok(())
+        self.apply_resolution(resolution, now_ms)
     }
 
     fn resolve_turn(
         &mut self,
         request_uuid: Uuid,
         now_ms: f64,
-        outcome: TurnOutcome,
+        status: WorkloadTerminalStatus,
     ) -> Result<Option<TurnResolution>> {
         let Some(in_flight) = self.in_flight.get(&request_uuid).copied() else {
-            return match outcome {
-                TurnOutcome::Completed | TurnOutcome::Rejected => Err(anyhow!(
-                    "unknown workload request completion for {request_uuid}"
+            return match status {
+                WorkloadTerminalStatus::Canceled => Ok(None),
+                WorkloadTerminalStatus::Completed
+                | WorkloadTerminalStatus::Rejected
+                | WorkloadTerminalStatus::Failed => Err(anyhow!(
+                    "unknown workload request terminal for {request_uuid}"
                 )),
-                TurnOutcome::Cancelled => Ok(None),
             };
         };
         let session = self
@@ -928,14 +1288,14 @@ impl WorkloadDriver {
             );
         }
 
-        let request_id = turn.request_id.clone();
-        if outcome == TurnOutcome::Rejected && in_flight.emitted_output_tokens != 0 {
+        let logical_request_id = turn.logical_request_id.clone();
+        if status == WorkloadTerminalStatus::Rejected && in_flight.emitted_output_tokens != 0 {
             bail!(
                 "rejected workload request {request_uuid} emitted {} output tokens",
                 in_flight.emitted_output_tokens
             );
         }
-        let completed_output_tokens = (outcome == TurnOutcome::Completed
+        let completed_output_tokens = (status == WorkloadTerminalStatus::Completed
             && self.prompt_mode == PromptMode::DeltaCumulative)
             .then(|| {
                 let planned_output_tokens = turn
@@ -944,8 +1304,8 @@ impl WorkloadDriver {
                     .expect("delta turns must have planned output tokens");
                 planned_output_tokens[..in_flight.emitted_output_tokens].to_vec()
             });
-        let (next_turn_index, next_ready_at_ms, session_ended) = match outcome {
-            TurnOutcome::Completed | TurnOutcome::Rejected => {
+        let (next_turn_index, next_ready_at_ms, session_ended) = match status {
+            WorkloadTerminalStatus::Completed => {
                 let next_turn_index = in_flight
                     .turn_index
                     .checked_add(1)
@@ -956,7 +1316,9 @@ impl WorkloadDriver {
                     .then(|| now_ms + session.turns[next_turn_index].delay_after_previous_ms);
                 (next_turn_index, next_ready_at_ms, !has_more_turns)
             }
-            TurnOutcome::Cancelled => (session.turns.len(), None, true),
+            WorkloadTerminalStatus::Rejected
+            | WorkloadTerminalStatus::Failed
+            | WorkloadTerminalStatus::Canceled => (session.turns.len(), None, true),
         };
 
         self.in_flight
@@ -980,27 +1342,40 @@ impl WorkloadDriver {
         }
 
         Ok(Some(TurnResolution {
-            request_id,
+            logical_request_id,
             session_ended,
+            status,
         }))
     }
 
-    fn apply_resolution(&mut self, resolution: TurnResolution, now_ms: f64) {
+    fn apply_resolution(
+        &mut self,
+        resolution: TurnResolution,
+        now_ms: f64,
+    ) -> Result<Vec<CascadedWorkloadTerminal>> {
         match &mut self.policy {
-            SchedulingPolicy::Trace => {}
+            SchedulingPolicy::Trace => Ok(Vec::new()),
             SchedulingPolicy::Concurrency(state) => {
                 if resolution.session_ended {
                     state.on_session_finished(&mut self.sessions, &mut self.ready_sessions, now_ms);
                 }
+                Ok(Vec::new())
             }
             SchedulingPolicy::Agentic(state) => {
-                if let Some(request_id) = resolution.request_id {
-                    state.release_dependents(
-                        &mut self.sessions,
-                        &mut self.ready_sessions,
-                        &request_id,
-                        now_ms,
-                    );
+                if let Some(request_id) = resolution.logical_request_id {
+                    if resolution.status == WorkloadTerminalStatus::Completed {
+                        state.release_dependents(
+                            &mut self.sessions,
+                            &mut self.ready_sessions,
+                            &request_id,
+                            now_ms,
+                        );
+                        Ok(Vec::new())
+                    } else {
+                        state.cancel_descendants(&mut self.sessions, &request_id)
+                    }
+                } else {
+                    Ok(Vec::new())
                 }
             }
         }
@@ -1025,11 +1400,32 @@ impl WorkloadDriver {
     }
 
     pub fn is_drained(&self) -> bool {
-        self.in_flight.is_empty()
+        let admission_closed = !matches!(
+            &self.policy,
+            SchedulingPolicy::Agentic(state) if state.open
+        );
+        admission_closed
+            && self.in_flight.is_empty()
             && self
                 .sessions
                 .iter()
                 .all(|session| session.next_turn_index >= session.turns.len())
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(
+            &self.policy,
+            SchedulingPolicy::Agentic(state) if state.open
+        )
+    }
+
+    /// Number of submitted turns that have not reached a terminal outcome,
+    /// including in-flight, dependency-blocked, and future-ready turns.
+    pub(crate) fn pending_turns(&self) -> usize {
+        self.sessions
+            .iter()
+            .map(|session| session.turns.len().saturating_sub(session.next_turn_index))
+            .sum()
     }
 
     pub fn total_turns(&self) -> usize {
@@ -1233,7 +1629,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unknown workload request completion")
+                .contains("unknown workload request terminal")
         );
         assert!(driver.in_flight.contains_key(&request_uuid));
         assert_eq!(driver.sessions[session_index].in_flight, Some(request_uuid));
@@ -1550,7 +1946,7 @@ mod tests {
                 max_output_tokens: 3,
                 hash_ids: vec![10, 11],
                 first_ready_timestamp_ms: Some(0.0),
-                prefix_reset: true,
+                prefix_reset: false,
                 ..Default::default()
             }],
         };
@@ -1706,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn accumulating_delta_mode_does_not_append_rejected_output_tokens() {
+    fn rejected_non_agentic_request_ends_sequential_session() {
         let trace = Trace {
             block_size: 1,
             sessions: vec![SessionTrace {
@@ -1732,12 +2128,17 @@ mod tests {
         let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 1, 1).unwrap();
 
         let first = driver.pop_ready(0.0, usize::MAX);
-        driver
-            .on_terminal(first[0].request_uuid, 1.0, true)
+        let cascaded = driver
+            .on_terminal(
+                first[0].request_uuid,
+                1.0,
+                WorkloadTerminalStatus::Rejected,
+            )
             .unwrap();
 
-        let second = driver.pop_ready(1.0, usize::MAX);
-        assert_eq!(second[0].request.tokens, vec![10, 12]);
+        assert!(cascaded.is_empty());
+        assert!(driver.pop_ready(1.0, usize::MAX).is_empty());
+        assert!(driver.is_drained());
     }
 
     #[test]
@@ -1754,12 +2155,13 @@ mod tests {
                     first_ready_timestamp_ms: Some(0.0),
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
-                    prefix_reset: true,
+                    prefix_reset: false,
                     ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "r2".into(),
                     session_id: "root".into(),
+                    authored_turn_index: 1,
                     input_length: 2,
                     max_output_tokens: 1,
                     hash_ids: vec![1, 3],
@@ -1787,7 +2189,7 @@ mod tests {
     }
 
     #[test]
-    fn agentic_mode_releases_dependents_when_cap_slot_is_released() {
+    fn canceled_agentic_parent_cascades_and_never_releases_child() {
         let trace = AgenticTrace {
             block_size: 1,
             turns: vec![
@@ -1800,7 +2202,7 @@ mod tests {
                     first_ready_timestamp_ms: Some(0.0),
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
-                    prefix_reset: true,
+                    prefix_reset: false,
                     ..Default::default()
                 },
                 AgenticTurnTrace {
@@ -1812,7 +2214,7 @@ mod tests {
                     first_ready_timestamp_ms: Some(100.0),
                     delay_after_dependencies_ms: 5.0,
                     wait_for: vec!["r1".into()],
-                    prefix_reset: true,
+                    prefix_reset: false,
                     ..Default::default()
                 },
             ],
@@ -1822,12 +2224,25 @@ mod tests {
         let first = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(first.len(), 1);
 
-        driver.release_cap_slot(first[0].request_uuid, 10.0);
+        let cascaded = driver
+            .on_terminal(
+                first[0].request_uuid,
+                10.0,
+                WorkloadTerminalStatus::Canceled,
+            )
+            .unwrap();
 
-        assert_eq!(driver.next_ready_time_ms(), Some(15.0));
-        let second = driver.pop_ready(15.0, usize::MAX);
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].scheduled_ready_at_ms, 15.0);
+        assert_eq!(cascaded.len(), 1);
+        assert_eq!(cascaded[0].logical_request_id, "r2");
+        assert_eq!(cascaded[0].session_id, "child");
+        assert_eq!(cascaded[0].authored_turn_index, 0);
+        assert_eq!(cascaded[0].input_length, 2);
+        assert_eq!(cascaded[0].requested_output_length, 1);
+        assert_eq!(cascaded[0].emitted_output_count, 0);
+        assert_eq!(cascaded[0].status, WorkloadTerminalStatus::Canceled);
+        assert_eq!(driver.next_ready_time_ms(), None);
+        assert!(driver.pop_ready(15.0, usize::MAX).is_empty());
+        assert!(driver.is_drained());
     }
 
     #[test]
@@ -1844,7 +2259,7 @@ mod tests {
                     first_ready_timestamp_ms: Some(0.0),
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
-                    prefix_reset: true,
+                    prefix_reset: false,
                     ..Default::default()
                 },
                 AgenticTurnTrace {
@@ -1856,7 +2271,7 @@ mod tests {
                     first_ready_timestamp_ms: Some(0.0),
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
-                    prefix_reset: true,
+                    prefix_reset: false,
                     ..Default::default()
                 },
                 AgenticTurnTrace {
@@ -1881,5 +2296,372 @@ mod tests {
         assert!(driver.next_ready_time_ms().is_none());
         driver.on_complete(initial[1].request_uuid, 30.0).unwrap();
         assert_eq!(driver.next_ready_time_ms(), Some(32.0));
+    }
+
+    fn open_agentic_turn(
+        request_id: &str,
+        session_id: &str,
+        authored_turn_index: usize,
+        wait_for: &[&str],
+        first_ready_timestamp_ms: Option<f64>,
+        delay_after_dependencies_ms: f64,
+    ) -> AgenticTurnTrace {
+        AgenticTurnTrace {
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+            authored_turn_index,
+            internal_uuid: None,
+            input_length: 1,
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![100 + authored_turn_index as u32]),
+            hash_ids: vec![authored_turn_index as u32 + 1],
+            first_ready_timestamp_ms,
+            delay_after_dependencies_ms,
+            wait_for: wait_for
+                .iter()
+                .map(|dependency| (*dependency).into())
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn open_agentic_trace(turns: Vec<AgenticTurnTrace>) -> AgenticTrace {
+        AgenticTrace {
+            block_size: 1,
+            turns,
+        }
+    }
+
+    #[test]
+    fn open_agentic_quiescence_append_close_and_identity() {
+        let mut driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+        assert!(driver.is_open());
+        assert!(!driver.is_drained());
+        assert_eq!(driver.pending_turns(), 0);
+        assert_eq!(driver.next_ready_time_ms(), None);
+
+        let mut root = open_agentic_turn("logical-root", "session-a", 7, &[], Some(3.0), 0.0);
+        root.internal_uuid = Some(Uuid::from_u128(77));
+        driver
+            .append_agentic_trace(open_agentic_trace(vec![root]), 10.0)
+            .unwrap();
+        assert_eq!(driver.total_turns(), 1);
+        assert_eq!(driver.pending_turns(), 1);
+        assert_eq!(driver.next_ready_time_ms(), Some(13.0));
+        assert!(driver.pop_ready(12.0, usize::MAX).is_empty());
+
+        let ready = driver.pop_ready(13.0, usize::MAX);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].logical_request_id.as_deref(), Some("logical-root"));
+        assert_eq!(ready[0].session_id, "session-a");
+        assert_eq!(ready[0].turn_index, 7);
+        assert_eq!(ready[0].authored_turn_index, 7);
+        assert_eq!(ready[0].request_uuid, Uuid::from_u128(77));
+        assert_eq!(ready[0].request.uuid, Some(Uuid::from_u128(77)));
+        assert!(!ready[0].prefix_reset);
+
+        driver.on_output_token(ready[0].request_uuid, 107).unwrap();
+        driver.on_complete(ready[0].request_uuid, 20.0).unwrap();
+        assert_eq!(driver.pending_turns(), 0);
+        assert_eq!(
+            driver.total_turns(),
+            1,
+            "submitted total remains cumulative"
+        );
+        assert!(
+            !driver.is_drained(),
+            "open and idle is quiescent, not drained"
+        );
+        driver.close().unwrap();
+        assert!(!driver.is_open());
+        assert!(driver.is_drained());
+        assert!(
+            driver
+                .append_agentic_trace(
+                    open_agentic_trace(vec![open_agentic_turn("late", "late", 0, &[], None, 0.0)]),
+                    20.0,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("admission is closed")
+        );
+    }
+
+    #[test]
+    fn open_agentic_rejects_global_identity_collisions_atomically() {
+        let mut driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+        let mut first = open_agentic_turn("one", "session", 0, &[], None, 0.0);
+        first.internal_uuid = Some(Uuid::from_u128(1));
+        driver
+            .append_agentic_trace(open_agentic_trace(vec![first]), 0.0)
+            .unwrap();
+
+        let duplicate_id = open_agentic_turn("one", "other", 0, &[], None, 0.0);
+        assert!(
+            driver
+                .append_agentic_trace(open_agentic_trace(vec![duplicate_id]), 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("request_id one is already registered")
+        );
+
+        let duplicate_turn = open_agentic_turn("two", "session", 0, &[], None, 0.0);
+        assert!(
+            driver
+                .append_agentic_trace(open_agentic_trace(vec![duplicate_turn]), 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with existing request one")
+        );
+
+        let mut duplicate_uuid = open_agentic_turn("three", "other", 0, &[], None, 0.0);
+        duplicate_uuid.internal_uuid = Some(Uuid::from_u128(1));
+        assert!(
+            driver
+                .append_agentic_trace(open_agentic_trace(vec![duplicate_uuid]), 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicates internal UUID")
+        );
+        assert_eq!(driver.total_turns(), 1);
+        assert_eq!(driver.pending_turns(), 1);
+    }
+
+    #[test]
+    fn open_agentic_validates_dependency_graph_before_mutation() {
+        let mut driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+        let missing = open_agentic_turn("child", "child", 0, &["missing"], None, 0.0);
+        assert!(
+            driver
+                .append_agentic_trace(open_agentic_trace(vec![missing]), 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown request_id missing")
+        );
+
+        let self_edge = open_agentic_turn("self", "self", 0, &["self"], None, 0.0);
+        assert!(
+            driver
+                .append_agentic_trace(open_agentic_trace(vec![self_edge]), 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot wait for itself")
+        );
+
+        let a = open_agentic_turn("a", "a", 0, &["b"], None, 0.0);
+        let b = open_agentic_turn("b", "b", 0, &["a"], None, 0.0);
+        assert!(
+            driver
+                .append_agentic_trace(open_agentic_trace(vec![a, b]), 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("cycle detected")
+        );
+        assert_eq!(driver.total_turns(), 0);
+    }
+
+    #[test]
+    fn static_and_open_agentic_reject_reporting_only_prefix_reset() {
+        let mut turn = open_agentic_turn("root", "root", 0, &[], None, 0.0);
+        turn.prefix_reset = true;
+        let trace = open_agentic_trace(vec![turn]);
+
+        let static_error = WorkloadDriver::new_agentic_trace(trace.clone(), 1).unwrap_err();
+        assert!(
+            static_error
+                .to_string()
+                .contains("unsupported prefix_reset=true")
+        );
+
+        let mut open_driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+        let open_error = open_driver.append_agentic_trace(trace, 0.0).unwrap_err();
+        assert!(
+            open_error
+                .to_string()
+                .contains("unsupported prefix_reset=true")
+        );
+        assert_eq!(open_driver.total_turns(), 0);
+        assert_eq!(open_driver.pending_turns(), 0);
+    }
+
+    #[test]
+    fn open_agentic_fanout_and_join_use_actual_latest_terminal_time() {
+        let trace = open_agentic_trace(vec![
+            open_agentic_turn("root", "root", 0, &[], None, 0.0),
+            open_agentic_turn("left", "left", 0, &["root"], None, 0.0),
+            open_agentic_turn("right", "right", 0, &["root"], None, 0.0),
+            open_agentic_turn("join", "join", 0, &["left", "right"], None, 2.0),
+        ]);
+        let mut driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+        driver.append_agentic_trace(trace, 5.0).unwrap();
+
+        let root = driver.pop_ready(5.0, usize::MAX);
+        assert_eq!(root.len(), 1);
+        driver.on_complete(root[0].request_uuid, 10.0).unwrap();
+
+        let fanout = driver.pop_ready(10.0, usize::MAX);
+        assert_eq!(fanout.len(), 2);
+        assert_eq!(fanout[0].logical_request_id.as_deref(), Some("left"));
+        assert_eq!(fanout[1].logical_request_id.as_deref(), Some("right"));
+        driver.on_complete(fanout[0].request_uuid, 20.0).unwrap();
+        assert_eq!(driver.next_ready_time_ms(), None);
+        driver.on_complete(fanout[1].request_uuid, 30.0).unwrap();
+        assert_eq!(driver.next_ready_time_ms(), Some(32.0));
+        let join = driver.pop_ready(32.0, usize::MAX);
+        assert_eq!(join.len(), 1);
+        assert_eq!(join[0].logical_request_id.as_deref(), Some("join"));
+    }
+
+    #[test]
+    fn failed_join_parent_cancels_join_and_downstream_once() {
+        let trace = open_agentic_trace(vec![
+            open_agentic_turn("a", "a", 0, &[], None, 0.0),
+            open_agentic_turn("b", "b", 0, &[], None, 0.0),
+            open_agentic_turn("join", "join", 0, &["a", "b"], None, 0.0),
+            open_agentic_turn("leaf", "leaf", 0, &["join"], None, 0.0),
+        ]);
+        let mut driver = WorkloadDriver::new_agentic_trace(trace, 1)
+            .unwrap()
+            .with_deterministic_request_ids(1);
+        let roots = driver.pop_ready(0.0, usize::MAX);
+        let a_uuid = roots
+            .iter()
+            .find(|ready| ready.logical_request_id.as_deref() == Some("a"))
+            .unwrap()
+            .request_uuid;
+        let b_uuid = roots
+            .iter()
+            .find(|ready| ready.logical_request_id.as_deref() == Some("b"))
+            .unwrap()
+            .request_uuid;
+
+        let cascaded = driver
+            .on_terminal(a_uuid, 5.0, WorkloadTerminalStatus::Failed)
+            .unwrap();
+
+        assert_eq!(
+            cascaded
+                .iter()
+                .map(|terminal| terminal.logical_request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["join", "leaf"]
+        );
+        assert_eq!(cascaded[0].request_uuid, Uuid::from_u128(3));
+        assert_eq!(cascaded[1].request_uuid, Uuid::from_u128(4));
+        assert_eq!(driver.next_ready_time_ms(), None);
+        assert!(!driver.is_drained(), "the independent root is still in flight");
+
+        driver.on_complete(b_uuid, 7.0).unwrap();
+        assert_eq!(driver.next_ready_time_ms(), None);
+        assert!(driver.pop_ready(7.0, usize::MAX).is_empty());
+        assert!(driver.is_drained());
+    }
+
+    #[test]
+    fn non_completed_agentic_parent_cascades_for_all_statuses() {
+        for status in [
+            WorkloadTerminalStatus::Rejected,
+            WorkloadTerminalStatus::Failed,
+            WorkloadTerminalStatus::Canceled,
+        ] {
+            let trace = open_agentic_trace(vec![
+                open_agentic_turn("root", "root", 0, &[], None, 0.0),
+                open_agentic_turn("child", "child", 0, &["root"], None, 0.0),
+                open_agentic_turn("leaf", "leaf", 0, &["child"], None, 0.0),
+            ]);
+            let mut driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+            driver.append_agentic_trace(trace, 0.0).unwrap();
+            driver.close().unwrap();
+            let mut driver = driver.with_deterministic_request_ids(1);
+            let root = driver.pop_ready(0.0, usize::MAX);
+
+            let cascaded = driver
+                .on_terminal(root[0].request_uuid, 7.0, status)
+                .unwrap();
+
+            assert_eq!(
+                cascaded
+                    .iter()
+                    .map(|terminal| terminal.logical_request_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["child", "leaf"]
+            );
+            assert_eq!(cascaded[0].request_uuid, Uuid::from_u128(2));
+            assert_eq!(cascaded[1].request_uuid, Uuid::from_u128(3));
+            assert!(
+                cascaded
+                    .iter()
+                    .all(|terminal| terminal.status == WorkloadTerminalStatus::Canceled)
+            );
+            assert_eq!(driver.next_ready_time_ms(), None);
+            assert!(driver.pop_ready(7.0, usize::MAX).is_empty());
+            assert_eq!(driver.pending_turns(), 0);
+            assert!(driver.is_drained());
+        }
+    }
+
+    #[test]
+    fn open_agentic_forwards_and_validates_exact_output_tokens() {
+        let mut turn = open_agentic_turn("root", "root", 0, &[], None, 0.0);
+        turn.max_output_tokens = 2;
+        turn.output_token_ids = Some(vec![9, 10]);
+        let mut driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+        driver
+            .append_agentic_trace(open_agentic_trace(vec![turn]), 0.0)
+            .unwrap();
+        let ready = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(ready[0].request.output_token_ids, Some(vec![9, 10]));
+        assert!(
+            driver
+                .on_output_token(ready[0].request_uuid, 8)
+                .unwrap_err()
+                .to_string()
+                .contains("expected 9")
+        );
+        driver.on_output_token(ready[0].request_uuid, 9).unwrap();
+        driver.on_output_token(ready[0].request_uuid, 10).unwrap();
+        driver.on_complete(ready[0].request_uuid, 1.0).unwrap();
+    }
+
+    #[test]
+    fn static_and_appendable_agentic_dispatch_are_equivalent() {
+        let trace = open_agentic_trace(vec![
+            open_agentic_turn("root", "session", 0, &[], Some(2.0), 0.0),
+            open_agentic_turn("child", "session", 1, &["root"], None, 3.0),
+        ]);
+        let mut static_driver = WorkloadDriver::new_agentic_trace(trace.clone(), 1)
+            .unwrap()
+            .with_deterministic_request_ids(1);
+        let mut open_driver = WorkloadDriver::new_open_agentic(1, 1).unwrap();
+        open_driver.append_agentic_trace(trace, 0.0).unwrap();
+        open_driver.close().unwrap();
+        let mut open_driver = open_driver.with_deterministic_request_ids(1);
+
+        let static_root = static_driver.pop_ready(2.0, usize::MAX);
+        let open_root = open_driver.pop_ready(2.0, usize::MAX);
+        assert_eq!(static_root[0].request_uuid, open_root[0].request_uuid);
+        assert_eq!(
+            static_root[0].logical_request_id,
+            open_root[0].logical_request_id
+        );
+        assert_eq!(static_root[0].request.tokens, open_root[0].request.tokens);
+        assert_eq!(
+            static_root[0].request.output_token_ids,
+            open_root[0].request.output_token_ids
+        );
+        static_driver
+            .on_complete(static_root[0].request_uuid, 10.0)
+            .unwrap();
+        open_driver
+            .on_complete(open_root[0].request_uuid, 10.0)
+            .unwrap();
+        let static_child = static_driver.pop_ready(13.0, usize::MAX);
+        let open_child = open_driver.pop_ready(13.0, usize::MAX);
+        assert_eq!(static_child[0].scheduled_ready_at_ms, 13.0);
+        assert_eq!(
+            static_child[0].logical_request_id,
+            open_child[0].logical_request_id
+        );
+        assert_eq!(static_child[0].request.tokens, open_child[0].request.tokens);
     }
 }

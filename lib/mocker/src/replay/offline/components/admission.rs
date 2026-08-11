@@ -9,7 +9,10 @@ use uuid::Uuid;
 
 use super::ReplayMode;
 use crate::common::protocols::DirectRequest;
-use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
+use crate::loadgen::{
+    AgenticTrace, CascadedWorkloadTerminal, ReplayRequestHashes, ReplayRequestPayload,
+    WorkloadDriver, WorkloadTerminalStatus,
+};
 use crate::replay::offline::core::{AdmissionSource as CoreAdmissionSource, ReadyArrival};
 
 pub(in crate::replay) trait ReplayAdmissionMetadata: Sized {
@@ -74,6 +77,10 @@ impl ReplayAdmissionMetadata for KvReplayMetadata {
 enum AdmissionSource {
     Requests(VecDeque<DirectRequest>),
     Workload(WorkloadDriver),
+    /// A dynamically appendable agentic workload. Keeping this distinct from
+    /// the closed one-shot workload makes open/empty versus closed/empty an
+    /// explicit admission state rather than an incidental driver detail.
+    OpenAgentic(WorkloadDriver),
 }
 
 pub(in crate::replay) struct AdmissionQueue<Metadata = KvReplayMetadata> {
@@ -98,10 +105,49 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         driver: WorkloadDriver,
         mode: ReplayMode,
     ) -> Self {
+        let source = if driver.is_open() {
+            AdmissionSource::OpenAgentic(driver)
+        } else {
+            AdmissionSource::Workload(driver)
+        };
         Self {
-            source: AdmissionSource::Workload(driver),
+            source,
             mode,
             metadata: PhantomData,
+        }
+    }
+
+    pub(in crate::replay::offline) fn append_agentic_trace(
+        &mut self,
+        trace: AgenticTrace,
+        release_at_ms: f64,
+    ) -> Result<()> {
+        let AdmissionSource::OpenAgentic(driver) = &mut self.source else {
+            anyhow::bail!("interactive replay admission is not agentic");
+        };
+        driver.append_agentic_trace(trace, release_at_ms)
+    }
+
+    pub(in crate::replay::offline) fn close(&mut self) -> Result<()> {
+        let AdmissionSource::OpenAgentic(driver) = &mut self.source else {
+            anyhow::bail!("fixed replay admission is already closed");
+        };
+        driver.close()
+    }
+
+    pub(in crate::replay::offline) fn is_open(&self) -> bool {
+        match &self.source {
+            AdmissionSource::Requests(_) => false,
+            AdmissionSource::Workload(driver) => driver.is_open(),
+            AdmissionSource::OpenAgentic(driver) => driver.is_open(),
+        }
+    }
+
+    pub(in crate::replay::offline) fn pending_requests(&self) -> usize {
+        match &self.source {
+            AdmissionSource::Requests(pending) => pending.len(),
+            AdmissionSource::Workload(driver) => driver.pending_turns(),
+            AdmissionSource::OpenAgentic(driver) => driver.pending_turns(),
         }
     }
 
@@ -111,9 +157,15 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 .front()
                 .and_then(|request| request.arrival_timestamp_ms),
             (ReplayMode::Trace, AdmissionSource::Workload(driver)) => driver.next_ready_time_ms(),
+            (ReplayMode::Trace, AdmissionSource::OpenAgentic(driver)) => {
+                driver.next_ready_time_ms()
+            }
             // Concurrency: the driver owns the session cap and gates admission, so defer to
             // it directly (no in-flight clamp needed here).
             (ReplayMode::Concurrency { .. }, AdmissionSource::Workload(driver)) => {
+                driver.next_ready_time_ms()
+            }
+            (ReplayMode::Concurrency { .. }, AdmissionSource::OpenAgentic(driver)) => {
                 driver.next_ready_time_ms()
             }
             (ReplayMode::Concurrency { .. }, AdmissionSource::Requests(_)) => None,
@@ -149,6 +201,8 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         metadata: Metadata::from_hashes(None),
                         session_id: None,
                         turn_index: None,
+                        logical_request_id: None,
+                        authored_turn_index: None,
                     });
                 }
                 Ok(ready)
@@ -165,6 +219,25 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         metadata: Metadata::from_hashes(ready.replay_hashes),
                         session_id,
                         turn_index,
+                        logical_request_id: ready.logical_request_id,
+                        authored_turn_index: Some(ready.authored_turn_index),
+                    }
+                })
+                .collect()),
+            (ReplayMode::Trace, AdmissionSource::OpenAgentic(driver)) => Ok(driver
+                .pop_ready_compact(now_ms, usize::MAX)
+                .into_iter()
+                .map(|ready| {
+                    let session_id = ready.emit_session_metadata.then_some(ready.session_id);
+                    let turn_index = ready.emit_session_metadata.then_some(ready.turn_index);
+                    ReadyArrival {
+                        request: ready.request,
+                        arrival_time_ms: ready.scheduled_ready_at_ms,
+                        metadata: Metadata::from_hashes(ready.replay_hashes),
+                        session_id,
+                        turn_index,
+                        logical_request_id: ready.logical_request_id,
+                        authored_turn_index: Some(ready.authored_turn_index),
                     }
                 })
                 .collect()),
@@ -182,6 +255,8 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         metadata: Metadata::from_hashes(None),
                         session_id: None,
                         turn_index: None,
+                        logical_request_id: None,
+                        authored_turn_index: None,
                     });
                     simulated_in_flight += 1;
                 }
@@ -202,10 +277,29 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                             metadata: Metadata::from_hashes(ready.replay_hashes),
                             session_id,
                             turn_index,
+                            logical_request_id: ready.logical_request_id,
+                            authored_turn_index: Some(ready.authored_turn_index),
                         }
                     })
                     .collect())
             }
+            (ReplayMode::Concurrency { .. }, AdmissionSource::OpenAgentic(driver)) => Ok(driver
+                .pop_ready_compact(now_ms, usize::MAX)
+                .into_iter()
+                .map(|ready| {
+                    let session_id = ready.emit_session_metadata.then_some(ready.session_id);
+                    let turn_index = ready.emit_session_metadata.then_some(ready.turn_index);
+                    ReadyArrival {
+                        request: ready.request,
+                        arrival_time_ms: now_ms,
+                        metadata: Metadata::from_hashes(ready.replay_hashes),
+                        session_id,
+                        turn_index,
+                        logical_request_id: ready.logical_request_id,
+                        authored_turn_index: Some(ready.authored_turn_index),
+                    }
+                })
+                .collect()),
         }
     }
 
@@ -213,12 +307,14 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         &mut self,
         uuid: Uuid,
         now_ms: f64,
-        rejected: bool,
-    ) -> Result<()> {
-        let AdmissionSource::Workload(driver) = &mut self.source else {
-            return Ok(());
-        };
-        driver.on_terminal(uuid, now_ms, rejected)
+        status: WorkloadTerminalStatus,
+    ) -> Result<Vec<CascadedWorkloadTerminal>> {
+        match &mut self.source {
+            AdmissionSource::Workload(driver) | AdmissionSource::OpenAgentic(driver) => {
+                driver.on_terminal(uuid, now_ms, status)
+            }
+            AdmissionSource::Requests(_) => Ok(Vec::new()),
+        }
     }
 
     pub(in crate::replay::offline) fn on_output_token(
@@ -226,28 +322,35 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         uuid: Uuid,
         token_id: u32,
     ) -> Result<()> {
-        let AdmissionSource::Workload(driver) = &mut self.source else {
-            return Ok(());
-        };
-        driver.on_output_token(uuid, token_id)
+        match &mut self.source {
+            AdmissionSource::Workload(driver) | AdmissionSource::OpenAgentic(driver) => {
+                driver.on_output_token(uuid, token_id)
+            }
+            AdmissionSource::Requests(_) => Ok(()),
+        }
     }
 
     pub(in crate::replay::offline) fn is_drained(&self) -> bool {
         match &self.source {
             AdmissionSource::Requests(pending) => pending.is_empty(),
             AdmissionSource::Workload(driver) => driver.is_drained(),
+            AdmissionSource::OpenAgentic(driver) => driver.is_drained(),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn is_workload(&self) -> bool {
-        matches!(self.source, AdmissionSource::Workload(_))
+        matches!(
+            self.source,
+            AdmissionSource::Workload(_) | AdmissionSource::OpenAgentic(_)
+        )
     }
 
     pub(in crate::replay::offline) fn total_requests(&self) -> usize {
         match &self.source {
             AdmissionSource::Requests(pending) => pending.len(),
             AdmissionSource::Workload(driver) => driver.total_turns(),
+            AdmissionSource::OpenAgentic(driver) => driver.total_turns(),
         }
     }
 }
@@ -272,8 +375,13 @@ impl<Metadata: ReplayAdmissionMetadata> CoreAdmissionSource for AdmissionQueue<M
         AdmissionQueue::on_output_token(self, request_id, token_id)
     }
 
-    fn on_terminal(&mut self, request_id: Uuid, now_ms: f64, rejected: bool) -> Result<()> {
-        AdmissionQueue::on_request_terminal(self, request_id, now_ms, rejected)
+    fn on_terminal(
+        &mut self,
+        request_id: Uuid,
+        now_ms: f64,
+        status: WorkloadTerminalStatus,
+    ) -> Result<Vec<CascadedWorkloadTerminal>> {
+        AdmissionQueue::on_request_terminal(self, request_id, now_ms, status)
     }
 
     fn is_drained(&self) -> bool {

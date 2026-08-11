@@ -15,14 +15,18 @@ use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
 use dynamo_mocker::replay::{
-    ReplayArgsMode, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+    OfflineReplaySession as RsOfflineReplaySession, ReplayAgenticRequest as RsReplayAgenticRequest,
+    ReplayAgenticWorkflow as RsReplayAgenticWorkflow, ReplayArgsMode,
+    ReplayRequestSpec as RsReplayRequestSpec, ReplayScalingDecision, ReplayScalingPolicy,
+    ReplayScalingSnapshot, ReplaySessionRouter as RsReplaySessionRouter,
+    WorkerTarget as RsWorkerTarget,
 };
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
 };
-use pythonize::pythonize;
-use serde::Serialize;
+use pythonize::{depythonize, pythonize};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -70,6 +74,20 @@ impl OfflineReplayResult {
             report,
             lifecycle_operations,
             capture_per_request,
+            coverage,
+        }
+    }
+
+    fn from_interactive(report: dynamo_mocker::replay::TraceSimulationReport) -> Self {
+        let coverage = OfflineReplayCoverage {
+            capture_per_request: true,
+            capture_planner_details: false,
+            per_request_records: report.per_request.len(),
+        };
+        Self {
+            report,
+            lifecycle_operations: Vec::new(),
+            capture_per_request: true,
             coverage,
         }
     }
@@ -980,6 +998,252 @@ impl MockEngineArgs {
             .map_err(|e| {
                 PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
             })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InteractiveWorkerTarget {
+    worker_id: usize,
+    #[serde(default)]
+    dp_rank: usize,
+}
+
+impl From<InteractiveWorkerTarget> for RsWorkerTarget {
+    fn from(target: InteractiveWorkerTarget) -> Self {
+        Self {
+            worker_id: target.worker_id,
+            dp_rank: target.dp_rank,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InteractiveRequestSpec {
+    logical_request_id: String,
+    #[serde(default)]
+    internal_uuid: Option<Uuid>,
+    session_id: String,
+    authored_turn_index: usize,
+    #[serde(default)]
+    ready_time_ms: f64,
+    input_length: usize,
+    hash_ids: Vec<u32>,
+    trace_block_size: usize,
+    output_length: usize,
+    #[serde(default)]
+    output_token_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default)]
+    strict_priority: u32,
+    #[serde(default)]
+    policy_class: Option<String>,
+    #[serde(default)]
+    target: Option<InteractiveWorkerTarget>,
+}
+
+impl From<InteractiveRequestSpec> for RsReplayRequestSpec {
+    fn from(request: InteractiveRequestSpec) -> Self {
+        Self {
+            logical_request_id: request.logical_request_id,
+            internal_uuid: request.internal_uuid,
+            session_id: request.session_id,
+            authored_turn_index: request.authored_turn_index,
+            ready_time_ms: request.ready_time_ms,
+            input_length: request.input_length,
+            hash_ids: request.hash_ids,
+            trace_block_size: request.trace_block_size,
+            output_length: request.output_length,
+            output_token_ids: request.output_token_ids,
+            priority: request.priority,
+            strict_priority: request.strict_priority,
+            policy_class: request.policy_class,
+            target: request.target.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InteractiveAgenticRequest {
+    request: InteractiveRequestSpec,
+    #[serde(default)]
+    wait_for: Vec<String>,
+    #[serde(default)]
+    dependency_delay_ms: f64,
+    #[serde(default)]
+    prefix_reset: bool,
+}
+
+impl From<InteractiveAgenticRequest> for RsReplayAgenticRequest {
+    fn from(request: InteractiveAgenticRequest) -> Self {
+        Self {
+            request: request.request.into(),
+            wait_for: request.wait_for,
+            dependency_delay_ms: request.dependency_delay_ms,
+            prefix_reset: request.prefix_reset,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InteractiveAgenticWorkflow {
+    trace_block_size: usize,
+    requests: Vec<InteractiveAgenticRequest>,
+}
+
+impl From<InteractiveAgenticWorkflow> for RsReplayAgenticWorkflow {
+    fn from(workflow: InteractiveAgenticWorkflow) -> Self {
+        Self {
+            trace_block_size: workflow.trace_block_size,
+            requests: workflow.requests.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+fn depythonize_interactive<T>(value: &Bound<'_, PyAny>, kind: &str) -> PyResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    depythonize(value).map_err(|error| {
+        PyValueError::new_err(format!("invalid interactive replay {kind}: {error}"))
+    })
+}
+
+fn pythonize_interactive<T>(py: Python<'_>, value: &T) -> PyResult<PyObject>
+where
+    T: Serialize,
+{
+    pythonize(py, value).map(Bound::unbind).map_err(to_pyerr)
+}
+
+fn parse_interactive_router(router: &str) -> PyResult<RsReplaySessionRouter> {
+    if router == "external" {
+        return Ok(RsReplaySessionRouter::External);
+    }
+    match parse_replay_router_mode(router)? {
+        dynamo_mocker::replay::ReplayRouterMode::RoundRobin => {
+            Ok(RsReplaySessionRouter::RoundRobin)
+        }
+        dynamo_mocker::replay::ReplayRouterMode::KvRouter => Ok(RsReplaySessionRouter::KvRouter),
+    }
+}
+
+/// Synchronous, polling-only Python owner of one causal offline replay.
+///
+/// The class is deliberately unsendable: the controller calls it on one Python
+/// thread and exchanges plain request/event values. Replay never invokes a
+/// Python placement callback.
+#[pyclass(name = "_OfflineReplaySession", unsendable)]
+pub struct PyOfflineReplaySession {
+    inner: RsOfflineReplaySession,
+}
+
+#[pymethods]
+impl PyOfflineReplaySession {
+    #[new]
+    #[pyo3(signature = (engine_args, trace_block_size, num_workers=1, router="external"))]
+    fn new(
+        py: Python<'_>,
+        engine_args: MockEngineArgs,
+        trace_block_size: usize,
+        num_workers: usize,
+        router: &str,
+    ) -> PyResult<Self> {
+        if engine_args.inner.aic_backend.is_some() {
+            return Err(PyValueError::new_err(
+                "interactive replay does not support Python-backed AIC performance callbacks",
+            ));
+        }
+        let args = materialize_replay_mocker_args(py, engine_args)?;
+        let router = parse_interactive_router(router)?;
+        let inner = RsOfflineReplaySession::new(&args, num_workers, trace_block_size, router)
+            .map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
+    fn submit(&mut self, request: &Bound<'_, PyAny>) -> PyResult<()> {
+        let request: InteractiveRequestSpec = depythonize_interactive(request, "request")?;
+        self.inner.submit_request(request.into()).map_err(to_pyerr)
+    }
+
+    fn append_agentic_workflow(
+        &mut self,
+        workflow: &Bound<'_, PyAny>,
+        release_at_ms: f64,
+    ) -> PyResult<()> {
+        let workflow: InteractiveAgenticWorkflow =
+            depythonize_interactive(workflow, "agentic workflow")?;
+        self.inner
+            .append_agentic_workflow(workflow.into(), release_at_ms)
+            .map_err(to_pyerr)
+    }
+
+    fn now_ms(&self) -> PyResult<f64> {
+        self.inner.now_ms().map_err(to_pyerr)
+    }
+
+    fn next_event_time_ms(&mut self) -> PyResult<Option<f64>> {
+        self.inner.next_event_time_ms().map_err(to_pyerr)
+    }
+
+    fn advance_next(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let status = self.inner.advance_next().map_err(to_pyerr)?;
+        pythonize_interactive(py, &status)
+    }
+
+    fn advance_to(&mut self, py: Python<'_>, target_ms: f64) -> PyResult<PyObject> {
+        let status = self.inner.advance_to(target_ms).map_err(to_pyerr)?;
+        pythonize_interactive(py, &status)
+    }
+
+    fn settle_current_time(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let status = self.inner.settle_current_time().map_err(to_pyerr)?;
+        pythonize_interactive(py, &status)
+    }
+
+    fn drain_events(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let events = self.inner.drain_events().map_err(to_pyerr)?;
+        pythonize_interactive(py, &events)
+    }
+
+    fn pending_placements(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let pending = self.inner.pending_placements().map_err(to_pyerr)?;
+        pythonize_interactive(py, &pending)
+    }
+
+    fn assign(&mut self, logical_request_id: &str, target: &Bound<'_, PyAny>) -> PyResult<()> {
+        let target: InteractiveWorkerTarget = depythonize_interactive(target, "worker target")?;
+        self.inner
+            .assign(logical_request_id, target.into())
+            .map_err(to_pyerr)
+    }
+
+    fn snapshot(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let snapshot = self.inner.snapshot().map_err(to_pyerr)?;
+        pythonize_interactive(py, &snapshot)
+    }
+
+    fn close_admission(&mut self) -> PyResult<()> {
+        self.inner.close_admission().map_err(to_pyerr)
+    }
+
+    fn is_quiescent(&mut self) -> PyResult<bool> {
+        self.inner.is_quiescent().map_err(to_pyerr)
+    }
+
+    fn is_drained(&self) -> PyResult<bool> {
+        self.inner.is_drained().map_err(to_pyerr)
+    }
+
+    fn finalize(&mut self) -> PyResult<OfflineReplayResult> {
+        self.inner
+            .finalize()
+            .map(OfflineReplayResult::from_interactive)
+            .map_err(to_pyerr)
     }
 }
 

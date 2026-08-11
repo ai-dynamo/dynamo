@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -286,6 +286,116 @@ impl AgenticTurnTrace {
             trace_block_size,
             engine_block_size,
         )
+    }
+}
+
+impl AgenticTrace {
+    /// Validate a complete authored workflow before it is installed in a
+    /// static or appendable driver. Keeping this validation independent of
+    /// JSON parsing makes interactive admission obey the same contract as
+    /// file-backed replay.
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.block_size == 0 {
+            bail!("agentic trace block_size must be greater than 0");
+        }
+        if self.turns.is_empty() {
+            bail!("agentic trace must contain at least one request");
+        }
+
+        let mut request_ids = HashSet::with_capacity(self.turns.len());
+        let mut session_turns = HashMap::with_capacity(self.turns.len());
+        let mut internal_uuids = HashMap::new();
+        for turn in &self.turns {
+            if turn.request_id.trim().is_empty() {
+                bail!("agentic trace has an empty request_id");
+            }
+            if turn.session_id.trim().is_empty() {
+                bail!("request {} has an empty session_id", turn.request_id);
+            }
+            if !request_ids.insert(turn.request_id.as_str()) {
+                bail!("agentic trace duplicates request_id {}", turn.request_id);
+            }
+            if let Some(existing) = session_turns.insert(
+                (turn.session_id.as_str(), turn.authored_turn_index),
+                turn.request_id.as_str(),
+            ) {
+                bail!(
+                    "requests {existing} and {} conflict on session {} authored turn {}",
+                    turn.request_id,
+                    turn.session_id,
+                    turn.authored_turn_index
+                );
+            }
+            if let Some(internal_uuid) = turn.internal_uuid
+                && let Some(existing) =
+                    internal_uuids.insert(internal_uuid, turn.request_id.as_str())
+            {
+                bail!(
+                    "requests {existing} and {} duplicate internal UUID {internal_uuid}",
+                    turn.request_id
+                );
+            }
+            validate_synthesizable_prompt(turn.input_length, &turn.hash_ids, self.block_size)
+                .with_context(|| format!("request {} has invalid prompt", turn.request_id))?;
+            if let Some(output_token_ids) = turn.output_token_ids.as_ref()
+                && output_token_ids.len() != turn.max_output_tokens
+            {
+                bail!(
+                    "request {} output length {} does not match output_token_ids length {}",
+                    turn.request_id,
+                    turn.max_output_tokens,
+                    output_token_ids.len()
+                );
+            }
+            if !turn.delay_after_dependencies_ms.is_finite()
+                || turn.delay_after_dependencies_ms < 0.0
+            {
+                bail!(
+                    "request {} has invalid dependency delay {}",
+                    turn.request_id,
+                    turn.delay_after_dependencies_ms
+                );
+            }
+            if let Some(timestamp_ms) = turn.first_ready_timestamp_ms
+                && (!timestamp_ms.is_finite() || timestamp_ms < 0.0)
+            {
+                bail!(
+                    "request {} has invalid first-ready timestamp {}",
+                    turn.request_id,
+                    timestamp_ms
+                );
+            }
+
+            let mut dependencies = HashSet::with_capacity(turn.wait_for.len());
+            for dependency in &turn.wait_for {
+                if dependency.trim().is_empty() {
+                    bail!("request {} has an empty dependency", turn.request_id);
+                }
+                if !dependencies.insert(dependency.as_str()) {
+                    bail!(
+                        "request {} duplicates dependency {}",
+                        turn.request_id,
+                        dependency
+                    );
+                }
+            }
+        }
+
+        for turn in &self.turns {
+            for dependency in &turn.wait_for {
+                if !request_ids.contains(dependency.as_str()) {
+                    bail!(
+                        "request {} waits for unknown request_id {}",
+                        turn.request_id,
+                        dependency
+                    );
+                }
+                if dependency == &turn.request_id {
+                    bail!("request {} cannot wait for itself", turn.request_id);
+                }
+            }
+        }
+        validate_agentic_trace_is_acyclic(&self.turns)
     }
 }
 
@@ -1167,6 +1277,7 @@ struct AgenticTraceBuilder {
     hash_id_interner: HashIdInterner,
     turns: Vec<AgenticTurnTrace>,
     request_ids: std::collections::HashSet<String>,
+    next_turn_index_by_session: HashMap<String, usize>,
 }
 
 impl AgenticTraceBuilder {
@@ -1176,6 +1287,7 @@ impl AgenticTraceBuilder {
             hash_id_interner: HashIdInterner::default(),
             turns: Vec::new(),
             request_ids: std::collections::HashSet::new(),
+            next_turn_index_by_session: HashMap::new(),
         }
     }
 
@@ -1250,11 +1362,23 @@ impl AgenticTraceBuilder {
 
         let hash_ids = self.hash_id_interner.intern_all(hash_ids)?;
 
+        let session_id = raw
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("request_{}", line_idx + 1));
+        let next_turn_index = self
+            .next_turn_index_by_session
+            .entry(session_id.clone())
+            .or_insert(0);
+        let authored_turn_index = *next_turn_index;
+        *next_turn_index = authored_turn_index
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("session {session_id} authored turn index overflow"))?;
         let replay_key = output_token_ids.as_ref().map(|_| {
             effective_replay_key(
                 Some(raw.request_id.as_str()),
-                raw.session_id.as_deref(),
-                0,
+                Some(session_id.as_str()),
+                authored_turn_index,
                 line_idx,
             )
         });
@@ -1262,9 +1386,9 @@ impl AgenticTraceBuilder {
         self.turns.push(AgenticTurnTrace {
             replay_key,
             request_id: raw.request_id,
-            session_id: raw
-                .session_id
-                .unwrap_or_else(|| format!("request_{}", line_idx + 1)),
+            session_id,
+            authored_turn_index,
+            internal_uuid: None,
             input_length,
             max_output_tokens: output_length,
             output_token_ids,
@@ -1282,26 +1406,12 @@ impl AgenticTraceBuilder {
     }
 
     fn finish(self) -> Result<AgenticTrace> {
-        for turn in &self.turns {
-            for dependency in &turn.wait_for {
-                if !self.request_ids.contains(dependency) {
-                    bail!(
-                        "request {} waits for unknown request_id {}",
-                        turn.request_id,
-                        dependency
-                    );
-                }
-                if dependency == &turn.request_id {
-                    bail!("request {} cannot wait for itself", turn.request_id);
-                }
-            }
-        }
-        validate_agentic_trace_is_acyclic(&self.turns)?;
-
-        Ok(AgenticTrace {
+        let trace = AgenticTrace {
             block_size: self.trace_block_size,
             turns: self.turns,
-        })
+        };
+        trace.validate()?;
+        Ok(trace)
     }
 }
 

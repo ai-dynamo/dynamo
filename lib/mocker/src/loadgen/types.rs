@@ -104,8 +104,16 @@ pub struct TurnTrace {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgenticTurnTrace {
+    /// Stable authored identity used to join replay events and reports back to
+    /// the source workflow. This is intentionally distinct from the internal
+    /// UUID used by the mock engine.
     pub request_id: String,
     pub session_id: String,
+    /// Authored zero-based turn index within `session_id`.
+    pub authored_turn_index: usize,
+    /// Optional caller-selected engine identity. Interactive callers may use
+    /// this for deterministic replay; file loaders leave it unset.
+    pub internal_uuid: Option<Uuid>,
     pub input_length: usize,
     pub max_output_tokens: usize,
     pub output_token_ids: Option<Vec<u32>>,
@@ -118,6 +126,8 @@ pub struct AgenticTurnTrace {
     pub policy_class: Option<String>,
     pub routing_constraints: RoutingConstraints,
     pub wait_for: Vec<String>,
+    /// Legacy trace metadata. The P0 causal replay contract rejects `true`
+    /// because no cache reset is implemented.
     pub prefix_reset: bool,
 }
 
@@ -195,15 +205,49 @@ impl ReplayRequestHashes {
     }
 }
 
+/// Terminal outcome understood by workload admission and dependency handling.
+///
+/// This type deliberately lives below the replay collector so every replay
+/// adapter can map its public terminal status into the same loadgen semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadTerminalStatus {
+    Completed,
+    Rejected,
+    Failed,
+    Canceled,
+}
+
+/// A dependency-blocked authored request canceled by an upstream failure.
+///
+/// The request never entered the engine, so `emitted_output_count` is always
+/// zero. The replay runtime consumes these descriptors to create collector
+/// records and emit exactly one synthetic canceled terminal event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CascadedWorkloadTerminal {
+    pub request_uuid: Uuid,
+    pub logical_request_id: String,
+    pub session_id: String,
+    pub authored_turn_index: usize,
+    pub input_length: usize,
+    pub requested_output_length: usize,
+    pub emitted_output_count: usize,
+    pub status: WorkloadTerminalStatus,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReadyTurn {
     pub request_uuid: Uuid,
+    pub logical_request_id: Option<String>,
     pub session_id: String,
     pub turn_index: usize,
+    pub authored_turn_index: usize,
     pub emit_session_metadata: bool,
     pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
+    /// Always false for accepted workloads; `prefix_reset=true` is rejected
+    /// because replay does not implement cache reset semantics.
+    pub prefix_reset: bool,
     pub request: DirectRequest,
     pub routing_constraints: RoutingConstraints,
 }
@@ -356,11 +400,16 @@ impl ReplayRequestPayload {
 #[derive(Debug)]
 pub struct ReadyReplayTurn {
     pub request_uuid: Uuid,
+    pub logical_request_id: Option<String>,
     pub session_id: String,
     pub turn_index: usize,
+    pub authored_turn_index: usize,
     pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
+    /// Always false for accepted workloads; `prefix_reset=true` is rejected
+    /// because replay does not implement cache reset semantics.
+    pub prefix_reset: bool,
     pub emit_session_metadata: bool,
     pub request: ReplayRequestPayload,
 }
@@ -370,12 +419,15 @@ impl ReadyReplayTurn {
         let routing_constraints = self.request.routing_constraints().clone();
         ReadyTurn {
             request_uuid: self.request_uuid,
+            logical_request_id: self.logical_request_id,
             session_id: self.session_id,
             turn_index: self.turn_index,
+            authored_turn_index: self.authored_turn_index,
             emit_session_metadata: self.emit_session_metadata,
             replay_key: self.replay_key,
             scheduled_ready_at_ms: self.scheduled_ready_at_ms,
             replay_hashes: self.replay_hashes,
+            prefix_reset: self.prefix_reset,
             request: self.request.into_direct_request(),
             routing_constraints,
         }

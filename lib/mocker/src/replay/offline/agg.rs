@@ -6,6 +6,7 @@ use super::components::OfflineRouterSnapshot;
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
+use super::core::pinned::ExternalPlacement;
 use super::core::round_robin::AggregatedRoundRobinPlacement;
 use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
@@ -19,6 +20,10 @@ use super::evidence::{
 };
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
+use super::interactive::{
+    InteractiveCapture, InteractiveRequestIdentity, ReplayEvent, ReplayPendingPlacement,
+    ReplaySnapshot, ReplayStepStatus, WorkerTarget,
+};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
     ReadyWorkerCompletions, next_timestamp as choose_next_timestamp, pop_ready_scaling_tick,
@@ -40,7 +45,10 @@ use super::{
     state::AggRequestState,
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
-use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
+use crate::loadgen::{
+    AgenticTrace, CascadedWorkloadTerminal, ReplayRequestPayload, WorkloadDriver,
+    WorkloadTerminalStatus,
+};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
 use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
@@ -118,6 +126,50 @@ pub(in crate::replay) type RoundRobinAggRuntime = AggRuntimeImpl<
     NoReplayMetadata,
     AdmissionQueue<NoReplayMetadata>,
 >;
+pub(in crate::replay) type ExternalAggRuntime = AggRuntimeImpl<
+    ExternalPlacement<()>,
+    NoEngineEvents,
+    NoReplayMetadata,
+    AdmissionQueue<NoReplayMetadata>,
+>;
+
+/// Open-admission controls used only by the polling adapter. Keeping these
+/// outside the generic [`CoreAdmissionSource`] contract lets one-shot replay
+/// and [`ReplayWorkSource`](crate::replay::offline::ReplayWorkSource) supply
+/// their own admission implementations while all adapters share the runtime's
+/// timestamp-stepping kernel.
+pub(in crate::replay::offline) trait InteractiveAdmission {
+    fn append_agentic_trace(
+        &mut self,
+        trace: AgenticTrace,
+        release_at_ms: f64,
+    ) -> anyhow::Result<()>;
+    fn close(&mut self) -> anyhow::Result<()>;
+    fn is_open(&self) -> bool;
+    fn pending_requests(&self) -> usize;
+}
+
+impl<Metadata: ReplayAdmissionMetadata> InteractiveAdmission for AdmissionQueue<Metadata> {
+    fn append_agentic_trace(
+        &mut self,
+        trace: AgenticTrace,
+        release_at_ms: f64,
+    ) -> anyhow::Result<()> {
+        AdmissionQueue::append_agentic_trace(self, trace, release_at_ms)
+    }
+
+    fn close(&mut self) -> anyhow::Result<()> {
+        AdmissionQueue::close(self)
+    }
+
+    fn is_open(&self) -> bool {
+        AdmissionQueue::is_open(self)
+    }
+
+    fn pending_requests(&self) -> usize {
+        AdmissionQueue::pending_requests(self)
+    }
+}
 
 pub(in crate::replay) struct AggRuntimeImpl<
     PlacementPolicyImpl,
@@ -155,10 +207,12 @@ pub(in crate::replay) struct AggRuntimeImpl<
     /// Whether to retain the latest FPM snapshot per worker/rank. Only the planner
     /// consumes them, so the plain `run()` path leaves this `false`.
     collect_fpm: bool,
+    /// Allocated only for polling-based interactive replay. Ordinary one-shot
+    /// replay retains its allocation profile when this is `None`.
+    interactive: Option<InteractiveCapture>,
+    stepping_started: bool,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
-    #[cfg(test)]
-    stepped: bool,
 }
 
 impl
@@ -195,6 +249,55 @@ impl
             num_workers,
             |args, topology| Ok(AggregatedRoundRobinPlacement::new(args.dp_size, topology)),
         )
+    }
+}
+
+impl
+    AggRuntimeImpl<
+        ExternalPlacement<()>,
+        NoEngineEvents,
+        NoReplayMetadata,
+        AdmissionQueue<NoReplayMetadata>,
+    >
+{
+    pub(in crate::replay) fn new_external_workload(
+        args: &MockEngineArgs,
+        driver: WorkloadDriver,
+        num_workers: usize,
+    ) -> anyhow::Result<Self> {
+        Self::new_composed(
+            args,
+            AdmissionQueue::new_workload(driver, ReplayMode::Trace),
+            num_workers,
+            |_args, topology| Ok(ExternalPlacement::new(topology)),
+        )
+    }
+
+    pub(in crate::replay::offline) fn preassign_interactive(
+        &mut self,
+        request_id: Uuid,
+        target: WorkerTarget,
+    ) -> anyhow::Result<()> {
+        self.placement.preassign(request_id, target)
+    }
+
+    pub(in crate::replay::offline) fn assign_interactive(
+        &mut self,
+        request_id: Uuid,
+        target: WorkerTarget,
+    ) -> anyhow::Result<()> {
+        let placement = self.placement.assign(request_id, target)?;
+        self.dispatch_placements(vec![placement])
+    }
+
+    pub(in crate::replay::offline) fn pending_interactive_placements(
+        &self,
+    ) -> Vec<ReplayPendingPlacement> {
+        self.interactive_pending_placements(self.placement.pending_ids())
+    }
+
+    pub(in crate::replay::offline) fn cancel_interactive_placement(&mut self, request_id: Uuid) {
+        self.placement.cancel(request_id);
     }
 }
 
@@ -261,13 +364,13 @@ where
             max_sim_time_ms: None,
             scaling_policy: None,
             collect_fpm: false,
+            interactive: None,
+            stepping_started: false,
             #[cfg(test)]
             worker_active_requests: vec![
                 Vec::new();
                 num_workers.saturating_mul(args.dp_size.max(1) as usize)
             ],
-            #[cfg(test)]
-            stepped: false,
         })
     }
 
@@ -277,6 +380,48 @@ where
     pub(in crate::replay) fn with_per_request_records(mut self, capture: bool) -> Self {
         self.collector.set_capture_per_request(capture);
         self
+    }
+
+    pub(in crate::replay::offline) fn enable_interactive_capture(
+        &mut self,
+        external_placement: bool,
+    ) {
+        self.collector.set_capture_per_request(true);
+        self.progress = ReplayProgress::disabled();
+        self.interactive = Some(InteractiveCapture::new(external_placement));
+    }
+
+    pub(in crate::replay::offline) fn register_interactive_identity(
+        &mut self,
+        identity: InteractiveRequestIdentity,
+    ) -> anyhow::Result<()> {
+        self.interactive
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("offline replay interactive capture is disabled"))?
+            .register(identity)
+    }
+
+    pub(in crate::replay::offline) fn append_interactive_agentic_trace(
+        &mut self,
+        trace: AgenticTrace,
+        release_at_ms: f64,
+    ) -> anyhow::Result<()>
+    where
+        Admission: InteractiveAdmission,
+    {
+        if release_at_ms < self.now_ms {
+            bail!(
+                "interactive replay cannot enqueue release time {release_at_ms} ms before current time {} ms",
+                self.now_ms
+            );
+        }
+        self.admission.append_agentic_trace(trace, release_at_ms)
+    }
+
+    pub(in crate::replay::offline) fn unregister_interactive_identity(&mut self, uuid: Uuid) {
+        if let Some(capture) = self.interactive.as_mut() {
+            capture.unregister(uuid);
+        }
     }
 
     /// Cap the simulated wall-clock duration. After construction, call this to
@@ -379,7 +524,28 @@ where
         uuid: Uuid,
         worker_idx: usize,
     ) -> anyhow::Result<()> {
+        let interactive_target = if let Some(capture) = self.interactive.as_ref() {
+            let (worker_id, dp_rank) = self.engine.rank_identity(worker_idx).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "interactive replay dispatch references unknown scheduler {worker_idx}"
+                )
+            })?;
+            capture.identity(uuid).ok_or_else(|| {
+                anyhow::anyhow!("interactive replay has no authored identity for request {uuid}")
+            })?;
+            Some(WorkerTarget {
+                worker_id,
+                dp_rank: dp_rank as usize,
+            })
+        } else {
+            None
+        };
         self.engine.dispatch(worker_idx, request)?;
+        if let (Some(capture), Some(target)) = (self.interactive.as_mut(), interactive_target) {
+            capture.set_worker(uuid, target)?;
+            capture.emit_routed(uuid, self.now_ms)?;
+            capture.emit_queued(uuid, self.now_ms)?;
+        }
         self.record_dispatch(uuid, worker_idx);
         // Aggregated replay uses a single pool. Treat the assignment as the
         // decode_worker_idx so per-request records consistently carry the
@@ -453,6 +619,9 @@ where
 
         self.collector
             .on_arrival(uuid, arrival_time_ms, input_length, output_length);
+        if let Some(capture) = self.interactive.as_mut() {
+            capture.mark_ready(uuid, self.now_ms)?;
+        }
         self.traffic.on_arrival();
 
         let effects = self
@@ -499,6 +668,11 @@ where
                     .on_route_queued(uuid, ReplayRequestPool::Agg, self.now_ms);
                 self.requests
                     .insert(uuid, AggRequestState::new_queued(request));
+                if let Some(capture) = self.interactive.as_mut()
+                    && capture.uses_external_placement()
+                {
+                    capture.emit_placement_needed(uuid, self.now_ms)?;
+                }
             }
         }
         self.record_router_pending();
@@ -589,25 +763,47 @@ where
     fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
         if let Some(token_id) = signal.token_id {
             CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
+            if !signal.rejected
+                && let Some(capture) = self.interactive.as_mut()
+            {
+                capture.on_output_token(signal.uuid, self.now_ms)?;
+            }
         }
         if signal.completed {
-            let status = if signal.rejected {
-                ReplayTerminalStatus::Rejected
+            let workload_status = if signal.rejected {
+                WorkloadTerminalStatus::Rejected
             } else {
-                ReplayTerminalStatus::Completed
+                WorkloadTerminalStatus::Completed
             };
-            self.collector.on_terminal(signal.uuid, self.now_ms, status);
-            #[cfg(test)]
-            self.remove_active_request(signal.uuid);
+            let status: ReplayTerminalStatus = workload_status.into();
+            if !self.requests.contains_key(&signal.uuid) {
+                bail!("offline replay missing request state for {}", signal.uuid);
+            }
+
+            // Commit all fallible terminal transitions before publishing the
+            // externally visible Terminal event. The event itself is emitted
+            // before any placement released by this terminal, preserving the
+            // decision-time ordering required by interactive controllers.
             let placements = self.placement.request_terminal(signal.uuid, self.now_ms)?;
+            let cascaded = CoreAdmissionSource::on_terminal(
+                &mut self.admission,
+                signal.uuid,
+                self.now_ms,
+                workload_status,
+            )?;
+            let removed_state = self
+                .requests
+                .remove(&signal.uuid)
+                .expect("request state was checked before terminal transitions");
+
+            self.collector.on_terminal(signal.uuid, self.now_ms, status);
             #[cfg(test)]
             if self.placement.is_router() {
                 self.stats.router_freed_count += 1;
             }
             self.record_router_pending();
-            let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
-                anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
-            })?;
+            #[cfg(test)]
+            self.remove_active_request(signal.uuid);
             // Rejected requests never ran: keep them out of completed-request
             // shape and latency samples. Their offered demand was already
             // recorded at arrival, matching requests_started_total.
@@ -629,13 +825,11 @@ where
                     latencies,
                 );
             }
-            CoreAdmissionSource::on_terminal(
-                &mut self.admission,
-                signal.uuid,
-                self.now_ms,
-                signal.rejected,
-            )?;
             self.progress.inc_completed();
+            if let Some(capture) = self.interactive.as_mut() {
+                capture.emit_terminal(signal.uuid, self.now_ms, status)?;
+            }
+            self.record_cascaded_terminals(cascaded)?;
             self.dispatch_placements(placements)?;
             return Ok(());
         }
@@ -665,6 +859,35 @@ where
         self.record_router_pending();
         self.dispatch_placements(placements)?;
 
+        Ok(())
+    }
+
+    /// Publish dependency-cascade terminals for authored requests that never
+    /// entered placement or the engine. Collision checks ensure a live request
+    /// cannot be silently overwritten or terminated twice.
+    fn record_cascaded_terminals(
+        &mut self,
+        cascaded: Vec<CascadedWorkloadTerminal>,
+    ) -> anyhow::Result<()> {
+        for terminal in cascaded {
+            if self.requests.contains_key(&terminal.request_uuid) {
+                bail!(
+                    "cascaded workload terminal {} collides with an engine-visible request",
+                    terminal.request_uuid
+                );
+            }
+            self.placement.cancel_pending(terminal.request_uuid);
+            self.collector
+                .on_cascaded_terminal(&terminal, self.now_ms)?;
+            self.progress.inc_completed();
+            if let Some(capture) = self.interactive.as_mut() {
+                capture.emit_terminal(
+                    terminal.request_uuid,
+                    self.now_ms,
+                    terminal.status.into(),
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -760,12 +983,28 @@ where
                 metadata,
                 session_id,
                 turn_index,
+                logical_request_id,
+                authored_turn_index,
             } = ready;
             let session_metadata = session_id.clone().zip(turn_index);
+            let authored_identity = logical_request_id
+                .zip(session_id.clone())
+                .zip(authored_turn_index)
+                .map(|((logical_request_id, session_id), authored_turn_index)| {
+                    (logical_request_id, session_id, authored_turn_index)
+                });
             let uuid = self.assign_request(request, arrival_time_ms, metadata, session_id)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
+            }
+            if let Some((logical_request_id, session_id, authored_turn_index)) = authored_identity {
+                self.collector.on_authored_identity(
+                    uuid,
+                    logical_request_id,
+                    session_id,
+                    authored_turn_index,
+                );
             }
             released_any = true;
         }
@@ -797,6 +1036,13 @@ where
                 self.now_ms,
                 admission.reused_input_tokens,
             );
+            if let Some(capture) = self.interactive.as_mut() {
+                capture.emit_admitted(
+                    admission.uuid,
+                    self.now_ms,
+                    admission.reused_input_tokens,
+                )?;
+            }
         }
         self.apply_engine_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
         for payload in effects.immediate_completions {
@@ -857,7 +1103,8 @@ where
     }
 
     /// Repeatedly process all work that becomes possible without advancing logical time.
-    fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
+    fn drain_current_timestamp(&mut self) -> anyhow::Result<bool> {
+        let mut made_progress = false;
         loop {
             #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
             let mut changed = false;
@@ -915,9 +1162,10 @@ where
             if !changed {
                 break;
             }
+            made_progress = true;
         }
 
-        Ok(())
+        Ok(made_progress)
     }
 
     /// Seed the first `ScalingTick` from the policy's requested start time (a
@@ -1218,11 +1466,233 @@ where
         );
     }
 
+    /// Initialize the shared stepping kernel exactly once. Legacy `run()` and
+    /// polling-based sessions both enter through this boundary, which keeps
+    /// timestamp settlement and scaling-tick seeding identical.
+    fn ensure_stepping_started(&mut self) -> anyhow::Result<bool> {
+        if self.stepping_started {
+            return Ok(false);
+        }
+        let changed = self.drain_current_timestamp()?;
+        self.seed_first_scaling_tick()?;
+        self.stepping_started = true;
+        Ok(changed)
+    }
+
+    fn external_assignment_pending(&self) -> bool {
+        self.interactive
+            .as_ref()
+            .is_some_and(InteractiveCapture::uses_external_placement)
+            && self.placement.pending_count() > 0
+    }
+
+    /// Advance and settle exactly the next virtual timestamp.
+    fn advance_kernel_next(&mut self) -> anyhow::Result<bool> {
+        self.ensure_stepping_started()?;
+        if self.external_assignment_pending() {
+            return Ok(false);
+        }
+        if self.is_done() {
+            return Ok(false);
+        }
+        let Some(next_timestamp_ms) = self.next_timestamp() else {
+            return Ok(false);
+        };
+        self.advance_now_ms(next_timestamp_ms);
+        self.drain_current_timestamp()?;
+        Ok(true)
+    }
+
+    fn interactive_status(&self, made_progress: bool) -> ReplayStepStatus {
+        if self.is_done() {
+            return ReplayStepStatus::Drained {
+                now_ms: self.now_ms,
+            };
+        }
+        if made_progress {
+            ReplayStepStatus::Advanced {
+                now_ms: self.now_ms,
+            }
+        } else {
+            ReplayStepStatus::Quiescent {
+                now_ms: self.now_ms,
+            }
+        }
+    }
+
+    fn fail_if_interactive_dead_end(&mut self) -> anyhow::Result<()>
+    where
+        Admission: InteractiveAdmission,
+    {
+        if !self.is_done()
+            && !self.external_assignment_pending()
+            && self.next_timestamp().is_none()
+            && !(self.admission.is_open()
+                && self.admission.pending_requests() == 0
+                && self.cluster_in_flight() == 0)
+        {
+            bail!(
+                "offline replay reached a dead end with {} in-flight requests, {} pending admission requests, and {} pending placements",
+                self.cluster_in_flight(),
+                self.admission.pending_requests(),
+                self.placement.pending_count()
+            );
+        }
+        Ok(())
+    }
+    pub(in crate::replay::offline) fn interactive_now_ms(&self) -> f64 {
+        self.now_ms
+    }
+
+    pub(in crate::replay::offline) fn interactive_next_event_time_ms(&mut self) -> Option<f64> {
+        if self.external_assignment_pending() {
+            None
+        } else {
+            self.next_timestamp()
+        }
+    }
+
+    pub(in crate::replay::offline) fn interactive_advance_next(
+        &mut self,
+    ) -> anyhow::Result<ReplayStepStatus>
+    where
+        Admission: InteractiveAdmission,
+    {
+        let initial_progress = self.ensure_stepping_started()?;
+        if initial_progress {
+            return Ok(self.interactive_status(true));
+        }
+        if self.external_assignment_pending() {
+            return Ok(self.interactive_status(false));
+        }
+        let advanced = self.advance_kernel_next()?;
+        self.fail_if_interactive_dead_end()?;
+        Ok(self.interactive_status(advanced))
+    }
+
+    pub(in crate::replay::offline) fn interactive_settle_current_time(
+        &mut self,
+    ) -> anyhow::Result<ReplayStepStatus>
+    where
+        Admission: InteractiveAdmission,
+    {
+        let mut changed = self.ensure_stepping_started()?;
+        changed |= self.drain_current_timestamp()?;
+        self.fail_if_interactive_dead_end()?;
+        Ok(self.interactive_status(changed))
+    }
+
+    /// Advance to the controller boundary, stopping at an earlier Dynamo
+    /// timestamp. At most one Dynamo timestamp is crossed per call.
+    pub(in crate::replay::offline) fn interactive_advance_to(
+        &mut self,
+        target_ms: f64,
+    ) -> anyhow::Result<ReplayStepStatus>
+    where
+        Admission: InteractiveAdmission,
+    {
+        if !target_ms.is_finite() || target_ms < self.now_ms {
+            bail!(
+                "interactive replay cannot advance from {} ms to {target_ms} ms",
+                self.now_ms
+            );
+        }
+        let initial_progress = self.ensure_stepping_started()?;
+        if initial_progress {
+            return Ok(self.interactive_status(true));
+        }
+        if target_ms == self.now_ms {
+            let changed = self.drain_current_timestamp()?;
+            self.fail_if_interactive_dead_end()?;
+            return Ok(self.interactive_status(changed));
+        }
+        if self.external_assignment_pending() {
+            return Ok(self.interactive_status(false));
+        }
+        if let Some(next_timestamp_ms) = self.next_timestamp()
+            && next_timestamp_ms <= target_ms
+        {
+            self.advance_now_ms(next_timestamp_ms);
+            self.drain_current_timestamp()?;
+            return Ok(self.interactive_status(true));
+        }
+        self.advance_now_ms(target_ms);
+        self.drain_current_timestamp()?;
+        Ok(self.interactive_status(true))
+    }
+
+    pub(in crate::replay::offline) fn interactive_is_quiescent(&mut self) -> bool
+    where
+        Admission: InteractiveAdmission,
+    {
+        !self.is_done()
+            && (self.external_assignment_pending()
+                || (self.next_timestamp().is_none()
+                    && self.admission.is_open()
+                    && self.admission.pending_requests() == 0
+                    && self.cluster_in_flight() == 0))
+    }
+
+    pub(in crate::replay::offline) fn interactive_is_drained(&self) -> bool {
+        self.is_done()
+    }
+
+    pub(in crate::replay::offline) fn drain_interactive_events(&mut self) -> Vec<ReplayEvent> {
+        self.interactive
+            .as_mut()
+            .map(InteractiveCapture::drain_events)
+            .unwrap_or_default()
+    }
+
+    pub(in crate::replay::offline) fn interactive_snapshot(&self) -> ReplaySnapshot
+    where
+        Admission: InteractiveAdmission,
+    {
+        ReplaySnapshot {
+            now_ms: self.now_ms,
+            admission_open: self.admission.is_open(),
+            pending_request_count: self.admission.pending_requests(),
+            pending_placement_count: self.placement.pending_count(),
+            workers: self.engine.interactive_snapshots(),
+        }
+    }
+
+    pub(in crate::replay::offline) fn interactive_uuid_for_logical_id(
+        &self,
+        logical_id: &str,
+    ) -> Option<Uuid> {
+        self.interactive
+            .as_ref()
+            .and_then(|capture| capture.uuid_for_logical_id(logical_id))
+    }
+
+    pub(in crate::replay::offline) fn interactive_pending_placements(
+        &self,
+        uuids: impl Iterator<Item = Uuid>,
+    ) -> Vec<ReplayPendingPlacement> {
+        self.interactive
+            .as_ref()
+            .map(|capture| capture.pending(uuids))
+            .unwrap_or_default()
+    }
+
+    pub(in crate::replay::offline) fn interactive_close_admission(&mut self) -> anyhow::Result<()>
+    where
+        Admission: InteractiveAdmission,
+    {
+        self.admission.close()
+    }
+
+    pub(in crate::replay::offline) fn finish_interactive(
+        self,
+    ) -> crate::replay::TraceSimulationReport {
+        self.progress.finish();
+        self.collector.finish()
+    }
+
     // ------------------------------------------------------------------
-    // Test-only stepping helpers. White-box unit tests advance the sim to a
-    // chosen simulated time, inspect mid-flight state, apply a manual scaling
-    // decision, and resume — a granularity `run()` (which goes straight to
-    // completion) cannot offer. Not part of the production drive path.
+    // White-box stepping helpers retain their historical surface while using
+    // the same production kernel.
     // ------------------------------------------------------------------
 
     /// Advance the simulation up to `until_ms` simulated time, then pause.
@@ -1230,7 +1700,7 @@ where
     /// events do not block completion since there is no work for those workers.
     #[cfg(test)]
     fn advance_to(&mut self, until_ms: f64) -> anyhow::Result<bool> {
-        self.drain_current_timestamp()?;
+        self.ensure_stepping_started()?;
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {
@@ -1247,8 +1717,8 @@ where
                 break;
             }
 
-            self.advance_now_ms(next_timestamp_ms);
-            self.drain_current_timestamp()?;
+            let advanced = self.advance_kernel_next()?;
+            debug_assert!(advanced);
         }
 
         Ok(self.is_workload_done())
@@ -1283,10 +1753,7 @@ where
         {
             bail!("max_sim_time_ms must be a finite, non-negative value; got {cap_ms}");
         }
-        self.drain_current_timestamp()?;
-        // With a planner attached, seed the recurring heartbeat; ticks then fire as
-        // events inside drain_current_timestamp.
-        self.seed_first_scaling_tick()?;
+        self.ensure_stepping_started()?;
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {
@@ -1300,8 +1767,8 @@ where
             {
                 break;
             }
-            self.advance_now_ms(next_timestamp_ms);
-            self.drain_current_timestamp()?;
+            let advanced = self.advance_kernel_next()?;
+            debug_assert!(advanced);
         }
 
         self.progress.finish();
@@ -1311,26 +1778,11 @@ where
     #[cfg(test)]
     /// Test helper: advance exactly one logical timestamp worth of work.
     fn advance_one_timestamp(&mut self) -> anyhow::Result<bool> {
-        if self.is_done() {
-            return Ok(false);
-        }
-
-        if !self.stepped {
-            self.stepped = true;
-            self.drain_current_timestamp()?;
+        if !self.stepping_started {
+            self.ensure_stepping_started()?;
             return Ok(true);
         }
-
-        let Some(next_timestamp_ms) = self.next_timestamp() else {
-            bail!(
-                "offline replay reached a dead end with {} in-flight requests remaining",
-                self.cluster_in_flight()
-            );
-        };
-
-        self.now_ms = next_timestamp_ms;
-        self.drain_current_timestamp()?;
-        Ok(true)
+        self.advance_kernel_next()
     }
 
     #[cfg(test)]
@@ -1476,6 +1928,8 @@ mod tests {
                         metadata: (),
                         session_id: Some(ready.session_id),
                         turn_index: Some(ready.turn_index),
+                        logical_request_id: ready.logical_request_id,
+                        authored_turn_index: Some(ready.authored_turn_index),
                     }
                 })
                 .collect())
@@ -1489,8 +1943,8 @@ mod tests {
             &mut self,
             request_id: Uuid,
             now_ms: f64,
-            rejected: bool,
-        ) -> anyhow::Result<()> {
+            status: WorkloadTerminalStatus,
+        ) -> anyhow::Result<Vec<CascadedWorkloadTerminal>> {
             let turn_index = self
                 .in_flight_turns
                 .remove(&request_id)
@@ -1499,7 +1953,7 @@ mod tests {
                 turn_index,
                 at_ms: now_ms,
             });
-            self.driver.on_terminal(request_id, now_ms, rejected)?;
+            let cascaded = self.driver.on_terminal(request_id, now_ms, status)?;
             if let Some(at_ms) = self.driver.next_ready_time_ms() {
                 self.events
                     .borrow_mut()
@@ -1508,7 +1962,7 @@ mod tests {
                         at_ms,
                     });
             }
-            Ok(())
+            Ok(cascaded)
         }
 
         fn is_drained(&self) -> bool {
@@ -1833,6 +2287,55 @@ mod tests {
             single_report.request_counts.total_output_tokens,
             multi_report.request_counts.total_output_tokens
         );
+    }
+
+    #[test]
+    fn one_shot_and_repeated_stepping_share_report_and_worker_seconds() {
+        let args = parity_args(EngineType::Vllm);
+        let make_runtime = || {
+            AggRuntime::new(
+                &args,
+                None,
+                None,
+                normalize_trace_requests(parity_requests(), 1.0).unwrap(),
+                2,
+                ReplayMode::Trace,
+                ReplayRouterMode::RoundRobin,
+            )
+            .unwrap()
+        };
+
+        let (one_shot_collector, one_shot_stats) = make_runtime().run().unwrap();
+        let one_shot_report = one_shot_collector.finish();
+
+        let mut stepped = make_runtime();
+        while stepped.advance_one_timestamp().unwrap() {}
+        let stepped_stats = stepped.stats.clone();
+        let stepped_report = stepped.finalize_report();
+
+        assert_eq!(one_shot_stats, stepped_stats);
+        assert_eq!(
+            one_shot_report.throughput.decode_worker_seconds,
+            stepped_report.throughput.decode_worker_seconds
+        );
+        assert_eq!(
+            one_shot_report.throughput.prefill_worker_seconds,
+            stepped_report.throughput.prefill_worker_seconds
+        );
+
+        let canonical = |report: &crate::replay::TraceSimulationReport| {
+            let mut value = serde_json::to_value(report).unwrap();
+            let summary = value.as_object_mut().unwrap();
+            for excluded in [
+                "wall_time_ms",
+                "processed_tokens_per_s",
+                "processed_output_tokens_per_s",
+            ] {
+                summary.remove(excluded);
+            }
+            value
+        };
+        assert_eq!(canonical(&one_shot_report), canonical(&stepped_report));
     }
 
     fn fast_router_args() -> MockEngineArgs {
@@ -4075,9 +4578,10 @@ mod tests {
 
         rt.advance_now_ms(scale_time_ms + 1000.0);
         let report = rt.finalize_report();
+        let expected_worker_seconds = 2.0 * scale_time_ms / 1000.0 + 1.0;
         assert!(
-            (report.throughput.decode_worker_seconds - 1.0).abs() < 1e-6,
-            "only the remaining worker should accrue during the post-scale interval, got {}",
+            (report.throughput.decode_worker_seconds - expected_worker_seconds).abs() < 1e-6,
+            "both initial workers plus only the remaining post-scale worker should accrue, got {} (expected {expected_worker_seconds})",
             report.throughput.decode_worker_seconds
         );
     }
