@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use aisimulate_replay::loadgen::{
+use aisimulate_core::replay::loadgen::{
     AgenticMooncakeRow, AgenticToolEvent, AgenticTrace, MooncakeRow, Trace, TraceFileFormat,
     validate_trace_files,
 };

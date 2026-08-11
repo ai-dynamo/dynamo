@@ -3,9 +3,8 @@
 
 [workspace]
 members = [
-    "aisimulate/crates/engine",
+    "aisimulate/crates/core",
     "aisimulate/crates/python",
-    "aisimulate/crates/replay",
     "lib/llm",
     "lib/rl",
     "lib/runtime",
@@ -55,8 +54,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-aisimulate-engine = { path = "aisimulate/crates/engine", version = "1.4.0" }
-aisimulate-replay = { path = "aisimulate/crates/replay", version = "1.4.0" }
+aisimulate-core = { path = "aisimulate/crates/core", version = "1.4.0" }
 dynamo-runtime = { path = "lib/runtime", version = "1.4.0" }
 dynamo-llm = { path = "lib/llm", version = "1.4.0" }
 dynamo-rl = { path = "lib/rl", version = "1.4.0" }

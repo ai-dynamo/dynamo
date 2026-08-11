@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 
-use aisimulate_replay::{
+use aisimulate_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, ProviderSpec, ReplayAdapters, ReplayCaptureOptions,
     ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec, ReplayTopology,
     Replayer, WorkerPoolSpec,
@@ -348,7 +348,7 @@ pub fn run_offline_handoff_conformance(
         arrival_timestamp_ms: Some(0.0),
         ..Default::default()
     };
-    Ok(aisimulate_replay::run_engine_handoff_conformance(engine, factory, request)?.into())
+    Ok(aisimulate_core::replay::run_engine_handoff_conformance(engine, factory, request)?.into())
 }
 
 pub(crate) fn generate_trace_worker_artifacts(

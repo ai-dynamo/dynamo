@@ -3,7 +3,7 @@
 
 //! Dynamo observation conversion shared by offline replay and Live Mocker.
 
-use aisimulate_engine::{ForwardPassMetrics, KvEvent, KvEventData};
+use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
@@ -85,7 +85,7 @@ pub(crate) fn dynamo_forward_pass_snapshot(
 mod tests {
     use std::sync::Arc;
 
-    use aisimulate_engine::{KvBlock, StoredBlocks};
+    use aisimulate_core::engine::{KvBlock, StoredBlocks};
     use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
     use dynamo_kv_router::protocols::{
         KvCacheEventData, LocalBlockHash, RouterEvent, WorkerWithDpRank,

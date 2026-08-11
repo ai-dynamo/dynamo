@@ -10,6 +10,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+publish = false
 
 [lib]
 name = "_runtime"
@@ -19,8 +20,7 @@ crate-type = ["cdylib", "rlib"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-aisimulate-engine = { workspace = true }
-aisimulate-replay = { workspace = true }
+aisimulate-core = { workspace = true }
 anyhow = { workspace = true }
 pyo3 = { version = "0.23.4", features = ["abi3-py310"] }
 serde = { workspace = true }

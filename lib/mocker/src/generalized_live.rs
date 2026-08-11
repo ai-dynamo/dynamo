@@ -16,11 +16,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use aisimulate_engine::generalized::{
+use aisimulate_core::engine::generalized::{
     EngineEffects, EnginePassCompleted, EnginePassStarted, GeneralizedMockerEngine,
     SchedulerCommand,
 };
-use aisimulate_engine::{
+use aisimulate_core::engine::{
     Command, CommandEffects, PassCompletionEffects, PassStartEffects, SchedulerRank,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -641,8 +641,8 @@ mod tests {
     use std::num::NonZeroU32;
     use std::sync::Arc;
 
-    use aisimulate_engine::generalized::EngineIdentity;
-    use aisimulate_engine::{
+    use aisimulate_core::engine::generalized::EngineIdentity;
+    use aisimulate_core::engine::{
         CommandResult, EngineConfig, EngineFactory, HandoffId, Request, TimingModel,
         TimingModelConfig, WorkerType,
     };
@@ -1174,7 +1174,7 @@ mod tests {
         };
         assert!(matches!(
             completed.effects.by_rank[0].effects.lifecycle_events.as_slice(),
-            [aisimulate_engine::LifecycleEvent::SourceHeld { handoff_id: observed, .. }]
+            [aisimulate_core::engine::LifecycleEvent::SourceHeld { handoff_id: observed, .. }]
                 if *observed == handoff_id
         ));
         boundary.finish().await.unwrap();

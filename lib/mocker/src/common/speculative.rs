@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub(crate) use aisimulate_engine::normalize_conditional_accept_rates;
+pub(crate) use aisimulate_core::engine::normalize_conditional_accept_rates;
 
 pub(crate) fn format_accept_rates(rates: &[f64]) -> String {
     rates

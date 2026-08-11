@@ -22,7 +22,7 @@ pub fn native_g1_parent_chain_artifact(block_size: usize) -> ReplayWorkerArtifac
     let tokens = (0..u32::try_from(prompt_len + 2)
         .expect("ordering regression token length must fit in u32"))
         .collect::<Vec<_>>();
-    let kv_events = aisimulate_engine::g1_parent_chain_events(block_size)
+    let kv_events = aisimulate_core::engine::g1_parent_chain_events(block_size)
         .into_iter()
         .enumerate()
         .map(|(ordinal, event)| ReplayTimedKvEvent {

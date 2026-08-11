@@ -4,7 +4,7 @@
 //! Performance model for timing simulations in the mocker.
 //!
 //! `Polynomial` remains a legacy configuration marker. Its implementation is
-//! owned by `aisimulate-engine`; this module only implements external NPZ and
+//! owned by `aisimulate_core::engine`; this module only implements external NPZ and
 //! AI Configurator providers.
 
 use anyhow::{Context, Result};

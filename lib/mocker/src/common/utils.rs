@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use aisimulate_engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
+use aisimulate_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
 
 use crate::common::handoff::HandoffTransferTiming;
 use crate::common::protocols::{KvTransferTimingMode, MockEngineArgs, WorkerType};

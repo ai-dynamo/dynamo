@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use aisimulate_engine::{Backend, TimingModel, TimingModelConfig};
-use aisimulate_replay::{
+use aisimulate_core::engine::{Backend, TimingModel, TimingModelConfig};
+use aisimulate_core::replay::{
     ReplayEngineConfig, ReplayRoleConfig, ReplaySpec, ReplayTopology, run_engine_replay,
     run_engine_replay_with_optional_role_timing, run_engine_replay_with_timing,
 };
@@ -450,8 +450,8 @@ fn _runtime(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use aisimulate_engine::{EngineConfig, TimingModelConfig};
-    use aisimulate_replay::{
+    use aisimulate_core::engine::{EngineConfig, TimingModelConfig};
+    use aisimulate_core::replay::{
         ProviderSpec, ReplayAdapters, ReplayEngineConfig, ReplayRequest, ReplaySpec,
         ReplayTopology, WorkerPoolSpec,
     };

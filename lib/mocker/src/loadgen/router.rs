@@ -3,7 +3,7 @@
 
 //! Conversion from neutral replay metadata to Dynamo Router wire identities.
 
-use aisimulate_replay::loadgen::Trace;
+use aisimulate_core::replay::loadgen::Trace;
 use anyhow::{Context, Result};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{

@@ -826,7 +826,7 @@ def _normalize_engine_replay_report(
             raise InvalidRunnerError(f"engine replay metric {name!r} is not finite")
         metrics[name] = number
 
-    # The moved TraceSimulationReport's flat serialization is the sole wire
+    # The Rust ReplayReport's flat serialization is the sole wire
     # format. Per-request records remain a Rust replay concern and are not
     # reconstructed into a second Python report model.
     for name, value in payload.items():

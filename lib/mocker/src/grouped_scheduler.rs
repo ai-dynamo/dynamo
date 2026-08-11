@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
-use aisimulate_engine::KvEventData;
-use aisimulate_engine::generalized::{
+use aisimulate_core::engine::KvEventData;
+use aisimulate_core::engine::generalized::{
     EngineEffects, EngineIdentity, EnginePassCompleted, GeneralizedMockerEngine, RankIdentity,
     SchedulerCommand as EngineSchedulerCommand,
 };
-use aisimulate_engine::{
+use aisimulate_core::engine::{
     Admission, Command, CommandEffects, CommandResult, ForwardPassMetrics, KvEvent, Metrics,
     PassCompletionEffects,
 };

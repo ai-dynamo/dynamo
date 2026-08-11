@@ -17,14 +17,13 @@ default = []
 profile = []
 # Test/benchmark-only deterministic replay plumbing. Production replay never
 # enables this feature and keeps the existing random selector behavior.
-replay-bench = ["aisimulate-replay/replay-bench", "dynamo-kv-router/bench"]
+replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
 test-support = []
 zmq-events = ["dep:tmq"]
 
 [dependencies]
 # repo
-aisimulate-engine = { workspace = true }
-aisimulate-replay = { workspace = true }
+aisimulate-core = { workspace = true }
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }

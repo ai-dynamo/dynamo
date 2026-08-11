@@ -48,35 +48,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "aisimulate-engine"
+name = "aisimulate-core"
 version = "1.4.0"
 dependencies = [
- "anyhow",
- "derive_builder",
- "rand 0.9.4",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
- "slotmap",
- "tracing",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "aisimulate-replay"
-version = "1.4.0"
-dependencies = [
- "aisimulate-engine",
  "anyhow",
  "blake3",
  "ddsketchy",
+ "derive_builder",
  "indicatif 0.18.4",
  "rand 0.9.4",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "slotmap",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
  "xxhash-rust",
 ]
@@ -2409,8 +2395,7 @@ dependencies = [
 name = "dynamo-mocker"
 version = "1.4.0"
 dependencies = [
- "aisimulate-engine",
- "aisimulate-replay",
+ "aisimulate-core",
  "anyhow",
  "blake3",
  "bytes",
@@ -3165,6 +3150,16 @@ checksum = "73fde052dbfc920003cfd2c8e2c6e6d4cc7c1091538c3a24226cec0665ab08c0"
 dependencies = [
  "autocfg",
  "tokio",
+]
+
+[[package]]
+name = "fs4"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8640e34b88f7652208ce9e88b1a37a2ae95227d84abec377ccd3c5cfeb141ed4"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
