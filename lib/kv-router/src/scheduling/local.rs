@@ -525,7 +525,7 @@ where
         let worker = self.slots.request_worker(&request_id);
         self.slots.free(&request_id, Instant::now())?;
         match worker {
-            Some(worker) => self.queue.update_worker(worker).await,
+            Some(worker) => self.queue.complete_request(&request_id, worker).await,
             None => self.queue.update().await,
         }
         Ok(())
@@ -540,10 +540,37 @@ where
         request_id: &str,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
+        self.release_if_worker(request_id, worker, true).await
+    }
+
+    /// Release a booking as an aborted request only if it still belongs to `worker`.
+    pub async fn abort_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.release_if_worker(request_id, worker, false).await
+    }
+
+    async fn release_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        completed: bool,
+    ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
+        let owned = self.slots.request_worker(&request_id) == Some(worker);
         self.slots
             .free_if_worker(&request_id, worker, Instant::now())?;
-        self.queue.update_worker(worker).await;
+        if owned {
+            if completed {
+                self.queue.complete_request(&request_id, worker).await;
+            } else {
+                self.queue.abort_request(&request_id, worker).await;
+            }
+        } else {
+            self.queue.update_worker(worker).await;
+        }
         Ok(())
     }
 

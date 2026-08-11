@@ -20,7 +20,9 @@ use super::overlap_refresh::{
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
-use super::queue_admission::WorkerPlacement;
+use super::queue_admission::{
+    PolicyQueueDecision, PolicyQueueEvent, PolicyQueueId, PolicyQueueWorker, WorkerPlacement,
+};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, NonMaxOverlapSelection,
@@ -56,6 +58,7 @@ struct QueuedRequest {
     request: SchedulingRequest,
     enqueue_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
+    policy_id: Option<PolicyQueueId>,
 }
 
 struct SelectedWorkerForRequest {
@@ -135,9 +138,16 @@ enum AdmissionCommand {
     },
     Update {
         worker: Option<WorkerWithDpRank>,
+        finished: Option<(String, PolicyRequestOutcome)>,
         ack_tx: oneshot::Sender<()>,
     },
     Cleanup,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PolicyRequestOutcome {
+    Completed,
+    Aborted,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -235,6 +245,7 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
+    policy_workers: Vec<PolicyQueueWorker>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
 }
 
@@ -332,18 +343,24 @@ impl<
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
         block_size: u32,
-        selector: Sel,
+        mut selector: Sel,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         available_worker_provider: Option<WorkerAvailabilityProvider>,
         admission_channel_capacity: usize,
     ) -> Result<Self, KvSchedulerError> {
-        let pending = PolicyQueue::new(profile.clone());
+        let queue_policy = selector.take_queue_policy();
+        let has_queue_policy = queue_policy.is_some();
+        let pending = match queue_policy {
+            Some(policy) => PolicyQueue::new(profile.clone()).with_policy(policy),
+            None => PolicyQueue::new(profile.clone()),
+        };
         let queueing_enabled = profile
             .classes()
             .iter()
-            .any(PolicyClassConfig::queueing_enabled);
+            .any(PolicyClassConfig::queueing_enabled)
+            || has_queue_policy;
         for class in profile.classes() {
             tracing::info!(
                 policy_class = class.name,
@@ -403,6 +420,7 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider,
             available_worker_provider,
+            policy_workers: Vec::new(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
         };
         tokio::spawn(actor.run(admission_rx));
@@ -623,14 +641,34 @@ impl<
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
     pub async fn update(&self) {
-        self.update_after(None).await;
+        self.update_after(None, None).await;
     }
 
     pub(crate) async fn update_worker(&self, worker: WorkerWithDpRank) {
-        self.update_after(Some(worker)).await;
+        self.update_after(Some(worker), None).await;
     }
 
-    async fn update_after(&self, worker: Option<WorkerWithDpRank>) {
+    pub(crate) async fn complete_request(&self, request_id: &str, worker: WorkerWithDpRank) {
+        self.update_after(
+            Some(worker),
+            Some((request_id.to_owned(), PolicyRequestOutcome::Completed)),
+        )
+        .await;
+    }
+
+    pub(crate) async fn abort_request(&self, request_id: &str, worker: WorkerWithDpRank) {
+        self.update_after(
+            Some(worker),
+            Some((request_id.to_owned(), PolicyRequestOutcome::Aborted)),
+        )
+        .await;
+    }
+
+    async fn update_after(
+        &self,
+        worker: Option<WorkerWithDpRank>,
+        finished: Option<(String, PolicyRequestOutcome)>,
+    ) {
         if !self.queueing_enabled {
             return;
         }
@@ -638,7 +676,11 @@ impl<
         let (ack_tx, ack_rx) = oneshot::channel();
         if self
             .admission_tx
-            .send(AdmissionCommand::Update { worker, ack_tx })
+            .send(AdmissionCommand::Update {
+                worker,
+                finished,
+                ack_tx,
+            })
             .await
             .is_ok()
         {
@@ -725,7 +767,14 @@ impl<
                     let result = self.select_without_admission_inner(request, Instant::now());
                     let _ = resp_tx.send(result);
                 }
-                AdmissionCommand::Update { worker, ack_tx } => {
+                AdmissionCommand::Update {
+                    worker,
+                    finished,
+                    ack_tx,
+                } => {
+                    if let Some((request_id, outcome)) = finished {
+                        self.handle_policy_finished(&request_id, outcome);
+                    }
                     self.handle_update(worker).await;
                     if drain_cleanup && self.drain_cleanup() {
                         self.handle_update(None).await;
@@ -783,12 +832,32 @@ impl<
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
             (class_index, Some(snapshot))
         };
+        let policy_admission =
+            if request.mode.lifecycle_request_id().is_some() && self.pending.has_policy() {
+                self.refresh_policy_workers();
+                self.pending.admit_policy(
+                    request
+                        .mode
+                        .tracked_request_id()
+                        .expect("lifecycle request is tracked"),
+                    request.isl_tokens,
+                    request.session_context.as_ref(),
+                    &self.policy_workers,
+                )
+            } else {
+                None
+            };
+        let policy_id = policy_admission.map(|(id, _)| id);
+        let deferred = policy_admission
+            .is_some_and(|(_, decision)| matches!(decision, PolicyQueueDecision::Defer));
+
         let class = self.profile.class(class_index);
-        let should_queue = self.should_queue(class_index, class, || {
-            self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
-        });
+        let should_queue = deferred
+            || self.should_queue(class_index, class, || {
+                self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
+            });
         if !should_queue {
-            return (false, self.admit_one(request, decay_now));
+            return self.admit_one(request, decay_now, policy_id);
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -803,21 +872,44 @@ impl<
             request,
             enqueue_at: decay_now,
             block_hashes,
+            policy_id,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((rejection, queued)) = self.pending.enqueue(
-            class_index,
-            worker_count,
-            snapshot,
-            arrival_offset,
-            priority_jump,
-            strict_priority,
-            placement,
-            queued,
-        ) {
+        let enqueue = match policy_admission {
+            Some((id, PolicyQueueDecision::Defer)) => self.pending.enqueue_deferred(
+                class_index,
+                worker_count,
+                snapshot,
+                arrival_offset,
+                priority_jump,
+                strict_priority,
+                placement,
+                id,
+                queued,
+            ),
+            _ => self.pending.enqueue(
+                class_index,
+                worker_count,
+                snapshot,
+                arrival_offset,
+                priority_jump,
+                strict_priority,
+                placement,
+                queued,
+            ),
+        };
+        if let Err((rejection, queued)) = enqueue {
             let mut request = queued.request;
+            let made_ready = queued.policy_id.is_some_and(|_| {
+                self.pending.policy_event(PolicyQueueEvent::Aborted {
+                    request_id: request
+                        .mode
+                        .tracked_request_id()
+                        .expect("queue policy request is tracked"),
+                })
+            });
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-            return (false, false);
+            return (made_ready, false);
         }
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         self.pending_isl_tokens
@@ -852,6 +944,52 @@ impl<
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
+    fn refresh_policy_workers(&mut self) {
+        let overloaded_worker_ids = self
+            .overloaded_worker_provider
+            .as_ref()
+            .and_then(|provider| provider());
+        let available_worker_ids = self
+            .available_worker_provider
+            .as_ref()
+            .and_then(|provider| provider());
+        let workers = self.workers_with_configs.borrow();
+        self.policy_workers.clear();
+
+        for (&worker_id, config) in workers.iter() {
+            let available = available_worker_ids
+                .as_ref()
+                .is_none_or(|workers| workers.contains(&worker_id))
+                && overloaded_worker_ids
+                    .as_ref()
+                    .is_none_or(|workers| !workers.contains(&worker_id));
+            let capacity_tokens =
+                config
+                    .total_kv_blocks()
+                    .filter(|blocks| *blocks > 0)
+                    .map(|blocks| {
+                        let tokens = blocks
+                            .saturating_mul(u64::from(self.block_size))
+                            .saturating_add(
+                                config.native_offloading_capacity_tokens().unwrap_or(0),
+                            );
+                        usize::try_from(tokens).unwrap_or(usize::MAX)
+                    });
+            let start = config.data_parallel_start_rank();
+            let end = start.saturating_add(config.data_parallel_size());
+            for dp_rank in start..end {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                self.policy_workers.push(PolicyQueueWorker::new(
+                    worker,
+                    capacity_tokens,
+                    available,
+                ));
+            }
+        }
+        self.policy_workers
+            .sort_unstable_by_key(PolicyQueueWorker::worker);
+    }
+
     fn drain_cleanup(&mut self) -> bool {
         let dirty = self.cleanup.drain();
         if dirty.is_empty() {
@@ -863,6 +1001,9 @@ impl<
         let mut unmanaged_request_ids = HashSet::new();
         for cleanup in dirty {
             let request_id = &cleanup.request_id;
+            made_ready |= self
+                .pending
+                .policy_event(PolicyQueueEvent::Aborted { request_id });
             if self.slots.request_worker(request_id).is_some() {
                 if let Err(error) = self.slots.free(request_id, Instant::now()) {
                     tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
@@ -890,6 +1031,14 @@ impl<
         made_ready || (removed_ready_head && self.has_dispatchable_ready_head())
     }
 
+    fn handle_policy_finished(&mut self, request_id: &str, outcome: PolicyRequestOutcome) -> bool {
+        let event = match outcome {
+            PolicyRequestOutcome::Completed => PolicyQueueEvent::Completed { request_id },
+            PolicyRequestOutcome::Aborted => PolicyQueueEvent::Aborted { request_id },
+        };
+        self.pending.policy_event(event)
+    }
+
     fn has_dispatchable_ready_head(&self) -> bool {
         let active_tokens = self.slots.active_tokens(Instant::now());
         let configs = self.workers_with_configs.borrow();
@@ -911,6 +1060,12 @@ impl<
     }
 
     async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
+        if self.pending.has_policy() {
+            self.refresh_policy_workers();
+            self.pending.policy_event(PolicyQueueEvent::Reconcile {
+                workers: &self.policy_workers,
+            });
+        }
         if !self.pending.has_ready() {
             return;
         }
@@ -994,12 +1149,13 @@ impl<
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
+            let policy_id = queued.policy_id;
             let request = queued.request;
             tracing::debug!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, admit_now);
+            self.admit_one(request, admit_now, policy_id);
         }
     }
 
@@ -1091,13 +1247,28 @@ impl<
 
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
-    fn admit_one(&mut self, mut request: SchedulingRequest, decay_now: Instant) -> bool {
+    fn admit_one(
+        &mut self,
+        mut request: SchedulingRequest,
+        decay_now: Instant,
+        policy_id: Option<PolicyQueueId>,
+    ) -> (bool, bool) {
         let selected = match self.select_worker_for_request(&mut request, decay_now) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
+                let made_ready = if policy_id.is_some() {
+                    self.pending.policy_event(PolicyQueueEvent::Aborted {
+                        request_id: request
+                            .mode
+                            .tracked_request_id()
+                            .expect("queue policy request is tracked"),
+                    })
+                } else {
+                    false
+                };
                 request.respond(Err(e));
-                return false;
+                return (made_ready, false);
             }
         };
 
@@ -1115,8 +1286,9 @@ impl<
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
         if !request.mode.is_tracked() {
+            debug_assert!(policy_id.is_none());
             request.respond(Ok(response));
-            return false;
+            return (false, false);
         }
 
         let request_id = request
@@ -1132,7 +1304,7 @@ impl<
         );
 
         let sequence_request = SequenceRequest {
-            request_id,
+            request_id: request_id.clone(),
             token_sequence: request.token_seq.take(),
             track_prefill_tokens: request.track_prefill_tokens,
             expected_output_tokens: request.expected_output_tokens,
@@ -1140,12 +1312,24 @@ impl<
             worker: selected.selection.worker,
             lora_name: request.lora_name.take(),
         };
-        self.book_and_respond(
+        let worker = selected.selection.worker;
+        let owns_lifecycle = self.book_and_respond(
             request,
             sequence_request,
             response,
             non_max_overlap_selection,
-        )
+        );
+        let made_ready = policy_id.is_some_and(|id| {
+            if owns_lifecycle {
+                self.pending
+                    .policy_event(PolicyQueueEvent::Dispatched { id, worker })
+            } else {
+                self.pending.policy_event(PolicyQueueEvent::Aborted {
+                    request_id: &request_id,
+                })
+            }
+        });
+        (made_ready, owns_lifecycle)
     }
 
     /// A closed receiver means the actor-owned request was abandoned before
@@ -1330,7 +1514,9 @@ mod tests {
     use crate::router_hint::RouterHintRootCandidates;
     use crate::scheduling::OverlapSignals;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
-    use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
+    use crate::scheduling::{
+        PolicyQueuePolicy, PolicyQueueRequest, RefreshedOverlap, RouterPolicyConfig,
+    };
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::{DefaultWorkerSelector, WorkerSelector};
@@ -1449,6 +1635,65 @@ mod tests {
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct QueuePolicyState {
+        deferred: StdMutex<Option<PolicyQueueId>>,
+        dispatched: AtomicUsize,
+        completed: AtomicUsize,
+    }
+
+    struct DeferOncePolicy {
+        state: Arc<QueuePolicyState>,
+    }
+
+    impl PolicyQueuePolicy for DeferOncePolicy {
+        fn admit(&mut self, request: PolicyQueueRequest<'_>) -> PolicyQueueDecision {
+            assert_eq!(request.request_id(), "policy-request");
+            *self.state.deferred.lock().unwrap() = Some(request.id());
+            PolicyQueueDecision::Defer
+        }
+
+        fn on_event(&mut self, event: PolicyQueueEvent<'_>, ready: &mut Vec<PolicyQueueId>) {
+            match event {
+                PolicyQueueEvent::Reconcile { .. } => {
+                    if let Some(id) = self.state.deferred.lock().unwrap().take() {
+                        ready.push(id);
+                    }
+                }
+                PolicyQueueEvent::Dispatched { .. } => {
+                    self.state.dispatched.fetch_add(1, Ordering::Relaxed);
+                }
+                PolicyQueueEvent::Completed { request_id } => {
+                    assert_eq!(request_id, "policy-request");
+                    self.state.completed.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    struct QueuePolicySelector {
+        selector: MinDecodeSelector,
+        policy: Option<Box<dyn PolicyQueuePolicy>>,
+    }
+
+    impl WorkerSelector<SimpleWorkerConfig> for QueuePolicySelector {
+        fn select_worker(
+            &self,
+            workers: &HashMap<WorkerId, SimpleWorkerConfig>,
+            request: &SchedulingRequest,
+            eligibility: RoutingEligibility<'_>,
+            block_size: u32,
+        ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+            self.selector
+                .select_worker(workers, request, eligibility, block_size)
+        }
+
+        fn take_queue_policy(&mut self) -> Option<Box<dyn PolicyQueuePolicy>> {
+            self.policy.take()
         }
     }
 
@@ -1902,6 +2147,48 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test]
+    async fn custom_queue_policy_defers_dispatch_and_observes_completion() {
+        let state = Arc::new(QueuePolicyState::default());
+        let selector = QueuePolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(DeferOncePolicy {
+                state: Arc::clone(&state),
+            })),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(1, 16, 128, None, selector);
+        let (mut request, mut response_rx) = make_request("policy-request", 32);
+        request.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "policy-request".to_owned(),
+        };
+        let lease = queue.new_request_lifecycle_lease(Some("policy-request"));
+        let mut lease = queue
+            .enqueue_with_block_hashes_and_lease(request, None, lease)
+            .await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut response_rx)
+                .await
+                .is_err()
+        );
+        queue.update().await;
+        let response = tokio::time::timeout(Duration::from_secs(1), &mut response_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        lease.as_mut().unwrap().disarm();
+        assert_eq!(state.dispatched.load(Ordering::Relaxed), 1);
+
+        slots
+            .free(&"policy-request".to_owned(), Instant::now())
+            .unwrap();
+        queue
+            .complete_request("policy-request", response.best_worker)
+            .await;
+        assert_eq!(state.completed.load(Ordering::Relaxed), 1);
     }
 
     #[test]

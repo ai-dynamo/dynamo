@@ -391,6 +391,17 @@ where
         Ok(())
     }
 
+    /// Release an aborted `request_id` only if it is still booked on `worker`.
+    pub async fn abort_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.inner.abort_if_worker(request_id, worker).await?;
+        self.update_queue_metrics();
+        Ok(())
+    }
+
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }
