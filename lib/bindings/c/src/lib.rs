@@ -446,58 +446,7 @@ pub struct RouterHandles {
 }
 
 impl RouterHandles {
-    /// Query optimal prefill worker for a request.
-    ///
-    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
-    /// Returns worker_id on success.
-    #[expect(clippy::too_many_arguments)]
-    async fn query_prefill_worker(
-        &self,
-        tokens: &[u32],
-        block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
-        lora_name: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
-    ) -> Result<(u64, Option<u32>), QueryRouterResult> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.prefill_router.register_workers(ids);
-        }
-
-        let outcome = self
-            .prefill_router
-            .query_prefill_worker(
-                tokens,
-                block_mm_infos,
-                lora_name,
-                priority_jump,
-                strict_priority,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(error = ?e, "Prefill query failed");
-                QueryRouterResult::ErrQueryFailed
-            })?;
-        match outcome {
-            // Advisory only: the external caller owns dispatch and lifecycle state.
-            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            PrefillQueryOutcome::QueueRejected { rejection } => {
-                tracing::warn!(
-                    policy_class = %rejection.policy_class,
-                    limit_kind = %rejection.limit_kind,
-                    current = rejection.current,
-                    limit = rejection.limit,
-                    "Prefill query rejected by policy-class queue limit"
-                );
-                Err(QueryRouterResult::ErrBackpressure)
-            }
-        }
-    }
-
-    /// Atomically select and reserve a prefill worker for an EPP-owned booking.
+     /// Atomically select and reserve a prefill worker for an EPP-owned booking.
     #[expect(clippy::too_many_arguments)]
     async fn reserve_prefill_worker(
         &self,
@@ -1300,85 +1249,7 @@ fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
     std::mem::forget(tokens_boxed);
 }
 
-/// Route a request to select the best **prefill** worker only.
-///
-/// This is used in disaggregated mode where the EPP runs separate prefill and decode
-/// scoring profiles.  It tokenizes the request and queries only the prefill router.
-///
-/// The returned `CRoutingResult` contains:
-/// - `prefill_worker_id`: the selected prefill worker
-/// - `decode_worker_id`: 0 (unused — decode is handled by `route_decode_request`)
-/// - `is_disaggregated`: always true (this function is only called in disagg mode)
-/// - `token_ids` / `token_count`: the tokenized request (caller must free via `free_routing_result`)
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-/// - `request_json` must be a valid null-terminated C string containing JSON
-/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
-/// - `out_result` must be a valid pointer
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn route_prefill_request(
-    handle: RouterHandlesPtr,
-    request_json: *const c_char,
-    pods_json: *const c_char,
-    out_result: *mut CRoutingResult,
-) -> QueryRouterResult {
-    if handle.is_null() || request_json.is_null() || out_result.is_null() {
-        return QueryRouterResult::ErrInvalidParam;
-    }
-
-    let handles = unsafe { &*handle };
-
-    let (tokens, priority_jump, strict_priority, routing_constraints) =
-        match unsafe { preprocess_request(handles, request_json) } {
-            Ok(t) => t,
-            Err(code) => return code,
-        };
-
-    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
-
-    let result = handles.runtime.secondary().block_on(async {
-        let (prefill_worker_id, prefill_dp_rank) = handles
-            .query_prefill_worker(
-                &tokens,
-                None,
-                None,
-                priority_jump,
-                strict_priority,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await?;
-
-        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
-
-        tracing::info!(
-            prefill_worker_id = prefill_worker_id,
-            prefill_dp_rank = prefill_dp_rank,
-            token_count = tokens.len(),
-            priority_jump,
-            strict_priority,
-            "Routed prefill request"
-        );
-
-        Ok((prefill_worker_id, prefill_dp_rank))
-    });
-
-    match result {
-        Ok((prefill_worker_id, prefill_dp_rank)) => {
-            let out = unsafe { &mut *out_result };
-            *out = CRoutingResult::default();
-            out.is_disaggregated = true;
-            out.prefill_worker_id = prefill_worker_id;
-            out.prefill_dp_rank = prefill_dp_rank;
-            write_tokens_to_result(&tokens, out);
-            QueryRouterResult::Ok
-        }
-        Err(code) => code,
-    }
-}
-
-/// Atomically select and reserve the best prefill worker for an EPP-owned booking.
+ /// Atomically select and reserve the best prefill worker for an EPP-owned booking.
 ///
 /// Pending scheduler admission is bounded by `timeout_ms`.
 ///
