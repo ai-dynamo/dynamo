@@ -10,12 +10,19 @@ rewrite is ephemeral: checkout at the source SHA, mutate, package, discard.
 Per chart token: Chart.yaml versions -- including the platform->dynamo-operator
 exact dependency pin (must move in lockstep) and the operator subchart's
 appVersion (`helm package --app-version` stamps only the top-level chart; the
-subchart's feeds the image-tag default and `--operator-version`) -- plus
-values.yaml image sites renamed to the *-nightly NGC repos at this run's dated
-tag. Third-party references are never touched; power-agent is excluded.
+subchart's feeds the image-tag default and `--operator-version`) -- the
+top-level chart name (-> dedicated -nightly chart names), plus values.yaml
+image sites renamed to the *-nightly NGC repos at this run's dated tag.
+Third-party references are never touched; power-agent is excluded.
 
 Every rewrite requires exactly one match and raises otherwise, so a chart
 restructure breaks this step loudly instead of shipping stale references.
+
+Known caveat: the DGDR defaulting webhook derives dynamo-planner:<appVersion>
+when spec.image is unset (a hardcoded repo in the operator), which does not
+exist for pre-release appVersions -- true for rc charts today and for these
+nightly charts. Nightly DGDR users must set spec.image explicitly until the
+operator grows a default-image override.
 """
 from __future__ import annotations
 
@@ -33,6 +40,14 @@ CHART_TARGETS: dict[str, list[str]] = {
     "snapshot": [
         "deploy/helm/charts/snapshot/Chart.yaml",
     ],
+}
+
+# token -> (top-level Chart.yaml, nightly chart name). Nightly charts publish
+# under dedicated -nightly names, mirroring the container repo convention; the
+# operator subchart keeps its name (values keys reference it).
+NIGHTLY_CHART_NAMES: dict[str, tuple[str, str]] = {
+    "platform": ("deploy/helm/charts/platform/Chart.yaml", "dynamo-platform-nightly"),
+    "snapshot": ("deploy/helm/charts/snapshot/Chart.yaml", "snapshot-nightly"),
 }
 
 # token -> (values.yaml path, repository in the file, nightly repository).
@@ -94,6 +109,20 @@ def set_chart_versions(path: Path, new: str, expect_operator_pin: bool) -> None:
 
     path.write_text(text)
     print(f"  {path}: version -> {new}")
+
+
+def set_chart_name(path: Path, new: str) -> None:
+    # Line-start anchored: never matches indented `- name:` entries
+    # (dependencies, maintainers).
+    pat = re.compile(r'^(name\s*:\s*)("?)[^"\n]*\2(\s*)$', re.MULTILINE)
+    text, n = pat.subn(
+        lambda m: f"{m.group(1)}{m.group(2)}{new}{m.group(2)}{m.group(3)}",
+        path.read_text(),
+    )
+    if n != 1:
+        raise RuntimeError(f"expected exactly one top-level name in {path}, found {n}")
+    path.write_text(text)
+    print(f"  {path}: name -> {new}")
 
 
 def set_image_site(path: Path, current_repo: str, nightly_repo: str, tag: str) -> None:
@@ -162,6 +191,8 @@ def main() -> int:
                 args.chart_version,
                 expect_operator_pin=rel.endswith("platform/Chart.yaml"),
             )
+        chart_path, nightly_name = NIGHTLY_CHART_NAMES[token]
+        set_chart_name(root / chart_path, nightly_name)
         for rel, current_repo, nightly_repo in IMAGE_SITES[token]:
             set_image_site(root / rel, current_repo, nightly_repo, args.image_tag)
     return 0

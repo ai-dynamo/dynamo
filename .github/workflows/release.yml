@@ -667,9 +667,13 @@ jobs:
 
           helm plugin install https://github.com/chartmuseum/helm-push || true
 
+          # --force-update refreshes the cached index when the alias already
+          # exists on the runner, so the duplicate probe below never reads a
+          # stale listing on re-runs.
           echo "${NGC_TOKEN}" | helm repo add "${REPO_ALIAS}" \
             --username="${NGC_USERNAME}" \
             --password-stdin \
+            --force-update \
             "${NGC_HELM_REPO}" > /dev/null 2>&1
 
           # helm does not read docker's login for OCI pushes.
