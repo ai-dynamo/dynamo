@@ -259,10 +259,10 @@ These flags are retained for backward compatibility and will be removed in a fut
   Environment variable: `MODEL_EXPRESS_URL`
 </ParamField>
 
-The five `--benchmark-*-granularity` flags below are the previous names for the benchmark sampling limits. Each is translated to its replacement at startup, with a deprecation warning. They are accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
+The five `--benchmark-*-granularity` flags below are the previous names for the benchmark sampling limits. They are read only when `--benchmark-mode` is set and `--benchmark-points-file` is not; otherwise they are ignored entirely, and none of the translation, range checking, or deprecation warnings described here takes place. Under those conditions each is translated to its replacement at startup, with a deprecation warning, and is accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
 
 <Warning>
-Passing a legacy flag together with its replacement raises a `ValueError` at startup — `cannot combine --benchmark-decode-length-granularity with --decode-max-kv-read-token-samples`, and likewise for each of the other pairs. Migrate to the replacement rather than setting both. All five are ignored when `--benchmark-points-file` is set.
+With `--benchmark-mode` set and no points file, passing a legacy flag together with its replacement raises a `ValueError` at startup — `cannot combine --benchmark-decode-length-granularity with --decode-max-kv-read-token-samples`, and likewise for each of the other pairs. Migrate to the replacement rather than setting both. All five are ignored when `--benchmark-points-file` is set.
 </Warning>
 
 <ParamField path="--benchmark-prefill-granularity" type="integer" default="null" deprecated={true}>
