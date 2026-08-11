@@ -65,6 +65,7 @@
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/kv-router/                                                              @ai-dynamo/dynamo-router-codeowners
+/lib/router-plugins/                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/tests/                                                        @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/indexer/                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/recovery/                                                 @ai-dynamo/dynamo-router-codeowners
@@ -75,6 +76,7 @@
 /components/src/dynamo/kv_dc_relay/                                          @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/                                        @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/squeeze_evolve/                                       @ai-dynamo/dynamo-router-codeowners
+/examples/router/custom-policy-example/                                      @ai-dynamo/dynamo-router-codeowners
 /examples/router/policy-class-queues.yaml                                    @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/tests/                                  @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/thunderagent_router/                                  @ai-dynamo/dynamo-router-codeowners

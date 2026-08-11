@@ -18,6 +18,7 @@ use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
     SelectionService, SelectionServiceBuilder, WorkerLifecycle, WorkerRequest as CoreWorkerRequest,
+    WorkerSelectionPolicyFactory,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -118,10 +119,28 @@ impl Selector {
         Self::new_with_kv_router_config(cfg, kv_router_config_from_dynamo_env()).await
     }
 
+    /// Build a selection service using the custom policy compiled into this EPP image.
+    pub(crate) async fn build_selection_service_with_worker_selection_policy_factory(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: KvRouterConfig,
+        factory: WorkerSelectionPolicyFactory,
+    ) -> Result<SelectionService> {
+        Self::build_selection_service(cfg, kv_router_config, Some(factory)).await
+    }
+
     async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
     ) -> Result<Self> {
+        let service = Self::build_selection_service(cfg, kv_router_config, None).await?;
+        Self::from_service(cfg, service).await
+    }
+
+    async fn build_selection_service(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: KvRouterConfig,
+        factory: Option<WorkerSelectionPolicyFactory>,
+    ) -> Result<SelectionService> {
         // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
         // Done once at startup to avoid validating on every reconcile.
         let queueing_enabled = kv_router_config
@@ -129,22 +148,19 @@ impl Selector {
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
         Self::validate_queueing_requirements(cfg, queueing_enabled)?;
 
-        let mut builder =
-            SelectionServiceBuilder::new(kv_router_config).indexer_threads(cfg.selector_threads);
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
+            .indexer_threads(cfg.selector_threads)
+            .resolved_worker_selection_policy_factory(factory);
         let replication = Self::replication(cfg).await?;
 
         if let Some((_, peer_sync_port)) = &replication {
             builder = builder.replica_sync(*peer_sync_port, Vec::new());
         }
 
-        let service = Arc::new(
-            builder
-                .build()
-                .await
-                .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
-        );
-
-        Self::from_service_with_replication(cfg, service, replication).await
+        builder
+            .build()
+            .await
+            .map_err(|e| anyhow!("building embedded selection service: {e}"))
     }
 
     /// Wrap a prebuilt selection service for use by a custom EPP image.
@@ -553,19 +569,20 @@ models:
 
     #[tokio::test]
     async fn prebuilt_service_runs_custom_policy_through_reservation() {
-        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
-            .indexer_threads(1)
-            .worker_selection_policy_factory(|config, worker_type, _partition| {
+        let service = Selector::build_selection_service(
+            &test_config(),
+            KvRouterConfig::default(),
+            Some(Arc::new(|config, worker_type, _partition| {
                 WorkerSelectionPolicy::new(
                     config.clone(),
                     worker_type,
                     Vec::new(),
                     Box::new(FirstEligiblePicker),
                 )
-            })
-            .build()
-            .await
-            .expect("custom selection service should build");
+            })),
+        )
+        .await
+        .expect("custom selection service should build");
         let selector = Selector::from_service(&test_config(), service)
             .await
             .expect("selector should accept a prebuilt service");
