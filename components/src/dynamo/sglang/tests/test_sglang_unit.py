@@ -17,6 +17,7 @@ from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
+import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
@@ -1038,12 +1039,15 @@ async def test_disagg_config_preserves_bootstrap_port(tmp_path, mock_sglang_cli)
 
 
 @pytest.mark.asyncio
-async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capfd):
+async def test_disagg_config_rejects_dynamo_keys(
+    tmp_path, mock_sglang_cli, capfd, monkeypatch
+):
     """Disagg config should only accept SGLang-native keys."""
     config_path = tmp_path / "disagg.yaml"
     config_path.write_text(
         yaml.safe_dump({"prefill": {"store-kv": "mem"}}), encoding="utf-8"
     )
+    monkeypatch.setattr(sglang_args.tempfile, "tempdir", str(tmp_path))
 
     mock_sglang_cli(
         "--model",
@@ -1059,6 +1063,7 @@ async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capf
 
     out, err = capfd.readouterr()
     assert "unrecognized arguments: --store-kv mem" in err
+    assert not list(tmp_path.glob("dynamo_config_*.yaml"))
 
 
 def test_disagg_health_check_payload_includes_bootstrap_info():

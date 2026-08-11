@@ -2482,7 +2482,16 @@ name = "dynamo-custom-policy-example-catalog"
 version = "1.4.0"
 dependencies = [
  "dynamo-custom-policy-example-basic",
+ "dynamo-custom-policy-example-disaggregated",
  "dynamo-kv-router",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-disaggregated"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
 ]
 
 [[package]]
