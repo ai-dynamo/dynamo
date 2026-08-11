@@ -37,7 +37,8 @@ class BasePlannerDefaults:
     min_endpoint = 1  # legacy shared floor for decode and prefill
     prefill_min_endpoint = None
     decode_min_endpoint = None
-    # Localhost-only runtime configuration API (0 disables).
+    # Localhost-only runtime configuration API (0 disables). It is
+    # unauthenticated by design and trusts processes in the pod namespace.
     control_api_port = 9086
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1

@@ -225,6 +225,8 @@ def _agg_config(**overrides):
         enable_power_awareness=True,
         total_gpu_power_limit=1200,
         min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
         min_gpu_budget=8,  # GPU floor: 8 GPUs
         max_gpu_budget=-1,  # no GPU ceiling
         mode="agg",
@@ -283,6 +285,8 @@ def _mode_config(mode, **overrides):
         enable_power_awareness=True,
         total_gpu_power_limit=1200,
         min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
         min_gpu_budget=-1,
         max_gpu_budget=-1,
         mode=mode,

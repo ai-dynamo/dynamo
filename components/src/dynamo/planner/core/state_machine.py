@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
 from dynamo.planner.core.budget import (
@@ -386,16 +386,14 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     # Budget
     # ------------------------------------------------------------------
 
-    def _min_endpoint_for(self, component: str) -> int:
-        """Return the effective floor for a planner component.
+    def _min_endpoint_for(self, component: Literal["prefill", "decode"]) -> int:
+        """Return the effective floor for a planner component."""
 
-        ``getattr`` keeps the scaling core compatible with the lightweight
-        config doubles used by unit tests while production always supplies a
-        ``PlannerConfig`` with the resolved properties.
-        """
         return resolve_min_endpoint(self._config, component)
 
-    def _apply_single_budget(self, desired: int, component: str) -> int:
+    def _apply_single_budget(
+        self, desired: int, component: Literal["prefill", "decode"]
+    ) -> int:
         caps = (
             self._capabilities.prefill
             if component == "prefill"

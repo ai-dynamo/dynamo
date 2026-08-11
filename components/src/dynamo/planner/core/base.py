@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Optional
 
 import aiohttp.web
@@ -21,8 +23,13 @@ from prometheus_client import start_http_server
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.control_api import MinimumEndpointValidationError, start_control_api
+from dynamo.planner.control_api import (
+    MinimumEndpointUnavailableError,
+    MinimumEndpointValidationError,
+    start_control_api,
+)
 from dynamo.planner.core import util
+from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.engine_protocol import EngineProtocol
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -48,6 +55,8 @@ if TYPE_CHECKING:
     from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 logger = logging.getLogger(__name__)
+
+_CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 
 
 def _engine_caps(
@@ -129,6 +138,7 @@ class NativePlannerBase:
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
         self._control_api_runner: Optional[aiohttp.web.AppRunner] = None
         self._config_lock = asyncio.Lock()
+        self._diagnostics_finalized = False
         self._environment_initialized = False
         self._engine: Optional[EngineProtocol] = None
         self._last_worker_counts: Optional[WorkerCounts] = None
@@ -159,9 +169,15 @@ class NativePlannerBase:
                     logger.error("Failed to start live dashboard: %s", exc)
 
             if self.config.control_api_port:
-                self._control_api_runner = await start_control_api(
-                    self, self.config.control_api_port
-                )
+                try:
+                    self._control_api_runner = await start_control_api(
+                        self, self.config.control_api_port
+                    )
+                except OSError as exc:
+                    logger.error(
+                        "Failed to start planner runtime configuration API: %s",
+                        exc,
+                    )
         except BaseException:
             await self._shutdown_runtime()
             raise
@@ -169,10 +185,12 @@ class NativePlannerBase:
     async def _shutdown_runtime(self) -> None:
         """Release initialized planner resources after normal or failed startup."""
 
-        try:
-            self._recorder.finalize()
-        except Exception:
-            logger.exception("Failed to finalize planner diagnostics")
+        if not self._diagnostics_finalized:
+            self._diagnostics_finalized = True
+            try:
+                self._recorder.finalize()
+            except Exception:
+                logger.exception("Failed to finalize planner diagnostics")
 
         control_api_runner = self._control_api_runner
         self._control_api_runner = None
@@ -235,29 +253,31 @@ class NativePlannerBase:
 
         power_budget = self.config.total_gpu_power_limit
         if power_budget is not None:
-            required_watts = 0
-            power_known = True
-            if prefill_min_endpoint is not None:
-                p_watts = (
-                    capabilities.prefill.power_watts_per_replica
-                    if capabilities.prefill is not None
-                    else None
+            p_watts = (
+                capabilities.prefill.power_watts_per_replica
+                if capabilities.prefill is not None
+                else None
+            )
+            d_watts = (
+                capabilities.decode.power_watts_per_replica
+                if capabilities.decode is not None
+                else None
+            )
+            power_known = (prefill_min_endpoint is None or p_watts is not None) and (
+                decode_min_endpoint is None or d_watts is not None
+            )
+            prefill_floor = prefill_min_endpoint or 0
+            decode_floor = decode_min_endpoint or 0
+            if power_known and not minimum_power_footprint_fits(
+                total_budget=power_budget,
+                prefill_min_endpoint=prefill_floor,
+                decode_min_endpoint=decode_floor,
+                p_watts=p_watts,
+                d_watts=d_watts,
+            ):
+                required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
+                    d_watts or 0
                 )
-                if p_watts is None:
-                    power_known = False
-                else:
-                    required_watts += prefill_min_endpoint * p_watts
-            if decode_min_endpoint is not None:
-                d_watts = (
-                    capabilities.decode.power_watts_per_replica
-                    if capabilities.decode is not None
-                    else None
-                )
-                if d_watts is None:
-                    power_known = False
-                else:
-                    required_watts += decode_min_endpoint * d_watts
-            if power_known and required_watts > power_budget:
                 errors.append(
                     "minimum endpoint footprint requires "
                     f"{required_watts}W, exceeding total_gpu_power_limit="
@@ -295,8 +315,25 @@ class NativePlannerBase:
     async def get_min_endpoints(self) -> dict[str, object]:
         """Return the active mode's effective minimum endpoint configuration."""
 
-        async with self._config_lock:
+        async with self._bounded_config_lock():
             return self._min_endpoint_response()
+
+    @asynccontextmanager
+    async def _bounded_config_lock(self) -> AsyncIterator[None]:
+        """Acquire the tick decision lock or ask the caller to retry."""
+
+        try:
+            await asyncio.wait_for(
+                self._config_lock.acquire(), timeout=_CONFIG_LOCK_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            raise MinimumEndpointUnavailableError(
+                "planner decision in progress; retry the request"
+            ) from None
+        try:
+            yield
+        finally:
+            self._config_lock.release()
 
     async def patch_min_endpoints(self, updates: dict[str, int]) -> dict[str, object]:
         """Atomically validate and apply a mode-shaped runtime update."""
@@ -314,7 +351,7 @@ class NativePlannerBase:
                 + ", ".join(inactive_fields)
             )
 
-        async with self._config_lock:
+        async with self._bounded_config_lock():
             (
                 prefill_min_endpoint,
                 decode_min_endpoint,
@@ -781,7 +818,10 @@ class NativePlannerBase:
         if tick_input.worker_counts is not None:
             self._last_worker_counts = tick_input.worker_counts
 
-        effects = await engine.tick(tick, tick_input)
+        # Runtime floor updates are atomic with decision computation, but the
+        # lock is released before connector rollouts that may take minutes.
+        async with self._config_lock:
+            effects = await engine.tick(tick, tick_input)
         await self._apply_effects(effects)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:
@@ -816,7 +856,6 @@ class NativePlannerBase:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
 
-                async with self._config_lock:
-                    next_tick = await self._run_one_tick(engine, next_tick)
+                next_tick = await self._run_one_tick(engine, next_tick)
         finally:
             await self._shutdown_runtime()

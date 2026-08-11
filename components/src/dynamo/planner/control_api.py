@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Protocol
 
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 class MinimumEndpointValidationError(ValueError):
     """Raised when a well-formed runtime update is invalid for the planner."""
+
+
+class MinimumEndpointUnavailableError(RuntimeError):
+    """Raised when a runtime update cannot safely run before its deadline."""
 
 
 class MinimumEndpointController(Protocol):
@@ -40,12 +45,16 @@ def _error(message: str, status: int) -> web.Response:
 
 def _build_app(controller: MinimumEndpointController) -> web.Application:
     async def handle_get(_request: web.Request) -> web.Response:
-        return web.json_response(await controller.get_min_endpoints())
+        try:
+            response = await controller.get_min_endpoints()
+        except MinimumEndpointUnavailableError as exc:
+            return _error(str(exc), 503)
+        return web.json_response(response)
 
     async def handle_patch(request: web.Request) -> web.Response:
         try:
             payload = await request.json()
-        except Exception:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return _error("request body must be valid JSON", 400)
         if not isinstance(payload, dict):
             return _error("request body must be a JSON object", 400)
@@ -72,6 +81,8 @@ def _build_app(controller: MinimumEndpointController) -> web.Application:
         updates = {field: int(getattr(patch, field)) for field in fields}
         try:
             response = await controller.patch_min_endpoints(updates)
+        except MinimumEndpointUnavailableError as exc:
+            return _error(str(exc), 503)
         except MinimumEndpointValidationError as exc:
             return _error(str(exc), 422)
         return web.json_response(response)

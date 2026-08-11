@@ -187,7 +187,7 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
   --data '{"decode_min_endpoint": 3}'
 ```
 
-The update is atomic. The Planner rejects malformed values, fields that are inactive for the current mode, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
+The update is atomic. The Planner rejects malformed values, fields that are inactive for the current mode, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same footprint checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
 
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
@@ -211,7 +211,7 @@ Existing planner fields still drive the builtin plugins:
 - `load_adjustment_interval_seconds` schedules `builtin_load_propose`, which reads FPM and worker-count observations and applies the current load-based algorithm.
 - `throughput_adjustment_interval_seconds` schedules `builtin_load_predict` and `builtin_throughput_propose`. The throughput proposer requires the prediction from the same tick, so it only fires when the predict plugin fires.
 - When both builtins propose targets in the same tick, load-based scaling runs after throughput-based scaling and preserves the existing behavior: throughput updates the lower-bound replicas, then load-based scaling can adjust above that floor and apply the global GPU budget clamp.
-- After the plugin pipeline finishes, the planner applies the same final effective component minimums and GPU-budget safety checks to builtin and external-plugin targets before scaling the deployment.
+- After the plugin pipeline finishes, the planner applies the same final effective component minimums and GPU-budget safety checks to built-in and external-plugin targets before scaling the deployment.
 
 #### DGDR example
 

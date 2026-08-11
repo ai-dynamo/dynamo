@@ -19,7 +19,7 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Protocol
 from urllib.parse import parse_qsl
 
 import yaml
@@ -41,13 +41,25 @@ from dynamo.planner.plugins.types import HoldPolicy
 logger = logging.getLogger(__name__)
 
 
-def resolve_min_endpoint(config: object, component: str) -> int:
+class MinimumEndpointConfig(Protocol):
+    """Configuration fields used to resolve component endpoint floors."""
+
+    min_endpoint: int
+    prefill_min_endpoint: Optional[int]
+    decode_min_endpoint: Optional[int]
+
+
+def resolve_min_endpoint(
+    config: MinimumEndpointConfig, component: Literal["prefill", "decode"]
+) -> int:
     """Resolve a component floor with legacy ``min_endpoint`` inheritance."""
 
-    field = "prefill_min_endpoint" if component == "prefill" else "decode_min_endpoint"
-    value = getattr(config, field, None)
-    legacy_value = getattr(config, "min_endpoint")
-    return legacy_value if value is None else value
+    value = (
+        config.prefill_min_endpoint
+        if component == "prefill"
+        else config.decode_min_endpoint
+    )
+    return config.min_endpoint if value is None else value
 
 
 def _prometheus_ssl_verify_default() -> bool:

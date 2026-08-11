@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.control_api import _build_app
+from dynamo.planner.control_api import MinimumEndpointUnavailableError, _build_app
 from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.errors import DeploymentValidationError
@@ -204,6 +204,43 @@ async def test_runtime_patch_waits_for_tick_lock():
 
 
 @pytest.mark.asyncio
+async def test_runtime_api_returns_503_when_decision_lock_times_out():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    planner = _planner("agg")
+    client = TestClient(TestServer(_build_app(planner)))
+    await client.start_server()
+    try:
+        with patch(
+            "dynamo.planner.core.base._CONFIG_LOCK_TIMEOUT_SECONDS", 0
+        ), pytest.raises(MinimumEndpointUnavailableError):
+            async with planner._config_lock:
+                await planner.get_min_endpoints()
+
+        with patch("dynamo.planner.core.base._CONFIG_LOCK_TIMEOUT_SECONDS", 0):
+            async with planner._config_lock:
+                get_response = await client.get("/v1/min-endpoints")
+                patch_response = await client.patch(
+                    "/v1/min-endpoints", json={"min_endpoint": 2}
+                )
+        assert get_response.status == 503
+        assert patch_response.status == 503
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_finalizes_diagnostics_once():
+    planner = _planner("agg")
+    planner._recorder = MagicMock()
+
+    await planner._shutdown_runtime()
+    await planner._shutdown_runtime()
+
+    planner._recorder.finalize.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_control_api_port_zero_disables_server_startup():
     planner = _planner("agg", control_api_port=0)
     planner._bootstrap_regression = AsyncMock()
@@ -242,7 +279,7 @@ async def test_async_init_environment_failure_still_runs_shutdown():
 
 
 @pytest.mark.asyncio
-async def test_async_init_control_api_failure_shuts_down_environment():
+async def test_async_init_control_api_failure_disables_api_only():
     planner = _planner("agg", control_api_port=9086)
     planner._bootstrap_regression = AsyncMock()
     planner._bootstrap_engine_plugins_if_needed = AsyncMock()
@@ -252,7 +289,9 @@ async def test_async_init_control_api_failure_shuts_down_environment():
         new_callable=AsyncMock,
         side_effect=OSError("address already in use"),
     ):
-        with pytest.raises(OSError, match="address already in use"):
-            await planner._async_init()
+        await planner._async_init()
 
+    assert planner._control_api_runner is None
+    assert planner.environment.shutdown_calls == 0
+    await planner._shutdown_runtime()
     assert planner.environment.shutdown_calls == 1
