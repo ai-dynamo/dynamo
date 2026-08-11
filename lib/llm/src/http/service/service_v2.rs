@@ -2047,20 +2047,9 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
-    fn generate_route_paths_reject_invalid_env_overrides() {
-        for (variable, path) in [
-            (HTTP_SVC_VLLM_GENERATE_PATH_ENV, "native/vllm"),
-            (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, "/:model"),
-        ] {
-            temp_env::with_var(variable, Some(path), || {
-                assert!(
-                    HttpService::builder()
-                        .enable_engine_apis(true)
-                        .build()
-                        .is_err()
-                );
-            });
+    fn generate_route_path_validation_rejects_invalid_paths() {
+        for path in ["", "native/vllm", "/:model", "/*path"] {
+            assert!(validate_generate_route_path(path).is_err());
         }
     }
 }
