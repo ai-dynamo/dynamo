@@ -173,7 +173,7 @@ def test_response_catalog_profile_advertises_runtime_parsers(
 
     _, runtime_config = CONFIG.build_runtime_config(engine_args)
 
-    assert engine_args.response_catalog_path == catalog_path
+    assert engine_args.response_catalog_path == str(catalog_path)
     assert engine_args.model_output_profile == profile
     assert runtime_config.tool_call_parser == tool_parser
     assert runtime_config.reasoning_parser == reasoning_parser
@@ -192,7 +192,7 @@ def test_response_catalog_cli_flags_are_forwarded(tmp_path):
 
     engine_args = CONFIG.build_mocker_engine_args(args)
 
-    assert engine_args.response_catalog_path == catalog_path
+    assert engine_args.response_catalog_path == str(catalog_path)
     assert engine_args.model_output_profile == "qwen3_5"
 
 

@@ -716,6 +716,7 @@ fn start_live_engine(
                 None,
             ),
             fpm_publisher: FpmPublisher::default(),
+            ..LiveEngineConfig::default()
         },
     )
     .unwrap();

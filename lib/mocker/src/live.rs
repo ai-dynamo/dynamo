@@ -47,10 +47,26 @@ const SCHEDULER_EVENT_CAPACITY: usize = 8;
 const DEFAULT_REQUEST_OUTPUT_CAPACITY: usize = 8;
 
 /// Runtime publishers used by one live Mocker scheduler.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LiveEngineConfig {
     pub kv_event_publishers: KvEventPublishers,
     pub fpm_publisher: FpmPublisher,
+    /// Maximum number of scheduler signals buffered for each request.
+    ///
+    /// `None` sizes the buffer for the request's complete output. This is useful
+    /// for exact replay workloads whose scheduler may emit the whole response
+    /// before the consumer gets a chance to drain it.
+    pub request_output_capacity: Option<NonZeroUsize>,
+}
+
+impl Default for LiveEngineConfig {
+    fn default() -> Self {
+        Self {
+            kv_event_publishers: KvEventPublishers::default(),
+            fpm_publisher: FpmPublisher::default(),
+            request_output_capacity: NonZeroUsize::new(DEFAULT_REQUEST_OUTPUT_CAPACITY),
+        }
+    }
 }
 
 pub(crate) struct ObservedAdmission {
@@ -155,6 +171,7 @@ impl LiveEngine {
             LiveEngineOptions {
                 kv_event_publishers: config.kv_event_publishers,
                 fpm_publisher: config.fpm_publisher,
+                request_output_capacity: config.request_output_capacity,
                 ..LiveEngineOptions::default()
             },
             None,

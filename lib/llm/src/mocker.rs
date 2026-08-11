@@ -740,27 +740,29 @@ impl MockerExecutionContext {
                 None => (KvEventPublishers::default(), None),
             };
 
-            let engine = match LiveEngine::start_with_config(
-                args.clone(),
-                dp_rank,
-                LiveEngineConfig {
-                    kv_event_publishers,
-                    fpm_publisher,
-                },
-            ) {
-                Ok(engine) => engine,
-                Err(error) => {
-                    for engine in &engines {
-                        if let Err(shutdown_error) = engine.shutdown().await {
-                            tracing::error!(
-                                %shutdown_error,
-                                "failed to shut down live Mocker engine after startup error"
-                            );
-                        }
-                    }
-                    return Err(error);
-                }
+            let mut live_engine_config = LiveEngineConfig {
+                kv_event_publishers,
+                fpm_publisher,
+                ..LiveEngineConfig::default()
             };
+            if self.response_catalog.is_some() {
+                live_engine_config.request_output_capacity = None;
+            }
+            let engine =
+                match LiveEngine::start_with_config(args.clone(), dp_rank, live_engine_config) {
+                    Ok(engine) => engine,
+                    Err(error) => {
+                        for engine in &engines {
+                            if let Err(shutdown_error) = engine.shutdown().await {
+                                tracing::error!(
+                                    %shutdown_error,
+                                    "failed to shut down live Mocker engine after startup error"
+                                );
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
 
             engines.push(engine);
             relay_publishers.push(relay_publisher);
@@ -1273,12 +1275,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if signal.completed {
-                            if let Some(output) = output
-                                && !send_response(&stream_tx, output, &async_context).await
-                            {
-                                break;
+                            let catalog_terminal_chunk = if catalog_mode {
+                                output
+                            } else {
+                                if let Some(output) = output
+                                    && !send_response(&stream_tx, output, &async_context).await
+                                {
+                                    break;
+                                }
+                                None
+                            };
+                            if !catalog_mode {
+                                native_timing.record_tokens(1);
                             }
-                            native_timing.record_tokens(1);
 
                             let delay_completed = tokio::select! {
                                 _ = wait_for_no_bootstrap_handoff_delay(
@@ -1357,8 +1366,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     cached,
                                 ));
                             }
+                            if let Some(terminal_chunk) = catalog_terminal_chunk {
+                                final_output.token_ids = terminal_chunk.token_ids;
+                                final_output.disaggregated_params =
+                                    terminal_chunk.disaggregated_params;
+                            }
                             if !send_response(&stream_tx, final_output, &async_context).await {
                                 break;
+                            }
+                            if catalog_mode {
+                                native_timing.record_tokens(1);
                             }
                             native_timing.record_normal_completion();
                             request_completed_normally = true;

@@ -785,13 +785,12 @@ async fn replay_options_allow_zero_output_and_full_response_buffering() {
     assert_eq!(terminal.token_id, None);
     zero_engine.shutdown().await.unwrap();
 
-    let buffered_engine = LiveEngine::start_with_options(
+    let buffered_engine = LiveEngine::start_with_config(
         args(EngineType::Vllm),
         0,
-        LiveEngineOptions {
+        LiveEngineConfig {
             request_output_capacity: None,
-            allow_zero_output: true,
-            ..LiveEngineOptions::default()
+            ..LiveEngineConfig::default()
         },
     )
     .unwrap();

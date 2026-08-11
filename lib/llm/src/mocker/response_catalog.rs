@@ -24,17 +24,12 @@ const CATALOG_VERSION: u32 = 1;
 const HARMONY_COMPATIBILITY_PROBE: &str =
     "<|start|>assistant<|channel|>final<|message|>ok<|return|>";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum CatalogFinishReason {
+    #[default]
     Stop,
     Length,
-}
-
-impl Default for CatalogFinishReason {
-    fn default() -> Self {
-        Self::Stop
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -230,23 +225,10 @@ impl ResponseCatalog {
                 .token_ids()
                 .to_vec(),
             (NativeOutput::Segments(segments), ModelOutputEncoding::TokenizerText) => {
-                let text: String = segments.into_iter().map(|segment| segment.text).collect();
-                self.tokenizer
-                    .encode(&text)
-                    .context("failed to encode scripted response")?
-                    .token_ids()
-                    .to_vec()
+                encode_text_segments(&self.tokenizer, self.profile, prompt_framing, segments)?
             }
             (NativeOutput::Segments(segments), ModelOutputEncoding::SegmentedSpecialTokens) => {
-                let borrowed: Vec<_> = segments
-                    .iter()
-                    .map(|segment| EncodeSegment::new(&segment.text, segment.allow_special))
-                    .collect();
-                self.tokenizer
-                    .encode_segments(&borrowed)
-                    .context("failed to encode segmented scripted response")?
-                    .token_ids()
-                    .to_vec()
+                encode_special_segments(&self.tokenizer, self.profile, prompt_framing, segments)?
             }
             (NativeOutput::TokenIds(token_ids), _) => token_ids,
             _ => unreachable!("profile registry and native renderer encoding disagree"),
@@ -263,6 +245,105 @@ impl ResponseCatalog {
             chunk_size: case.chunk_size,
         })
     }
+}
+
+fn framing_prefix(
+    profile: ModelOutputProfile,
+    prompt_framing: PromptFraming,
+) -> Vec<RenderedSegment> {
+    match (profile.spec().prompt_framing, prompt_framing) {
+        (ModelOutputPromptFraming::ThinkTag, PromptFraming::ReasoningOpen) => {
+            vec![RenderedSegment::new("<think>", true)]
+        }
+        (ModelOutputPromptFraming::KimiK3Xtml, PromptFraming::ReasoningOpen) => vec![
+            RenderedSegment::new("<|open|>", true),
+            RenderedSegment::new("think", false),
+            RenderedSegment::new("<|sep|>", true),
+        ],
+        (ModelOutputPromptFraming::KimiK3Xtml, PromptFraming::KimiResponseOpen) => vec![
+            RenderedSegment::new("<|open|>", true),
+            RenderedSegment::new("response", false),
+            RenderedSegment::new("<|sep|>", true),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn strip_framing_prefix(
+    mut full_token_ids: Vec<TokenIdType>,
+    prefix_token_ids: &[TokenIdType],
+) -> Result<Vec<TokenIdType>> {
+    ensure!(
+        full_token_ids.starts_with(prefix_token_ids),
+        "prompt-framing prefix does not align with scripted response tokenization"
+    );
+    full_token_ids.drain(..prefix_token_ids.len());
+    Ok(full_token_ids)
+}
+
+fn encode_text_segments(
+    tokenizer: &Tokenizer,
+    profile: ModelOutputProfile,
+    prompt_framing: PromptFraming,
+    segments: Vec<RenderedSegment>,
+) -> Result<Vec<TokenIdType>> {
+    let prefix: String = framing_prefix(profile, prompt_framing)
+        .into_iter()
+        .map(|segment| segment.text)
+        .collect();
+    let text: String = segments.into_iter().map(|segment| segment.text).collect();
+    if prefix.is_empty() {
+        return Ok(tokenizer
+            .encode(&text)
+            .context("failed to encode scripted response")?
+            .token_ids()
+            .to_vec());
+    }
+
+    let prefix_token_ids = tokenizer
+        .encode(&prefix)
+        .context("failed to encode scripted response framing prefix")?
+        .token_ids()
+        .to_vec();
+    let full_token_ids = tokenizer
+        .encode(&(prefix + &text))
+        .context("failed to encode prompt-framed scripted response")?
+        .token_ids()
+        .to_vec();
+    strip_framing_prefix(full_token_ids, &prefix_token_ids)
+}
+
+fn encode_special_segments(
+    tokenizer: &Tokenizer,
+    profile: ModelOutputProfile,
+    prompt_framing: PromptFraming,
+    segments: Vec<RenderedSegment>,
+) -> Result<Vec<TokenIdType>> {
+    let prefix = framing_prefix(profile, prompt_framing);
+    let mut full_segments = prefix.clone();
+    full_segments.extend(segments);
+    let full_token_ids = tokenizer
+        .encode_segments(&as_encode_segments(&full_segments))
+        .context("failed to encode segmented scripted response")?
+        .token_ids()
+        .to_vec();
+    if prefix.is_empty() {
+        return Ok(full_token_ids);
+    }
+
+    let prefix_token_ids = tokenizer
+        .encode_segments(&as_encode_segments(&prefix))
+        .context("failed to encode segmented response framing prefix")?
+        .token_ids()
+        .to_vec();
+    strip_framing_prefix(full_token_ids, &prefix_token_ids)
+}
+
+fn as_encode_segments(segments: &[RenderedSegment]) -> Vec<EncodeSegment<'_>> {
+    segments
+        .iter()
+        .map(|segment| EncodeSegment::new(&segment.text, segment.allow_special))
+        .collect()
 }
 
 fn encode_harmony_compatible(tokenizer: &Tokenizer, text: &str) -> Result<Vec<TokenIdType>> {
@@ -857,6 +938,40 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn prompt_open_encoding_preserves_the_first_reasoning_token() {
+        let tokenizer = Tokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+        ))
+        .unwrap();
+        let catalog_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            catalog_file.path(),
+            json!({
+                "version": 1,
+                "cases": [{
+                    "id": "reasoning",
+                    "response": {"reasoning": "I should call a tool."}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let catalog = ResponseCatalog::from_path(
+            catalog_file.path(),
+            ModelOutputProfile::Qwen35,
+            tokenizer.clone(),
+        )
+        .unwrap();
+        let prompt_token_ids = tokenizer.encode("<think>").unwrap().token_ids().to_vec();
+
+        let compiled = catalog.resolve("reasoning", &prompt_token_ids).unwrap();
+        let decoded = tokenizer.decode(&compiled.token_ids, false).unwrap();
+
+        assert_eq!(decoded.as_str(), "I should call a tool.</think>");
     }
 
     #[tokio::test]
