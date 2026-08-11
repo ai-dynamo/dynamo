@@ -29,7 +29,7 @@ Modern LLM serving hits recurring bottlenecks:
 
 - **Prefill/decode imbalance** leaves GPUs underutilized when traffic mix shifts ([DistServe](https://arxiv.org/abs/2401.09670)).
 - **KV recomputation** increases TTFT and wastes compute when routing ignores cache overlap ([DeepSeek](https://arxiv.org/abs/2501.12948)).
-- **Memory pressure** from long contexts and concurrency exceeds HBM capacity without multi-tier cache management ([KVBM](modular-components/kvbm/overview.md), [Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html), [AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html), [FlexKV](https://github.com/taco-project/FlexKV), [LMCache](https://lmcache.ai/)).
+- **Memory pressure** from long contexts and concurrency exceeds HBM capacity without KV cache offloading ([Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html), [FlexKV](https://github.com/taco-project/FlexKV), and [LMCache](https://lmcache.ai/)).
 - **Dynamic demand** breaks static provisioning assumptions ([AzureTrace](https://github.com/Azure/AzurePublicDataset)).
 - **Real-world failures** (pod restart, partition, hot-spot overload) require first-class recovery behavior.
 
@@ -37,7 +37,7 @@ Dynamo addresses these constraints by separating serving, control, and state pro
 
 ## Architecture Overview
 
-![Dynamo architecture showing Request Plane (Client, Frontend, Router, Prefill/Decode workers), Control Plane (Planner, Dynamo Operator, Dynamo Graph, Grove, Model Express, Runtime Resources), and Storage &amp; Events Plane (KVBM, NIXL, Local SSD/NFS/Remote Storage)](../../../assets/img/dynamo-architecture.svg "Dynamo Architecture")
+![Dynamo architecture showing the request, control, storage, and event planes](../../../assets/img/dynamo-architecture.svg "Dynamo Architecture")
 
 ## System Model
 
@@ -84,7 +84,7 @@ This path is optimized for correctness and convergence to target capacity.
 The storage/events plane is responsible for cache state visibility and movement:
 
 - **KV Events** publish cache lifecycle transitions.
-- **KVBM** manages block reuse, eviction, and offload/recall across memory tiers.
+- **Backend offloading connectors** move reusable KV blocks across GPU, host, and storage tiers.
 - **NIXL** performs high-speed KV/data transfer across workers and memory domains.
 
 This path is optimized for cache reuse and cross-worker handoff efficiency.
@@ -99,10 +99,9 @@ This path is optimized for cache reuse and cross-worker handoff efficiency.
 6. Decode receives KV state (typically via **NIXL** transfer path).
 7. Decode streams tokens back through Frontend.
 8. **KV Events** update cache visibility for future routing decisions.
-9. **KVBM** may offload or recall KV blocks based on pressure and reuse potential.
+9. The selected backend can offload or recall KV blocks based on pressure and reuse potential.
 
-For flow-level detail, see [Architecture Flow](concepts/system-architecture/architecture-flow.md).
-For request transport options, see [Request Plane](concepts/communication-planes/request-plane.md).
+For request flow, runtime, discovery, and transport details, see [Architecture](concepts/system-architecture/architecture.md).
 
 ## Control Loops
 
@@ -167,14 +166,6 @@ This model assumes failures are routine, not exceptional.
 
 ## Performance Rationale
 
-### Disaggregated Serving
-
-Separating prefill and decode improves utilization and enables phase-specific scaling.
-
-![Two scatter plots comparing the performance of disagg and baseline configurations on one node versus two nodes](../../../assets/img/disagg-perf-benefit.png)
-
-*Tested on H100 with R1 Distilled Llama 70B FP8 on vLLM. 3K ISL / 150 OSL.*
-
 ### KV-Aware Routing
 
 Routing with cache overlap + load signals reduces prefill recomputation and improves latency.
@@ -183,14 +174,6 @@ For an external production case study, see [How Baseten achieved 2x faster infer
 ![Two bar charts comparing Random routing and Dynamo with KV aware routing for Time To First Token (3x faster with Dynamo) and Avg request latency (2x faster with Dynamo).](../../../assets/img/kv-routing.png)
 
 *Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 H100 nodes. Avg 4K ISL / 800 OSL.*
-
-### KV Block Manager (KVBM)
-
-KVBM extends effective cache capacity using multi-tier memory offload/recall.
-
-![Line graph comparing Pure GPU prefix caching with vLLM and KVBM host offloading for TTFT (Time To First Token)](../../../assets/img/kvbm-agg-performance.png)
-
-*Tested across QPS values using Qwen3-8B on H100. Avg 20K ISL / 100 OSL.*
 
 ### NIXL Data Transfer
 
@@ -204,12 +187,10 @@ NIXL reduces KV handoff cost in distributed serving by optimizing cross-worker t
 
 ## Related Documentation
 
-- [Architecture Flow](concepts/system-architecture/architecture-flow.md)
+- [Architecture](concepts/system-architecture/architecture.md)
 - [Router Design](modular-components/router/router-design.md)
 - [Planner Design](modular-components/planner/planner-design.md)
-- [Discovery Plane](concepts/communication-planes/discovery-plane.md)
-- [Event Plane](concepts/communication-planes/event-plane.md)
-- [Request Plane](concepts/communication-planes/request-plane.md)
+- [Simulation](concepts/simulation/dynosim-architecture.md)
 - [Fault Tolerance](../../kubernetes/fault-tolerance/introduction.md)
 - [Grove](kubernetes/multinode/grove.md)
 

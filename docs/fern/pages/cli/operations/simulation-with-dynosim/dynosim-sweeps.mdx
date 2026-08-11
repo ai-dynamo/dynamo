@@ -7,7 +7,7 @@ subtitle: Search simulated topology, worker, and router choices before using GPU
 
 A DynoSim sweep evaluates many simulated configurations and ranks candidates against latency and GPU
 budget constraints. The sweep runs locally, but its candidates can be used for either Kubernetes or
-local CLI deployment. Use a sweep after a single [DynoSim run](dynosim-replay.mdx) works and you want to identify
+local deployment. Use a sweep after a single [DynoSim run](dynosim-replay.mdx) works and you want to identify
 configurations to validate on real hardware.
 
 The current Python API is `dynamo.profiler.utils.replay_optimize`. For the input models, field names,
@@ -116,6 +116,6 @@ is optimal. Take the highest-ranked feasible candidates through these checks:
 2. Exercise the live frontend and router with [Simulate a Local Deployment](mocker-live-simulation.mdx) or
    [Simulate a Kubernetes Deployment](../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx).
 3. Deploy the candidate on the target hardware and benchmark it with AIPerf using either the
-   [Kubernetes workflow](../../../kubernetes/operations/benchmarking-with-aiperf.mdx) or the [local CLI workflow](../benchmarking-with-aiperf.mdx).
+   [Kubernetes workflow](../../../kubernetes/operations/benchmarking-with-aiperf.mdx) or the [local workflow](../benchmarking-with-aiperf.mdx).
 </Step>
 </Steps>
