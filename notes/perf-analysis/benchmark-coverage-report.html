@@ -89,6 +89,9 @@ SPDX-License-Identifier: Apache-2.0
   .cad-auto{background:var(--goodT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--good)}
   .cad-partial{background:var(--warningT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--warning)}
   .cad-manual{background:var(--criticalT);color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--critical)}
+  .seealso{margin:0 0 16px;font-size:12.5px;background:var(--naT);border-left:2px solid var(--flowaccent,var(--axis));
+    padding:9px 13px;border-radius:0 6px 6px 0;color:var(--ink2)}
+  .seealso a{color:var(--ink);font-weight:600;text-decoration:underline;text-underline-offset:2px}
   .run{margin-top:16px;border-top:1px solid var(--grid);padding-top:14px}
   .run h4{font-size:12px;margin:0 0 8px;color:var(--ink2);letter-spacing:.03em;text-transform:uppercase}
   .run pre{margin:0 0 10px;background:var(--naT);border:1px solid var(--ring);border-radius:6px;
@@ -192,6 +195,7 @@ kubectl apply -f deploy/pre-deployment/nixl/nixlbench-deployment.yaml -n $NAMESP
       <div class="tierhead" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px">Tier 3 — Micro</h2><span class="pill">CI-gateable · attributable</span> <span class="cadence cad-partial">▲ 6 of 10 run every PR · timings discarded</span></div>
 
     <p class="lede">Answers: what does this function cost? Ten criterion benches; nine have a single primary author.</p>
+      <div class="seealso">→ <a href="micro-bench-audit.html">micro-bench-audit.html</a> — each of the ten audited against the benchmarking procedure, one tab per bench: what it outputs, whether its load is defined, whether accuracy is gated, and whether anything defines "good".</div>
     <table>
       <thead><tr><th style="width:44%">Bench</th><th style="width:20%">Stage</th><th>Measures</th></tr></thead>
       <tbody>
@@ -210,7 +214,6 @@ kubectl apply -f deploy/pre-deployment/nixl/nixlbench-deployment.yaml -n $NAMESP
     <div class="note"><strong>Six of the ten execute on every PR, and every timing is thrown away.</strong> <code>dynamo-pipeline.yml:169</code> runs <code>cargo test --all-targets</code>, which includes bench targets; the other four are feature-gated (<code>kv-router-stress</code>, <code>request-trace-bench</code>, <code>block-manager</code>+<code>testing-cuda</code>, <code>testing</code>) and do not build in the default pipeline. Every <code>[[bench]]</code> sets <code>harness = false</code>, so criterion owns the binary, detects test mode, and runs each benchmark <em>once for validation</em> — no sampling, no timing, no comparison.<br><br><strong>This was not a decision.</strong> <code>--all-targets</code> arrived in a CI consolidation (#8525) where it means "compile and test everything"; the benches were swept in and criterion's test mode is its designed response. The only later commit touching that line (#11853) treats the benches purely as an obstacle to keeping the <em>test</em> command green. Whether to gate on performance was never posed. The accidental upside is real: a bench that panics or stops compiling fails the pipeline, so none can silently bit-rot.</div>
     <div class="run">
       <h4>How to get actual numbers</h4>
-      <p class="where">Per-bench detail — what each one outputs, and how it scores against the procedure — is in <code>micro-bench-audit.html</code>.</p>
 <pre><span class="c"># Time one crate, or one bench</span>
 cargo bench -p dynamo-kv-router
 cargo bench -p dynamo-llm --bench tokenizer_simple
