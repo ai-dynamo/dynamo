@@ -10,9 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::engine_routes::{
-    EngineRouteCallback, EngineRouteMethod, EngineRouteRegistry,
-};
+use dynamo_runtime::engine_routes::{EngineRouteCallback, EngineRouteMethod, EngineRouteRegistry};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -130,7 +128,9 @@ impl RequestTracker {
 
     pub(crate) fn try_acquire(self: &Arc<Self>) -> Result<RequestGuard> {
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(worker_draining_error("worker is not accepting new requests"));
+            return Err(worker_draining_error(
+                "worker is not accepting new requests",
+            ));
         }
 
         self.inflight.fetch_add(1, Ordering::AcqRel);
@@ -171,7 +171,7 @@ impl RequestTracker {
 
 fn worker_draining_error(message: &'static str) -> anyhow::Error {
     DynamoError::builder()
-        .error_type(ErrorType::WorkerOverloaded)
+        .error_type(ErrorType::Unavailable)
         .message(message)
         .build()
         .into()
@@ -297,9 +297,7 @@ impl WorkerLifecycleController {
                 let (started_tx, started_rx) = oneshot::channel();
                 let controller = Arc::clone(self);
                 tokio::spawn(async move {
-                    controller
-                        .run_drain_operation(generation, started_tx)
-                        .await;
+                    controller.run_drain_operation(generation, started_tx).await;
                 });
                 Some(started_rx)
             }
@@ -347,9 +345,8 @@ impl WorkerLifecycleController {
                         .store(WorkerLifecycleState::Serving as u8, Ordering::Release);
                     self.tracker.start_accepting();
                     if let Some(started) = started.take() {
-                        let _ = started.send(
-                            Err(error).context("failed to unregister worker from discovery"),
-                        );
+                        let _ = started
+                            .send(Err(error).context("failed to unregister worker from discovery"));
                     }
                     return;
                 }
@@ -659,7 +656,7 @@ mod tests {
         let error = error
             .downcast_ref::<DynamoError>()
             .expect("drain rejection should preserve its Dynamo error type");
-        assert_eq!(error.error_type(), ErrorType::WorkerOverloaded);
+        assert_eq!(error.error_type(), ErrorType::Unavailable);
     }
 
     #[tokio::test(start_paused = true)]
@@ -731,12 +728,7 @@ mod tests {
         );
 
         controller.drain().await.unwrap();
-        quiescence
-            .check_started
-            .acquire()
-            .await
-            .unwrap()
-            .forget();
+        quiescence.check_started.acquire().await.unwrap().forget();
 
         let resumed = controller.resume().await.unwrap();
         assert_eq!(resumed.state, WorkerLifecycleState::Serving);

@@ -776,8 +776,8 @@ mod integration_tests {
     use crate::metrics::MetricsHierarchy;
     use anyhow::Result;
     use rstest::rstest;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::Duration;
 
     #[tokio::test]
