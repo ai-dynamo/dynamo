@@ -182,8 +182,10 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
             token_id: Some(9),
             completed: true,
             rejected: false,
+            cached_tokens: Some(4),
         });
         assert_eq!(output.handoff_delay_ms.is_some(), expect_handoff_delay);
+        assert_eq!(output.cached_tokens, Some(4));
     }
 }
 
@@ -208,14 +210,8 @@ async fn two_rank_handles_share_one_group_boundary_and_publish_rank_effects() {
         schedulers, actor, ..
     } = create_grouped_scheduler(args(2), sinks, Some(cancel.clone())).unwrap();
 
-    schedulers[0]
-        .request_sender()
-        .try_send(request(1, 0))
-        .unwrap();
-    schedulers[1]
-        .request_sender()
-        .try_send(request(2, 1))
-        .unwrap();
+    schedulers[0].request_sender().send(request(1, 0)).unwrap();
+    schedulers[1].request_sender().send(request(2, 1)).unwrap();
     let rank0 = tokio::time::timeout(Duration::from_secs(2), rank0_rx.recv())
         .await
         .unwrap()
@@ -249,10 +245,7 @@ async fn same_rank_receive_burst_is_batched_into_one_native_pass() {
     .unwrap();
 
     for id in 10..14 {
-        schedulers[0]
-            .request_sender()
-            .try_send(request(id, 0))
-            .unwrap();
+        schedulers[0].request_sender().send(request(id, 0)).unwrap();
     }
     let first_pass_outputs = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
         .await
@@ -485,7 +478,7 @@ async fn midpass_cancel_ack_precedes_completion_router_effects() {
     let mut metrics = schedulers[0].metrics_receiver();
     schedulers[0]
         .request_sender()
-        .try_send(DirectRequest {
+        .send(DirectRequest {
             tokens: vec![1; 16],
             max_output_tokens: 8,
             output_token_ids: Some((0..8).collect()),
@@ -798,7 +791,7 @@ async fn closed_output_receiver_cancels_request_and_releases_native_kv() {
     let mut metrics = schedulers[0].metrics_receiver();
     schedulers[0]
         .request_sender()
-        .try_send(DirectRequest {
+        .send(DirectRequest {
             tokens: vec![1; 16],
             max_output_tokens: 8,
             output_token_ids: Some((0..8).collect()),

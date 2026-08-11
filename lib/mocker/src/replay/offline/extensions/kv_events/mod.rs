@@ -232,6 +232,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
                     completed: output.completed,
                     rejected: output.rejected,
                     handoff_delay_ms: None,
+                    cached_tokens: output.cached_tokens,
                 },
                 timestamp_us: timestamp_us_from_ms(output.observed_at_ms),
             })

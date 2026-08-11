@@ -1079,6 +1079,7 @@ mod tests {
                 completed: false,
                 rejected: false,
                 handoff_delay_ms: None,
+                cached_tokens: None,
             },
             OutputSignal {
                 uuid: first,
@@ -1086,6 +1087,7 @@ mod tests {
                 completed: false,
                 rejected: false,
                 handoff_delay_ms: None,
+                cached_tokens: None,
             },
             OutputSignal {
                 uuid: second,
@@ -1093,6 +1095,7 @@ mod tests {
                 completed: true,
                 rejected: false,
                 handoff_delay_ms: None,
+                cached_tokens: None,
             },
             OutputSignal {
                 uuid: second,
@@ -1100,6 +1103,7 @@ mod tests {
                 completed: true,
                 rejected: false,
                 handoff_delay_ms: None,
+                cached_tokens: None,
             },
         ];
 

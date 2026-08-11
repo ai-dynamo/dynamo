@@ -490,7 +490,7 @@ impl RankDispatch {
     }
 
     pub(super) fn publish_metrics(&self, metrics: Metrics) {
-        let _ = self.metrics_tx.send(MockerMetrics {
+        let mut metrics = MockerMetrics {
             dp_rank: metrics.dp_rank,
             active_decode_blocks: metrics.active_blocks,
             total_blocks: metrics.total_blocks,
@@ -500,6 +500,18 @@ impl RankDispatch {
             vllm_preemptions_total: metrics.preemptions_total,
             sglang_cache_hit_tokens: metrics.sglang_cache_hit_tokens,
             sglang_cache_total_tokens: metrics.sglang_cache_total_tokens,
+        };
+        self.metrics_tx.send_modify(|current| {
+            // NOTE: This is a semantic latch, not optional smoothing. SGLang's cache fields are
+            // per-prefill observations, while `watch` retains only the latest value. DO NOT let a
+            // decode or idle snapshot with no prefill tokens erase a meaningful observation before
+            // consumers can read it. A real miss has a nonzero total and must replace the latch.
+            // This latch is specific to SGLang's aggregate cache observation; do not generalize it.
+            if metrics.sglang_cache_total_tokens == 0 {
+                metrics.sglang_cache_hit_tokens = current.sglang_cache_hit_tokens;
+                metrics.sglang_cache_total_tokens = current.sglang_cache_total_tokens;
+            }
+            *current = metrics;
         });
     }
 }

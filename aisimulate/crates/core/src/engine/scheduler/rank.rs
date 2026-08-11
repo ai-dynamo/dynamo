@@ -221,7 +221,15 @@ impl RankEngine for SchedulerRank {
         );
         let completion_kv_events = self.core.drain_kv_events();
         pending.effects.kv_events.extend(completion_kv_events);
+        // Occupancy is authoritative at the shared completion boundary, but
+        // SGLang cache hit/total are transient observations from this pass.
+        // Preserve those fields while refreshing the rest of the snapshot;
+        // a later live adapter latches the last non-empty observation.
+        let sglang_cache_hit_tokens = pending.effects.metrics.sglang_cache_hit_tokens;
+        let sglang_cache_total_tokens = pending.effects.metrics.sglang_cache_total_tokens;
         pending.effects.metrics = self.metrics();
+        pending.effects.metrics.sglang_cache_hit_tokens = sglang_cache_hit_tokens;
+        pending.effects.metrics.sglang_cache_total_tokens = sglang_cache_total_tokens;
         pending.effects.forward_pass_metrics.duration_ms =
             (end_ms - pending.started_at_ms).max(0.0);
         for output in &pending.effects.outputs {
@@ -509,6 +517,7 @@ fn split_pass(
                 token_id: output.token_id,
                 completed: output.completed,
                 rejected: output.rejected,
+                cached_tokens: output.cached_tokens,
             })
             .collect(),
         lifecycle_events: lifecycle_events.into_iter().map(map_lifecycle).collect(),

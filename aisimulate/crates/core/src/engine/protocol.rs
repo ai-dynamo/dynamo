@@ -203,6 +203,9 @@ pub struct Output {
     pub completed: bool,
     /// Whether admission rejected the request as physically impossible.
     pub rejected: bool,
+    /// Prompt tokens served from KV cache at first admission, reported once
+    /// on the request's first output.
+    pub cached_tokens: Option<usize>,
 }
 
 /// Rank-local scheduler and G1 metrics.

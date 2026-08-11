@@ -201,6 +201,10 @@ pub struct OutputSignal {
     pub rejected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_delay_ms: Option<f64>,
+    /// Prompt tokens served from KV cache at admission (scheduler truth,
+    /// post-eviction). Set once, on the request's first output signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<usize>,
 }
 
 /// Preemption policy for evicting decode requests under memory pressure

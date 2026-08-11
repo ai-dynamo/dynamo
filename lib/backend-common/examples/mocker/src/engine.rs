@@ -212,7 +212,7 @@ pub struct MockerBackend {
     disaggregation_mode: DisaggregationMode,
     cancel: CancellationToken,
     active: Arc<DashMap<Uuid, ActiveEntry>>,
-    request_tx: OnceCell<mpsc::Sender<DirectRequest>>,
+    request_tx: OnceCell<mpsc::UnboundedSender<DirectRequest>>,
     /// Held for its lifetime side-effect only: the scheduler's internal
     /// `CancelGuard` fires on drop, so keeping the handle alive keeps
     /// the scheduler tasks running for the engine's lifetime.
@@ -446,9 +446,8 @@ impl LLMEngine for MockerBackend {
             },
         );
 
-        // Install the guard before awaiting the bounded scheduler queue. This
-        // covers every enqueue exit path, including cancellation and the
-        // generate future itself being dropped while the queue is full.
+        // Install the guard before enqueueing so a closed compatibility lane
+        // also releases the active entry.
         let mut guard = ActiveRequestGuard {
             uuid,
             active: self.active.clone(),
@@ -456,22 +455,8 @@ impl LLMEngine for MockerBackend {
             blocks_held: 0,
         };
 
-        tokio::select! {
-            biased;
-            _ = ctx.stopped() => {
-                return Ok(Box::pin(async_stream::stream! {
-                    yield Ok(LLMEngineOutput::cancelled()
-                        .with_usage(usage(prompt_len, 0)));
-                }));
-            }
-            _ = self.cancel.cancelled() => {
-                return Err(engine_shutdown("mocker backend is shutting down"));
-            }
-            result = request_tx.send(direct) => {
-                if result.is_err() {
-                    return Err(engine_shutdown("scheduler is not accepting requests"));
-                }
-            }
+        if request_tx.send(direct).is_err() {
+            return Err(engine_shutdown("scheduler is not accepting requests"));
         }
 
         // Synthetic per-request block accounting: each request claims its
@@ -702,28 +687,6 @@ mod tests {
             .unwrap()
     }
 
-    fn install_saturated_request_queue(engine: &MockerBackend) -> mpsc::Receiver<DirectRequest> {
-        let (request_tx, request_rx) = mpsc::channel(1);
-        request_tx
-            .try_send(DirectRequest::default())
-            .expect("test queue has one free slot");
-        assert!(
-            engine.request_tx.set(request_tx).is_ok(),
-            "test engine request queue must be uninitialized"
-        );
-        request_rx
-    }
-
-    async fn wait_for_pending_request(engine: &MockerBackend) {
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while engine.active.is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("generate must block on the saturated request queue");
-    }
-
     #[test]
     fn args_parse_with_defaults() {
         let args = Args::try_parse_from(["bin"]).unwrap();
@@ -929,72 +892,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_cancellation_interrupts_blocked_scheduler_enqueue() {
-        let engine = Arc::new(test_engine());
-        let _request_rx = install_saturated_request_queue(&engine);
-        let ctx = Context::new(());
-        let ctrl = ctx.context();
-
-        let generate_task = tokio::spawn({
-            let engine = engine.clone();
-            let ctrl = ctrl.clone();
-            async move { engine.generate(request(Some(1)), gen_ctx(ctrl)).await }
-        });
-
-        wait_for_pending_request(&engine).await;
-        ctrl.stop_generating();
-
-        let stream = generate_task
-            .await
-            .expect("generate task must not panic")
-            .expect("request cancellation returns a terminal stream");
-        let chunks = collect_ok(stream).await;
-        assert_eq!(chunks.len(), 1);
-        assert!(matches!(
-            chunks[0].finish_reason,
-            Some(FinishReason::Cancelled)
-        ));
-        assert!(
-            engine.active.is_empty(),
-            "cancelled pending request must be removed from active state"
-        );
-    }
-
-    #[tokio::test]
-    async fn backend_cancellation_interrupts_blocked_scheduler_enqueue() {
-        let engine = Arc::new(test_engine());
-        let _request_rx = install_saturated_request_queue(&engine);
-
-        let generate_task = tokio::spawn({
-            let engine = engine.clone();
-            async move {
-                engine
-                    .generate(request(Some(1)), gen_ctx(Context::new(()).context()))
-                    .await
-            }
-        });
-
-        wait_for_pending_request(&engine).await;
-        engine.cancel.cancel();
-
-        let result = generate_task.await.expect("generate task must not panic");
-        let Err(err) = result else {
-            panic!("backend cancellation must reject a pending enqueue");
-        };
-        assert_eq!(
-            err.error_type(),
-            ErrorType::Backend(BackendError::EngineShutdown)
-        );
-        assert!(
-            engine.active.is_empty(),
-            "backend-cancelled pending request must be removed from active state"
-        );
-    }
-
-    #[tokio::test]
     async fn closed_scheduler_queue_cleans_up_pending_request() {
         let engine = test_engine();
-        let (request_tx, request_rx) = mpsc::channel(1);
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
         drop(request_rx);
         assert!(engine.request_tx.set(request_tx).is_ok());
 

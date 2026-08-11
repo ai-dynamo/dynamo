@@ -173,7 +173,11 @@ impl From<SchedulerCancellationEnvelope> for SchedulerCommandEnvelope {
 
 /// Engine-agnostic asynchronous scheduler interface retained for Dynamo.
 pub trait SchedulerHandle: Send + Sync {
-    fn request_sender(&self) -> mpsc::Sender<DirectRequest>;
+    /// Send a request to the scheduler's waiting queue.
+    fn receive(&self, request: DirectRequest);
+
+    /// Get a clone of the compatibility request sender channel.
+    fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest>;
 
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics>;
 
@@ -210,6 +214,7 @@ mod tests {
                     completed: true,
                     rejected: false,
                     handoff_delay_ms: None,
+                    cached_tokens: None,
                 }])
                 .await
         });
@@ -245,6 +250,7 @@ mod tests {
                     completed: true,
                     rejected: false,
                     handoff_delay_ms: None,
+                    cached_tokens: None,
                 }])
                 .await
         });
@@ -276,6 +282,7 @@ mod tests {
                     completed: true,
                     rejected: false,
                     handoff_delay_ms: None,
+                    cached_tokens: None,
                 }])
                 .await
         });

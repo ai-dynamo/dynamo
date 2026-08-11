@@ -46,6 +46,9 @@ pub struct ReplayArtifactOutput {
     pub token_id: Option<u32>,
     pub completed: bool,
     pub rejected: bool,
+    /// Prompt tokens served from KV cache at first admission. Present only on
+    /// the request's first output artifact.
+    pub cached_tokens: Option<usize>,
     pub observed_at_ms: f64,
 }
 
@@ -108,6 +111,7 @@ impl ReplayArtifactSink {
                 token_id: output.token_id,
                 completed: output.completed,
                 rejected: output.rejected,
+                cached_tokens: output.cached_tokens,
                 observed_at_ms,
             }));
         Ok(())
