@@ -47,7 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/scale"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -113,7 +113,7 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
@@ -169,7 +169,7 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
@@ -515,7 +515,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 
 			r := &DynamoGraphDeploymentReconciler{
 				Client:   fakeClient,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 			}
 
 			t.Log("Reconcile scaling adapters")
@@ -620,7 +620,7 @@ func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(
 					},
 				}).
 				Build()
-			recorder := record.NewFakeRecorder(10)
+			recorder := events.NewFakeRecorder(10)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   kubeClient,
 				Recorder: recorder,
@@ -1110,7 +1110,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				WithInterceptorFuncs(tt.interceptorFuncs).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -1188,7 +1188,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fakeKubeClient,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 		ScaleClient:   &mockScaleClient{},
@@ -2424,7 +2424,7 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   fakeKubeClient,
 				Recorder: recorder,
@@ -3076,7 +3076,7 @@ func TestComponentWorkloadsReconciler_Reconcile(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
