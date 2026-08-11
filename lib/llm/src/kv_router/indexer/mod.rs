@@ -544,6 +544,7 @@ mod tests {
                 ))
                 .await;
         }
+        flush_indexer(&indexer).await;
 
         indexer
             .reset_worker_dp_rank_and_wait(reset_rank.worker_id, reset_rank.dp_rank)
