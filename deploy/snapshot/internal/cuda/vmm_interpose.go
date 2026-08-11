@@ -39,10 +39,11 @@ const (
 	vmmArtifactName     = "cuda-vmm.rdb"
 	vmmRestorePoison    = "dynamo:cuda-vmm:restore-poison"
 	vmmProtocolMagic    = 0x44564d4d
-	vmmProtocolVersion  = 4
-	vmmLedgerVersion    = 2
+	vmmProtocolVersion  = 5
+	vmmLedgerVersion    = 3
 	vmmHeaderSize       = 256
 	vmmRecordSize       = 96
+	vmmMulticastSize    = 96
 	vmmPlacementSize    = 40
 	vmmFabricHandleSize = 64
 	vmmMessageSize      = 96
@@ -54,21 +55,29 @@ const (
 	vmmMaximumRESPLine  = 4 << 10
 	vmmMaximumRightsFDs = 253
 
-	vmmInspect         = 1
-	vmmReadOwner       = 2
-	vmmDetachImporters = 3
-	vmmDetachOwners    = 4
-	vmmRestoreOwner    = 5
-	vmmRestoreImporter = 6
-	vmmIdentify        = 7
-	vmmSetPlacement    = 8
+	vmmInspect          = 1
+	vmmReadOwner        = 2
+	vmmDetachImporters  = 3
+	vmmDetachOwners     = 4
+	vmmRestoreOwner     = 5
+	vmmRestoreImporter  = 6
+	vmmIdentify         = 7
+	vmmSetPlacement     = 8
+	vmmRestoreMulticast = 10
+	vmmFinalizeRestore  = 11
+	vmmAbortRestore     = 12
 
 	vmmOwner    = 1
 	vmmImporter = 2
 
 	vmmAllocation = 1
+	vmmMulticast  = 2
 
 	vmmApplicationHandleLive = 1
+	vmmRetainRestoreHandle   = 2
+
+	vmmMulticastBindMem   = 1
+	vmmMulticastBindMemV2 = 2
 
 	vmmHandlePOSIX  = 1
 	vmmHandleFabric = 8
@@ -81,8 +90,29 @@ type VMMProcess struct {
 	Participant  string
 }
 
+func vmmMappingBacksMulticast(
+	ledger vmmLedger,
+	resourceID uint64,
+	participant string,
+) bool {
+	for _, resource := range ledger.Resources {
+		if resource.Kind != "multicast" {
+			continue
+		}
+		mappings := append([]vmmMapping{resource.Owner}, resource.Importers...)
+		for _, mapping := range mappings {
+			if mapping.Participant == participant &&
+				mapping.Multicast.BackingResourceID == resourceID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type vmmBrokerResult struct {
 	handleType uint32
+	objectKind uint32
 	fd         int
 	bytes      []byte
 }
@@ -94,9 +124,15 @@ func supportedVMMHandleType(handleType uint32) bool {
 func takeVMMBrokerResult(
 	response *vmmResponse,
 	handleType uint32,
+	objectKind uint32,
 ) (vmmBrokerResult, error) {
-	result := vmmBrokerResult{handleType: handleType, fd: -1}
-	valid := response.header.HandleType == handleType
+	result := vmmBrokerResult{
+		handleType: handleType,
+		objectKind: objectKind,
+		fd:         -1,
+	}
+	valid := response.header.HandleType == handleType &&
+		response.header.ObjectKind == objectKind
 	switch handleType {
 	case vmmHandlePOSIX:
 		valid = valid && response.fd >= 0 && len(response.payload) == 0
@@ -170,6 +206,82 @@ func verifyVMMHealth(ctx context.Context, processes []VMMProcess) error {
 	return nil
 }
 
+func abortVMMRestore(ctx context.Context, processes []VMMProcess) error {
+	var result error
+	for _, process := range processes {
+		requestCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), vmmTimeout,
+		)
+		_, err := exchangeVMM(
+			requestCtx,
+			process,
+			vmmHeader{Operation: vmmAbortRestore},
+			nil,
+			-1,
+			vmmResponseEmpty,
+		)
+		cancel()
+		if err != nil {
+			result = errors.Join(
+				result,
+				fmt.Errorf(
+					"abort CUDA VMM multicast restore participant %s: %w",
+					process.Participant, err,
+				),
+			)
+		}
+	}
+	return result
+}
+
+func validateVMMMulticastMapping(
+	ledger vmmLedger,
+	resource vmmResource,
+	mapping vmmMapping,
+) error {
+	bind := mapping.Multicast
+	if bind == nil || bind.BackingResourceID == 0 ||
+		bind.BackingResourceID > uint64(len(ledger.Resources)) ||
+		(bind.BackingRole != vmmOwner && bind.BackingRole != vmmImporter) ||
+		bind.MulticastOffset != 0 || bind.MemoryOffset != 0 ||
+		bind.Size != mapping.Size || bind.Flags != 0 ||
+		(bind.BindAPI != vmmMulticastBindMem &&
+			bind.BindAPI != vmmMulticastBindMemV2) {
+		return fmt.Errorf(
+			"ledger multicast resource %d has invalid bind for participant %q",
+			resource.ID, mapping.Participant,
+		)
+	}
+	backing := ledger.Resources[bind.BackingResourceID-1]
+	if backing.Kind != "allocation" {
+		return fmt.Errorf(
+			"ledger multicast resource %d bind references non-allocation resource %d",
+			resource.ID, bind.BackingResourceID,
+		)
+	}
+	var backingMapping vmmMapping
+	if bind.BackingRole == vmmOwner {
+		backingMapping = backing.Owner
+	} else {
+		for _, importer := range backing.Importers {
+			if importer.Participant == mapping.Participant {
+				backingMapping = importer
+				break
+			}
+		}
+	}
+	if backingMapping.Participant != mapping.Participant ||
+		backingMapping.GPUUUID != mapping.GPUUUID ||
+		backingMapping.Size != mapping.Size ||
+		backingMapping.RequestedHandleType != mapping.RequestedHandleType {
+		return fmt.Errorf(
+			"ledger multicast resource %d bind does not match backing resource %d participant %q",
+			resource.ID, bind.BackingResourceID, mapping.Participant,
+		)
+	}
+	return nil
+}
+
 type vmmExecutionPlacement map[string]map[string]int32
 
 type vmmPlacementSetup struct {
@@ -195,21 +307,28 @@ func isLowerHex(value string) bool {
 
 func vmmDetachPlan(ledger vmmLedger) []vmmDetach {
 	var plan []vmmDetach
-	for _, resource := range ledger.Resources {
-		for _, importer := range resource.Importers {
-			plan = append(plan, vmmDetach{
-				resourceID:  resource.ID,
-				participant: importer.Participant,
-				role:        vmmImporter,
-			})
+	for _, kind := range []string{"multicast", "allocation"} {
+		for _, resource := range ledger.Resources {
+			if resource.Kind != kind {
+				continue
+			}
+			for _, importer := range resource.Importers {
+				plan = append(plan, vmmDetach{
+					resourceID:  resource.ID,
+					participant: importer.Participant,
+					role:        vmmImporter,
+				})
+			}
 		}
-	}
-	for _, resource := range ledger.Resources {
-		plan = append(plan, vmmDetach{
-			resourceID:  resource.ID,
-			participant: resource.Owner.Participant,
-			role:        vmmOwner,
-		})
+		for _, resource := range ledger.Resources {
+			if resource.Kind == kind {
+				plan = append(plan, vmmDetach{
+					resourceID:  resource.ID,
+					participant: resource.Owner.Participant,
+					role:        vmmOwner,
+				})
+			}
+		}
 	}
 	return plan
 }
@@ -226,6 +345,7 @@ type vmmRestorePlan struct {
 	process       VMMProcess
 	payload       []byte
 	handleType    uint32
+	objectKind    uint32
 }
 
 func ValidateVMMProcessSet(expected, current []int) error {
@@ -261,6 +381,7 @@ type vmmHeader struct {
 	Status         int32
 	Count          uint32
 	HandleType     uint32
+	ObjectKind     uint32
 	AllocationUUID [16]byte
 	ObjectID       uint64
 	PayloadSize    uint64
@@ -283,26 +404,65 @@ type vmmCaptureRecord struct {
 	access         []byte
 	accessCount    uint32
 	accessSize     uint32
+	multicast      *vmmCaptureMulticast
+}
+
+type vmmCaptureMulticast struct {
+	backingUUID       [16]byte
+	backingObjectID   uint64
+	multicastOffset   uint64
+	memoryOffset      uint64
+	bindSize          uint64
+	bindFlags         uint64
+	objectFlags       uint64
+	objectHandleTypes uint64
+	objectSize        uint64
+	numDevices        uint32
+	backingRole       uint32
+	bindAPI           uint32
 }
 
 type vmmMapping struct {
-	Participant           string `json:"participant"`
-	Address               uint64 `json:"address"`
-	Size                  uint64 `json:"size"`
-	GPUUUID               string `json:"gpuUUID"`
-	RequestedHandleType   uint32 `json:"requestedHandleType"`
-	ApplicationHandleLive bool   `json:"applicationHandleLive"`
-	Properties            []byte `json:"properties,omitempty"`
-	Access                []byte `json:"access"`
-	AccessCount           uint32 `json:"accessCount"`
-	AccessSize            uint32 `json:"accessSize"`
+	Participant           string               `json:"participant"`
+	Address               uint64               `json:"address"`
+	Size                  uint64               `json:"size"`
+	GPUUUID               string               `json:"gpuUUID"`
+	RequestedHandleType   uint32               `json:"requestedHandleType"`
+	ApplicationHandleLive bool                 `json:"applicationHandleLive"`
+	Properties            []byte               `json:"properties,omitempty"`
+	Access                []byte               `json:"access"`
+	AccessCount           uint32               `json:"accessCount"`
+	AccessSize            uint32               `json:"accessSize"`
+	Multicast             *vmmMulticastMapping `json:"multicast,omitempty"`
+
+	retainRestoreHandle bool
+}
+
+type vmmMulticastMapping struct {
+	BackingResourceID uint64 `json:"backingResourceID"`
+	BackingRole       uint32 `json:"backingRole"`
+	MulticastOffset   uint64 `json:"multicastOffset"`
+	MemoryOffset      uint64 `json:"memoryOffset"`
+	Size              uint64 `json:"size"`
+	Flags             uint64 `json:"flags"`
+	BindAPI           uint32 `json:"bindAPI"`
+
+	backingUUID [16]byte
+}
+
+type vmmMulticastProperties struct {
+	Flags       uint64 `json:"flags"`
+	HandleTypes uint64 `json:"handleTypes"`
+	NumDevices  uint32 `json:"numDevices"`
+	Size        uint64 `json:"size"`
 }
 
 type vmmResource struct {
-	ID        uint64       `json:"id"`
-	Kind      string       `json:"kind"`
-	Owner     vmmMapping   `json:"owner"`
-	Importers []vmmMapping `json:"importers"`
+	ID        uint64                  `json:"id"`
+	Kind      string                  `json:"kind"`
+	Owner     vmmMapping              `json:"owner"`
+	Importers []vmmMapping            `json:"importers"`
+	Multicast *vmmMulticastProperties `json:"multicast,omitempty"`
 
 	captureUUID [16]byte
 }
@@ -559,6 +719,9 @@ func PrepareVMM(
 	writeVMMDigestPart(digest, encoded)
 	for index := range ledger.Resources {
 		resource := &ledger.Resources[index]
+		if resource.Kind == "multicast" {
+			continue
+		}
 		owner, err := findVMMProcess(processes, resource.Owner.Participant)
 		if err != nil {
 			return "", err
@@ -756,8 +919,8 @@ func RestoreVMM(
 	writeVMMDigestPart(digest, encoded)
 	contentsByResource := make([][]byte, len(ledger.Resources))
 	for index, resource := range ledger.Resources {
-		if resource.Kind != "allocation" {
-			return fmt.Errorf("CUDA VMM resource %d has unsupported kind %q", resource.ID, resource.Kind)
+		if resource.Kind == "multicast" {
+			continue
 		}
 		contents, err := client.get(vmmRedisKey(generation, fmt.Sprintf("resource:%d", resource.ID)))
 		if err != nil {
@@ -786,6 +949,12 @@ func RestoreVMM(
 	for index := range brokers {
 		brokers[index].fd = -1
 	}
+	abortMulticastRestore := false
+	defer func() {
+		if abortMulticastRestore && retErr != nil {
+			retErr = errors.Join(retErr, abortVMMRestore(ctx, processes))
+		}
+	}()
 	defer func() {
 		for index := range brokers {
 			if err := closeVMMBrokerResult(&brokers[index]); err != nil {
@@ -800,104 +969,191 @@ func RestoreVMM(
 			}
 		}
 	}()
-	ownerPlans := make([]vmmRestorePlan, 0, len(ledger.Resources))
-	var importerPlans []vmmRestorePlan
+	var allocationOwnerPlans []vmmRestorePlan
+	var allocationImporterPlans []vmmRestorePlan
+	var multicastOwnerPlans []vmmRestorePlan
+	var multicastImporterPlans []vmmRestorePlan
+	var multicastReplayPlans []vmmRestorePlan
 	for index, resource := range ledger.Resources {
+		kind := uint32(vmmAllocation)
+		if resource.Kind == "multicast" {
+			kind = vmmMulticast
+		}
 		owner, err := findVMMProcess(processes, resource.Owner.Participant)
 		if err != nil {
 			return err
 		}
-		payload := encodeVMMRestoreRecord(
+		ownerMapping := resource.Owner
+		ownerMapping.retainRestoreHandle =
+			resource.Kind == "allocation" &&
+				vmmMappingBacksMulticast(ledger, resource.ID, ownerMapping.Participant)
+		payload := encodeVMMResourceRecord(
 			resource.ID,
 			vmmOwner,
-			resource.Owner,
+			kind,
+			ownerMapping,
 			placement[resource.Owner.Participant][resource.Owner.GPUUUID],
+			resource.Multicast,
 			contentsByResource[index],
 		)
 		contentsByResource[index] = nil
-		ownerPlans = append(ownerPlans, vmmRestorePlan{
+		ownerPlan := vmmRestorePlan{
 			resourceID:    resource.ID,
 			resourceIndex: index,
 			process:       owner,
 			payload:       payload,
 			handleType:    resource.Owner.RequestedHandleType,
-		})
+			objectKind:    kind,
+		}
+		if kind == vmmAllocation {
+			allocationOwnerPlans = append(allocationOwnerPlans, ownerPlan)
+		} else {
+			multicastOwnerPlans = append(multicastOwnerPlans, ownerPlan)
+			multicastReplayPlans = append(multicastReplayPlans, ownerPlan)
+		}
 		for _, mapping := range resource.Importers {
 			importer, err := findVMMProcess(processes, mapping.Participant)
 			if err != nil {
 				return err
 			}
-			importerPlans = append(importerPlans, vmmRestorePlan{
+			importerMapping := mapping
+			importerMapping.retainRestoreHandle =
+				resource.Kind == "allocation" &&
+					vmmMappingBacksMulticast(
+						ledger, resource.ID, importerMapping.Participant,
+					)
+			importerPlan := vmmRestorePlan{
 				resourceID:    resource.ID,
 				resourceIndex: index,
 				process:       importer,
 				handleType:    mapping.RequestedHandleType,
-				payload: encodeVMMRestoreRecord(
+				objectKind:    kind,
+				payload: encodeVMMResourceRecord(
 					resource.ID,
 					vmmImporter,
-					mapping,
+					kind,
+					importerMapping,
 					placement[mapping.Participant][mapping.GPUUUID],
+					resource.Multicast,
 					nil,
 				),
-			})
+			}
+			if kind == vmmAllocation {
+				allocationImporterPlans = append(
+					allocationImporterPlans, importerPlan,
+				)
+			} else {
+				multicastImporterPlans = append(
+					multicastImporterPlans, importerPlan,
+				)
+				multicastReplayPlans = append(
+					multicastReplayPlans, importerPlan,
+				)
+			}
 		}
 	}
 	if err := unlock(); err != nil {
 		return fmt.Errorf("unlock CUDA processes before VMM replay: %w", err)
 	}
-	for _, plan := range ownerPlans {
-		response, err := exchangeVMM(
+	abortMulticastRestore = len(multicastReplayPlans) != 0
+	restoreOwners := func(plans []vmmRestorePlan) error {
+		for _, plan := range plans {
+			response, err := exchangeVMM(
+				ctx,
+				plan.process,
+				vmmHeader{
+					Operation:  vmmRestoreOwner,
+					ObjectID:   plan.resourceID,
+					HandleType: plan.handleType,
+					ObjectKind: plan.objectKind,
+				},
+				plan.payload,
+				-1,
+				vmmBrokerResponseExpectation(plan.handleType),
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"restore CUDA VMM resource %d owner: %w",
+					plan.resourceID, err,
+				)
+			}
+			broker, err := takeVMMBrokerResult(
+				&response, plan.handleType, plan.objectKind,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"restore CUDA VMM resource %d owner broker: %w",
+					plan.resourceID, err,
+				)
+			}
+			brokers[plan.resourceIndex] = broker
+		}
+		return nil
+	}
+	restoreImporters := func(plans []vmmRestorePlan) error {
+		for _, plan := range plans {
+			payload, fd, err := vmmImporterTransport(
+				plan.payload, brokers[plan.resourceIndex],
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"prepare CUDA VMM resource %d importer transport: %w",
+					plan.resourceID, err,
+				)
+			}
+			_, err = exchangeVMM(
+				ctx,
+				plan.process,
+				vmmHeader{
+					Operation:  vmmRestoreImporter,
+					ObjectID:   plan.resourceID,
+					HandleType: plan.handleType,
+					ObjectKind: plan.objectKind,
+				},
+				payload,
+				fd,
+				vmmResponseUntyped,
+			)
+			if plan.handleType == vmmHandleFabric {
+				clearVMMBytes(payload)
+			}
+			if err != nil {
+				return fmt.Errorf(
+					"restore CUDA VMM resource %d importer participant %s: %w",
+					plan.resourceID, plan.process.Participant, err,
+				)
+			}
+		}
+		return nil
+	}
+	if err := restoreOwners(allocationOwnerPlans); err != nil {
+		return err
+	}
+	if err := restoreImporters(allocationImporterPlans); err != nil {
+		return err
+	}
+	if err := restoreOwners(multicastOwnerPlans); err != nil {
+		return err
+	}
+	if err := restoreImporters(multicastImporterPlans); err != nil {
+		return err
+	}
+	for _, plan := range multicastReplayPlans {
+		if _, err := exchangeVMM(
 			ctx,
 			plan.process,
 			vmmHeader{
-				Operation:  vmmRestoreOwner,
+				Operation:  vmmRestoreMulticast,
 				ObjectID:   plan.resourceID,
 				HandleType: plan.handleType,
+				ObjectKind: vmmMulticast,
 			},
 			plan.payload,
 			-1,
-			vmmBrokerResponseExpectation(plan.handleType),
-		)
-		if err != nil {
-			return fmt.Errorf("restore CUDA VMM resource %d owner: %w", plan.resourceID, err)
-		}
-		broker, err := takeVMMBrokerResult(&response, plan.handleType)
-		if err != nil {
+			vmmResponseEmpty,
+		); err != nil {
 			return fmt.Errorf(
-				"restore CUDA VMM resource %d owner broker: %w",
-				plan.resourceID, err,
-			)
-		}
-		brokers[plan.resourceIndex] = broker
-	}
-	for _, plan := range importerPlans {
-		payload, fd, err := vmmImporterTransport(
-			plan.payload, brokers[plan.resourceIndex],
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"prepare CUDA VMM resource %d importer transport: %w",
-				plan.resourceID, err,
-			)
-		}
-		_, err = exchangeVMM(
-			ctx,
-			plan.process,
-			vmmHeader{
-				Operation:  vmmRestoreImporter,
-				ObjectID:   plan.resourceID,
-				HandleType: plan.handleType,
-			},
-			payload,
-			fd,
-			vmmResponseUntyped,
-		)
-		if plan.handleType == vmmHandleFabric {
-			clearVMMBytes(payload)
-		}
-		if err != nil {
-			return fmt.Errorf(
-				"restore CUDA VMM resource %d importer participant %s: %w",
+				"restore CUDA VMM multicast resource %d participant %s binding: %w",
 				plan.resourceID, plan.process.Participant, err,
 			)
 		}
@@ -908,6 +1164,23 @@ func RestoreVMM(
 				"close CUDA VMM resource %d broker result: %w",
 				ledger.Resources[index].ID, err,
 			)
+		}
+	}
+	if len(multicastReplayPlans) != 0 {
+		for _, process := range processes {
+			if _, err := exchangeVMM(
+				ctx,
+				process,
+				vmmHeader{Operation: vmmFinalizeRestore},
+				nil,
+				-1,
+				vmmResponseEmpty,
+			); err != nil {
+				return fmt.Errorf(
+					"finalize CUDA VMM restore participant %s: %w",
+					process.Participant, err,
+				)
+			}
 		}
 	}
 	if err := verifyVMMHealth(ctx, processes); err != nil {
@@ -921,6 +1194,7 @@ func RestoreVMM(
 		"generation", generation,
 		"resources", len(ledger.Resources),
 	)
+	abortMulticastRestore = false
 	return nil
 }
 
@@ -954,7 +1228,8 @@ func validateVMMLedger(ledger vmmLedger) error {
 		usedParticipantGPUs[participant.ID] = make(map[string]struct{}, len(gpus))
 	}
 	for index, resource := range ledger.Resources {
-		if resource.ID != uint64(index+1) || resource.Kind != "allocation" ||
+		if resource.ID != uint64(index+1) ||
+			(resource.Kind != "allocation" && resource.Kind != "multicast") ||
 			resource.Owner.Participant == "" || len(resource.Importers) == 0 {
 			return fmt.Errorf("ledger resource %d is incomplete or unsupported", resource.ID)
 		}
@@ -966,6 +1241,7 @@ func validateVMMLedger(ledger vmmLedger) error {
 		}
 		mappings := append([]vmmMapping{resource.Owner}, resource.Importers...)
 		seen := make(map[string]struct{}, len(mappings))
+		memberGPUs := make(map[string]struct{}, len(mappings))
 		for _, mapping := range mappings {
 			if _, ok := participants[mapping.Participant]; !ok {
 				return fmt.Errorf(
@@ -987,6 +1263,15 @@ func validateVMMLedger(ledger vmmLedger) error {
 				)
 			}
 			seen[mapping.Participant] = struct{}{}
+			if resource.Kind == "multicast" {
+				if _, duplicate := memberGPUs[mapping.GPUUUID]; duplicate {
+					return fmt.Errorf(
+						"ledger multicast resource %d repeats member GPU %q",
+						resource.ID, mapping.GPUUUID,
+					)
+				}
+				memberGPUs[mapping.GPUUUID] = struct{}{}
+			}
 			if mapping.Size > vmmMaximumRedisBulk {
 				return fmt.Errorf(
 					"ledger resource %d mapping for participant %q exceeds the %d-byte allocation limit",
@@ -1005,6 +1290,45 @@ func validateVMMLedger(ledger vmmLedger) error {
 					resource.ID, mapping.Participant,
 				)
 			}
+			if resource.Kind == "allocation" {
+				if mapping.Multicast != nil {
+					return fmt.Errorf(
+						"ledger allocation resource %d has multicast metadata",
+						resource.ID,
+					)
+				}
+			} else if err := validateVMMMulticastMapping(
+				ledger, resource, mapping,
+			); err != nil {
+				return err
+			}
+		}
+		if resource.Kind == "allocation" {
+			if resource.Multicast != nil {
+				return fmt.Errorf(
+					"ledger allocation resource %d has multicast properties",
+					resource.ID,
+				)
+			}
+		} else if resource.Multicast == nil ||
+			resource.Multicast.Flags != 0 ||
+			!supportedVMMHandleType(uint32(resource.Multicast.HandleTypes)) ||
+			resource.Multicast.HandleTypes !=
+				uint64(resource.Owner.RequestedHandleType) ||
+			resource.Multicast.NumDevices != uint32(len(mappings)) ||
+			resource.Multicast.NumDevices == 0 ||
+			resource.Multicast.Size == 0 ||
+			resource.Multicast.Size != resource.Owner.Size ||
+			slices.ContainsFunc(
+				resource.Importers,
+				func(mapping vmmMapping) bool {
+					return mapping.Size != resource.Multicast.Size
+				},
+			) {
+			return fmt.Errorf(
+				"ledger multicast resource %d has invalid object properties",
+				resource.ID,
+			)
 		}
 	}
 	if len(ledger.Resources) == 0 {
@@ -1086,15 +1410,29 @@ func inspectVMM(
 	participants := make(map[string]vmmParticipant, len(captures))
 	ledger := vmmLedger{Version: vmmLedgerVersion, Generation: generation}
 	for index, id := range ids {
+		kind := grouped[id][0].record.kind
+		kindName := ""
+		switch kind {
+		case vmmAllocation:
+			kindName = "allocation"
+		case vmmMulticast:
+			kindName = "multicast"
+		default:
+			return vmmLedger{}, fmt.Errorf(
+				"CUDA VMM capture has unsupported object kind %d",
+				kind,
+			)
+		}
 		resource := vmmResource{
 			ID:          uint64(index + 1),
-			Kind:        "allocation",
+			Kind:        kindName,
 			captureUUID: id,
 		}
 		for _, capture := range grouped[id] {
-			if capture.record.kind != vmmAllocation {
+			if capture.record.kind != kind {
 				return vmmLedger{}, fmt.Errorf(
-					"CUDA VMM capture has unsupported object kind %d",
+					"CUDA VMM object mixes capture kinds %d and %d",
+					kind,
 					capture.record.kind,
 				)
 			}
@@ -1127,12 +1465,49 @@ func inspectVMM(
 					)
 				}
 				resource.Owner = mapping
+				if kind == vmmMulticast {
+					multicast := capture.record.multicast
+					if multicast == nil {
+						return vmmLedger{}, errors.New(
+							"CUDA VMM multicast owner has no object metadata",
+						)
+					}
+					resource.Multicast = &vmmMulticastProperties{
+						Flags:       multicast.objectFlags,
+						HandleTypes: multicast.objectHandleTypes,
+						NumDevices:  multicast.numDevices,
+						Size:        multicast.objectSize,
+					}
+				}
 			case vmmImporter:
 				resource.Importers = append(resource.Importers, mapping)
 			default:
 				return vmmLedger{}, fmt.Errorf(
 					"CUDA VMM capture has unknown role %d", capture.record.role,
 				)
+			}
+		}
+		if kind == vmmMulticast {
+			if resource.Multicast == nil {
+				return vmmLedger{}, fmt.Errorf(
+					"CUDA VMM multicast resource %d has no owner properties",
+					resource.ID,
+				)
+			}
+			for _, capture := range grouped[id] {
+				multicast := capture.record.multicast
+				if multicast == nil ||
+					multicast.objectFlags != resource.Multicast.Flags ||
+					multicast.objectHandleTypes !=
+						resource.Multicast.HandleTypes ||
+					multicast.numDevices !=
+						resource.Multicast.NumDevices ||
+					multicast.objectSize != resource.Multicast.Size {
+					return vmmLedger{}, fmt.Errorf(
+						"CUDA VMM multicast resource %d has inconsistent object properties",
+						resource.ID,
+					)
+				}
 			}
 		}
 		if resource.Owner.Participant == "" || len(resource.Importers) == 0 {
@@ -1145,6 +1520,7 @@ func inspectVMM(
 			return strings.Compare(left.Participant, right.Participant)
 		})
 		resourceParticipants := map[string]struct{}{resource.Owner.Participant: {}}
+		resourceGPUs := map[string]struct{}{resource.Owner.GPUUUID: {}}
 		for _, importer := range resource.Importers {
 			if importer.Size != resource.Owner.Size {
 				return vmmLedger{}, fmt.Errorf(
@@ -1167,8 +1543,47 @@ func inspectVMM(
 				)
 			}
 			resourceParticipants[importer.Participant] = struct{}{}
+			if resource.Kind == "multicast" {
+				if _, duplicate := resourceGPUs[importer.GPUUUID]; duplicate {
+					return vmmLedger{}, fmt.Errorf(
+						"CUDA VMM multicast resource %d repeats member GPU %s",
+						resource.ID, importer.GPUUUID,
+					)
+				}
+				resourceGPUs[importer.GPUUUID] = struct{}{}
+			}
 		}
 		ledger.Resources = append(ledger.Resources, resource)
+	}
+	resourcesByCapture := make(map[[16]byte]uint64, len(ledger.Resources))
+	for _, resource := range ledger.Resources {
+		resourcesByCapture[resource.captureUUID] = resource.ID
+	}
+	for resourceIndex := range ledger.Resources {
+		resource := &ledger.Resources[resourceIndex]
+		if resource.Kind != "multicast" {
+			continue
+		}
+		mappings := []*vmmMapping{&resource.Owner}
+		for importerIndex := range resource.Importers {
+			mappings = append(mappings, &resource.Importers[importerIndex])
+		}
+		for _, mapping := range mappings {
+			if mapping.Multicast == nil {
+				return vmmLedger{}, fmt.Errorf(
+					"CUDA VMM multicast resource %d has incomplete participant metadata",
+					resource.ID,
+				)
+			}
+			backingID, ok := resourcesByCapture[mapping.Multicast.backingUUID]
+			if !ok {
+				return vmmLedger{}, fmt.Errorf(
+					"CUDA VMM multicast resource %d references unknown backing allocation",
+					resource.ID,
+				)
+			}
+			mapping.Multicast.BackingResourceID = backingID
+		}
 	}
 	if len(ledger.Resources) == 0 {
 		return vmmLedger{}, errors.New("no CUDA VMM sharing graph discovered")
@@ -1192,7 +1607,7 @@ func inspectVMM(
 }
 
 func mappingFromCapture(participant string, record vmmCaptureRecord) vmmMapping {
-	return vmmMapping{
+	mapping := vmmMapping{
 		Participant:           participant,
 		Address:               record.address,
 		Size:                  record.size,
@@ -1204,6 +1619,18 @@ func mappingFromCapture(participant string, record vmmCaptureRecord) vmmMapping 
 		AccessCount:           record.accessCount,
 		AccessSize:            record.accessSize,
 	}
+	if record.multicast != nil {
+		mapping.Multicast = &vmmMulticastMapping{
+			BackingRole:     record.multicast.backingRole,
+			MulticastOffset: record.multicast.multicastOffset,
+			MemoryOffset:    record.multicast.memoryOffset,
+			Size:            record.multicast.bindSize,
+			Flags:           record.multicast.bindFlags,
+			BindAPI:         record.multicast.bindAPI,
+			backingUUID:     record.multicast.backingUUID,
+		}
+	}
+	return mapping
 }
 
 func readVMMRESPLine(reader *bufio.Reader) (string, error) {
@@ -1473,6 +1900,9 @@ func decodeVMMRecords(count uint32, payload []byte) ([]vmmCaptureRecord, error) 
 		propertiesSize := binary.LittleEndian.Uint32(payload[68:72])
 		metadataSize := uint64(vmmRecordSize) + uint64(propertiesSize) +
 			uint64(record.accessCount)*uint64(record.accessSize)
+		if record.kind == vmmMulticast {
+			metadataSize += vmmMulticastSize
+		}
 		if metadataSize > uint64(len(payload)) {
 			return nil, errors.New("invalid VMM record lengths")
 		}
@@ -1484,10 +1914,38 @@ func decodeVMMRecords(count uint32, payload []byte) ([]vmmCaptureRecord, error) 
 			[]byte(nil),
 			payload[vmmRecordSize+int(propertiesSize):int(metadataSize)]...,
 		)
+		if record.kind == vmmMulticast {
+			extensionOffset := vmmRecordSize + int(propertiesSize) +
+				int(record.accessCount)*int(record.accessSize)
+			extension := payload[extensionOffset : extensionOffset+vmmMulticastSize]
+			record.access = record.access[:len(record.access)-vmmMulticastSize]
+			record.multicast = &vmmCaptureMulticast{
+				backingObjectID:   binary.LittleEndian.Uint64(extension[16:24]),
+				multicastOffset:   binary.LittleEndian.Uint64(extension[24:32]),
+				memoryOffset:      binary.LittleEndian.Uint64(extension[32:40]),
+				bindSize:          binary.LittleEndian.Uint64(extension[40:48]),
+				bindFlags:         binary.LittleEndian.Uint64(extension[48:56]),
+				objectFlags:       binary.LittleEndian.Uint64(extension[56:64]),
+				objectHandleTypes: binary.LittleEndian.Uint64(extension[64:72]),
+				objectSize:        binary.LittleEndian.Uint64(extension[72:80]),
+				numDevices:        binary.LittleEndian.Uint32(extension[80:84]),
+				backingRole:       binary.LittleEndian.Uint32(extension[84:88]),
+				bindAPI:           binary.LittleEndian.Uint32(extension[88:92]),
+			}
+			copy(record.multicast.backingUUID[:], extension[0:16])
+			if binary.LittleEndian.Uint32(extension[92:96]) != 0 ||
+				record.multicast.backingUUID == ([16]byte{}) ||
+				record.multicast.backingObjectID != 0 {
+				return nil, errors.New("invalid VMM multicast capture metadata")
+			}
+		}
 		if record.allocationUUID == ([16]byte{}) || record.address == 0 ||
 			record.size == 0 || record.offset != 0 || record.accessCount == 0 ||
 			record.accessSize == 0 || record.kind == 0 || record.gpuUUID == "" {
 			return nil, errors.New("unsupported incomplete VMM mapping metadata")
+		}
+		if record.kind != vmmAllocation && record.kind != vmmMulticast {
+			return nil, fmt.Errorf("unsupported VMM object kind %d", record.kind)
 		}
 		payload = payload[metadataSize:]
 		records = append(records, record)
@@ -1498,25 +1956,38 @@ func decodeVMMRecords(count uint32, payload []byte) ([]vmmCaptureRecord, error) 
 	return records, nil
 }
 
-func encodeVMMRestoreRecord(
+func encodeVMMResourceRecord(
 	objectID uint64,
 	role uint32,
+	kind uint32,
 	mapping vmmMapping,
 	deviceOrdinal int32,
+	multicast *vmmMulticastProperties,
 	contents []byte,
 ) []byte {
+	extensionSize := 0
+	if kind == vmmMulticast {
+		extensionSize = vmmMulticastSize
+	}
 	payload := make(
 		[]byte,
-		vmmRecordSize+len(mapping.Properties)+len(mapping.Access)+len(contents),
+		vmmRecordSize+len(mapping.Properties)+len(mapping.Access)+
+			extensionSize+len(contents),
 	)
 	binary.LittleEndian.PutUint64(payload[16:24], objectID)
 	binary.LittleEndian.PutUint64(payload[24:32], mapping.Address)
 	binary.LittleEndian.PutUint64(payload[32:40], mapping.Size)
 	binary.LittleEndian.PutUint32(payload[48:52], role)
-	binary.LittleEndian.PutUint32(payload[52:56], vmmAllocation)
+	binary.LittleEndian.PutUint32(payload[52:56], kind)
 	binary.LittleEndian.PutUint32(payload[56:60], mapping.RequestedHandleType)
 	if mapping.ApplicationHandleLive {
 		binary.LittleEndian.PutUint32(payload[60:64], vmmApplicationHandleLive)
+	}
+	if mapping.retainRestoreHandle {
+		binary.LittleEndian.PutUint32(
+			payload[60:64],
+			binary.LittleEndian.Uint32(payload[60:64])|vmmRetainRestoreHandle,
+		)
 	}
 	binary.LittleEndian.PutUint32(payload[64:68], uint32(deviceOrdinal))
 	binary.LittleEndian.PutUint32(payload[68:72], uint32(len(mapping.Properties)))
@@ -1528,6 +1999,21 @@ func encodeVMMRestoreRecord(
 	cursor += len(mapping.Properties)
 	copy(payload[cursor:], mapping.Access)
 	cursor += len(mapping.Access)
+	if kind == vmmMulticast {
+		bind := mapping.Multicast
+		binary.LittleEndian.PutUint64(payload[cursor+16:cursor+24], bind.BackingResourceID)
+		binary.LittleEndian.PutUint64(payload[cursor+24:cursor+32], bind.MulticastOffset)
+		binary.LittleEndian.PutUint64(payload[cursor+32:cursor+40], bind.MemoryOffset)
+		binary.LittleEndian.PutUint64(payload[cursor+40:cursor+48], bind.Size)
+		binary.LittleEndian.PutUint64(payload[cursor+48:cursor+56], bind.Flags)
+		binary.LittleEndian.PutUint64(payload[cursor+56:cursor+64], multicast.Flags)
+		binary.LittleEndian.PutUint64(payload[cursor+64:cursor+72], multicast.HandleTypes)
+		binary.LittleEndian.PutUint64(payload[cursor+72:cursor+80], multicast.Size)
+		binary.LittleEndian.PutUint32(payload[cursor+80:cursor+84], multicast.NumDevices)
+		binary.LittleEndian.PutUint32(payload[cursor+84:cursor+88], bind.BackingRole)
+		binary.LittleEndian.PutUint32(payload[cursor+88:cursor+92], bind.BindAPI)
+		cursor += vmmMulticastSize
+	}
 	copy(payload[cursor:], contents)
 	return payload
 }
@@ -1609,6 +2095,7 @@ func validateVMMResponseShape(
 		(response.Count != 0 ||
 			response.PayloadSize != 0 ||
 			response.ObjectID != 0 ||
+			response.ObjectKind != 0 ||
 			response.AllocationUUID != ([16]byte{}) ||
 			response.Message != "") {
 		return 0, fmt.Errorf(
@@ -1842,6 +2329,7 @@ func encodeVMMHeader(header vmmHeader) []byte {
 	binary.LittleEndian.PutUint32(buffer[8:12], uint32(header.Status))
 	binary.LittleEndian.PutUint32(buffer[12:16], header.Count)
 	binary.LittleEndian.PutUint32(buffer[16:20], header.HandleType)
+	binary.LittleEndian.PutUint32(buffer[20:24], header.ObjectKind)
 	copy(buffer[24:40], header.AllocationUUID[:])
 	binary.LittleEndian.PutUint64(buffer[40:48], header.ObjectID)
 	binary.LittleEndian.PutUint64(buffer[48:56], header.PayloadSize)
@@ -1854,7 +2342,6 @@ func decodeVMMHeader(buffer []byte) (vmmHeader, error) {
 	if len(buffer) != vmmHeaderSize ||
 		binary.LittleEndian.Uint32(buffer[0:4]) != vmmProtocolMagic ||
 		binary.LittleEndian.Uint16(buffer[4:6]) != vmmProtocolVersion ||
-		binary.LittleEndian.Uint32(buffer[20:24]) != 0 ||
 		!bytes.Equal(buffer[185:256], make([]byte, 71)) {
 		return vmmHeader{}, errors.New("invalid VMM response protocol")
 	}
@@ -1863,6 +2350,7 @@ func decodeVMMHeader(buffer []byte) (vmmHeader, error) {
 		Status:      int32(binary.LittleEndian.Uint32(buffer[8:12])),
 		Count:       binary.LittleEndian.Uint32(buffer[12:16]),
 		HandleType:  binary.LittleEndian.Uint32(buffer[16:20]),
+		ObjectKind:  binary.LittleEndian.Uint32(buffer[20:24]),
 		ObjectID:    binary.LittleEndian.Uint64(buffer[40:48]),
 		PayloadSize: binary.LittleEndian.Uint64(buffer[48:56]),
 		Message:     strings.TrimRight(string(buffer[56:56+vmmMessageSize]), "\x00"),

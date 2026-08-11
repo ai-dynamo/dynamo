@@ -8,11 +8,12 @@ SPDX-License-Identifier: Apache-2.0
 
 This launcher-scoped `LD_PRELOAD` interposer checkpoints complete CUDA Driver
 API VMM allocations shared through either POSIX file descriptors or single-node
-`CU_MEM_HANDLE_TYPE_FABRIC`/IMEX unicast handles. It is transparent to
-inference frameworks: applications do not call checkpoint hooks. The
-interposer composes with `cuda-checkpoint --launch-job`; Redis replaces the
-CUDA job-file role only for shim-managed VMM state. CUDA checkpoint continues
-to own unrelated CUDA state, including legacy CUDA IPC.
+`CU_MEM_HANDLE_TYPE_FABRIC`/IMEX handles. It also checkpoints the exact
+same-node, handle-based CUDA multicast lifecycle used by FlashInfer. It is
+transparent to inference frameworks: applications do not call checkpoint
+hooks. The interposer composes with `cuda-checkpoint --launch-job`; Redis
+replaces the CUDA job-file role only for shim-managed VMM state. CUDA
+checkpoint continues to own unrelated CUDA state, including legacy CUDA IPC.
 
 ## Enablement and flow
 
@@ -34,12 +35,14 @@ operations. At that boundary:
 
 1. Each shim reports owner/importer mappings to the Snapshot coordinator over
    its runtime `/snapshot-control/cuda-vmm-PID.sock`.
-2. The coordinator groups this captured generation by the allocation UUID in
-   each shim record, assigns logical resource IDs, and validates exactly one
-   owner per UUID.
-3. Each owner's bytes are copied once into Redis.
-4. Importer mappings are detached in resource/participant order, followed by owners.
-   CUDA virtual-address reservations remain in place.
+2. The coordinator groups this captured generation by allocation or multicast
+   UUID, assigns logical resource IDs, resolves every multicast
+   backing-allocation reference, and validates exactly one owner per resource.
+3. Each allocation owner's bytes are copied once into Redis. Multicast
+   resources are byte-less and have no content key.
+4. Multicast importers and owners are unbound, unmapped, and released first.
+   Allocation importers and owners are then detached while CUDA
+   virtual-address reservations remain in place.
 5. The coordinator records metadata and content in Redis, runs `SAVE`, and
    copies the RDB into the checkpoint as `cuda-vmm.rdb`.
 6. Normal `cuda-checkpoint` and CRIU capture all remaining supported state.
@@ -68,36 +71,52 @@ restore on the source node under the authoritative placement plan.
 
 After all preflight checks pass, the coordinator unlocks the CUDA processes
 immediately before the first owner replay request. This is required because
-owner and importer replay invokes ordinary CUDA Driver APIs in the restored
-processes. During this brief unlocked window, it recreates all owner
-allocations before any importer, restores each owner at its exact VA, installs
-temporary owner-location read/write access only while copying bytes, then
-applies the recorded final access. Importers receive only their exact recorded
-access. Every fresh broker FD is released and every shim passes one final
-health check before the restore succeeds. Application-released generic handles
-use temporary restore handles, which are released after remap. Application-live
-logical handles are rebound to their new real handle and can be released
-normally after restore.
+replay invokes ordinary CUDA Driver APIs in the restored processes. During
+this brief unlocked window:
+
+1. It recreates all allocation owners before any allocation importer, restores
+   each owner at its exact VA, copies owner bytes under temporary access, and
+   applies every participant's recorded final access.
+2. It creates multicast owners, imports multicast importers, and adds each
+   participant's recorded local device. No multicast bind or map occurs until
+   every participant has completed this membership phase.
+3. It replays each exact full-range bind, mapping, and access update.
+4. It releases temporary backing-allocation handles only after every multicast
+   resource has bound. This preserves allocations shared by FlashInfer's full
+   and tensor-parallel multicast groups.
+5. It verifies every shim's final health and only then marks Redis restored.
+
+After unlock, any multicast owner/importer, bind, broker, finalize, or health
+failure triggers a best-effort abort request to every restored process. The
+abort leaves each shim failed and removes recreated/imported multicast groups,
+their mappings and binds, and temporary retained backing handles. This
+distributed cleanup is specific to the multicast restore transaction; it does
+not roll back unrelated ordinary allocation replay.
+
+Every fresh broker value is closed or wiped. Application-released allocation
+handles referenced by multicast binds are retained only through the explicit
+finalize phase. Application-live logical handles are rebound to their new real
+handle and can be released normally after restore.
 
 The application never observes a real UMD
-`CUmemGenericAllocationHandle` for managed allocations. The shim returns a
-tagged process-local logical token from supported `cuMemCreate` and
-`cuMemImportFromShareableHandle` calls and translates it for map, export,
-release, and allocation-property queries. Unknown tagged tokens fail closed;
+`CUmemGenericAllocationHandle` for managed allocations or multicast objects.
+The shim returns a tagged process-local logical token from supported
+`cuMemCreate`, `cuMulticastCreate`, and `cuMemImportFromShareableHandle` calls
+and translates it for supported operations. Unknown tagged tokens fail closed;
 logical tokens are never passed to the UMD.
 
 The application never observes a raw CUDA POSIX export FD or raw CUDA FABRIC
 handle. On the first successful owner export, the shim assigns that allocation
 a random nonzero 128-bit UUID.
 
-- A POSIX export returns the existing fresh 256-byte sealed memfd capability
-  containing the UUID, exact owner control-socket path, and owner participant
-  ID. The application can transport this opaque capability with `SCM_RIGHTS`;
-  it remains caller-owned and open after import.
+- A POSIX export returns a fresh 256-byte sealed memfd capability containing
+  the UUID, object-kind discriminator, exact owner control-socket path, and
+  owner participant ID. The application can transport this opaque capability
+  with `SCM_RIGHTS`; it remains caller-owned and open after import.
 - A FABRIC export calls the real driver on every attempt, then returns an exact
   64-byte logical token containing a magic/version/type discriminator, UUID,
   32 lowercase hexadecimal participant bytes, positive namespace PID, and
-  zero reserved word. The driver-produced 64 bytes are immediately discarded.
+  object kind. The driver-produced 64 bytes are immediately discarded.
   Repeated exports reuse the logical UUID and route identity.
 
 The POSIX capability and FABRIC token are bearer values. Control-socket
@@ -115,8 +134,8 @@ own socket. The private protocol is typed:
 
 | Handle type | Broker result |
 |---|---|
-| POSIX FD (`1`) | Exactly one `SCM_RIGHTS` FD and no payload |
-| FABRIC (`8`) | No FD and exactly 64 payload bytes |
+| POSIX FD (`1`) | Exact allocation or multicast object kind, one `SCM_RIGHTS` FD, and no payload |
+| FABRIC (`8`) | Exact allocation or multicast object kind, no FD, and exactly 64 payload bytes |
 
 The owner binds responses to operation, exact handle type, allocation UUID, and
 participant ID. Raw FD copies are closed and raw FABRIC bytes are wiped and
@@ -144,29 +163,32 @@ copy framework, or CUDA job-file fallback.
 
 Redis keys are generation-scoped and contain one JSON graph/state record plus
 one binary value per logical allocation. The typed JSON graph contains stable
-participant and allocation-resource IDs, logical node placement, stable GPU
+participant and resource IDs, resource kind, logical node placement, stable GPU
 UUID placement, exact VAs, allocation-property bytes, requested handle type,
-application-handle liveness, and access descriptors. It does not persist
-PIDs, FD numbers, capture allocation UUIDs, real CUDA handles, CUDA contexts,
-or opaque transport handles. Device ordinals can occur inside opaque
+application-handle liveness, access descriptors, and multicast object,
+membership, and backing-allocation binding metadata. Multicast groups have no
+`resource:<id>` content value or content digest object; their serialized
+metadata remains covered by the ledger digest. The ledger does not persist
+PIDs, FD numbers, capture UUIDs, real CUDA handles, CUDA contexts, socket
+paths, or POSIX/FABRIC transport bytes. Device ordinals can occur inside opaque
 allocation-property and access-descriptor replay records, but they are not
 durable identity. The shim admits only an access descriptor whose ordinal matches
 the allocation's transient validated device ordinal; restore uses an ordinal
 only after validating the controller-supplied source/target UUID plan. A
 deterministic SHA-256 digest over that graph
-metadata and every allocation byte is stored in Redis and the checkpoint manifest. Redis
-stores the allocation graph and contents, never POSIX FDs, logical FABRIC
-tokens, raw FABRIC handles, PIDs, or socket paths. Ledger version 2 and private
-control protocol version 4 are required; cross-version artifact restore is
-unsupported. The artifact requires the same architecture, CUDA ABI, and shim
-build.
+metadata and every allocation byte is stored in Redis and the checkpoint
+manifest. Redis stores the resource graph and allocation contents, never POSIX
+FDs, logical FABRIC tokens, raw FABRIC handles, PIDs, or socket paths. Ledger
+version 3 and private control protocol version 5 are required; cross-version
+artifact restore is unsupported. The artifact requires the same architecture,
+CUDA ABI, and shim build.
 
 ## Supported contract
 
 - CUDA Driver API VMM with `requestedHandleTypes` exactly POSIX FD (`1`) or
   exactly FABRIC (`8`). Zero, combined bitmasks such as `9`, and every other
   type are rejected.
-- FABRIC is single-node M2 IMEX unicast only. Exporter and importer must use
+- FABRIC is single-node IMEX only. Exporter and importer must use
   fabric-ready hardware and have access to the same IMEX channel.
 - One owner physical allocation, one complete offset-zero mapping per
   participant, all participants launched through the shim, and one
@@ -186,10 +208,15 @@ build.
   restore frames add only one exact record, property, and access descriptor.
 - Legacy CUDA IPC passes through unchanged to CUDA checkpoint's native
   job-file support.
-- `cuMulticastBindMem` and its available `_v2` resolver entry are poison-only:
-  binding a managed allocation is rejected before the UMD because the shim does not
-  capture or replay multicast state. Calls with unrelated real handles pass
-  through unchanged.
+- Handle-based multicast supports one owner and one or more importers on the
+  same logical node. Each participant adds exactly one stable member GPU,
+  binds one tracked allocation at offsets zero for the complete object size
+  with flags zero, maps the complete object once, and applies one full-range
+  same-GPU read/write access update. Both legacy `cuMulticastBindMem` and its
+  available `_v2` form are supported; `_v2` must name the recorded member.
+- Multiple multicast resources can bind the same backing allocation, as in
+  FlashInfer's full and tensor-parallel groups. `cuMulticastGetGranularity`
+  and entirely unmanaged multicast objects pass through unchanged.
 
 On restore, owner reconstruction remains one path: create, exact-VA map,
 temporary write access, content copy, final access, and logical-handle rebind.
@@ -212,6 +239,10 @@ The implementation detects and rejects:
   result is returned unchanged;
 - partial, repeated, overlapping, or nonzero-offset tracked mappings and
   incomplete access metadata;
+- missing, duplicate, or post-bind multicast membership; mixed
+  managed/unmanaged multicast operations; partial, repeated, nonzero-offset,
+  wrong-device, wrong-backing, or wrong-size multicast binds; incomplete
+  multicast graphs; and managed `cuMulticastBindAddr` variants;
 - partial, gapped, mixed managed/unmanaged, or repeated access-update ranges;
 - host, other-device, multi-device, non-read/write, or otherwise non-FlashInfer
   access descriptors; the shim requires exactly one read/write DEVICE descriptor on
@@ -219,11 +250,11 @@ The implementation detects and rejects:
 - missing owners/importers or local detached records that do not match the
   allocation UUID, logical object, role, exact VA, and size;
 - zero allocation UUIDs, invalid FABRIC token magic/version/type/participant/PID
-  or reserved word, multiple owners for one UUID, owner endpoint or participant
-  mismatches, unavailable owners, broker timeouts, FABRIC responses carrying an
-  FD or not exactly 64 bytes, POSIX responses carrying a payload or not exactly
-  one FD, and any attempt to fall back to importing an application token
-  directly;
+  or object-kind discrimination, multiple owners for one UUID, owner endpoint
+  or participant mismatches, unavailable owners, broker timeouts, FABRIC
+  responses carrying an FD or not exactly 64 bytes, POSIX responses carrying a
+  payload or not exactly one FD, and any attempt to fall back to importing an
+  application token directly;
 - real CUDA FABRIC export/import failure, including
   `CUDA_ERROR_NOT_PERMITTED` when the CUDA FABRIC-support attribute, fabric
   state, or accessible IMEX channel is absent or mismatched, or when exporter
@@ -247,9 +278,13 @@ The implementation detects and rejects:
 
 Preflight errors abort while CUDA remains locked, and an unlock error prevents
 all owner/importer replay. Replay and final-health errors occur after CUDA
-unlock. Partial detach/restore has no rollback: Snapshot fails closed by
-withholding the `restore-complete` sentinel and tearing down the restore
-container.
+unlock. On a partial multicast restore, the coordinator best-effort sends the
+idempotent abort operation to every restored process; each shim unbinds, unmaps,
+and releases newly created/imported groups and temporary allocation handles.
+Cleanup failures are reported with the original replay failure. The shims
+remain failed, Snapshot withholds the `restore-complete` sentinel, and the
+restore container is torn down. The abort does not undo unrelated ordinary
+allocation replay.
 
 `UnlockProcessTree` unlocks one process at a time. If a later PID fails, earlier
 PIDs can remain running, but no VMM replay is sent, `restore-complete` is
@@ -260,7 +295,9 @@ The wrappers are limited to `cuMemCreate`, `cuMemRelease`, `cuMemMap`,
 `cuMemUnmap`, `cuMemSetAccess`, `cuMemExportToShareableHandle`,
 `cuMemImportFromShareableHandle`, the poison-only
 `cuMemRetainAllocationHandle`, `cuMemGetAllocationPropertiesFromHandle`,
-poison-only `cuMulticastBindMem` variants, and CUDA driver/runtime resolver
+`cuMulticastCreate`, `cuMulticastAddDevice`, `cuMulticastBindMem`,
+`cuMulticastUnbind`, poison-only `cuMulticastBindAddr` variants, and CUDA
+driver/runtime resolver
 entry points needed to return those wrappers. The shim narrowly interposes
 `dlsym` for cuda-python's explicit `libcuda` lookup of
 `cuGetProcAddress`, `cuGetProcAddress_v2`, or
@@ -285,7 +322,7 @@ must enforce these assumptions:
 | No FD has been received but not imported. | The untracked capability can survive outside the logical graph and later import stale backing. |
 | Applications treat sharing FDs as opaque transport capabilities and do not require raw CUDA-FD `fstat`, `ioctl`, or `poll` behavior. | The returned FD is a sealed memfd, not the NVIDIA character-device export. Unsupported inspection or raw-FD bypass cannot be associated safely and must not be used. |
 | Every managed allocation has one complete offset-zero mapping and one full-range access update, either individually or through an exact contiguous union. | Partial, gapped, mixed, repeated, or unobserved shape cannot be reconstructed exactly. Observed wrapped violations fail admission; bypassed calls can replay incorrectly without detection. |
-| Shared resources use only exact POSIX-FD or FABRIC allocation types through the wrapped Driver APIs. | Multicast APIs/state, mempools, external memory, arrays, native FlashInfer checkpoint hooks, retained/queued transport objects, or unwrapped allocation-derived handles bypass the graph and can restore incomplete or stale sharing state. |
+| Shared resources use only exact POSIX-FD or FABRIC handle types through the wrapped Driver APIs. Multicast follows the one-member, one-full-bind, one-map contract above. | Address-bound multicast, multicast shapes outside that contract, mempools, external memory, arrays, native FlashInfer checkpoint hooks, retained/queued transport objects, or unwrapped allocation-derived handles bypass the graph and can restore incomplete or stale sharing state. |
 | Every participating process uses the launcher and resolves managed APIs through the preload/resolver path. | Static binaries, alternate loader namespaces, preload suppression, explicit-handle `dlvsym`, or direct explicit-handle lookup of a managed API can bypass tracking and produce an incomplete graph. cuda-python's explicit `dlsym` lookup of the CUDA resolver is supported. |
 | A process does not fork before CUDA use and then continue without `exec`. | The child inherits the parent's participant ID, listener FD, and socket path but not the control thread. It cannot create an independent endpoint, and checkpoint eventually fails through participant/process-set drift. Fork followed by `exec` reinitializes the launcher-scoped shim. |
 | Checkpoint and restore run on one logical node, with the same accessible IMEX channel and ready fabric state for FABRIC resources. | Cross-node routing is unsupported. A node, GPU, IMEX channel, or fabric-state change invalidates local brokerage and can cause `CUDA_ERROR_NOT_PERMITTED` or restore failure. |
@@ -298,11 +335,13 @@ identity is unavailable. The implementation remains single-node.
 
 ## Non-goals
 
-The interposer does not support cross-node routing, multinode IMEX, multicast
-objects or APIs/state, CUDA mempools, unobservable retained, dangling, queued,
-or received-but-not-imported transport capabilities, repeated checkpoint/restore
-cycles, cross-version artifacts, or native application checkpoint hooks,
-including native FlashInfer hooks. It does not remove CUDA's native checkpoint
-responsibility for unrelated CUDA state or legacy CUDA IPC.
+The interposer does not support cross-node routing, multinode IMEX,
+`cuMulticastBindAddr` replay, partial or repeated multicast membership/binds,
+CUDA mempools, external memory, arrays, unobservable retained, dangling,
+queued, or received-but-not-imported transport capabilities, repeated
+checkpoint/restore cycles, cross-version artifacts, or native application
+checkpoint hooks, including native FlashInfer hooks. It does not remove
+CUDA's native checkpoint responsibility for unrelated CUDA state or legacy
+CUDA IPC.
 
 Deployment admission and workload discipline must enforce these assumptions.

@@ -10,6 +10,7 @@
 #include <cuda_runtime_api.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,7 +19,10 @@
 #include <unistd.h>
 
 #undef cuGetProcAddress
+#undef cuMulticastAddDevice
+#undef cuMulticastCreate
 #undef cuMulticastBindMem
+#undef cuMulticastUnbind
 #undef cudaGetDriverEntryPoint
 #undef cudaGetDriverEntryPointByVersion
 
@@ -40,11 +44,38 @@ static unsigned int logical_forward_count;
 static unsigned int active_handle_count;
 static unsigned int active_mapping_count;
 static unsigned int multicast_bind_count;
+static unsigned int multicast_create_count;
+static unsigned int multicast_add_count;
+static unsigned int multicast_bind_addr_count;
+static unsigned int multicast_unbind_count;
+static unsigned int active_multicast_count;
+static unsigned int active_multicast_bind_count;
+static CUmulticastObjectProp multicast_properties[16];
+static CUdevice multicast_devices[16];
+static CUmemGenericAllocationHandle created_multicast_handles[16];
+static CUmemGenericAllocationHandle multicast_handles[16];
+static CUmemGenericAllocationHandle multicast_memory_handles[16];
+static bool multicast_bind_active[16];
+static size_t multicast_offsets[16];
+static size_t multicast_memory_offsets[16];
+static size_t multicast_sizes[16];
+static unsigned long long multicast_flags[16];
+static CUdevice multicast_bind_devices[16];
+static CUmemGenericAllocationHandle multicast_unbind_handles[16];
+static CUdevice multicast_unbind_devices[16];
+static size_t multicast_unbind_offsets[16];
+static size_t multicast_unbind_sizes[16];
+static CUdeviceptr multicast_map_addresses[16];
+static unsigned int multicast_map_address_count;
+static char multicast_events[64];
+static unsigned int multicast_event_count;
 static int last_exported_fd = -1;
 static int last_internal_export_alias = -1;
 static int internal_export_aliases[32];
 static CUmemAllocationHandleType handle_types[32];
+static CUdevice handle_devices[32];
 static CUdevice create_devices[32];
+static CUdevice import_device;
 static int last_imported_fd = -1;
 static unsigned char last_imported_fabric[CU_IPC_HANDLE_SIZE];
 static int colliding_export_source = -1;
@@ -67,6 +98,152 @@ static CUdevice device_identities[16];
 static unsigned int device_get_calls;
 static unsigned int device_uuid_calls;
 static unsigned int device_count_calls;
+
+unsigned int
+fake_cuda_multicast_create_count(void)
+{
+  return multicast_create_count;
+}
+
+unsigned int
+fake_cuda_multicast_add_count(void)
+{
+  return multicast_add_count;
+}
+
+unsigned int
+fake_cuda_multicast_bind_addr_count(void)
+{
+  return multicast_bind_addr_count;
+}
+
+CUdevice
+fake_cuda_multicast_device(unsigned int index)
+{
+  return index < multicast_add_count ? multicast_devices[index] : -1;
+}
+
+unsigned int
+fake_cuda_multicast_unbind_count(void)
+{
+  return multicast_unbind_count;
+}
+
+unsigned int
+fake_cuda_active_multicast_count(void)
+{
+  return active_multicast_count;
+}
+
+unsigned int
+fake_cuda_active_multicast_bind_count(void)
+{
+  return active_multicast_bind_count;
+}
+
+char
+fake_cuda_multicast_event(unsigned int index)
+{
+  return index < multicast_event_count ? multicast_events[index] : '\0';
+}
+
+unsigned int
+fake_cuda_multicast_event_count(void)
+{
+  return multicast_event_count;
+}
+
+CUmemGenericAllocationHandle
+fake_cuda_multicast_handle(unsigned int index)
+{
+  return index < multicast_bind_count ? multicast_handles[index] : 0;
+}
+
+CUmemGenericAllocationHandle
+fake_cuda_multicast_memory_handle(unsigned int index)
+{
+  return index < multicast_bind_count ? multicast_memory_handles[index] : 0;
+}
+
+size_t
+fake_cuda_multicast_offset(unsigned int index)
+{
+  return index < multicast_bind_count ? multicast_offsets[index] : 0;
+}
+
+size_t
+fake_cuda_multicast_memory_offset(unsigned int index)
+{
+  return index < multicast_bind_count ? multicast_memory_offsets[index] : 0;
+}
+
+size_t
+fake_cuda_multicast_size(unsigned int index)
+{
+  return index < multicast_bind_count ? multicast_sizes[index] : 0;
+}
+
+unsigned long long
+fake_cuda_multicast_flags(unsigned int index)
+{
+  return index < multicast_bind_count ? multicast_flags[index] : 0;
+}
+
+CUdevice
+fake_cuda_multicast_bind_device(unsigned int index)
+{
+  return index < multicast_bind_count ? multicast_bind_devices[index] : -1;
+}
+
+CUmemGenericAllocationHandle
+fake_cuda_multicast_unbind_handle(unsigned int index)
+{
+  return index < multicast_unbind_count
+      ? multicast_unbind_handles[index]
+      : 0;
+}
+
+CUdevice
+fake_cuda_multicast_unbind_device(unsigned int index)
+{
+  return index < multicast_unbind_count ? multicast_unbind_devices[index] : -1;
+}
+
+size_t
+fake_cuda_multicast_unbind_offset(unsigned int index)
+{
+  return index < multicast_unbind_count ? multicast_unbind_offsets[index] : 0;
+}
+
+size_t
+fake_cuda_multicast_unbind_size(unsigned int index)
+{
+  return index < multicast_unbind_count ? multicast_unbind_sizes[index] : 0;
+}
+
+static void
+record_multicast_event(char event)
+{
+  if (multicast_event_count < sizeof(multicast_events))
+    multicast_events[multicast_event_count] = event;
+  multicast_event_count++;
+}
+
+static int
+known_multicast_handle(CUmemGenericAllocationHandle handle)
+{
+  size_t index;
+
+  for (index = 0; index < multicast_create_count; index++) {
+    if (created_multicast_handles[index] == handle)
+      return 1;
+  }
+  for (index = 0; index < multicast_bind_count; index++) {
+    if (multicast_handles[index] == handle)
+      return 1;
+  }
+  return 0;
+}
 
 __attribute__((constructor)) static void
 initialize_fake_cuda(void)
@@ -251,6 +428,12 @@ fake_cuda_create_device(unsigned int index)
 }
 
 void
+fake_cuda_set_import_device(CUdevice device)
+{
+  import_device = device;
+}
+
+void
 fake_cuda_set_device_count(int count)
 {
   device_count = count;
@@ -335,6 +518,33 @@ cuCtxGetCurrent(CUcontext* context)
   return CUDA_SUCCESS;
 }
 
+#if CUDA_VERSION >= 13010
+CUresult CUDAAPI
+cuMulticastBindAddr_v2(
+    CUmemGenericAllocationHandle multicast_handle, CUdevice device,
+    size_t multicast_offset, CUdeviceptr address, size_t size,
+    unsigned long long flags)
+{
+  (void)device;
+  return cuMulticastBindAddr(
+      multicast_handle, multicast_offset, address, size, flags);
+}
+#endif
+
+CUresult CUDAAPI
+cuMulticastBindAddr(
+    CUmemGenericAllocationHandle multicast_handle, size_t multicast_offset,
+    CUdeviceptr address, size_t size, unsigned long long flags)
+{
+  (void)multicast_handle;
+  (void)multicast_offset;
+  (void)address;
+  (void)size;
+  (void)flags;
+  multicast_bind_addr_count++;
+  return CUDA_SUCCESS;
+}
+
 CUresult CUDAAPI
 cuCtxSetCurrent(CUcontext context)
 {
@@ -393,8 +603,10 @@ cuMemCreate(
   active_handle_count++;
   *output = next_handle++;
   index = (size_t)(*output - UINT64_C(0x1234));
-  if (index < sizeof(handle_types) / sizeof(handle_types[0]))
+  if (index < sizeof(handle_types) / sizeof(handle_types[0])) {
     handle_types[index] = properties->requestedHandleTypes;
+    handle_devices[index] = properties->location.id;
+  }
   return CUDA_SUCCESS;
 }
 
@@ -407,6 +619,22 @@ cuMemRelease(CUmemGenericAllocationHandle handle)
     released_handles[release_count] = handle;
   release_count++;
   active_handle_count--;
+  if (known_multicast_handle(handle)) {
+    for (size_t binding = 0; binding < multicast_bind_count; binding++) {
+      if (multicast_bind_active[binding] &&
+          multicast_handles[binding] == handle) {
+        multicast_bind_active[binding] = false;
+        active_multicast_bind_count--;
+      }
+    }
+  }
+  for (size_t index = 0; index < multicast_create_count; index++) {
+    if (created_multicast_handles[index] == handle) {
+      active_multicast_count--;
+      record_multicast_event('r');
+      break;
+    }
+  }
   return CUDA_SUCCESS;
 }
 
@@ -425,6 +653,14 @@ cuMemMap(
     map_addresses[map_count] = address;
   map_count++;
   active_mapping_count++;
+  if (known_multicast_handle(handle)) {
+    if (multicast_map_address_count <
+        sizeof(multicast_map_addresses) /
+            sizeof(multicast_map_addresses[0]))
+      multicast_map_addresses[multicast_map_address_count] = address;
+    multicast_map_address_count++;
+    record_multicast_event('m');
+  }
   return CUDA_SUCCESS;
 }
 
@@ -451,6 +687,12 @@ cuMemSetAccess(
       access_descriptors[set_access_count] = descriptors[0];
   }
   set_access_count++;
+  for (size_t index = 0; index < multicast_map_address_count; index++) {
+    if (multicast_map_addresses[index] == address) {
+      record_multicast_event('x');
+      break;
+    }
+  }
   return CUDA_SUCCESS;
 }
 
@@ -515,8 +757,10 @@ cuMemImportFromShareableHandle(
   active_handle_count++;
   *output = next_handle++;
   index = (size_t)(*output - UINT64_C(0x1234));
-  if (index < sizeof(handle_types) / sizeof(handle_types[0]))
+  if (index < sizeof(handle_types) / sizeof(handle_types[0])) {
     handle_types[index] = CU_MEM_HANDLE_TYPE_NONE;
+    handle_devices[index] = import_device;
+  }
   return CUDA_SUCCESS;
 }
 
@@ -531,7 +775,10 @@ cuMemGetAllocationPropertiesFromHandle(
   memset(properties, 0, sizeof(*properties));
   properties->type = CU_MEM_ALLOCATION_TYPE_PINNED;
   properties->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  properties->location.id = 0;
+  properties->location.id =
+      index < sizeof(handle_devices) / sizeof(handle_devices[0])
+          ? handle_devices[index]
+          : 0;
   properties->requestedHandleTypes =
       index < sizeof(handle_types) / sizeof(handle_types[0])
           ? handle_types[index]
@@ -575,19 +822,59 @@ cuIpcGetMemHandle(CUipcMemHandle* handle, CUdeviceptr address)
 }
 
 CUresult CUDAAPI
+cuMulticastCreate(
+    CUmemGenericAllocationHandle* output,
+    const CUmulticastObjectProp* properties)
+{
+  unsigned int index = multicast_create_count++;
+
+  active_handle_count++;
+  active_multicast_count++;
+  *output = next_handle++;
+  if (index < sizeof(multicast_properties) / sizeof(multicast_properties[0])) {
+    multicast_properties[index] = *properties;
+    created_multicast_handles[index] = *output;
+  }
+  record_multicast_event('c');
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuMulticastAddDevice(
+    CUmemGenericAllocationHandle handle, CUdevice device)
+{
+  if (!real_handle(handle))
+    return CUDA_ERROR_INVALID_HANDLE;
+  if (multicast_add_count <
+      sizeof(multicast_devices) / sizeof(multicast_devices[0]))
+    multicast_devices[multicast_add_count] = device;
+  multicast_add_count++;
+  record_multicast_event('a');
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
 cuMulticastBindMem(
     CUmemGenericAllocationHandle multicast_handle, size_t multicast_offset,
     CUmemGenericAllocationHandle memory_handle, size_t memory_offset,
     size_t size, unsigned long long flags)
 {
-  (void)multicast_handle;
-  (void)multicast_offset;
-  (void)memory_offset;
-  (void)size;
-  (void)flags;
-  if (!real_handle(memory_handle))
+  if (!real_handle(multicast_handle) || !real_handle(memory_handle))
     return CUDA_ERROR_INVALID_HANDLE;
+  if (multicast_bind_count <
+      sizeof(multicast_handles) / sizeof(multicast_handles[0])) {
+    multicast_handles[multicast_bind_count] = multicast_handle;
+    multicast_memory_handles[multicast_bind_count] = memory_handle;
+    multicast_offsets[multicast_bind_count] = multicast_offset;
+    multicast_memory_offsets[multicast_bind_count] = memory_offset;
+    multicast_sizes[multicast_bind_count] = size;
+    multicast_flags[multicast_bind_count] = flags;
+    multicast_bind_devices[multicast_bind_count] = -1;
+    multicast_bind_active[multicast_bind_count] = true;
+  }
   multicast_bind_count++;
+  active_multicast_bind_count++;
+  record_multicast_event('b');
   return CUDA_SUCCESS;
 }
 
@@ -598,12 +885,47 @@ cuMulticastBindMem_v2(
     size_t multicast_offset, CUmemGenericAllocationHandle memory_handle,
     size_t memory_offset, size_t size, unsigned long long flags)
 {
-  (void)device;
-  return cuMulticastBindMem(
+  CUresult result = cuMulticastBindMem(
       multicast_handle, multicast_offset, memory_handle, memory_offset, size,
       flags);
+  if (result == CUDA_SUCCESS &&
+      multicast_bind_count <=
+          sizeof(multicast_bind_devices) / sizeof(multicast_bind_devices[0]))
+    multicast_bind_devices[multicast_bind_count - 1] = device;
+  return result;
 }
 #endif
+
+CUresult CUDAAPI
+cuMulticastUnbind(
+    CUmemGenericAllocationHandle multicast_handle, CUdevice device,
+    size_t multicast_offset, size_t size)
+{
+  (void)device;
+  (void)multicast_offset;
+  (void)size;
+  if (!real_handle(multicast_handle))
+    return CUDA_ERROR_INVALID_HANDLE;
+  if (multicast_unbind_count <
+      sizeof(multicast_unbind_handles) /
+          sizeof(multicast_unbind_handles[0])) {
+    multicast_unbind_handles[multicast_unbind_count] = multicast_handle;
+    multicast_unbind_devices[multicast_unbind_count] = device;
+    multicast_unbind_offsets[multicast_unbind_count] = multicast_offset;
+    multicast_unbind_sizes[multicast_unbind_count] = size;
+  }
+  multicast_unbind_count++;
+  for (size_t index = 0; index < multicast_bind_count; index++) {
+    if (multicast_bind_active[index] &&
+        multicast_handles[index] == multicast_handle) {
+      multicast_bind_active[index] = false;
+      active_multicast_bind_count--;
+      break;
+    }
+  }
+  record_multicast_event('u');
+  return CUDA_SUCCESS;
+}
 
 void*
 fake_cuda_ipc_entry(void)
@@ -676,6 +998,24 @@ cuGetProcAddress_v2(
     *output = (void*)&cuMemcpyDtoH_v2;
   else if (strcmp(symbol, "cuMemcpyHtoD_v2") == 0)
     *output = (void*)&cuMemcpyHtoD_v2;
+  else if (strcmp(symbol, "cuMulticastCreate") == 0)
+    *output = (void*)&cuMulticastCreate;
+  else if (strcmp(symbol, "cuMulticastAddDevice") == 0)
+    *output = (void*)&cuMulticastAddDevice;
+  else if (strcmp(symbol, "cuMulticastUnbind") == 0)
+    *output = (void*)&cuMulticastUnbind;
+  else if (strcmp(symbol, "cuMulticastBindAddr") == 0) {
+#if CUDA_VERSION >= 13010
+    if (version >= 13010)
+      *output = (void*)&cuMulticastBindAddr_v2;
+    else
+#endif
+      *output = (void*)&cuMulticastBindAddr;
+  }
+#if CUDA_VERSION >= 13010
+  else if (strcmp(symbol, "cuMulticastBindAddr_v2") == 0)
+    *output = (void*)&cuMulticastBindAddr_v2;
+#endif
   else if (strcmp(symbol, "cuMulticastBindMem") == 0) {
 #if CUDA_VERSION >= 13010
     if (version >= 13010)

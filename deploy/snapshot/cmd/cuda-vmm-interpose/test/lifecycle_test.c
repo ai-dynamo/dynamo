@@ -30,6 +30,7 @@ CUdevice fake_cuda_create_device(unsigned int);
 void fake_cuda_set_device_count(int);
 void fake_cuda_set_device_handle(int, CUdevice);
 void fake_cuda_set_device_identity(CUdevice, CUdevice);
+void fake_cuda_set_import_device(CUdevice);
 unsigned int fake_cuda_device_get_calls(void);
 unsigned int fake_cuda_device_uuid_calls(void);
 unsigned int fake_cuda_device_count_calls(void);
@@ -41,6 +42,24 @@ unsigned int fake_cuda_logical_forward_count(void);
 unsigned int fake_cuda_active_handle_count(void);
 unsigned int fake_cuda_active_mapping_count(void);
 unsigned int fake_cuda_multicast_bind_count(void);
+unsigned int fake_cuda_multicast_create_count(void);
+unsigned int fake_cuda_multicast_add_count(void);
+unsigned int fake_cuda_multicast_unbind_count(void);
+unsigned int fake_cuda_active_multicast_count(void);
+unsigned int fake_cuda_active_multicast_bind_count(void);
+char fake_cuda_multicast_event(unsigned int);
+unsigned int fake_cuda_multicast_event_count(void);
+CUmemGenericAllocationHandle fake_cuda_multicast_handle(unsigned int);
+CUmemGenericAllocationHandle fake_cuda_multicast_memory_handle(unsigned int);
+size_t fake_cuda_multicast_offset(unsigned int);
+size_t fake_cuda_multicast_memory_offset(unsigned int);
+size_t fake_cuda_multicast_size(unsigned int);
+unsigned long long fake_cuda_multicast_flags(unsigned int);
+CUdevice fake_cuda_multicast_bind_device(unsigned int);
+CUmemGenericAllocationHandle fake_cuda_multicast_unbind_handle(unsigned int);
+CUdevice fake_cuda_multicast_unbind_device(unsigned int);
+size_t fake_cuda_multicast_unbind_offset(unsigned int);
+size_t fake_cuda_multicast_unbind_size(unsigned int);
 CUmemGenericAllocationHandle fake_cuda_last_consumed_handle(void);
 CUcontext fake_cuda_last_context(void);
 int fake_cuda_last_exported_fd(void);
@@ -64,8 +83,21 @@ static char coordinator_participant[DYN_VMM_PARTICIPANT_ID_SIZE];
 static void establish_mapping(CUmemGenericAllocationHandle*, int*, CUdeviceptr);
 static void establish_fabric_mapping(CUmemGenericAllocationHandle*, struct dyn_vmm_fabric_token*, CUdeviceptr);
 static int fabric_token_is_valid(const struct dyn_vmm_fabric_token*);
+static void require(int, const char*);
 static struct dyn_vmm_header exchange_fd(
     const struct dyn_vmm_header*, const void*, void**, int, int*, int);
+
+static void
+fail_next_response_send(void)
+{
+  typedef int (*function_type)(void);
+  function_type function = (function_type)dlsym(
+      RTLD_DEFAULT, "dyn_vmm_test_fail_next_response_send");
+
+  require(
+      function != NULL && function() == 0,
+      "cannot arm response-send failure test seam");
+}
 
 static void
 require(int condition, const char* message)
@@ -358,6 +390,47 @@ connect_control(void)
   return client;
 }
 
+static void
+send_without_response(
+    const struct dyn_vmm_header* request, const void* payload, int passed_fd)
+{
+  struct dyn_vmm_header bound_request = *request;
+  char control[CMSG_SPACE(sizeof(int))] = {0};
+  struct iovec vector = {
+      .iov_base = &bound_request,
+      .iov_len = sizeof(bound_request),
+  };
+  struct msghdr message = {
+      .msg_iov = &vector,
+      .msg_iovlen = 1,
+  };
+  int client = connect_control();
+
+  memcpy(
+      bound_request.participant_id, coordinator_participant,
+      sizeof(bound_request.participant_id));
+  if (passed_fd >= 0) {
+    struct cmsghdr* item;
+
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    item = CMSG_FIRSTHDR(&message);
+    item->cmsg_level = SOL_SOCKET;
+    item->cmsg_type = SCM_RIGHTS;
+    item->cmsg_len = CMSG_LEN(sizeof(passed_fd));
+    memcpy(CMSG_DATA(item), &passed_fd, sizeof(passed_fd));
+  }
+  require(
+      sendmsg(client, &message, 0) == (ssize_t)sizeof(bound_request),
+      "cannot send no-response VMM request header");
+  if (request->payload_size != 0)
+    require(
+        write(client, payload, (size_t)request->payload_size) ==
+            (ssize_t)request->payload_size,
+        "cannot send no-response VMM request payload");
+  close(client);
+}
+
 static struct dyn_vmm_header
 exchange_fd(
     const struct dyn_vmm_header* request, const void* payload,
@@ -551,15 +624,15 @@ test_control_request_validation(void)
   (void)exchange_header_only(request, -1);
 
   request.payload_size = 0;
-  request.reserved = 1;
+  request.object_kind = DYN_VMM_ALLOCATION;
   (void)exchange_header_only(request, -1);
 
-  request.reserved = 0;
+  request.object_kind = 0;
   request.version = DYN_VMM_VERSION - 1;
   (void)exchange_header_only(request, -1);
 
   request.version = DYN_VMM_VERSION;
-  request.reserved = 0;
+  request.object_kind = 0;
   request.reserved_identity[0] = 1;
   (void)exchange_header_only(request, -1);
 
@@ -584,6 +657,7 @@ test_control_request_validation(void)
   request.version = DYN_VMM_VERSION;
   request.operation = DYN_VMM_RESTORE_OWNER;
   request.handle_type = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  request.object_kind = DYN_VMM_ALLOCATION;
   request.object_id = 1;
   request.payload_size = sizeof(struct dyn_vmm_record) +
       sizeof(CUmemAllocationProp) + sizeof(CUmemAccessDesc);
@@ -642,9 +716,9 @@ test_control_request_validation(void)
 }
 
 static void
-establish_mapping(
+establish_mapping_on_device(
     CUmemGenericAllocationHandle* logical, int* export_fd,
-    CUdeviceptr address)
+    CUdeviceptr address, CUdevice device)
 {
   CUmemAllocationProp properties;
   CUmemAccessDesc access;
@@ -652,7 +726,7 @@ establish_mapping(
   memset(&properties, 0, sizeof(properties));
   properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
   properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  properties.location.id = 0;
+  properties.location.id = device;
   properties.requestedHandleTypes =
       CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
   memset(&access, 0, sizeof(access));
@@ -666,6 +740,14 @@ establish_mapping(
               export_fd, *logical,
               CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0) == CUDA_SUCCESS,
       "cannot establish managed mapping");
+}
+
+static void
+establish_mapping(
+    CUmemGenericAllocationHandle* logical, int* export_fd,
+    CUdeviceptr address)
+{
+  establish_mapping_on_device(logical, export_fd, address, 0);
 }
 
 static void
@@ -1034,6 +1116,40 @@ restore_payload(
   return payload;
 }
 
+static size_t
+vmm_record_size(const struct dyn_vmm_record* record)
+{
+  return sizeof(*record) + record->properties_size +
+      (size_t)record->access_count * record->access_size +
+      (record->object_kind == DYN_VMM_MULTICAST
+           ? sizeof(struct dyn_vmm_multicast_record)
+           : 0);
+}
+
+static void*
+restore_multicast_payload(
+    const struct dyn_vmm_record* record, size_t* payload_size,
+    uint64_t object_id, uint64_t backing_object_id)
+{
+  struct dyn_vmm_record* restored;
+  struct dyn_vmm_multicast_record* multicast;
+  size_t extension_offset = sizeof(*record) + record->properties_size +
+      (size_t)record->access_count * record->access_size;
+
+  *payload_size = extension_offset + sizeof(*multicast);
+  restored = malloc(*payload_size);
+  require(restored != NULL, "cannot allocate multicast restore payload");
+  memcpy(restored, record, *payload_size);
+  restored->object_id = object_id;
+  multicast = (struct dyn_vmm_multicast_record*)(
+      (char*)restored + extension_offset);
+  memset(
+      multicast->backing_allocation_uuid, 0,
+      sizeof(multicast->backing_allocation_uuid));
+  multicast->backing_object_id = backing_object_id;
+  return restored;
+}
+
 static void
 test_owner_restore_failure(const char* stage)
 {
@@ -1066,6 +1182,7 @@ test_owner_restore_failure(const char* stage)
   request.version = DYN_VMM_VERSION;
   request.operation = DYN_VMM_RESTORE_OWNER;
   request.handle_type = record->requested_handle_type;
+  request.object_kind = DYN_VMM_ALLOCATION;
   request.object_id = 1;
   request.payload_size = payload_size;
   response = exchange_fd(
@@ -1160,6 +1277,7 @@ test_importer_restore_failure(const char* stage)
   request.version = DYN_VMM_VERSION;
   request.operation = DYN_VMM_RESTORE_OWNER;
   request.handle_type = owner_record->requested_handle_type;
+  request.object_kind = DYN_VMM_ALLOCATION;
   request.object_id = 1;
   request.payload_size = owner_payload_size;
   (void)exchange(
@@ -1322,6 +1440,7 @@ test_owner_importer_success(void)
   request.version = DYN_VMM_VERSION;
   request.operation = DYN_VMM_RESTORE_OWNER;
   request.handle_type = owner_record->requested_handle_type;
+  request.object_kind = DYN_VMM_ALLOCATION;
   request.object_id = 1;
   request.payload_size = owner_payload_size;
   (void)exchange(
@@ -1397,6 +1516,486 @@ test_owner_importer_success(void)
   free(importer_payload);
   free(owner_payload);
   free(owner_bytes);
+  free(inspect_payload);
+}
+
+static void
+test_mnnvl_multicast_teardown(void)
+{
+  CUmemGenericAllocationHandle backing;
+  CUmemGenericAllocationHandle multicast;
+  CUmulticastObjectProp multicast_properties;
+  CUmemAccessDesc access;
+  int capability;
+  void* ignored;
+  int received_fd;
+  struct dyn_vmm_header response;
+  struct dyn_vmm_header identify = {
+      .magic = DYN_VMM_MAGIC,
+      .version = DYN_VMM_VERSION,
+      .operation = DYN_VMM_IDENTIFY,
+  };
+
+  fake_cuda_set_device_count(1);
+  establish_mapping(&backing, &capability, 0x100000);
+  memset(&multicast_properties, 0, sizeof(multicast_properties));
+  multicast_properties.handleTypes =
+      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  multicast_properties.size = 4096;
+  multicast_properties.numDevices = 1;
+  memset(&access, 0, sizeof(access));
+  access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  access.location.id = 0;
+  access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  require(
+      cuMulticastCreate(&multicast, &multicast_properties) == CUDA_SUCCESS &&
+          cuMulticastAddDevice(multicast, 0) == CUDA_SUCCESS &&
+          cuMemMap(0x200000, 4096, 0, multicast, 0) == CUDA_SUCCESS &&
+          cuMemSetAccess(0x200000, 4096, &access, 1) == CUDA_SUCCESS &&
+          cuMulticastBindMem(multicast, 0, backing, 0, 4096, 0) ==
+              CUDA_SUCCESS,
+      "cannot establish MNNVL-style multicast mapping");
+  require(
+      cuMemUnmap(0x200000, 4096) == CUDA_SUCCESS &&
+          cuMemRelease(multicast) == CUDA_SUCCESS &&
+          fake_cuda_active_multicast_count() == 0 &&
+          fake_cuda_active_multicast_bind_count() == 0 &&
+          fake_cuda_multicast_unbind_count() == 0,
+      "MNNVL-style multicast release required an explicit unbind or leaked state");
+  (void)exchange(&identify, NULL, &ignored, &received_fd);
+  require(
+      received_fd < 0, "MNNVL-style multicast teardown poisoned the shim");
+  identify.operation = DYN_VMM_INSPECT;
+  response = exchange(&identify, NULL, &ignored, &received_fd);
+  require(
+      response.count == 1 && received_fd < 0 && ignored != NULL,
+      "released MNNVL multicast logical object remained in shim state");
+  free(ignored);
+  close(capability);
+  require(
+      cuMemUnmap(0x100000, 4096) == CUDA_SUCCESS &&
+          cuMemRelease(backing) == CUDA_SUCCESS,
+      "cannot clean up MNNVL multicast backing allocation");
+}
+
+static void
+test_multicast_restore(
+    bool fail_second_bind, bool fail_importer_response,
+    bool fail_binding_response, bool abort_after_first_bind)
+{
+  CUmemGenericAllocationHandle backing_owner;
+  CUmemGenericAllocationHandle backing_importer;
+  CUmemGenericAllocationHandle multicast_owner;
+  CUmemGenericAllocationHandle multicast_importer;
+  CUmulticastObjectProp multicast_properties;
+  CUmemAccessDesc access;
+  struct dyn_vmm_header request = {
+      .magic = DYN_VMM_MAGIC,
+      .version = DYN_VMM_VERSION,
+      .operation = DYN_VMM_INSPECT,
+  };
+  struct dyn_vmm_header response;
+  struct dyn_vmm_record* backing_owner_record = NULL;
+  struct dyn_vmm_record* backing_importer_record = NULL;
+  struct dyn_vmm_record* multicast_owner_record = NULL;
+  struct dyn_vmm_record* multicast_importer_record = NULL;
+  struct dyn_vmm_multicast_record* owner_bind;
+  struct dyn_vmm_multicast_record* importer_bind;
+  char* cursor;
+  void* inspect_payload;
+  void* payload;
+  void* ignored;
+  size_t payload_size;
+  size_t record_size;
+  unsigned int replay_bind;
+  unsigned int replay_event;
+  int backing_capability;
+  int multicast_capability;
+  int broker_fd;
+  int received_fd;
+
+  fake_cuda_set_device_count(2);
+  establish_mapping(&backing_owner, &backing_capability, 0x100000);
+  fake_cuda_set_import_device(1);
+  require(
+      cuMemImportFromShareableHandle(
+          &backing_importer, (void*)(uintptr_t)backing_capability,
+          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) == CUDA_SUCCESS,
+      "cannot import multicast backing allocation");
+  close(backing_capability);
+  memset(&access, 0, sizeof(access));
+  access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  access.location.id = 1;
+  access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  require(
+      cuMemMap(0x200000, 4096, 0, backing_importer, 0) == CUDA_SUCCESS &&
+          cuMemSetAccess(0x200000, 4096, &access, 1) == CUDA_SUCCESS,
+      "cannot map multicast backing importer");
+
+  memset(&multicast_properties, 0, sizeof(multicast_properties));
+  multicast_properties.handleTypes =
+      CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  multicast_properties.size = 4096;
+  multicast_properties.numDevices = 2;
+  require(
+      cuMulticastCreate(&multicast_owner, &multicast_properties) ==
+              CUDA_SUCCESS &&
+          cuMemExportToShareableHandle(
+              &multicast_capability, multicast_owner,
+              CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0) == CUDA_SUCCESS &&
+          cuMemImportFromShareableHandle(
+              &multicast_importer, (void*)(uintptr_t)multicast_capability,
+              CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) == CUDA_SUCCESS,
+      "cannot create and share managed multicast object");
+  close(multicast_capability);
+  require(
+      cuMulticastAddDevice(multicast_owner, 0) == CUDA_SUCCESS &&
+          cuMulticastAddDevice(multicast_importer, 1) == CUDA_SUCCESS,
+      "cannot add multicast members");
+  access.location.id = 0;
+  require(
+      cuMemMap(0x300000, 4096, 0, multicast_owner, 0) == CUDA_SUCCESS &&
+          cuMemSetAccess(0x300000, 4096, &access, 1) == CUDA_SUCCESS,
+      "cannot map multicast owner before bind");
+  access.location.id = 1;
+  require(
+      cuMemMap(0x400000, 4096, 0, multicast_importer, 0) == CUDA_SUCCESS &&
+          cuMemSetAccess(0x400000, 4096, &access, 1) == CUDA_SUCCESS,
+      "cannot map multicast importer before bind");
+  require(
+      cuMulticastBindMem(
+          multicast_owner, 0, backing_owner, 0, 4096, 0) == CUDA_SUCCESS,
+      "cannot bind multicast owner");
+#if CUDA_VERSION >= 13010
+  require(
+      cuMulticastBindMem_v2(
+          multicast_importer, 1, 0, backing_importer, 0, 4096, 0) ==
+          CUDA_SUCCESS,
+      "cannot bind multicast importer with v2");
+#else
+  require(
+      cuMulticastBindMem(
+          multicast_importer, 0, backing_importer, 0, 4096, 0) ==
+          CUDA_SUCCESS,
+      "cannot bind multicast importer");
+#endif
+  require(
+      cuMemRelease(backing_owner) == CUDA_SUCCESS &&
+          cuMemRelease(backing_importer) == CUDA_SUCCESS,
+      "cannot release multicast backing handles");
+
+  response = exchange(&request, NULL, &inspect_payload, &received_fd);
+  require(
+      response.count == 4 && received_fd < 0,
+      "multicast inspect did not return the complete graph");
+  cursor = inspect_payload;
+  for (uint32_t index = 0; index < response.count; index++) {
+    struct dyn_vmm_record* record = (struct dyn_vmm_record*)cursor;
+
+    record_size = vmm_record_size(record);
+    require(
+        cursor + record_size <=
+            (char*)inspect_payload + response.payload_size,
+        "multicast inspect returned invalid record lengths");
+    if (record->object_kind == DYN_VMM_ALLOCATION &&
+        record->role == DYN_VMM_OWNER)
+      backing_owner_record = record;
+    else if (record->object_kind == DYN_VMM_ALLOCATION &&
+             record->role == DYN_VMM_IMPORTER)
+      backing_importer_record = record;
+    else if (record->object_kind == DYN_VMM_MULTICAST &&
+             record->role == DYN_VMM_OWNER)
+      multicast_owner_record = record;
+    else if (record->object_kind == DYN_VMM_MULTICAST &&
+             record->role == DYN_VMM_IMPORTER)
+      multicast_importer_record = record;
+    cursor += record_size;
+  }
+  require(
+      cursor == (char*)inspect_payload + response.payload_size &&
+          backing_owner_record != NULL &&
+          backing_importer_record != NULL &&
+          multicast_owner_record != NULL &&
+          multicast_importer_record != NULL &&
+          backing_owner_record->flags == 0 &&
+          backing_importer_record->flags == 0 &&
+          multicast_owner_record->flags == DYN_VMM_APPLICATION_HANDLE_LIVE &&
+          multicast_importer_record->flags ==
+              DYN_VMM_APPLICATION_HANDLE_LIVE,
+      "multicast inspect returned incomplete roles or handle state");
+  owner_bind = (struct dyn_vmm_multicast_record*)(
+      (char*)multicast_owner_record + sizeof(*multicast_owner_record) +
+      multicast_owner_record->properties_size +
+      (size_t)multicast_owner_record->access_count *
+          multicast_owner_record->access_size);
+  importer_bind = (struct dyn_vmm_multicast_record*)(
+      (char*)multicast_importer_record + sizeof(*multicast_importer_record) +
+      multicast_importer_record->properties_size +
+      (size_t)multicast_importer_record->access_count *
+          multicast_importer_record->access_size);
+  require(
+      memcmp(
+          owner_bind->backing_allocation_uuid,
+          backing_owner_record->allocation_uuid,
+          sizeof(owner_bind->backing_allocation_uuid)) == 0 &&
+          owner_bind->backing_role == DYN_VMM_OWNER &&
+          memcmp(
+              importer_bind->backing_allocation_uuid,
+              backing_importer_record->allocation_uuid,
+              sizeof(importer_bind->backing_allocation_uuid)) == 0 &&
+          importer_bind->backing_role == DYN_VMM_IMPORTER &&
+          owner_bind->bind_size == 4096 &&
+          importer_bind->bind_size == 4096 &&
+          owner_bind->bind_api == DYN_VMM_MULTICAST_BIND_MEM &&
+          importer_bind->bind_api ==
+#if CUDA_VERSION >= 13010
+              DYN_VMM_MULTICAST_BIND_MEM_V2,
+#else
+              DYN_VMM_MULTICAST_BIND_MEM,
+#endif
+      "multicast inspect lost exact backing bindings");
+
+  detach_record(
+      multicast_importer_record, DYN_VMM_DETACH_IMPORTS, 2);
+  detach_record(multicast_owner_record, DYN_VMM_DETACH_OWNERS, 2);
+  require(
+      fake_cuda_multicast_unbind_count() == 2 &&
+          fake_cuda_multicast_unbind_device(0) == 1 &&
+          fake_cuda_multicast_unbind_device(1) == 0 &&
+          fake_cuda_multicast_unbind_offset(0) == 0 &&
+          fake_cuda_multicast_unbind_offset(1) == 0 &&
+          fake_cuda_multicast_unbind_size(0) == 4096 &&
+          fake_cuda_multicast_unbind_size(1) == 4096,
+      "multicast detach did not unbind exact importer/owner ranges");
+  detach_record(backing_importer_record, DYN_VMM_DETACH_IMPORTS, 1);
+  detach_record(backing_owner_record, DYN_VMM_DETACH_OWNERS, 1);
+  require(
+      fake_cuda_active_handle_count() == 0 &&
+          fake_cuda_active_mapping_count() == 0 &&
+          fake_cuda_active_multicast_bind_count() == 0,
+      "multicast detach left active handles, mappings, or bindings");
+
+  payload = restore_payload(
+      backing_owner_record, backing_owner_record, &payload_size, 1, 1);
+  ((struct dyn_vmm_record*)payload)->flags |=
+      DYN_VMM_RETAIN_RESTORE_HANDLE;
+  memset(&request, 0, sizeof(request));
+  request.magic = DYN_VMM_MAGIC;
+  request.version = DYN_VMM_VERSION;
+  request.operation = DYN_VMM_RESTORE_OWNER;
+  request.handle_type = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  request.object_kind = DYN_VMM_ALLOCATION;
+  request.object_id = 1;
+  request.payload_size = payload_size;
+  (void)exchange(&request, payload, &ignored, &broker_fd);
+  free(payload);
+  require(broker_fd >= 0, "allocation owner replay returned no broker");
+
+  payload = restore_payload(
+      backing_importer_record, backing_importer_record, &payload_size, 1, 0);
+  ((struct dyn_vmm_record*)payload)->flags |=
+      DYN_VMM_RETAIN_RESTORE_HANDLE;
+  request.operation = DYN_VMM_RESTORE_IMPORT;
+  request.payload_size = payload_size;
+  (void)exchange_fd(
+      &request, payload, &ignored, broker_fd, &received_fd, 1);
+  free(payload);
+  close(broker_fd);
+  require(
+      received_fd < 0 && fake_cuda_active_handle_count() == 2 &&
+          fake_cuda_active_mapping_count() == 2,
+      "allocation replay did not retain both multicast backing handles");
+
+  replay_bind = fake_cuda_multicast_bind_count();
+  replay_event = fake_cuda_multicast_event_count();
+  payload = restore_multicast_payload(
+      multicast_owner_record, &payload_size, 2, 1);
+  request.operation = DYN_VMM_RESTORE_OWNER;
+  request.object_kind = DYN_VMM_MULTICAST;
+  request.object_id = 2;
+  request.payload_size = payload_size;
+  (void)exchange(&request, payload, &ignored, &broker_fd);
+  free(payload);
+  require(broker_fd >= 0, "multicast owner replay returned no broker");
+
+  payload = restore_multicast_payload(
+      multicast_importer_record, &payload_size, 2, 1);
+  request.operation = DYN_VMM_RESTORE_IMPORT;
+  request.payload_size = payload_size;
+  if (fail_importer_response) {
+    fail_next_response_send();
+    send_without_response(&request, payload, broker_fd);
+  } else {
+    (void)exchange_fd(
+        &request, payload, &ignored, broker_fd, &received_fd, 1);
+  }
+  free(payload);
+  close(broker_fd);
+  if (fail_importer_response) {
+    require_identify_failure("multicast importer restore failed");
+    require(
+        fake_cuda_active_handle_count() == 0 &&
+            fake_cuda_active_multicast_count() == 0 &&
+            fake_cuda_active_multicast_bind_count() == 0 &&
+            fake_cuda_active_mapping_count() == 2,
+        "multicast importer response failure leaked restored CUDA state");
+    free(inspect_payload);
+    return;
+  }
+  require(
+      received_fd < 0 &&
+          fake_cuda_multicast_bind_count() == replay_bind,
+      "multicast membership replay bound before every member was added");
+
+  request.operation = DYN_VMM_RESTORE_MULTICAST;
+  payload = restore_multicast_payload(
+      multicast_owner_record, &payload_size, 2, 1);
+  request.payload_size = payload_size;
+  response = exchange_fd(
+      &request, payload, &ignored, -1, &received_fd, 1);
+  free(payload);
+  require(
+      response.status == 0 && received_fd < 0 &&
+          fake_cuda_multicast_bind_count() == replay_bind + 1,
+      "multicast owner binding replay failed");
+  if (abort_after_first_bind) {
+    memset(&request, 0, sizeof(request));
+    request.magic = DYN_VMM_MAGIC;
+    request.version = DYN_VMM_VERSION;
+    request.operation = DYN_VMM_ABORT_RESTORE;
+    (void)exchange(&request, NULL, &ignored, &received_fd);
+    (void)exchange(&request, NULL, &ignored, &received_fd);
+    require(
+        received_fd < 0 && fake_cuda_active_handle_count() == 0 &&
+            fake_cuda_active_multicast_count() == 0 &&
+            fake_cuda_active_multicast_bind_count() == 0 &&
+            fake_cuda_active_mapping_count() == 2,
+        "multicast restore abort leaked successfully replayed CUDA state");
+    require_identify_failure("multicast restore aborted");
+    free(inspect_payload);
+    return;
+  }
+  if (fail_second_bind)
+    require(
+        setenv(
+            "DYN_SNAPSHOT_CUDA_VMM_FAIL_STAGE", "multicast-bind", 1) == 0,
+        "cannot configure multicast replay failure");
+  request.operation = DYN_VMM_RESTORE_MULTICAST;
+  {
+    void* importer_replay = restore_multicast_payload(
+        multicast_importer_record, &payload_size, 2, 1);
+
+    request.payload_size = payload_size;
+    if (fail_binding_response) {
+      fail_next_response_send();
+      send_without_response(&request, importer_replay, -1);
+    } else {
+      response = exchange_fd(
+          &request, importer_replay, &ignored, -1, &received_fd,
+          !fail_second_bind);
+    }
+    free(importer_replay);
+  }
+  if (fail_binding_response) {
+    require_identify_failure("multicast binding restore failed");
+    require(
+        fake_cuda_active_handle_count() == 0 &&
+            fake_cuda_active_multicast_count() == 0 &&
+            fake_cuda_active_multicast_bind_count() == 0 &&
+            fake_cuda_active_mapping_count() == 2,
+        "multicast binding response failure leaked restored CUDA state");
+    free(inspect_payload);
+    return;
+  }
+  if (fail_second_bind) {
+    require(
+        response.status != 0 && received_fd < 0 &&
+            fake_cuda_active_handle_count() == 0 &&
+            fake_cuda_active_multicast_count() == 0 &&
+            fake_cuda_active_multicast_bind_count() == 0 &&
+            fake_cuda_active_mapping_count() == 2,
+        "partial multicast replay rollback leaked transient handles");
+    require_identify_failure("multicast binding restore failed");
+    memset(&request, 0, sizeof(request));
+    request.magic = DYN_VMM_MAGIC;
+    request.version = DYN_VMM_VERSION;
+    request.operation = DYN_VMM_ABORT_RESTORE;
+    (void)exchange(&request, NULL, &ignored, &received_fd);
+    (void)exchange(&request, NULL, &ignored, &received_fd);
+    require(
+        received_fd < 0 && fake_cuda_active_handle_count() == 0 &&
+            fake_cuda_active_multicast_count() == 0 &&
+            fake_cuda_active_multicast_bind_count() == 0 &&
+            fake_cuda_active_mapping_count() == 2,
+        "repeated multicast restore abort was not idempotent");
+    free(inspect_payload);
+    return;
+  }
+  require(
+      response.status == 0 && received_fd < 0 &&
+          fake_cuda_multicast_bind_count() == replay_bind + 2 &&
+          fake_cuda_multicast_offset(replay_bind) == 0 &&
+          fake_cuda_multicast_offset(replay_bind + 1) == 0 &&
+          fake_cuda_multicast_memory_offset(replay_bind) == 0 &&
+          fake_cuda_multicast_memory_offset(replay_bind + 1) == 0 &&
+          fake_cuda_multicast_size(replay_bind) == 4096 &&
+          fake_cuda_multicast_size(replay_bind + 1) == 4096 &&
+          fake_cuda_multicast_flags(replay_bind) == 0 &&
+          fake_cuda_multicast_flags(replay_bind + 1) == 0 &&
+          fake_cuda_multicast_handle(replay_bind) != 0 &&
+          fake_cuda_multicast_handle(replay_bind + 1) != 0 &&
+          fake_cuda_multicast_memory_handle(replay_bind) != 0 &&
+          fake_cuda_multicast_memory_handle(replay_bind + 1) != 0 &&
+          fake_cuda_logical_forward_count() == 0,
+      "multicast replay changed exact bind arguments or forwarded a logical handle");
+#if CUDA_VERSION >= 13010
+  require(
+      fake_cuda_multicast_bind_device(replay_bind) == -1 &&
+          fake_cuda_multicast_bind_device(replay_bind + 1) == 1,
+      "multicast v2 replay did not preserve the recorded member device");
+#endif
+  require(
+      fake_cuda_multicast_event_count() == replay_event + 9 &&
+          fake_cuda_multicast_event(replay_event + 0) == 'c' &&
+          fake_cuda_multicast_event(replay_event + 1) == 'a' &&
+          fake_cuda_multicast_event(replay_event + 2) == 'a' &&
+          fake_cuda_multicast_event(replay_event + 3) == 'b' &&
+          fake_cuda_multicast_event(replay_event + 4) == 'm' &&
+          fake_cuda_multicast_event(replay_event + 5) == 'x' &&
+          fake_cuda_multicast_event(replay_event + 6) == 'b' &&
+          fake_cuda_multicast_event(replay_event + 7) == 'm' &&
+          fake_cuda_multicast_event(replay_event + 8) == 'x',
+      "multicast UMD ordering was not create/add-all/bind/map/access");
+
+  memset(&request, 0, sizeof(request));
+  request.magic = DYN_VMM_MAGIC;
+  request.version = DYN_VMM_VERSION;
+  request.operation = DYN_VMM_FINALIZE_RESTORE;
+  (void)exchange(&request, NULL, &ignored, &received_fd);
+  require(
+      received_fd < 0 && fake_cuda_active_handle_count() == 2 &&
+          fake_cuda_active_mapping_count() == 4 &&
+          fake_cuda_active_multicast_bind_count() == 2,
+      "multicast finalize did not release only temporary backing handles");
+  request.operation = DYN_VMM_IDENTIFY;
+  (void)exchange(&request, NULL, &ignored, &received_fd);
+
+  require(
+      cuMulticastUnbind(multicast_owner, 0, 0, 4096) == CUDA_SUCCESS &&
+          cuMulticastUnbind(multicast_importer, 1, 0, 4096) ==
+              CUDA_SUCCESS &&
+          cuMemUnmap(0x300000, 4096) == CUDA_SUCCESS &&
+          cuMemUnmap(0x400000, 4096) == CUDA_SUCCESS &&
+          cuMemRelease(multicast_owner) == CUDA_SUCCESS &&
+          cuMemRelease(multicast_importer) == CUDA_SUCCESS &&
+          cuMemUnmap(0x100000, 4096) == CUDA_SUCCESS &&
+          cuMemUnmap(0x200000, 4096) == CUDA_SUCCESS &&
+          fake_cuda_active_handle_count() == 0 &&
+          fake_cuda_active_mapping_count() == 0 &&
+          fake_cuda_active_multicast_count() == 0 &&
+          fake_cuda_active_multicast_bind_count() == 0 &&
+          fake_cuda_logical_forward_count() == 0,
+      "restored multicast teardown leaked state or forwarded logical handles");
   free(inspect_payload);
 }
 
@@ -1484,6 +2083,7 @@ test_fabric_owner_importer_restore(bool fail_import, bool reindex)
   request.version = DYN_VMM_VERSION;
   request.operation = DYN_VMM_RESTORE_OWNER;
   request.handle_type = CU_MEM_HANDLE_TYPE_FABRIC;
+  request.object_kind = DYN_VMM_ALLOCATION;
   request.object_id = 1;
   request.payload_size = owner_payload_size;
   response = exchange(&request, owner_payload, &broker_bytes, &received_fd);
@@ -1771,7 +2371,7 @@ test_invalid_fabric_token(const char* shape)
   } else if (strcmp(shape, "zero-pid") == 0) {
     token.owner_namespace_pid = 0;
   } else if (strcmp(shape, "reserved") == 0) {
-    token.reserved = 1;
+    token.object_kind = 99;
   } else if (strcmp(shape, "unavailable-owner") == 0) {
     token.owner_namespace_pid = INT_MAX;
   } else if (strcmp(shape, "raw") == 0) {
@@ -2148,6 +2748,30 @@ main(int argc, char** argv)
     test_owner_importer_success();
     return 0;
   }
+  if (argc == 2 && strcmp(argv[1], "multicast-success") == 0) {
+    test_multicast_restore(false, false, false, false);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "multicast-rollback") == 0) {
+    test_multicast_restore(true, false, false, false);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "multicast-abort") == 0) {
+    test_multicast_restore(false, false, false, true);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "multicast-importer-response-failure") == 0) {
+    test_multicast_restore(false, true, false, false);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "multicast-binding-response-failure") == 0) {
+    test_multicast_restore(false, false, true, false);
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[1], "mnnvl-multicast-teardown") == 0) {
+    test_mnnvl_multicast_teardown();
+    return 0;
+  }
   if (argc == 2 && strcmp(argv[1], "gpu-identity-capture") == 0) {
     test_gpu_identity_capture();
     return 0;
@@ -2262,6 +2886,7 @@ main(int argc, char** argv)
   request.version = DYN_VMM_VERSION;
   request.operation = DYN_VMM_RESTORE_OWNER;
   request.handle_type = record->requested_handle_type;
+  request.object_kind = DYN_VMM_ALLOCATION;
   request.object_id = 1;
   request.payload_size = metadata_size + record->size;
   (void)exchange(&request, restore_payload, &ignored, &received_fd);

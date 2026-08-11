@@ -52,6 +52,130 @@ func TestDetectVMMInterposeRequiresUniformLauncherScope(t *testing.T) {
 	}
 }
 
+func TestValidateVMMLedgerMulticastGraph(t *testing.T) {
+	const (
+		owner       = "11111111111111111111111111111111"
+		importer    = "22222222222222222222222222222222"
+		ownerGPU    = "00112233-4455-6677-8899-aabbccddeeff"
+		importerGPU = "ffeeddcc-bbaa-9988-7766-554433221100"
+		size        = uint64(4096)
+	)
+	mapping := func(participant, gpu string) vmmMapping {
+		return vmmMapping{
+			Participant:         participant,
+			Address:             0x1000,
+			Size:                size,
+			GPUUUID:             gpu,
+			RequestedHandleType: vmmHandleFabric,
+			Access:              []byte{1},
+			AccessCount:         1,
+			AccessSize:          1,
+		}
+	}
+	valid := func() vmmLedger {
+		allocationOwner := mapping(owner, ownerGPU)
+		allocationImporter := mapping(importer, importerGPU)
+		multicastOwner := mapping(owner, ownerGPU)
+		multicastOwner.Multicast = &vmmMulticastMapping{
+			BackingResourceID: 1,
+			BackingRole:       vmmOwner,
+			Size:              size,
+			BindAPI:           vmmMulticastBindMem,
+		}
+		multicastImporter := mapping(importer, importerGPU)
+		multicastImporter.Multicast = &vmmMulticastMapping{
+			BackingResourceID: 1,
+			BackingRole:       vmmImporter,
+			Size:              size,
+			BindAPI:           vmmMulticastBindMemV2,
+		}
+		return vmmLedger{
+			Version: vmmLedgerVersion,
+			Participants: []vmmParticipant{
+				{
+					ID: owner,
+					Placement: vmmPlacement{
+						Node: "node-a", GPUUUIDs: []string{ownerGPU},
+					},
+				},
+				{
+					ID: importer,
+					Placement: vmmPlacement{
+						Node: "node-a", GPUUUIDs: []string{importerGPU},
+					},
+				},
+			},
+			Resources: []vmmResource{
+				{
+					ID:        1,
+					Kind:      "allocation",
+					Owner:     allocationOwner,
+					Importers: []vmmMapping{allocationImporter},
+				},
+				{
+					ID:        2,
+					Kind:      "multicast",
+					Owner:     multicastOwner,
+					Importers: []vmmMapping{multicastImporter},
+					Multicast: &vmmMulticastProperties{
+						HandleTypes: vmmHandleFabric,
+						NumDevices:  2,
+						Size:        size,
+					},
+				},
+			},
+		}
+	}
+	if err := validateVMMLedger(valid()); err != nil {
+		t.Fatalf("valid multicast graph rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*vmmLedger)
+	}{
+		{
+			name: "unknown backing resource",
+			mutate: func(ledger *vmmLedger) {
+				ledger.Resources[1].Owner.Multicast.BackingResourceID = 3
+			},
+		},
+		{
+			name: "duplicate member GPU",
+			mutate: func(ledger *vmmLedger) {
+				ledger.Resources[1].Importers[0].GPUUUID = ownerGPU
+				ledger.Participants[1].Placement.GPUUUIDs[0] = ownerGPU
+			},
+		},
+		{
+			name: "partial bind",
+			mutate: func(ledger *vmmLedger) {
+				ledger.Resources[1].Owner.Multicast.Size--
+			},
+		},
+		{
+			name: "nonzero multicast offset",
+			mutate: func(ledger *vmmLedger) {
+				ledger.Resources[1].Owner.Multicast.MulticastOffset = 1
+			},
+		},
+		{
+			name: "duplicate participant bind role",
+			mutate: func(ledger *vmmLedger) {
+				ledger.Resources[1].Importers[0].Multicast.BackingRole = vmmOwner
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ledger := valid()
+			test.mutate(&ledger)
+			if err := validateVMMLedger(ledger); err == nil {
+				t.Fatal("malformed multicast graph was accepted")
+			}
+		})
+	}
+}
+
 func TestExchangeVMMRejectsNonemptySuccessBeforeReadingPayload(t *testing.T) {
 	const participant = "11111111111111111111111111111111"
 	path := filepath.Join(t.TempDir(), "vmm.sock")
@@ -318,6 +442,11 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 					header: vmmHeader{Operation: vmmSetPlacement},
 					fd:     -1,
 				}, nil
+			case vmmFinalizeRestore:
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmFinalizeRestore},
+					fd:     -1,
+				}, nil
 			case vmmRestoreOwner:
 				if request.header.HandleType != vmmHandleFabric ||
 					request.fd >= 0 {
@@ -333,6 +462,7 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 					header: vmmHeader{
 						Operation:  vmmRestoreOwner,
 						HandleType: vmmHandleFabric,
+						ObjectKind: vmmAllocation,
 					},
 					payload: append([]byte(nil), raw...),
 					fd:      -1,
@@ -390,6 +520,11 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 					header: vmmHeader{Operation: vmmRestoreImporter},
 					fd:     -1,
 				}, nil
+			case vmmFinalizeRestore:
+				return vmmResponse{
+					header: vmmHeader{Operation: vmmFinalizeRestore},
+					fd:     -1,
+				}, nil
 			case vmmIdentify:
 				return vmmResponse{
 					header: vmmHeader{
@@ -442,19 +577,20 @@ func TestRestoreVMMFabricTransport(t *testing.T) {
 	}
 }
 
-func TestVMMProtocolV4HandleTypeLayout(t *testing.T) {
+func TestVMMProtocolV5ObjectKindLayout(t *testing.T) {
 	encoded := encodeVMMHeader(vmmHeader{
 		Operation:  vmmRestoreOwner,
 		HandleType: vmmHandleFabric,
+		ObjectKind: vmmMulticast,
 	})
-	if got := binary.LittleEndian.Uint16(encoded[4:6]); got != 4 {
-		t.Fatalf("protocol version = %d, want 4", got)
+	if got := binary.LittleEndian.Uint16(encoded[4:6]); got != 5 {
+		t.Fatalf("protocol version = %d, want 5", got)
 	}
 	if got := binary.LittleEndian.Uint32(encoded[16:20]); got != vmmHandleFabric {
 		t.Fatalf("header handle type = %d, want %d", got, vmmHandleFabric)
 	}
-	if got := binary.LittleEndian.Uint32(encoded[20:24]); got != 0 {
-		t.Fatalf("header reserved word = %d, want 0", got)
+	if got := binary.LittleEndian.Uint32(encoded[20:24]); got != vmmMulticast {
+		t.Fatalf("header object kind = %d, want %d", got, vmmMulticast)
 	}
 	if len(encoded) != vmmHeaderSize {
 		t.Fatalf("header size = %d, want %d", len(encoded), vmmHeaderSize)
@@ -467,6 +603,12 @@ func TestVMMProtocolV4HandleTypeLayout(t *testing.T) {
 		t.Fatalf(
 			"decoded handle type = %d, want %d",
 			decoded.HandleType, vmmHandleFabric,
+		)
+	}
+	if decoded.ObjectKind != vmmMulticast {
+		t.Fatalf(
+			"decoded object kind = %d, want %d",
+			decoded.ObjectKind, vmmMulticast,
 		)
 	}
 	encoded[255] = 1
@@ -560,11 +702,16 @@ func TestVMMBrokerResultShapesAndCleanup(t *testing.T) {
 	t.Run("fabric", func(t *testing.T) {
 		raw := bytes.Repeat([]byte{0xa5}, vmmFabricHandleSize)
 		response := vmmResponse{
-			header:  vmmHeader{HandleType: vmmHandleFabric},
+			header: vmmHeader{
+				HandleType: vmmHandleFabric,
+				ObjectKind: vmmAllocation,
+			},
 			payload: raw,
 			fd:      -1,
 		}
-		result, err := takeVMMBrokerResult(&response, vmmHandleFabric)
+		result, err := takeVMMBrokerResult(
+			&response, vmmHandleFabric, vmmAllocation,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -585,12 +732,15 @@ func TestVMMBrokerResultShapesAndCleanup(t *testing.T) {
 		}
 		payload := []byte{1}
 		response := vmmResponse{
-			header:  vmmHeader{HandleType: vmmHandlePOSIX},
+			header: vmmHeader{
+				HandleType: vmmHandlePOSIX,
+				ObjectKind: vmmAllocation,
+			},
 			payload: payload,
 			fd:      fd,
 		}
 		if _, err := takeVMMBrokerResult(
-			&response, vmmHandlePOSIX,
+			&response, vmmHandlePOSIX, vmmAllocation,
 		); err == nil {
 			t.Fatal("POSIX broker response with payload was accepted")
 		}
@@ -785,6 +935,85 @@ func TestVMMStateDigestBindsMetadataAndBytes(t *testing.T) {
 	}
 	if baseline == digest([]byte("ledger"), []byte("changed")) {
 		t.Fatal("digest did not bind allocation contents")
+	}
+}
+
+func TestVMMDurableMulticastMetadataBindsDigestWithoutRuntimeIdentity(t *testing.T) {
+	ledger := vmmLedger{
+		Version:    vmmLedgerVersion,
+		Generation: "00112233445566778899aabbccddeeff",
+		Resources: []vmmResource{
+			{
+				ID:   1,
+				Kind: "allocation",
+			},
+			{
+				ID:   2,
+				Kind: "multicast",
+				Owner: vmmMapping{
+					Participant:         "11111111111111111111111111111111",
+					RequestedHandleType: vmmHandleFabric,
+					Multicast: &vmmMulticastMapping{
+						BackingResourceID: 1,
+						BackingRole:       vmmOwner,
+						Size:              4096,
+						BindAPI:           vmmMulticastBindMem,
+						backingUUID:       [16]byte{0xaa},
+					},
+					retainRestoreHandle: true,
+				},
+				Multicast: &vmmMulticastProperties{
+					HandleTypes: vmmHandleFabric,
+					NumDevices:  2,
+					Size:        4096,
+				},
+				captureUUID: [16]byte{0xbb},
+			},
+		},
+	}
+	encoded, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, want := range []string{
+		`"kind":"multicast"`,
+		`"backingResourceID":1`,
+		`"bindAPI":1`,
+		`"numDevices":2`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("durable multicast JSON %s does not contain %s", text, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"captureUUID",
+		"backingUUID",
+		"retainRestoreHandle",
+		"fabricToken",
+		"rawHandle",
+		"socket",
+		"context",
+		"pid",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("durable multicast JSON contains runtime field %q: %s", forbidden, text)
+		}
+	}
+	digest := func(metadata []byte) string {
+		hash := sha256.New()
+		writeVMMDigestPart(hash, metadata)
+		writeVMMDigestObject(hash, 1, []byte("allocation bytes"))
+		return hex.EncodeToString(hash.Sum(nil))
+	}
+	baseline := digest(encoded)
+	ledger.Resources[1].Owner.Multicast.BindAPI = vmmMulticastBindMemV2
+	changed, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline == digest(changed) {
+		t.Fatal("digest did not bind durable multicast metadata")
 	}
 }
 
@@ -990,25 +1219,483 @@ func TestRestoreVMMUnlockBoundary(t *testing.T) {
 	}
 }
 
+func TestRestoreVMMMulticastReplayOrder(t *testing.T) {
+	const (
+		generation   = "00112233445566778899aabbccddeeff"
+		participantA = "11111111111111111111111111111111"
+		participantB = "22222222222222222222222222222222"
+		gpuA         = "00112233-4455-6677-8899-aabbccddeeff"
+		gpuB         = "ffeeddcc-bbaa-9988-7766-554433221100"
+	)
+	mapping := func(participant, gpu string, address uint64) vmmMapping {
+		return vmmMapping{
+			Participant:         participant,
+			Address:             address,
+			Size:                4,
+			GPUUUID:             gpu,
+			RequestedHandleType: vmmHandlePOSIX,
+			Access:              []byte{1, 2, 3, 4},
+			AccessCount:         1,
+			AccessSize:          4,
+		}
+	}
+	allocationOwner := mapping(participantA, gpuA, 0x1000)
+	allocationImporter := mapping(participantB, gpuB, 0x2000)
+	multicastOwner := mapping(participantA, gpuA, 0x3000)
+	multicastOwner.Multicast = &vmmMulticastMapping{
+		BackingResourceID: 1,
+		BackingRole:       vmmOwner,
+		Size:              4,
+		BindAPI:           vmmMulticastBindMem,
+	}
+	multicastImporter := mapping(participantB, gpuB, 0x4000)
+	multicastImporter.Multicast = &vmmMulticastMapping{
+		BackingResourceID: 1,
+		BackingRole:       vmmImporter,
+		Size:              4,
+		BindAPI:           vmmMulticastBindMemV2,
+	}
+	ledger := vmmLedger{
+		Version:    vmmLedgerVersion,
+		Generation: generation,
+		Participants: []vmmParticipant{
+			{
+				ID: participantA,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{gpuA},
+				},
+			},
+			{
+				ID: participantB,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{gpuB},
+				},
+			},
+		},
+		Resources: []vmmResource{
+			{
+				ID:        1,
+				Kind:      "allocation",
+				Owner:     allocationOwner,
+				Importers: []vmmMapping{allocationImporter},
+			},
+			{
+				ID:        2,
+				Kind:      "multicast",
+				Owner:     multicastOwner,
+				Importers: []vmmMapping{multicastImporter},
+				Multicast: &vmmMulticastProperties{
+					HandleTypes: vmmHandlePOSIX,
+					NumDevices:  2,
+					Size:        4,
+				},
+			},
+		},
+	}
+	if err := validateVMMLedger(ledger); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte{9, 8, 7, 6}
+	digest := sha256.New()
+	writeVMMDigestPart(digest, encoded)
+	writeVMMDigestObject(digest, 1, contents)
+	expectedDigest := hex.EncodeToString(digest.Sum(nil))
+	events := make(chan string, 32)
+	t.Setenv(VMMRedisAddressEnv, serveVMMRestoreRedis(t, map[string][]byte{
+		vmmRedisKey(generation, "state"):      []byte("detached"),
+		vmmRedisKey(generation, "ledger"):     encoded,
+		vmmRedisKey(generation, "digest"):     []byte(expectedDigest),
+		vmmRedisKey(generation, "resource:1"): contents,
+	}, events))
+	t.Setenv(VMMRedisRDBPathEnv, "")
+	t.Setenv(VMMRedisRestoreCmdEnv, "/bin/true")
+	t.Setenv("NODE_NAME", "node-a")
+
+	serve := func(participant, gpu string, ordinal int32) VMMProcess {
+		return serveVMMProcess(
+			t, "", participant,
+			func(request vmmResponse) (vmmResponse, error) {
+				response := vmmResponse{
+					header: vmmHeader{Operation: request.header.Operation},
+					fd:     -1,
+				}
+				switch request.header.Operation {
+				case vmmSetPlacement:
+					if err := validateVMMPlacementRequest(
+						request, gpu, gpu, ordinal,
+					); err != nil {
+						return response, err
+					}
+					events <- "placement:" + participant
+				case vmmRestoreOwner:
+					if participant != participantA ||
+						(request.header.ObjectID != 1 &&
+							request.header.ObjectID != 2) {
+						return response, errors.New("unexpected restore owner")
+					}
+					if request.header.ObjectKind == vmmAllocation {
+						if request.header.ObjectID != 1 ||
+							request.header.HandleType != vmmHandlePOSIX ||
+							binary.LittleEndian.Uint32(request.payload[60:64])&
+								vmmRetainRestoreHandle == 0 {
+							return response, errors.New("invalid retained allocation owner")
+						}
+						events <- "allocation-owner"
+					} else if request.header.ObjectKind == vmmMulticast {
+						if err := validateMulticastRestoreRequest(
+							request, 2, vmmOwner, 1,
+						); err != nil {
+							return response, err
+						}
+						events <- "multicast-owner-add"
+					} else {
+						return response, errors.New("unexpected owner object kind")
+					}
+					response.header.HandleType = vmmHandlePOSIX
+					response.header.ObjectKind = request.header.ObjectKind
+					var err error
+					response.fd, err = unix.MemfdCreate(
+						"vmm-multicast-restore", unix.MFD_CLOEXEC,
+					)
+					if err != nil {
+						return response, err
+					}
+				case vmmRestoreImporter:
+					if participant != participantB || request.fd < 0 {
+						return response, errors.New("unexpected restore importer")
+					}
+					if request.header.ObjectKind == vmmAllocation {
+						if request.header.ObjectID != 1 ||
+							binary.LittleEndian.Uint32(request.payload[60:64])&
+								vmmRetainRestoreHandle == 0 {
+							return response, errors.New("invalid retained allocation importer")
+						}
+						events <- "allocation-importer"
+					} else if request.header.ObjectKind == vmmMulticast {
+						if err := validateMulticastRestoreRequest(
+							request, 2, vmmImporter, 1,
+						); err != nil {
+							return response, err
+						}
+						events <- "multicast-importer-add"
+					} else {
+						return response, errors.New("unexpected importer object kind")
+					}
+				case vmmRestoreMulticast:
+					if err := validateMulticastRestoreRequest(
+						request, 2,
+						map[bool]uint32{true: vmmOwner, false: vmmImporter}[participant == participantA],
+						1,
+					); err != nil {
+						return response, err
+					}
+					events <- "multicast-bind:" + participant
+				case vmmFinalizeRestore:
+					events <- "finalize:" + participant
+				case vmmIdentify:
+					events <- "health:" + participant
+				default:
+					return response, fmt.Errorf(
+						"unexpected VMM operation %d", request.header.Operation,
+					)
+				}
+				return response, nil
+			},
+		)
+	}
+	processes := []VMMProcess{
+		serve(participantA, gpuA, 0),
+		serve(participantB, gpuB, 1),
+	}
+	if err := RestoreVMM(
+		context.Background(),
+		processes,
+		generation,
+		expectedDigest,
+		t.TempDir(),
+		[]types.VMMPlacement{
+			{SourceGPUUUID: gpuA, TargetGPUUUID: gpuA, TargetOrdinal: 0},
+			{SourceGPUUUID: gpuB, TargetGPUUUID: gpuB, TargetOrdinal: 1},
+		},
+		func() error {
+			events <- "unlock"
+			return nil
+		},
+		logr.Discard(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for range len(events) {
+		got = append(got, <-events)
+	}
+	want := []string{
+		"content:1",
+		"placement:" + participantA,
+		"placement:" + participantB,
+		"unlock",
+		"allocation-owner",
+		"allocation-importer",
+		"multicast-owner-add",
+		"multicast-importer-add",
+		"multicast-bind:" + participantA,
+		"multicast-bind:" + participantB,
+		"finalize:" + participantA,
+		"finalize:" + participantB,
+		"health:" + participantA,
+		"health:" + participantB,
+		"redis-restored",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("multicast restore events = %v, want %v", got, want)
+	}
+}
+
+func TestRestoreVMMMulticastFailureAbortsParticipants(t *testing.T) {
+	const (
+		generation   = "00112233445566778899aabbccddeeff"
+		participantA = "11111111111111111111111111111111"
+		participantB = "22222222222222222222222222222222"
+		gpuA         = "00112233-4455-6677-8899-aabbccddeeff"
+		gpuB         = "ffeeddcc-bbaa-9988-7766-554433221100"
+	)
+	mapping := func(participant, gpu string, address uint64) vmmMapping {
+		return vmmMapping{
+			Participant:         participant,
+			Address:             address,
+			Size:                4,
+			GPUUUID:             gpu,
+			RequestedHandleType: vmmHandlePOSIX,
+			Access:              []byte{1, 2, 3, 4},
+			AccessCount:         1,
+			AccessSize:          4,
+		}
+	}
+	allocationOwner := mapping(participantA, gpuA, 0x1000)
+	allocationImporter := mapping(participantB, gpuB, 0x2000)
+	multicastOwner := mapping(participantA, gpuA, 0x3000)
+	multicastOwner.Multicast = &vmmMulticastMapping{
+		BackingResourceID: 1,
+		BackingRole:       vmmOwner,
+		Size:              4,
+		BindAPI:           vmmMulticastBindMem,
+	}
+	multicastImporter := mapping(participantB, gpuB, 0x4000)
+	multicastImporter.Multicast = &vmmMulticastMapping{
+		BackingResourceID: 1,
+		BackingRole:       vmmImporter,
+		Size:              4,
+		BindAPI:           vmmMulticastBindMemV2,
+	}
+	ledger := vmmLedger{
+		Version:    vmmLedgerVersion,
+		Generation: generation,
+		Participants: []vmmParticipant{
+			{
+				ID: participantA,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{gpuA},
+				},
+			},
+			{
+				ID: participantB,
+				Placement: vmmPlacement{
+					Node: "node-a", GPUUUIDs: []string{gpuB},
+				},
+			},
+		},
+		Resources: []vmmResource{
+			{
+				ID:        1,
+				Kind:      "allocation",
+				Owner:     allocationOwner,
+				Importers: []vmmMapping{allocationImporter},
+			},
+			{
+				ID:        2,
+				Kind:      "multicast",
+				Owner:     multicastOwner,
+				Importers: []vmmMapping{multicastImporter},
+				Multicast: &vmmMulticastProperties{
+					HandleTypes: vmmHandlePOSIX,
+					NumDevices:  2,
+					Size:        4,
+				},
+			},
+		},
+	}
+	encoded, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte{9, 8, 7, 6}
+	digest := sha256.New()
+	writeVMMDigestPart(digest, encoded)
+	writeVMMDigestObject(digest, 1, contents)
+	expectedDigest := hex.EncodeToString(digest.Sum(nil))
+	events := make(chan string, 32)
+	t.Setenv(VMMRedisAddressEnv, serveVMMRestoreRedis(t, map[string][]byte{
+		vmmRedisKey(generation, "state"):      []byte("detached"),
+		vmmRedisKey(generation, "ledger"):     encoded,
+		vmmRedisKey(generation, "digest"):     []byte(expectedDigest),
+		vmmRedisKey(generation, "resource:1"): contents,
+	}, events))
+	t.Setenv(VMMRedisRDBPathEnv, "")
+	t.Setenv(VMMRedisRestoreCmdEnv, "/bin/true")
+	t.Setenv("NODE_NAME", "node-a")
+
+	serve := func(participant, gpu string, ordinal int32) VMMProcess {
+		return serveVMMProcess(
+			t, "", participant,
+			func(request vmmResponse) (vmmResponse, error) {
+				response := vmmResponse{
+					header: vmmHeader{Operation: request.header.Operation},
+					fd:     -1,
+				}
+				switch request.header.Operation {
+				case vmmSetPlacement:
+					if err := validateVMMPlacementRequest(
+						request, gpu, gpu, ordinal,
+					); err != nil {
+						return response, err
+					}
+				case vmmRestoreOwner:
+					if participant != participantA {
+						return response, errors.New("unexpected restore owner")
+					}
+					response.header.HandleType = vmmHandlePOSIX
+					response.header.ObjectKind = request.header.ObjectKind
+					var err error
+					response.fd, err = unix.MemfdCreate(
+						"vmm-multicast-abort", unix.MFD_CLOEXEC,
+					)
+					return response, err
+				case vmmRestoreImporter:
+					if participant != participantB || request.fd < 0 {
+						return response, errors.New("unexpected restore importer")
+					}
+				case vmmRestoreMulticast:
+					events <- "bind:" + participant
+					if participant == participantB {
+						response.header.Status = 1
+						response.header.Message = "participant B bind failed"
+					}
+				case vmmAbortRestore:
+					events <- "abort:" + participant
+					if participant == participantB {
+						response.header.Status = 1
+						response.header.Message = "participant B abort failed"
+					}
+				case vmmFinalizeRestore:
+					events <- "finalize:" + participant
+				case vmmIdentify:
+					events <- "health:" + participant
+				default:
+					return response, fmt.Errorf(
+						"unexpected VMM operation %d", request.header.Operation,
+					)
+				}
+				return response, nil
+			},
+		)
+	}
+	processes := []VMMProcess{
+		serve(participantA, gpuA, 0),
+		serve(participantB, gpuB, 1),
+	}
+	err = RestoreVMM(
+		context.Background(),
+		processes,
+		generation,
+		expectedDigest,
+		t.TempDir(),
+		[]types.VMMPlacement{
+			{SourceGPUUUID: gpuA, TargetGPUUUID: gpuA, TargetOrdinal: 0},
+			{SourceGPUUUID: gpuB, TargetGPUUUID: gpuB, TargetOrdinal: 1},
+		},
+		func() error {
+			events <- "unlock"
+			return nil
+		},
+		logr.Discard(),
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "participant B bind failed") ||
+		!strings.Contains(err.Error(), "participant B abort failed") {
+		t.Fatalf("RestoreVMM error = %v, want bind and abort failures", err)
+	}
+	var got []string
+	for range len(events) {
+		got = append(got, <-events)
+	}
+	want := []string{
+		"content:1",
+		"unlock",
+		"bind:" + participantA,
+		"bind:" + participantB,
+		"abort:" + participantA,
+		"abort:" + participantB,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("multicast abort events = %v, want %v", got, want)
+	}
+}
+
+func validateMulticastRestoreRequest(
+	request vmmResponse,
+	resourceID uint64,
+	role uint32,
+	backingResourceID uint64,
+) error {
+	if request.header.ObjectID != resourceID ||
+		request.header.ObjectKind != vmmMulticast ||
+		request.header.HandleType != vmmHandlePOSIX ||
+		len(request.payload) < vmmRecordSize+vmmMulticastSize {
+		return errors.New("invalid multicast restore header")
+	}
+	if binary.LittleEndian.Uint64(request.payload[16:24]) != resourceID ||
+		binary.LittleEndian.Uint32(request.payload[48:52]) != role ||
+		binary.LittleEndian.Uint32(request.payload[52:56]) != vmmMulticast {
+		return errors.New("invalid multicast restore record")
+	}
+	extension := vmmRecordSize +
+		int(binary.LittleEndian.Uint32(request.payload[68:72])) +
+		int(binary.LittleEndian.Uint32(request.payload[72:76]))*
+			int(binary.LittleEndian.Uint32(request.payload[76:80]))
+	if extension+vmmMulticastSize != len(request.payload) ||
+		binary.LittleEndian.Uint64(
+			request.payload[extension+16:extension+24],
+		) != backingResourceID {
+		return errors.New("invalid multicast restore bind")
+	}
+	return nil
+}
+
 func TestVMMDetachPlanOrdersImportersBeforeOwners(t *testing.T) {
 	plan := vmmDetachPlan(vmmLedger{Resources: []vmmResource{
 		{
 			ID:        1,
+			Kind:      "allocation",
 			Owner:     vmmMapping{Participant: "owner-a"},
 			Importers: []vmmMapping{{Participant: "importer-a"}, {Participant: "importer-b"}},
 		},
 		{
 			ID:        2,
+			Kind:      "multicast",
 			Owner:     vmmMapping{Participant: "owner-b"},
 			Importers: []vmmMapping{{Participant: "importer-c"}},
 		},
 	}})
 	want := []vmmDetach{
+		{resourceID: 2, participant: "importer-c", role: vmmImporter},
+		{resourceID: 2, participant: "owner-b", role: vmmOwner},
 		{resourceID: 1, participant: "importer-a", role: vmmImporter},
 		{resourceID: 1, participant: "importer-b", role: vmmImporter},
-		{resourceID: 2, participant: "importer-c", role: vmmImporter},
 		{resourceID: 1, participant: "owner-a", role: vmmOwner},
-		{resourceID: 2, participant: "owner-b", role: vmmOwner},
 	}
 	if fmt.Sprint(plan) != fmt.Sprint(want) {
 		t.Fatalf("detach plan = %#v, want %#v", plan, want)
@@ -1196,6 +1883,73 @@ func TestInspectVMMBuildsDeterministicGraph(t *testing.T) {
 		if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
 			t.Fatalf("persistent ledger contains forbidden runtime identity %s: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestInspectVMMRejectsMulticastPropertyDisagreement(t *testing.T) {
+	const (
+		owner       = "11111111111111111111111111111111"
+		importer    = "22222222222222222222222222222222"
+		ownerGPU    = "00112233-4455-6677-8899-aabbccddeeff"
+		importerGPU = "ffeeddcc-bbaa-9988-7766-554433221100"
+	)
+	allocationUUID := [16]byte{1}
+	multicastUUID := [16]byte{2}
+	record := func(
+		role uint32,
+		kind uint32,
+		address uint64,
+		gpu string,
+	) vmmCaptureRecord {
+		result := vmmCaptureRecord{
+			allocationUUID: allocationUUID,
+			address:        address,
+			size:           4096,
+			role:           role,
+			kind:           kind,
+			handleType:     vmmHandleFabric,
+			gpuUUID:        gpu,
+			access:         []byte{1},
+			accessCount:    1,
+			accessSize:     1,
+		}
+		if role == vmmOwner {
+			result.properties = []byte{1}
+		}
+		if kind == vmmMulticast {
+			result.allocationUUID = multicastUUID
+			result.multicast = &vmmCaptureMulticast{
+				backingUUID:       allocationUUID,
+				bindSize:          4096,
+				objectHandleTypes: vmmHandleFabric,
+				objectSize:        4096,
+				numDevices:        2,
+				backingRole:       role,
+				bindAPI:           vmmMulticastBindMem,
+			}
+		}
+		return result
+	}
+	ownerRecords := []vmmCaptureRecord{
+		record(vmmOwner, vmmAllocation, 0x1000, ownerGPU),
+		record(vmmOwner, vmmMulticast, 0x3000, ownerGPU),
+	}
+	importerRecords := []vmmCaptureRecord{
+		record(vmmImporter, vmmAllocation, 0x2000, importerGPU),
+		record(vmmImporter, vmmMulticast, 0x4000, importerGPU),
+	}
+	importerRecords[1].multicast.numDevices = 3
+	_, err := inspectVMM(
+		context.Background(),
+		[]VMMProcess{
+			serveVMMInspectAs(t, owner, ownerRecords),
+			serveVMMInspectAs(t, importer, importerRecords),
+		},
+		"generation",
+		"node-a",
+	)
+	if err == nil || !strings.Contains(err.Error(), "inconsistent object properties") {
+		t.Fatalf("multicast property disagreement error = %v", err)
 	}
 }
 
@@ -2043,7 +2797,14 @@ func encodeVMMRecordsForTest(records []vmmCaptureRecord) []byte {
 		if record.handleType == 0 {
 			record.handleType = 1
 		}
-		encoded := make([]byte, vmmRecordSize+len(record.properties)+len(record.access))
+		extensionSize := 0
+		if record.kind == vmmMulticast {
+			extensionSize = vmmMulticastSize
+		}
+		encoded := make(
+			[]byte,
+			vmmRecordSize+len(record.properties)+len(record.access)+extensionSize,
+		)
 		copy(encoded[0:16], record.allocationUUID[:])
 		binary.LittleEndian.PutUint64(encoded[24:32], record.address)
 		binary.LittleEndian.PutUint64(encoded[32:40], record.size)
@@ -2058,6 +2819,44 @@ func encodeVMMRecordsForTest(records []vmmCaptureRecord) []byte {
 		copy(encoded[80:96], parseGPUUUID(record.gpuUUID))
 		copy(encoded[vmmRecordSize:], record.properties)
 		copy(encoded[vmmRecordSize+len(record.properties):], record.access)
+		if record.multicast != nil {
+			offset := vmmRecordSize + len(record.properties) + len(record.access)
+			extension := encoded[offset : offset+vmmMulticastSize]
+			copy(extension[0:16], record.multicast.backingUUID[:])
+			binary.LittleEndian.PutUint64(
+				extension[16:24], record.multicast.backingObjectID,
+			)
+			binary.LittleEndian.PutUint64(
+				extension[24:32], record.multicast.multicastOffset,
+			)
+			binary.LittleEndian.PutUint64(
+				extension[32:40], record.multicast.memoryOffset,
+			)
+			binary.LittleEndian.PutUint64(
+				extension[40:48], record.multicast.bindSize,
+			)
+			binary.LittleEndian.PutUint64(
+				extension[48:56], record.multicast.bindFlags,
+			)
+			binary.LittleEndian.PutUint64(
+				extension[56:64], record.multicast.objectFlags,
+			)
+			binary.LittleEndian.PutUint64(
+				extension[64:72], record.multicast.objectHandleTypes,
+			)
+			binary.LittleEndian.PutUint64(
+				extension[72:80], record.multicast.objectSize,
+			)
+			binary.LittleEndian.PutUint32(
+				extension[80:84], record.multicast.numDevices,
+			)
+			binary.LittleEndian.PutUint32(
+				extension[84:88], record.multicast.backingRole,
+			)
+			binary.LittleEndian.PutUint32(
+				extension[88:92], record.multicast.bindAPI,
+			)
+		}
 		payload = append(payload, encoded...)
 	}
 	return payload
@@ -2224,6 +3023,7 @@ func serveVMMRestoreProcess(
 			}
 			var err error
 			response.header.HandleType = request.header.HandleType
+			response.header.ObjectKind = vmmAllocation
 			response.fd, err = unix.MemfdCreate("vmm-restore-owner", unix.MFD_CLOEXEC)
 			return response, err
 		case vmmRestoreImporter:
@@ -2234,6 +3034,9 @@ func serveVMMRestoreProcess(
 				return response, err
 			}
 			events <- fmt.Sprintf("importer:%d", importerResource)
+			return response, nil
+		case vmmFinalizeRestore:
+			events <- "finalize:" + roleSummary
 			return response, nil
 		case vmmIdentify:
 			events <- "health:" + roleSummary
