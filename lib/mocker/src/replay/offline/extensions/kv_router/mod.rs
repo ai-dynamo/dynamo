@@ -256,6 +256,7 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    routing_constraints: RoutingConstraints,
 }
 
 impl PendingRequest {
@@ -304,7 +305,7 @@ impl PendingRequest {
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
+            routing_constraints: self.routing_constraints.clone(),
             shared_cache_hits: None,
             resp_tx: None,
         }
@@ -378,6 +379,7 @@ trait PlacementRequestView {
     fn metadata(&self) -> &DirectRequest;
     fn input_length(&self) -> usize;
     fn prompt_tokens(&self) -> Cow<'_, [u32]>;
+    fn routing_constraints(&self) -> RoutingConstraints;
 }
 
 impl PlacementRequestView for DirectRequest {
@@ -391,6 +393,10 @@ impl PlacementRequestView for DirectRequest {
 
     fn prompt_tokens(&self) -> Cow<'_, [u32]> {
         Cow::Borrowed(&self.tokens)
+    }
+
+    fn routing_constraints(&self) -> RoutingConstraints {
+        RoutingConstraints::default()
     }
 }
 
@@ -408,6 +414,10 @@ impl PlacementRequestView for ReplayRequestPayload {
             Some(tokens) => Cow::Borrowed(tokens),
             None => Cow::Owned(ReplayRequestPayload::prompt_tokens(self)),
         }
+    }
+
+    fn routing_constraints(&self) -> RoutingConstraints {
+        self.routing_constraints().clone()
     }
 }
 
@@ -505,6 +515,12 @@ impl OfflineReplayRouter {
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            args.worker_taints.is_empty() || args.worker_taints.len() == num_workers,
+            "worker_taints must be empty or contain exactly one entry per replay worker: got {} for {} workers",
+            args.worker_taints.len(),
+            num_workers,
+        );
         let config = replay_router_config(args, router_config);
         let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
@@ -859,6 +875,7 @@ impl OfflineReplayRouter {
             strict_priority,
             policy_class: request.policy_class.clone(),
             session_id,
+            routing_constraints: request_view.routing_constraints(),
         })
     }
 

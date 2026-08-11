@@ -140,6 +140,10 @@ where
         let mut workers = Vec::with_capacity(num_workers.saturating_mul(dp_size));
         let mut worker_groups = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
+            let mut worker_args = args.clone();
+            if let Some(&max_num_seqs) = args.worker_max_num_seqs.get(worker_id) {
+                worker_args.max_num_seqs = Some(max_num_seqs);
+            }
             let mut rank_ids = Vec::with_capacity(dp_size);
             for dp_rank in 0..dp_size {
                 let rank_id = worker_id * dp_size + dp_rank;
@@ -148,7 +152,7 @@ where
                     rank_id,
                     worker_id as u64,
                     dp_rank as u32,
-                    args.clone(),
+                    worker_args.clone(),
                     Observation::CAPTURE_RAW,
                 )));
                 rank_ids.push(rank_id);
@@ -309,6 +313,10 @@ where
     /// the stable mocker worker ID.
     pub(in crate::replay::offline) fn add_worker(&mut self) -> usize {
         let worker_id = self.worker_groups.len();
+        let mut worker_args = self.args.clone();
+        if let Some(&max_num_seqs) = self.args.worker_max_num_seqs.get(worker_id) {
+            worker_args.max_num_seqs = Some(max_num_seqs);
+        }
         let mut rank_ids = Vec::with_capacity(self.args.dp_size.max(1) as usize);
         for dp_rank in 0..self.args.dp_size.max(1) {
             let rank_id = self.workers.len();
@@ -316,7 +324,7 @@ where
                 rank_id,
                 worker_id as u64,
                 dp_rank,
-                self.args.clone(),
+                worker_args.clone(),
                 self.capture_raw,
             );
             debug_assert_eq!(rank_id, self.workers.len());

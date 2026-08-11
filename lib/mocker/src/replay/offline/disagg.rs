@@ -1776,7 +1776,7 @@ where
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
         let next = choose_next_timestamp(
-            CoreAdmissionSource::next_ready_time_ms(&mut self.admission),
+            CoreAdmissionSource::next_internal_event_ms(&mut self.admission),
             next_event_ms,
         );
         #[cfg(feature = "kvbm-offload")]

@@ -4,6 +4,7 @@
 use derive_builder::Builder;
 use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -645,6 +646,8 @@ struct MockEngineArgsSerde {
     zmq_replay_port: OptionalConfigValue<u16>,
     preemption_mode: OptionalConfigValue<String>,
     router_queue_policy: OptionalConfigValue<String>,
+    worker_taints: OptionalConfigValue<Vec<HashSet<String>>>,
+    worker_max_num_seqs: OptionalConfigValue<Vec<usize>>,
     sglang: OptionalConfigValue<SglangArgs>,
     trtllm: OptionalConfigValue<TrtllmArgs>,
     #[serde(rename = "has_perf_model")]
@@ -987,6 +990,16 @@ pub struct MockEngineArgs {
     /// Optional replay-only override for the router queue policy.
     #[builder(default = "None")]
     pub router_queue_policy: Option<RouterQueuePolicy>,
+
+    /// Replay-only taints published by each logical worker, indexed by worker ID.
+    /// An empty vector leaves every replay worker untainted.
+    #[builder(default)]
+    pub worker_taints: Vec<HashSet<String>>,
+
+    /// Replay-only active-sequence limits indexed by logical worker ID.
+    /// An empty vector uses `max_num_seqs` for every replay worker.
+    #[builder(default)]
+    pub worker_max_num_seqs: Vec<usize>,
 
     /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
@@ -1347,6 +1360,25 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
                 .transpose()?;
             builder = builder.router_queue_policy(router_queue_policy);
         }
+        if let Some(worker_taints) = compat.worker_taints.into_non_null("worker_taints")? {
+            if worker_taints
+                .iter()
+                .flatten()
+                .any(|taint| taint.trim().is_empty())
+            {
+                return Err("worker_taints must not contain empty strings".to_string());
+            }
+            builder = builder.worker_taints(worker_taints);
+        }
+        if let Some(worker_max_num_seqs) = compat
+            .worker_max_num_seqs
+            .into_non_null("worker_max_num_seqs")?
+        {
+            if worker_max_num_seqs.contains(&0) {
+                return Err("worker_max_num_seqs values must be positive".to_string());
+            }
+            builder = builder.worker_max_num_seqs(worker_max_num_seqs);
+        }
         if let Some(sglang) = compat.sglang.into_nullable() {
             builder = builder.sglang(sglang);
         }
@@ -1697,6 +1729,20 @@ mod tests {
         let serialized = serde_json::to_value(args).unwrap();
 
         assert!(serialized.get("g1_backend").is_none());
+    }
+
+    #[test]
+    fn test_mock_engine_args_accepts_per_worker_sequence_limits() {
+        let args = MockEngineArgs::from_json_str(
+            &json!({"worker_max_num_seqs": [24, 24, 64, 64]}).to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(args.worker_max_num_seqs, vec![24, 24, 64, 64]);
+        let error =
+            MockEngineArgs::from_json_str(&json!({"worker_max_num_seqs": [24, 0]}).to_string())
+                .unwrap_err();
+        assert!(error.to_string().contains("must be positive"));
     }
 
     #[test]

@@ -316,7 +316,7 @@ impl SchedulerState {
         }
     }
 
-    fn next_waiting_uuid(&mut self) -> Option<Uuid> {
+    fn next_waiting_uuid(&mut self, prefer_materialized: bool) -> Option<Uuid> {
         loop {
             let entry = *self.waiting.entries.first()?;
             let is_live = self.waiting_members.contains(&entry.uuid)
@@ -325,7 +325,7 @@ impl SchedulerState {
                         && WaitingRequest::from_state(entry.uuid, request) == entry
                 });
             if is_live {
-                return Some(entry.uuid);
+                break;
             }
 
             // Terminal removal and lifecycle transitions eagerly delete their
@@ -335,6 +335,21 @@ impl SchedulerState {
             self.waiting.entries.remove(&entry);
             self.waiting_members.remove(&entry.uuid);
         }
+
+        if prefer_materialized
+            && let Some(entry) = self.waiting.entries.iter().find(|entry| {
+                self.waiting_members.contains(&entry.uuid)
+                    && self.requests.get(&entry.uuid).is_some_and(|request| {
+                        request.status != RequestStatus::Running
+                            && request.prompt_is_prebuilt()
+                            && WaitingRequest::from_state(entry.uuid, request) == **entry
+                    })
+            })
+        {
+            return Some(entry.uuid);
+        }
+
+        self.waiting.entries.first().map(|entry| entry.uuid)
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
@@ -1644,7 +1659,11 @@ impl VllmCore {
         let admission = AdmissionInvariant::new(self.pending_destinations.has_pending());
         let mut rejected_uuids: Vec<Uuid> = Vec::new();
         while !preempted_any && self.state.running.len() < max_num_running {
-            let Some(uuid) = self.state.next_waiting_uuid() else {
+            let prefer_materialized = matches!(
+                admission.stage_for(false),
+                AdmissionStage::PendingDestinationHead
+            );
+            let Some(uuid) = self.state.next_waiting_uuid(prefer_materialized) else {
                 break;
             };
             if self.refresh_request_offload_dependency(uuid).is_some() {
