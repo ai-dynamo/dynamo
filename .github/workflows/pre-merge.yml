@@ -69,7 +69,7 @@ jobs:
   fern-check:
     name: Fern Configuration Check
     needs: changed-files
-    if: needs.changed-files.outputs.docs == 'true'
+    if: needs.changed-files.outputs.docs == 'true' || needs.changed-files.outputs.fern_components == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
