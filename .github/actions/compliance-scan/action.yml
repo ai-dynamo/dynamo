@@ -11,6 +11,9 @@ inputs:
   artifact_name:
     description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda13-amd64)'
     required: true
+  namespace:
+    description: 'Kubernetes namespace for BuildKit workers and fallback pods'
+    required: true
   arch:
     description: 'Docker platform string (e.g. linux/amd64, linux/arm64)'
     required: false
@@ -71,6 +74,7 @@ runs:
         builder_name: ${{ steps.builder.outputs.name }}
         flavor: general
         arch: ${{ inputs.arch }}
+        namespace: ${{ inputs.namespace }}
 
     - name: Extract target image packages
       shell: bash
@@ -94,6 +98,7 @@ runs:
         builder_name: ${{ steps.builder.outputs.name }}
         flavor: general
         arch: ${{ inputs.arch }}
+        namespace: ${{ inputs.namespace }}
 
     - name: Extract base image packages
       if: steps.resolve-base.outputs.base_image != ''

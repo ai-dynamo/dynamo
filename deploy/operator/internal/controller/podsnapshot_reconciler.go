@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -74,7 +74,7 @@ type PodSnapshotReconciler struct {
 	client.Client
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -112,7 +112,7 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if !sr.markPending(snap, "CheckpointDisabled", message) {
 			return ctrl.Result{}, nil
 		}
-		sr.Recorder.Event(snap, corev1.EventTypeWarning, "CheckpointDisabled", message)
+		sr.Recorder.Eventf(snap, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", message)
 		return ctrl.Result{}, sr.Status().Update(ctx, snap)
 	}
 	return sr.captureFromSourcePod(ctx, snap)
@@ -241,7 +241,7 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 			}
 			return existing, nil
 		}
-		sr.Recorder.Event(snap, corev1.EventTypeWarning, "SnapshotContentCreateFailed", err.Error())
+		sr.Recorder.Eventf(snap, content, corev1.EventTypeWarning, "SnapshotContentCreateFailed", "Create", "%s", err.Error())
 		return nil, fmt.Errorf("create PodSnapshotContent %q: %w", contentName, err)
 	}
 	return content, nil
@@ -267,7 +267,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *nvidiacomv1alpha1
 				UID:       snap.UID,
 			},
 			Source: nvidiacomv1alpha1.PodSnapshotContentSource{
-				PodRef:   nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID},
+				PodRef:   nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
 		},
@@ -346,7 +346,7 @@ func (sr *PodSnapshotReconciler) markPending(snap *nvidiacomv1alpha1.PodSnapshot
 // failPodSnapshot marks the PodSnapshot Failed terminally (Failed=True, Ready=False) and records
 // an event.
 func (sr *PodSnapshotReconciler) failPodSnapshot(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, reason string, cause error) (ctrl.Result, error) {
-	sr.Recorder.Event(snap, corev1.EventTypeWarning, reason, cause.Error())
+	sr.Recorder.Eventf(snap, nil, corev1.EventTypeWarning, reason, "Update", "%s", cause.Error())
 	sr.markFailed(snap, reason, cause.Error())
 	if err := sr.Status().Update(ctx, snap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("mark snapshot failed: %w", err)

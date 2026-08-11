@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
@@ -75,6 +78,87 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
     assert _eagle_enabled_for(speculative_algorithm) is expected
 
 
+@pytest.mark.parametrize(
+    "allow_auto_truncate, validate_total_tokens, reserved_tokens, expected",
+    [
+        (
+            False,
+            True,
+            4,
+            TokenBudget(252, True, True),
+        ),
+        (
+            True,
+            True,
+            0,
+            TokenBudget(256, False, False),
+        ),
+        (
+            False,
+            False,
+            0,
+            TokenBudget(256, True, False),
+        ),
+    ],
+)
+def test_token_budget_matches_sglang_policy(
+    allow_auto_truncate, validate_total_tokens, reserved_tokens, expected
+):
+    from dynamo.sglang.register import _get_token_budget
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            context_len=256,
+            validate_total_tokens=validate_total_tokens,
+            num_reserved_tokens=reserved_tokens,
+        )
+    )
+    server_args = SimpleNamespace(
+        context_length=None,
+        allow_auto_truncate=allow_auto_truncate,
+    )
+
+    assert _get_token_budget(engine, server_args) == expected
+
+
+def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
+    from dynamo.sglang import register
+
+    server_args = SimpleNamespace(
+        allow_auto_truncate=False,
+        context_length=4096,
+        disaggregation_mode=None,
+        max_prefill_tokens=None,
+        page_size=16,
+        speculative_algorithm="NONE",
+        speculative_num_steps=None,
+    )
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    capacity = SimpleNamespace(
+        max_num_seqs=None,
+        max_num_batched_tokens=None,
+        total_kv_blocks=None,
+    )
+
+    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
+    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(register, "apply_topology_config", lambda _: None)
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+
+    runtime_config = asyncio.run(
+        register.get_runtime_config(None, server_args, dynamo_args)
+    )
+
+    assert TOKEN_BUDGET_RUNTIME_KEY not in runtime_config.runtime_data
+    assert "Failed to get runtime config" not in caplog.text
+
+
 def test_hicache_publishes_native_offloading_capacity():
     server_args = SimpleNamespace(hicache_write_policy="write_back")
     assert get_hicache_native_offloading_capacity(
@@ -97,14 +181,17 @@ def test_hicache_native_offloading_capacity_ignores_invalid_values(value):
     )
 
 
-def test_hicache_requires_reported_host_capacity():
-    assert (
-        get_hicache_native_offloading_capacity(
-            SimpleNamespace(hicache_write_policy="write_back"),
-            {"max_total_num_tokens": 100},
-        )
-        is None
-    )
+def test_hicache_derives_ratio_based_capacity():
+    assert get_hicache_native_offloading_capacity(
+        SimpleNamespace(
+            enable_hierarchical_cache=True,
+            hicache_size=0,
+            hicache_write_policy="write_back",
+            hicache_ratio=3.0,
+            page_size=16,
+        ),
+        {"max_total_num_tokens": 100},
+    ) == {"total_tokens": 304}
 
 
 @pytest.mark.parametrize(
@@ -139,6 +226,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     from dynamo.sglang import register
 
     server_args = SimpleNamespace(
+        allow_auto_truncate=False,
         context_length=4096,
         disaggregation_mode=None,
         hicache_write_policy="write_back",
@@ -154,7 +242,12 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
         "max_total_num_tokens": 1024,
     }
     engine = SimpleNamespace(
-        _scheduler_init_result=SimpleNamespace(scheduler_infos=[scheduler_info])
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[scheduler_info]),
+        tokenizer_manager=SimpleNamespace(
+            context_len=4096,
+            validate_total_tokens=True,
+            num_reserved_tokens=4,
+        ),
     )
     capacity = SimpleNamespace(
         max_num_seqs=None,
@@ -181,12 +274,15 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
         register.ModelRuntimeConfig, "set_engine_specific", fail_hicache_publish
     )
 
-    runtime_config = await register._get_runtime_config(
-        engine, server_args, dynamo_args
-    )
+    runtime_config = await register.get_runtime_config(engine, server_args, dynamo_args)
 
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
+    assert json.loads(runtime_config.runtime_data[TOKEN_BUDGET_RUNTIME_KEY]) == {
+        "combined_limit": 4092,
+        "reject_prompt_overflow": True,
+        "reject_total_overflow": True,
+    }
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )

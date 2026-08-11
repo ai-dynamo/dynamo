@@ -1365,6 +1365,108 @@ mod tests_startup_helpers {
         let _ = listener_handle.await;
     }
 
+    /// Unknown media (e.g. vLLM 0.26.0 `FS`) must be filtered in `preprocess`, not
+    /// dropped later in conversion. A conversion-time drop would still burn a
+    /// next_event_id (the listener increments it before `normalize_preprocessed`),
+    /// leaving an id gap the event processor misreads as an engine drop. Two GPU
+    /// stores bracketing an FS store must therefore land on consecutive event ids
+    /// (0, 1) — direct proof the filtered FS store consumed no id.
+    #[tokio::test]
+    async fn test_start_zmq_listener_filters_unknown_medium_without_burning_event_id() {
+        #[derive(serde::Serialize)]
+        #[serde(tag = "type")]
+        enum MediumKvEvent {
+            BlockStored {
+                block_hashes: Vec<u64>,
+                parent_block_hash: Option<u64>,
+                token_ids: Vec<u32>,
+                block_size: usize,
+                medium: Option<&'static str>,
+                group_idx: Option<u32>,
+                kv_cache_spec_kind: Option<&'static str>,
+            },
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (_ipc_dir, endpoint) = unique_ipc_endpoint();
+        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
+        let token = dynamo_runtime::CancellationToken::new();
+        let listener_handle = tokio::spawn({
+            let token = token.clone();
+            start_zmq_listener(
+                endpoint,
+                String::new(),
+                1,
+                tx,
+                token,
+                4,
+                Arc::new(AtomicU64::new(0)),
+                None,
+            )
+        });
+
+        let stored = |hash: u64, medium: &'static str| MediumKvEvent::BlockStored {
+            block_hashes: vec![hash],
+            parent_block_hash: None,
+            token_ids: vec![0, 1, 2, 3],
+            block_size: 4,
+            medium: Some(medium),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+        };
+
+        // One native batch: GPU, unknown-medium FS, GPU.
+        let batch = (
+            0.0,
+            vec![stored(51, "GPU"), stored(52, "FS"), stored(53, "GPU")],
+            Some(0_i32),
+        );
+        let payload = rmps::to_vec_named(&batch).unwrap();
+        let frames = vec![Vec::new(), 0_u64.to_be_bytes().to_vec(), payload];
+
+        let event_batch = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            let mut publish_interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event_batch = rx.recv() => {
+                        return event_batch.expect("listener channel closed");
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(&pub_socket, frames.clone())
+                            .await
+                            .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
+
+        // Only the two GPU stores survive; the FS store is filtered in preprocess.
+        assert_eq!(
+            event_batch.len(),
+            2,
+            "unknown-medium FS store must be filtered, leaving two GPU stores"
+        );
+        // Consecutive ids prove the filtered FS store consumed no next_event_id.
+        assert_eq!(event_batch[0].event.event_id, 0);
+        assert_eq!(event_batch[1].event.event_id, 1);
+        let stored_hash = |placement: &PlacementEvent| {
+            let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = &placement.event.data
+            else {
+                panic!("expected KvCacheStoreData");
+            };
+            assert_eq!(blocks.len(), 1);
+            blocks[0].block_hash.0
+        };
+        assert_eq!(stored_hash(&event_batch[0]), 51);
+        assert_eq!(stored_hash(&event_batch[1]), 53);
+
+        token.cancel();
+        let _ = listener_handle.await;
+    }
+
     #[tokio::test]
     async fn test_start_zmq_listener_skips_fully_filtered_native_batch() {
         #[derive(serde::Serialize)]

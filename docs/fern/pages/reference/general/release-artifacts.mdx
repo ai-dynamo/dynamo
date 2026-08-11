@@ -9,7 +9,6 @@ import { ReferenceStyles } from "@/components/ReferenceStyles";
 import { ArtifactBrowser } from "@/components/ArtifactBrowser";
 import { CratesFirstPublished } from "@/components/ReleaseTimeline";
 import { EaCoverageDots } from "@/components/ModelEABuildCards";
-import { NightlyBuilds } from "@/components/NightlyBuilds";
 import { PinnedEnvironment } from "@/components/PinnedEnvironment";
 import { TagLookup } from "@/components/TagLookup";
 
@@ -25,7 +24,7 @@ See [Compatibility](compatibility.mdx) for hardware, platform, and backend featu
 
 <ArtifactBrowser />
 
-**CUDA and driver requirements:** for the CUDA toolkit versions and minimum drivers for each container image, see [Compatibility](compatibility.mdx).
+**CUDA and driver requirements:** for the CUDA toolkit versions and minimum drivers per release, see the [Release Support Matrix](compatibility.mdx#release-support-matrix) on the Compatibility page.
 
 ### Pinned Environment
 
@@ -36,10 +35,6 @@ One copy-paste block that pins every install path — the backend runtime contai
 ## Known Issues
 
 Known issues are tracked on the [Known Issues](releases/known-issues.mdx) reference page, including artifact-specific issues for older releases.
-
-## Recent Nightlies
-
-<NightlyBuilds />
 
 <a id="pre-release-artifacts"></a>
 
@@ -102,7 +97,7 @@ Current stable release: v1.3.1 (container tag `1.3.1`, wheel version `1.3.1`).
 | container | dynamo-frontend | OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP) | AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.1` |
 | container | dynamo-planner | Standalone Planner used by Profiler jobs and Planner pods | AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.1` |
 | container | kubernetes-operator | Operator that manages Dynamo deployments and CRDs | AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.3.1` |
-| container | snapshot-agent (Preview) | Fast GPU worker recovery via CRIU | AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.3.1` |
+| container | snapshot-agent (Preview) | Fast GPU worker recovery via CRIU | AMD64 | `nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.3.1` |
 | wheel | ai-dynamo | Main package with backend integrations (vLLM, SGLang, TRT-LLM) | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install ai-dynamo==1.3.1` |
 | wheel | ai-dynamo-runtime | Core Python bindings for the Dynamo runtime | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install ai-dynamo-runtime==1.3.1` |
 | wheel | kvbm | KV Block Manager for disaggregated KV cache | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install kvbm==1.3.1` |
@@ -114,7 +109,7 @@ Current stable release: v1.3.1 (container tag `1.3.1`, wheel version `1.3.1`).
 | crate | dynamo-async-openai (Deprecated) | Legacy OpenAI client; use dynamo-protocols | MSRV Rust v1.82 · final release | `cargo add dynamo-async-openai@1.0.2` |
 | crate | dynamo-parsers | Protocol parsers (SSE, JSON streaming) | MSRV Rust v1.82 | `cargo add dynamo-parsers@1.3.0` |
 | crate | dynamo-memory | Memory management utilities | MSRV Rust v1.82 | `cargo add dynamo-memory@1.3.1` |
-| crate | dynamo-config | Configuration management | MSRV Rust v1.82 | `cargo add dynamo-config@1.3.0` |
+| crate | dynamo-config | Configuration management | MSRV Rust v1.82 | `cargo add dynamo-config@1.2.1` |
 | crate | dynamo-tokens | Tokenizer bindings for LLM inference | MSRV Rust v1.82 | `cargo add dynamo-tokens@1.3.1` |
 | crate | dynamo-tokenizers | Tokenizer library for LLM inference | MSRV Rust v1.82 | `cargo add dynamo-tokenizers@1.3.1` |
 | crate | dynamo-mocker | Inference engine simulator for benchmarking | MSRV Rust v1.82 | `cargo add dynamo-mocker@1.3.1` |

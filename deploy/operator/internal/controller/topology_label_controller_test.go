@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -207,7 +207,7 @@ func TestTopologyLabelReconciler_SkipsIfNodeMissingLabel(t *testing.T) {
 	}
 
 	cl := fake.NewClientBuilder().WithObjects(node, pod).Build()
-	recorder := record.NewFakeRecorder(1)
+	recorder := events.NewFakeRecorder(1)
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: cl, Recorder: recorder}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{

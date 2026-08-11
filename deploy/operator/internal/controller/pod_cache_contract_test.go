@@ -16,7 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -108,8 +108,12 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 	})
 
 	t.Run("checkpoint and snapshot", func(t *testing.T) {
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "checkpoint", Namespace: pod.Namespace}}
-		snapshot := buildPodSnapshot(ckpt, "checkpoint-id", pod)
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "checkpoint", Namespace: pod.Namespace},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{TargetContainerName: "main"}},
+		}
+		snapshot, err := buildPodSnapshot(ckpt, "checkpoint-id", pod)
+		require.NoError(t, err)
 		assert.Equal(t, pod.Name, snapshot.Spec.Source.PodRef.Name)
 		assert.Equal(t, pod.UID, snapshot.Spec.Source.PodRef.UID)
 		require.NoError(t, validateSourcePod(snapshot, pod))
@@ -130,7 +134,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 		reconciler := &DynamoGraphDeploymentRequestReconciler{
 			Client:   client,
-			Recorder: record.NewFakeRecorder(1),
+			Recorder: events.NewFakeRecorder(1),
 		}
 		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace}}
 		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "profiling-job", Namespace: pod.Namespace}}

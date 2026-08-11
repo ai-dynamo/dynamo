@@ -74,7 +74,7 @@ func (o DynamoModelSetupOptions) modelEndpointClient() *modelendpoint.Client {
 func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploymentSetupOptions) error {
 	if err := (&DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
+		Recorder:              mgr.GetEventRecorder("dynamocomponentdeployment"),
 		Config:                opts.Config,
 		RuntimeConfig:         opts.RuntimeConfig,
 		DockerSecretRetriever: opts.DockerSecretRetriever,
@@ -87,7 +87,7 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
+		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
 		Config:                opts.Config,
 		RuntimeConfig:         opts.RuntimeConfig,
 		RestConfig:            mgr.GetConfig(),
@@ -105,7 +105,7 @@ func SetupDynamoGraphDeploymentScalingAdapter(mgr ctrl.Manager, opts SetupOption
 	if err := (&DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorderFor("dgdscalingadapter"),
+		Recorder:      mgr.GetEventRecorder("dgdscalingadapter"),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
@@ -118,7 +118,7 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 	if err := (&DynamoGraphDeploymentRequestReconciler{
 		Client:                  mgr.GetClient(),
 		APIReader:               mgr.GetAPIReader(),
-		Recorder:                mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Recorder:                mgr.GetEventRecorder("dynamographdeploymentrequest"),
 		Config:                  opts.Config,
 		RuntimeConfig:           opts.RuntimeConfig,
 		GPUDiscoveryCache:       opts.gpuDiscoveryCache(),
@@ -135,7 +135,7 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 	if err := (&DynamoModelReconciler{
 		Client:         mgr.GetClient(),
-		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		Recorder:       mgr.GetEventRecorder("dynamomodel"),
 		EndpointClient: opts.modelEndpointClient(),
 		Config:         opts.Config,
 		RuntimeConfig:  opts.RuntimeConfig,
@@ -150,7 +150,7 @@ func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
 		Client:        mgr.GetClient(),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
+		Recorder:      mgr.GetEventRecorder("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
@@ -162,7 +162,7 @@ func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
 		Client:        mgr.GetClient(),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("snapshot"),
+		Recorder:      mgr.GetEventRecorder("snapshot"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
@@ -172,7 +172,7 @@ func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
 func SetupFailoverCascade(mgr ctrl.Manager) error {
 	if err := (&failoverCascadeReconciler{
 		Client:   mgr.GetClient(),
-		recorder: mgr.GetEventRecorderFor("gms-failover-cascade"),
+		recorder: mgr.GetEventRecorder("gms-failover-cascade"),
 	}).setupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create failover cascade controller: %w", err)
 	}
@@ -196,7 +196,7 @@ func SetupTopologyLabel(mgr ctrl.Manager, opts SetupOptions) error {
 		NodeReader:    mgr.GetAPIReader(),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("topology-label"),
+		Recorder:      mgr.GetEventRecorder("topology-label"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
 	}
