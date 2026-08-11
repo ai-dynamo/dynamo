@@ -520,6 +520,7 @@ mod tests {
             instance_id,
             transport: TransportType::Tcp(transport.to_string()),
             device_type: None,
+            request_plane_codec: None,
         })
     }
 

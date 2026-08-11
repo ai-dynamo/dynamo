@@ -94,7 +94,7 @@ func TestPodSnapshotNameUIDPinned(t *testing.T) {
 	podUID := types.UID("pod-uid-abc")
 
 	tests := []struct {
-		name    string
+		name     string
 		snapName string
 	}{
 		{name: "short name", snapName: "my-snap"},
@@ -105,10 +105,11 @@ func TestPodSnapshotNameUIDPinned(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			crClient := crfake.NewClientBuilder().WithScheme(s).Build()
-			snap, err := createPodSnapshot(context.Background(), crClient, "default", tt.snapName, "my-pod", podUID, "ckpt-123")
+			snap, err := createPodSnapshot(context.Background(), crClient, "default", tt.snapName, "my-pod", podUID, []string{"main"}, "ckpt-123")
 			require.NoError(t, err)
 			assert.Equal(t, podUID, snap.Spec.Source.PodRef.UID, "source pod UID must be pinned")
 			assert.Equal(t, "my-pod", snap.Spec.Source.PodRef.Name)
+			assert.Equal(t, []string{"main"}, snap.Spec.Source.PodRef.Containers, "target container must be set on the PodSnapshot")
 		})
 	}
 }
@@ -127,7 +128,7 @@ func TestPodSnapshotAlreadyExists(t *testing.T) {
 	}
 	crClient := crfake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 
-	_, err := createPodSnapshot(context.Background(), crClient, "default", "my-snap", "my-pod", "uid-1", "ckpt-1")
+	_, err := createPodSnapshot(context.Background(), crClient, "default", "my-snap", "my-pod", "uid-1", []string{"main"}, "ckpt-1")
 	require.Error(t, err)
 	assert.True(t, apierrors.IsAlreadyExists(err) || strings.Contains(err.Error(), "already exists"),
 		"error should report AlreadyExists: %v", err)
@@ -274,4 +275,3 @@ func TestWaitForPodSnapshotContextDeadline(t *testing.T) {
 	_, err := waitForPodSnapshot(ctx, crClient, "default", "snap-pending")
 	require.Error(t, err)
 }
-

@@ -17,11 +17,40 @@ use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
     WorkerWithDpRank,
 };
+use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+
+/// Supplies the authoritative set of workers currently available for selection.
+///
+/// This is an inclusion set, unlike [`OverloadedWorkerProvider`]'s exclusion
+/// set. `None` means no hard-availability source is attached; `Some` is
+/// authoritative, so an empty set rejects every candidate.
+pub type WorkerAvailabilityProvider =
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerSelectionPolicyError {
+    #[error("worker selection policy failed: {0}")]
+    Failed(String),
+
+    #[error("scorer {scorer_index} produced a non-finite cost for candidate row {row}")]
+    NonFiniteCost { scorer_index: usize, row: usize },
+
+    #[error(
+        "picker returned candidate row {row}, but the candidate table contains {candidate_count} rows"
+    )]
+    InvalidPickerRow { row: usize, candidate_count: usize },
+}
+
+impl WorkerSelectionPolicyError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(message.into())
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
@@ -58,6 +87,9 @@ pub enum KvSchedulerError {
 
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
+
+    #[error(transparent)]
+    WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
 
 impl KvSchedulerError {
@@ -75,7 +107,38 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
+    pub target_cached_prefix_blocks: u32,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
+}
+
+/// A routing decision that selected less KV overlap than another eligible worker.
+///
+/// This records the observable locality tradeoff without attributing its cause. The
+/// final selection may differ because of worker load, routing preferences, or
+/// temperature-based sampling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonMaxOverlapSelection {
+    /// Worker selected by the scheduler's complete scoring policy.
+    pub selected_worker: WorkerWithDpRank,
+    /// Eligible worker with the greatest effective KV overlap.
+    pub highest_overlap_worker: WorkerWithDpRank,
+    /// Effective overlap available on `highest_overlap_worker`.
+    pub highest_overlap_blocks: f64,
+    /// Effective overlap available on `selected_worker`.
+    pub selected_overlap_blocks: f64,
+}
+
+/// Callback dispatched off the scheduler actor after an admitted non-max-overlap selection is
+/// delivered.
+pub type NonMaxOverlapSelectionObserver =
+    Arc<dyn Fn(&str, NonMaxOverlapSelection) + Send + Sync + 'static>;
+
+impl NonMaxOverlapSelection {
+    /// Return the effective overlap blocks sacrificed by the final selection.
+    pub fn overlap_blocks_lost(self) -> f64 {
+        self.highest_overlap_blocks - self.selected_overlap_blocks
+    }
 }
 
 #[derive(Debug)]
@@ -187,6 +250,8 @@ pub struct ScheduleRequest {
     pub policy_class: Option<String>,
     pub session_id: Option<String>,
     pub overlap: OverlapSignals,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
 
@@ -216,6 +281,8 @@ pub struct SchedulingRequest {
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
@@ -388,6 +455,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             shared_cache_hits: None,
             worker_loads,
             resp_tx: None,
