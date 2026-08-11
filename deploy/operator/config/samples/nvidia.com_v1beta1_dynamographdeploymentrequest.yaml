@@ -56,8 +56,9 @@ spec:
   # Optional: Features controls optional Dynamo platform features
   # features:
   #   planner:
-  #     # Use min_endpoint for agg, or to set the same minimum for both roles
-  #     # in disagg. Set role-specific values when the P/D minimums differ.
+  #     # Use min_endpoint for agg, both roles in disagg, or the active role in
+  #     # single-component mode when its role-specific value is unset. Set
+  #     # role-specific values when the P/D minimums differ.
   #     min_endpoint: 2
   #     prefill_min_endpoint: 2
   #     decode_min_endpoint: 3

@@ -172,7 +172,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 </ParamField>
 
 <ParamField path="min_endpoint" type="integer" default="1">
-  Minimum engine endpoints (replicas) for aggregated deployments. In disaggregated deployments, this value applies to both prefill and decode unless a role-specific value is set. Must be nonnegative; use `0` for scale-to-zero compatibility.
+  Minimum engine endpoints (replicas) for aggregated deployments. In disaggregated deployments, this value applies to both prefill and decode unless a role-specific value is set. In prefill-only or decode-only deployments, it supplies the active role when the corresponding role-specific value is unset. Must be nonnegative; use `0` for scale-to-zero compatibility.
 </ParamField>
 
 <ParamField path="prefill_min_endpoint" type="integer" default="null">

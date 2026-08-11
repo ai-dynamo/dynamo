@@ -107,7 +107,7 @@ Whatever target you choose, a few knobs bound what the Planner is allowed to do.
 
 | Field | Default | What it protects |
 |---|---|---|
-| `min_endpoint` | `1` | Replica floor for aggregated mode, or the same floor for prefill and decode in disaggregated mode. |
+| `min_endpoint` | `1` | Replica floor for aggregated mode, the same floor for prefill and decode in disaggregated mode, or the active role in single-component mode when its role-specific field is `null`. |
 | `prefill_min_endpoint` | `null` | Prefill replica floor for disaggregated or prefill-only mode; replaces the prefill value from `min_endpoint` when set. |
 | `decode_min_endpoint` | `null` | Decode replica floor for disaggregated or decode-only mode; replaces the decode value from `min_endpoint` when set. |
 | `max_gpu_budget` | `8` | Ceiling on total GPUs the Planner may allocate. Your cost cap — scaling never exceeds it. |

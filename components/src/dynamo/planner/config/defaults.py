@@ -34,8 +34,9 @@ class BasePlannerDefaults:
     # See dynamo.planner.core.budget.proportional_clamp_pair for the
     # tolerance band semantics.
     min_gpu_budget = -1
-    # Minimum endpoints for agg, or the same minimum for prefill and decode
-    # in disagg. A role-specific value overrides it for that role.
+    # Minimum endpoints for agg, both roles in disagg, or the active role in
+    # single-component mode when its role-specific value is unset. A
+    # role-specific value overrides it for that role.
     min_endpoint = 1
     prefill_min_endpoint = None
     decode_min_endpoint = None

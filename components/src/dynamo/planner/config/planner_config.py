@@ -54,8 +54,8 @@ def resolve_min_endpoint(
 ) -> int:
     """Return the configured minimum for one planner role.
 
-    ``min_endpoint`` supplies both role values unless a role-specific value is
-    set.
+    ``min_endpoint`` supplies a role's value when its role-specific value is
+    unset.
     """
 
     value = (
@@ -436,7 +436,9 @@ class PlannerConfig(BaseModel):
         description=(
             "Minimum endpoints for aggregated mode. In disaggregated mode, this "
             "value applies to both prefill and decode unless a role-specific "
-            "value is set. Must be nonnegative; 0 permits scale-to-zero."
+            "value is set. In prefill-only or decode-only mode, it supplies the "
+            "active role when the corresponding role-specific value is unset. "
+            "Must be nonnegative; 0 permits scale-to-zero."
         ),
     )
     prefill_min_endpoint: Optional[int] = Field(

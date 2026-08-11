@@ -134,7 +134,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 ### General
 
-**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. For a single-component deployment, set the active role's field; when that field is unset, `min_endpoint` supplies the active role. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
 
 ## Documentation
 
@@ -165,7 +165,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `ttft_ms` | `500.0` | Target Time To First Token (ms) |
 | `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
 | `max_gpu_budget` | `8` | Maximum GPUs across all workers |
-| `min_endpoint` | `1` | Replica floor for aggregated mode, or the same floor for prefill and decode in disaggregated mode |
+| `min_endpoint` | `1` | Replica floor for aggregated mode, the same floor for prefill and decode in disaggregated mode, or the active role in single-component mode when its role-specific field is `null` |
 | `prefill_min_endpoint` | `null` | Prefill replica floor; replaces the prefill value from `min_endpoint` when set |
 | `decode_min_endpoint` | `null` | Decode replica floor; replaces the decode value from `min_endpoint` when set |
 | `decode_engine_num_gpu` | `null` | GPUs per decode engine; auto-detected from the deployment when unset |

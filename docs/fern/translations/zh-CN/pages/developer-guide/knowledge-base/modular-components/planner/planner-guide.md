@@ -110,7 +110,7 @@ spec:
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | 基于吞吐量的扩缩容决策之间的秒数。 |
 | `throughput_metrics_source` | string | `frontend` | 用于吞吐量扩缩容的 Prometheus 流量来源：`frontend` 从公共 Frontend 读取 `dynamo_frontend_*` 指标；`router` 从 LocalRouter 读取 `dynamo_component_router_*` 指标。在 GlobalPlanner 部署中，为池本地 Planner 使用 `router`。 |
-| `min_endpoint` | int | `1` | `agg` 模式的最小端点数；在 `disagg` 模式中，将同一最小值同时应用于 prefill 和 decode。为兼容 scale-to-zero，可设置为 `0`。 |
+| `min_endpoint` | int | `1` | `agg` 模式的最小端点数；在 `disagg` 模式中，将同一最小值同时应用于 prefill 和 decode；在 `prefill` 或 `decode` 单组件模式中，当对应角色专用字段为 `null` 时应用于当前角色。为兼容 scale-to-zero，可设置为 `0`。 |
 | `prefill_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `prefill` 模式的最小 prefill 端点数。设置后会替换 `min_endpoint` 提供的 prefill 值。必须至少为 `1`。 |
 | `decode_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `decode` 模式的最小 decode 端点数。设置后会替换 `min_endpoint` 提供的 decode 值。必须至少为 `1`。 |
 | `max_gpu_budget` | int | `8` | planner 可以分配的 GPU 总数上限。 |
