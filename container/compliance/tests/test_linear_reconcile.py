@@ -45,9 +45,7 @@ class FakeTransport:
         self.issues = issues or []
         self.mutations: list[tuple[str, dict[str, object]]] = []
 
-    def __call__(
-        self, query: str, variables: dict[str, object]
-    ) -> dict[str, object]:
+    def __call__(self, query: str, variables: dict[str, object]) -> dict[str, object]:
         """Return fixture query data or record a fake mutation."""
         if "GrypeLinearContext" in query:
             return {

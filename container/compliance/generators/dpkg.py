@@ -424,8 +424,8 @@ def _dpkg_purl(
 ) -> str:
     """Build a distro- and architecture-qualified Package URL for a dpkg package."""
     namespace = quote(distro_id, safe="") if distro_id else ""
-    qualified_name = f"{namespace}/{quote(name, safe='')}" if namespace else quote(
-        name, safe=""
+    qualified_name = (
+        f"{namespace}/{quote(name, safe='')}" if namespace else quote(name, safe="")
     )
     qualifiers: list[str] = []
     if architecture:

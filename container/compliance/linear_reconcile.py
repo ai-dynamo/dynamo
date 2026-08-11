@@ -76,9 +76,7 @@ class LinearContext:
 Transport = Callable[[str, dict[str, object]], dict[str, object]]
 
 
-def _default_transport(
-    api_key: str, endpoint: str = LINEAR_ENDPOINT
-) -> Transport:
+def _default_transport(api_key: str, endpoint: str = LINEAR_ENDPOINT) -> Transport:
     """Create an authenticated stdlib HTTP transport for Linear GraphQL."""
 
     def send(query: str, variables: dict[str, object]) -> dict[str, object]:

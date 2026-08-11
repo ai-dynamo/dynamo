@@ -48,8 +48,7 @@ def test_ubuntu_component_purl_includes_distro_and_architecture(
 
     assert len(components) == 1
     assert components[0].purl == (
-        "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3.5"
-        "?arch=amd64&distro=ubuntu-24.04"
+        "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3.5" "?arch=amd64&distro=ubuntu-24.04"
     )
 
 
@@ -60,9 +59,7 @@ def test_ubuntu_component_purl_includes_distro_and_architecture(
         ("all", "arch=all"),
     ],
 )
-def test_dpkg_purl_preserves_architecture(
-    architecture: str, expected: str
-) -> None:
+def test_dpkg_purl_preserves_architecture(architecture: str, expected: str) -> None:
     """Architecture qualifiers should remain explicit for every generated artifact."""
     purl = dpkg._dpkg_purl(
         "package",
