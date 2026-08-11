@@ -106,7 +106,7 @@ Implement `WorkerPicker` to choose one row after scoring. `WorkerInputView::cand
 
 Candidate order is unspecified. Inspect the worker, cost, or another signal instead of relying on the first row.
 
-The [basic policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/basic/src/lib.rs) shows one scorer and picker. The [disaggregated policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/disaggregated/src/lib.rs) shows separate implementations for prefill and decode workers.
+The [basic policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/basic/src/lib.rs) shows one scorer and picker. The `disaggregated` crate in the [custom policy example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) shows separate implementations for prefill and decode workers.
 
 ### Available Signals
 
