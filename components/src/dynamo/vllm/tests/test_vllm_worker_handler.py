@@ -1761,6 +1761,102 @@ class TestRLAdminRouteHardening:
         )
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
 
+    @staticmethod
+    def _make_rl_handler():
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+        return handler
+
+    @staticmethod
+    async def _declare_via_update(handler, version):
+        return await handler.update_weights_from_distributed(
+            {
+                "allow_unpaused": True,
+                "reset_prefix_cache": False,
+                "engine_rpc": "update_weights",
+                "weight_version": version,
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_weight_version_reports_undeclared_before_any_update(self):
+        """A worker nobody has declared a version for says so, rather than
+        asserting a version it has no basis for. Dynamo only sees updates that
+        traverse its own ``/engine`` routes, so an RL caller that loads weights
+        by another path must be able to tell "Dynamo does not know" from a real
+        answer.
+        """
+        handler = self._make_rl_handler()
+
+        resp = await handler.get_weight_version({})
+
+        assert resp["status"] == "ok"
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_weight_version_reports_declared_version_after_update(self):
+        handler = self._make_rl_handler()
+
+        await self._declare_via_update(handler, "policy-42")
+        resp = await handler.get_weight_version({})
+
+        assert resp["status"] == "ok"
+        assert resp["version"] == "policy-42"
+        assert resp["version_declared"] is True
+
+    @pytest.mark.asyncio
+    async def test_declared_initial_is_distinguishable_from_never_declared(self):
+        """The sharp edge: ``"initial"`` used to be both the pre-update sentinel
+        and a legal caller-supplied tag, so the two states were the same
+        response. They must now differ.
+        """
+        never_declared = self._make_rl_handler()
+        declared_initial = self._make_rl_handler()
+
+        await self._declare_via_update(declared_initial, "initial")
+
+        undeclared_resp = await never_declared.get_weight_version({})
+        declared_resp = await declared_initial.get_weight_version({})
+
+        assert undeclared_resp != declared_resp
+        assert undeclared_resp["version_declared"] is False
+        assert declared_resp["version_declared"] is True
+        assert declared_resp["version"] == "initial"
+
+    @pytest.mark.asyncio
+    async def test_set_weight_version_declares_without_touching_the_engine(self):
+        """The declaration route exists for callers that loaded weights outside
+        Dynamo: it moves the reported version without loading anything.
+        """
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({"weight_version": "policy-43"})
+
+        assert resp == {"status": "ok", "version": "policy-43"}
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": "policy-43",
+            "version_declared": True,
+        }
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_weight_version_rejects_a_missing_version(self):
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({})
+
+        assert resp["status"] == "error"
+        assert "weight_version" in resp["message"]
+        # A rejected declaration must not leave the surface claiming knowledge.
+        assert (await handler.get_weight_version({}))["version_declared"] is False
+
     @pytest.mark.asyncio
     async def test_init_weights_update_group_succeeds_within_timeout(self):
         handler = _make_handler()

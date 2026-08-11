@@ -301,6 +301,7 @@ The response describes each live worker and probes it for the routes available i
         "liveness_probe",
         "pause_generation",
         "resume_generation",
+        "set_weight_version",
         "update_weights_from_disk"
       ]
     }
@@ -362,6 +363,39 @@ trap - EXIT
 ```
 
 Route request bodies and response fields are engine-specific. A callback can return `{"status":"error"}` with HTTP 200, while an exception in the callback produces HTTP 500. Check both the HTTP status and the JSON result before advancing the rollout state.
+
+### Read and Declare the Weight Version
+
+A vLLM worker reports the weight version it is serving through `get_weight_version`:
+
+```bash
+curl http://10.0.0.12:8081/engine/get_weight_version \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+```json
+{"status": "ok", "version": "42", "version_declared": true}
+```
+
+A worker tracks only the versions declared to it. `version_declared` is `false`, with `version` set to `null`, until something declares one, either through a `/engine/` weight-update route that carries `weight_version` or through `set_weight_version`. Branch on `version_declared` rather than comparing `version` against a placeholder string: any string, including `"initial"`, is a legal version tag that a caller can declare.
+
+> [!WARNING]
+> A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes only the weight updates that traverse its own `/engine/` routes. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.
+
+When an RL framework loads weights outside Dynamo, declare the resulting version so the surface stays correct. `set_weight_version` records the tag and loads nothing:
+
+```bash
+curl http://10.0.0.12:8081/engine/set_weight_version \
+  -H 'Content-Type: application/json' \
+  -d '{"weight_version": "43"}'
+```
+
+```json
+{"status": "ok", "version": "43"}
+```
+
+The route requires `weight_version` in the body and returns `{"status": "error"}` when it is missing. It neither pauses generation nor invalidates the prefix cache, so a caller that changed the weights must handle both itself.
 
 SGLang direct administration uses SGLang-specific routes and response shapes. For example, call `/engine/control/update_weights_from_disk` directly when you already know the worker URL, or call `/engine/call_tokenizer_manager` with `{"method":"update_weights_from_disk", ...}` for tokenizer-manager passthrough behavior.
 
