@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Custom worker-selection policy with separate prefill and decode behavior.
+//! Factory and registration for the `disaggregated-load` policy.
+//!
+//! The factory selects prefill or decode components for each routing partition.
+
+mod picker;
+mod scorer;
 
 use std::sync::Arc;
 
@@ -10,84 +15,11 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{
-    KvRouterConfig, WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::{KvRouterConfig, WorkerPicker, WorkerScorer, WorkerSelectionPolicy};
+use picker::{DecodePicker, PrefillPicker};
+use scorer::{DecodeLoadScorer, PrefillLoadScorer};
 
 const DECODE_WORKER_TYPE: &str = "decode";
-
-struct PrefillLoadScorer;
-
-impl WorkerScorer for PrefillLoadScorer {
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::LOAD
-    }
-
-    fn score(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        Ok(load.active_prefill_tokens() as f64)
-    }
-}
-
-struct DecodeLoadScorer;
-
-impl WorkerScorer for DecodeLoadScorer {
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::LOAD
-    }
-
-    fn score(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        Ok(load.decode_cost_blocks())
-    }
-}
-
-fn lowest_cost_row(input: WorkerInputView<'_>) -> Result<usize, WorkerSelectionPolicyError> {
-    input
-        .candidates()
-        .iter()
-        .enumerate()
-        .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
-        .map(|(row, _)| row)
-        .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
-}
-
-struct PrefillPicker;
-
-impl WorkerPicker for PrefillPicker {
-    fn pick(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        input: WorkerInputView<'_>,
-    ) -> Result<usize, WorkerSelectionPolicyError> {
-        lowest_cost_row(input)
-    }
-}
-
-struct DecodePicker;
-
-impl WorkerPicker for DecodePicker {
-    fn pick(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        input: WorkerInputView<'_>,
-    ) -> Result<usize, WorkerSelectionPolicyError> {
-        lowest_cost_row(input)
-    }
-}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

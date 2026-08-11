@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::local_model::{LocalModel, register_model_card};
+use dynamo_llm::local_model::{
+    LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
+};
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
@@ -171,6 +173,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
+    m.add_function(wrap_pyfunction!(update_model_taints, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
@@ -758,6 +761,21 @@ fn unregister_model<'p>(
             .await
             .map_err(to_pyerr)?;
         Ok(())
+    })
+}
+
+/// Replace the caller-managed taints on this worker's registered model.
+#[pyfunction]
+#[pyo3(signature = (endpoint, taints))]
+fn update_model_taints<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    taints: std::collections::HashSet<String>,
+) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        update_model_taints_rs(&endpoint.inner, taints)
+            .await
+            .map_err(to_pyerr)
     })
 }
 

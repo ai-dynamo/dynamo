@@ -11,10 +11,12 @@ This example shows how to link custom Rust worker-selection policies into the Dy
 
 | Crate | Purpose |
 |---|---|
-| `basic` | Uses one scorer and picker for every worker type. It scores active requests and picks the lowest cost. |
+| `basic` | Optionally requires cache overlap, then scores active requests and picks the lowest cost. |
 | `disaggregated` | Uses separate scorer and picker types for prefill and decode workers. |
 | `catalog` | Registers both policy types with Dynamo. Add new policy crates here. |
 | `epp` | Runs the catalog in a standalone EPP binary. |
+
+Each policy crate keeps configuration, factory creation, and registration in `lib.rs`. The filter, scorer, and picker algorithms live in focused source files.
 
 The disaggregated policy keeps the algorithm deliberately small:
 
@@ -47,12 +49,18 @@ worker_selection:
     - name: least-busy
       type: least-busy
       parameters: {}
+    - name: cache-affinity
+      type: least-busy
+      parameters:
+        min_effective_overlap_blocks: 8
     - name: disaggregated-load
       type: disaggregated-load
       parameters: {}
 ```
 
-Change `default` to `least-busy` to use the basic policy. Set `DYN_ROUTER_WORKER_SELECTION_POLICY` to either instance name to override the YAML default. Use `default` to select Dynamo's built-in policy.
+Change `default` to `least-busy` to use the basic policy without a filter. Change it to `cache-affinity` to require at least eight effective cache-overlap blocks. Set a positive `min_effective_overlap_blocks` value. Set `DYN_ROUTER_WORKER_SELECTION_POLICY` to an instance name to override the YAML default. Use `default` to select Dynamo's built-in policy.
+
+The cache-affinity filter is a hard requirement. If no eligible worker meets the threshold, Dynamo returns HTTP 503.
 
 ## Run With the Python Frontend
 
@@ -101,7 +109,7 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 
 Start with a new Rust library crate. The `basic` and `disaggregated` crates are runnable references, not templates.
 
-1. Implement the scorer and picker. Declare each signal with `required_worker_inputs`.
+1. Implement filters, scorers, and a picker. Declare each signal with `required_worker_inputs`.
 2. Parse and validate policy parameters in the provider.
 3. Return a factory that builds the policy for each worker type.
 4. Register a unique policy type name.
@@ -109,4 +117,6 @@ Start with a new Rust library crate. The `basic` and `disaggregated` crates are 
 
 The [custom routing guide](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) explains the traits, available signals, factory lifecycle, and registration flow.
 
-`score` and `pick` run in the scheduler queue actor. Keep them free of blocking I/O and return finite costs and a valid candidate row.
+`keep`, `score`, and `pick` run in the scheduler queue actor. Keep them free of blocking I/O. Return finite costs and a valid candidate row.
+
+For each candidate, filters run in declaration order before scorers. Candidate order and callback order across different candidates are unspecified. Dynamo normally scores kept candidates directly. It buffers them only when the built-in scorer needs a minimum active prefill load across the filtered set.

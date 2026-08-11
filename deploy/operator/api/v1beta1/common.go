@@ -128,11 +128,11 @@ type RestartStrategy struct {
 	Order []string `json:"order,omitempty"`
 }
 
-// ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
-// (DGDSA). When `scalingAdapter` is set on a component (even as an empty
-// object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
-// field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-// the Scale subresource. Omitting the field opts the component out.
+// ScalingAdapter opts a component into the DynamoGraphDeploymentScalingAdapter (DGDSA).
+// It is a marker struct: setting `scalingAdapter` at all -- even as the empty object
+// `scalingAdapter: {}` -- creates the DGDSA, which owns the `replicas` field so that
+// external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource.
+// Omit the field to opt out.
 type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
