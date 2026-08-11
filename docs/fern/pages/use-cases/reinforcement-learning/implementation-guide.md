@@ -366,7 +366,7 @@ Route request bodies and response fields are engine-specific. A callback can ret
 
 ### Read and Declare the Weight Version
 
-A vLLM worker reports the weight version it is serving through `get_weight_version`:
+A vLLM worker reports the last weight version declared to it through `get_weight_version`:
 
 ```bash
 curl http://10.0.0.12:8081/engine/get_weight_version \
@@ -379,6 +379,8 @@ curl http://10.0.0.12:8081/engine/get_weight_version \
 ```
 
 A worker tracks only the versions declared to it. `version_declared` is `false`, with `version` set to `null`, until something declares one, either through a `/engine/` weight-update route that carries `weight_version` or through `set_weight_version`. Branch on `version_declared` rather than comparing `version` against a placeholder string: any string, including `"initial"`, is a legal version tag that a caller can declare.
+
+A weight-update route that omits `weight_version` answers `"version": "unknown"` but declares nothing, so the surface stays undeclared. Pass `weight_version` on every update whose version you want the surface to report.
 
 > [!WARNING]
 > A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes only the weight updates that traverse its own `/engine/` routes. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.

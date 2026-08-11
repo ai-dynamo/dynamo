@@ -98,6 +98,8 @@ def _make_handler(
     # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
     # registers per-request deferred-abort guards here.
     handler._deferred_aborts = {}
+    # Likewise the weight-version surface starts undeclared.
+    handler._weight_version = mod._WEIGHT_VERSION_UNDECLARED
     return handler
 
 
@@ -1856,6 +1858,35 @@ class TestRLAdminRouteHardening:
         assert "weight_version" in resp["message"]
         # A rejected declaration must not leave the surface claiming knowledge.
         assert (await handler.get_weight_version({}))["version_declared"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_without_a_version_declares_nothing(self):
+        """An update that carries no ``weight_version`` leaves the surface
+        undeclared. The routes answer ``"unknown"`` so the response shape is
+        stable, but that placeholder is the route's, not the caller's, and
+        recording it would report a version nobody chose as declared.
+        """
+        handler = self._make_rl_handler()
+
+        distributed = await handler.update_weights_from_distributed(
+            {
+                "allow_unpaused": True,
+                "reset_prefix_cache": False,
+                "engine_rpc": "update_weights",
+            }
+        )
+        handler._paused = True
+        disk = await handler.update_weights_from_disk(
+            {"model_path": "/models/checkpoint-42"}
+        )
+
+        assert distributed == {"status": "ok", "version": "unknown"}
+        assert disk == {"status": "ok", "version": "unknown"}
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": None,
+            "version_declared": False,
+        }
 
     @pytest.mark.asyncio
     async def test_init_weights_update_group_succeeds_within_timeout(self):

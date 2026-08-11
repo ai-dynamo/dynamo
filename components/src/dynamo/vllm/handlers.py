@@ -1731,10 +1731,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": str(e)}
 
     def _declare_weight_version(self, version: Any) -> None:
-        """Record the weight version this worker is now serving.
+        """Record the weight version a caller has declared for this worker.
 
-        The single writer for the tracked version: both /engine weight-update
-        routes and the set_weight_version declaration route come through here.
+        The single writer for the tracked version: the set_weight_version
+        declaration route and both /engine weight-update routes come through
+        here. The update routes call it only when the request carried a
+        weight_version, so an update that declares nothing leaves the surface
+        undeclared rather than recording the placeholder they respond with.
         """
         self._weight_version = version
 
@@ -1754,7 +1757,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        version = getattr(self, "_weight_version", _WEIGHT_VERSION_UNDECLARED)
+        version = self._weight_version
         declared = version is not _WEIGHT_VERSION_UNDECLARED
         return {
             "status": "ok",
@@ -1820,7 +1823,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # weights is now stale and must not be reused. Invalidate it
                 # while still holding _pause_lock (generation is paused).
                 await self.engine_client.reset_prefix_cache()
-                self._declare_weight_version(version)
+                # Only a caller-supplied tag counts as a declaration. The
+                # "unknown" default is a response placeholder, not something a
+                # caller declared, and recording it would make version_declared
+                # true while get_weight_version reports a version nobody chose.
+                if "weight_version" in body:
+                    self._declare_weight_version(version)
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
                 )
@@ -1883,7 +1891,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
                     await self.engine_client.reset_prefix_cache()
-                self._declare_weight_version(version)
+                # See update_weights_from_disk: the "unknown" default is a
+                # response placeholder, not a declaration.
+                if "weight_version" in body:
+                    self._declare_weight_version(version)
                 logger.info(
                     f"[RL] Weights received via distributed "
                     f"(version={version}, rpc={rpc})"
