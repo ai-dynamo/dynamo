@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -128,6 +129,9 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 type CUDAManifest struct {
 	PIDs           []int    `yaml:"pids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
+	VMMInterpose   bool     `yaml:"vmmInterpose,omitempty"`
+	VMMGeneration  string   `yaml:"vmmGeneration,omitempty"`
+	VMMStateDigest string   `yaml:"vmmStateDigest,omitempty"`
 }
 
 func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
@@ -141,13 +145,46 @@ func (m CUDAManifest) IsEmpty() bool {
 	return len(m.PIDs) == 0
 }
 
+func (m CUDAManifest) validate() error {
+	generation := strings.TrimSpace(m.VMMGeneration)
+	digest := strings.TrimSpace(m.VMMStateDigest)
+	if !m.VMMInterpose {
+		if generation != "" || digest != "" {
+			return fmt.Errorf("checkpoint manifest has CUDA VMM metadata without vmmInterpose")
+		}
+		return nil
+	}
+	if len(m.PIDs) == 0 {
+		return fmt.Errorf("checkpoint manifest enables CUDA VMM interpose without CUDA PIDs")
+	}
+	if generation != m.VMMGeneration || !isHexBytes(generation, 16) {
+		return fmt.Errorf("checkpoint manifest has invalid CUDA VMM generation")
+	}
+	if digest != m.VMMStateDigest || !isHexBytes(digest, 32) {
+		return fmt.Errorf("checkpoint manifest has invalid CUDA VMM state digest")
+	}
+	return nil
+}
+
+func isHexBytes(value string, size int) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == size && hex.EncodeToString(decoded) == value
+}
+
+func (m *CheckpointManifest) validate() error {
+	if strings.TrimSpace(m.CheckpointID) == "" {
+		return fmt.Errorf("checkpoint manifest is missing checkpointId")
+	}
+	return m.CUDA.validate()
+}
+
 // WriteManifest writes a checkpoint manifest file in the checkpoint directory.
 func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	if data == nil {
 		return fmt.Errorf("checkpoint manifest is required")
 	}
-	if strings.TrimSpace(data.CheckpointID) == "" {
-		return fmt.Errorf("checkpoint manifest is missing checkpointId")
+	if err := data.validate(); err != nil {
+		return err
 	}
 
 	content, err := yaml.Marshal(data)
@@ -176,8 +213,8 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 	if err := yaml.Unmarshal(content, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint manifest: %w", err)
 	}
-	if strings.TrimSpace(data.CheckpointID) == "" {
-		return nil, fmt.Errorf("checkpoint manifest is missing checkpointId")
+	if err := data.validate(); err != nil {
+		return nil, err
 	}
 
 	return &data, nil

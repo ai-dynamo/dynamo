@@ -31,10 +31,6 @@ type CheckpointPhaseTimings struct {
 	TotalDuration time.Duration
 }
 
-type RestorePhaseTimings struct {
-	TotalDuration time.Duration
-}
-
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
 // PodResources (nvidia.com/gpu entries in GetDevices()).
 func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
@@ -343,30 +339,27 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	return timings, nil
 }
 
-// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
-	var timings RestorePhaseTimings
-
-	start := time.Now()
+// RestoreProcessTree restores CUDA state while keeping every process locked.
+func RestoreProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) error {
 	for _, pid := range cudaPIDs {
 		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
+			return err
 		}
 	}
+	return nil
+}
 
+// UnlockProcessTree resumes all restored CUDA processes.
+func UnlockProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) error {
 	for _, pid := range cudaPIDs {
 		if err := unlock(ctx, pid, log); err != nil {
-			timings.TotalDuration = time.Since(start)
 			state, stateErr := getState(ctx, pid)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue
 			}
-			return timings, err
+			return err
 		}
 	}
-	timings.TotalDuration = time.Since(start)
-
-	return timings, nil
+	return nil
 }

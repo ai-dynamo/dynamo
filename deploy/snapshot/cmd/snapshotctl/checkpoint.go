@@ -22,6 +22,7 @@ type checkpointOptions struct {
 	CheckpointID                 string
 	Container                    string
 	DisableCudaCheckpointJobFile bool
+	EnableCUDAVMM                bool
 	Timeout                      time.Duration
 }
 
@@ -83,6 +84,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
 		WrapLaunchJob:   !opts.DisableCudaCheckpointJobFile,
+		EnableCUDAVMM:   opts.EnableCUDAVMM,
 	})
 	if err != nil {
 		return nil, err

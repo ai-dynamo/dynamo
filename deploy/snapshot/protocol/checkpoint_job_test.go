@@ -23,6 +23,58 @@ func requireCheckpointContainer(t *testing.T, containers []corev1.Container, nam
 	return nil
 }
 
+func TestNewCheckpointJobScopesCUDAVMMUnderLaunchJob(t *testing.T) {
+	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{TargetContainersAnnotation: "main"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:    "main",
+			Command: []string{"python3"},
+			Args:    []string{"app.py"},
+		}}},
+	}, CheckpointJobOptions{
+		Namespace:       "test",
+		TargetContainer: "main",
+		CheckpointID:    "checkpoint",
+		Name:            "job",
+		WrapLaunchJob:   true,
+		EnableCUDAVMM:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := &job.Spec.Template.Spec.Containers[0]
+	if got := strings.Join(container.Command, " "); got != "cuda-checkpoint" {
+		t.Fatalf("command = %q", got)
+	}
+	want := "--launch-job dynamo-snapshot-cuda-vmm-launch python3 app.py"
+	if got := strings.Join(container.Args, " "); got != want {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+}
+
+func TestNewCheckpointJobRejectsCUDAVMMWithoutLaunchJob(t *testing.T) {
+	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{TargetContainersAnnotation: "main"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:    "main",
+			Command: []string{"python3"},
+		}}},
+	}, CheckpointJobOptions{
+		Namespace:       "test",
+		TargetContainer: "main",
+		CheckpointID:    "checkpoint",
+		Name:            "job",
+		EnableCUDAVMM:   true,
+	})
+	if err == nil {
+		t.Fatal("VMM opt-in without cuda-checkpoint launch-job must fail")
+	}
+}
+
 func TestNewCheckpointJob(t *testing.T) {
 	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
