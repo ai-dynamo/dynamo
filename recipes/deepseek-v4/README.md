@@ -132,7 +132,8 @@ TCP transfer or fails NIXL setup.
 
 - **Do not raise `--max-num-batched-tokens` to 24576 or above** on
   `vllm-runtime:1.3.0` when serving DeepSeek-V4-Flash with tensor parallelism on
-  H100-class GPUs: the fused attention kernel crashes the EngineCore a few minutes into
+  Hopper GPUs (reproduced on H100 TP4; H200 runs the same sm90 kernel path, so treat
+  the boundary as unvalidated there rather than safe): the fused attention kernel crashes the EngineCore a few minutes into
   sustained load (init and readiness pass, so the failure only appears under traffic).
   16384 is the validated-stable ceiling. Tracked in
   [#12972](https://github.com/ai-dynamo/dynamo/issues/12972).

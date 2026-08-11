@@ -31,7 +31,7 @@ spec:
   # NUM_REQUESTS=400 run (minutes); a full-trace replay is opt-in (NUM_REQUESTS=0) and
   # this deadline is sized for it. Divide the trace's total output tokens by your
   # system tok/s before opting in: the full agentic trace forces ~57.2M output tokens.
-  activeDeadlineSeconds: 28800
+  activeDeadlineSeconds: 43200
   completions: 1
   parallelism: 1
   template:
@@ -115,7 +115,8 @@ spec:
           # across runs (content-identical paired A/B). NUM_REQUESTS=0 replays the full
           # trace - see the activeDeadlineSeconds note before opting in.
           REQS="${NUM_REQUESTS:-400}"
-          if [ "${REQS}" -le 0 ]; then REQS=$(wc -l < "${TRACE_FILE}"); fi
+          TOTAL_ROWS=$(wc -l < "${TRACE_FILE}")
+          if [ "${REQS}" -le 0 ] || [ "${REQS}" -gt "${TOTAL_ROWS}" ]; then REQS="${TOTAL_ROWS}"; fi
 
           aiperf profile \
           -m "${TARGET_MODEL}" \
