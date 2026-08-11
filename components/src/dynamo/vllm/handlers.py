@@ -1474,14 +1474,73 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self.node_ip: str = d["NodeManagerAddress"]
                     self.node_id: str = d["NodeID"]
 
-            original_list_nodes = _ray_util_state.list_nodes
+            async def _scale_engine(size: int) -> None:
+                # add_dp_placement_groups calls ray.util.state.list_nodes();
+                # patch it to the GCS API for the duration of the reconfigure.
+                # Both the grow and any rollback go through this path.
+                original_list_nodes = _ray_util_state.list_nodes
+                try:
+                    _ray_util_state.list_nodes = lambda **kw: [
+                        _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                    ]
+                    await self.engine_client.scale_elastic_ep(size)
+                finally:
+                    _ray_util_state.list_nodes = original_list_nodes
+
+            # Capture the current dp up front so a failed grow can be rolled back
+            # to it instead of wedging the engine at a size it cannot fulfill: a
+            # half-created rank that dies leaves its peers expecting a collective
+            # that never completes, so the leader survives but stops serving.
+            prev_dp = self.engine_client.vllm_config.parallel_config.data_parallel_size
+
             try:
-                _ray_util_state.list_nodes = lambda **kw: [
-                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-                ]
-                await self.engine_client.scale_elastic_ep(new_dp_size)
-            finally:
-                _ray_util_state.list_nodes = original_list_nodes
+                await _scale_engine(new_dp_size)
+            except Exception as grow_err:
+                logger.error(
+                    f"[ElasticEP] Scaling to dp={new_dp_size} failed: {grow_err}"
+                )
+                if new_dp_size == prev_dp:
+                    # No size change was applied; nothing to roll back.
+                    raise
+                # Roll back to the last good dp: "either it grows, or nothing
+                # changes" for the engine, not just the pod.
+                try:
+                    logger.warning(
+                        f"[ElasticEP] Rolling back to data_parallel_size={prev_dp}"
+                    )
+                    await _scale_engine(prev_dp)
+                except Exception as rollback_err:
+                    # Rollback itself failed: the engine is unrecoverable in
+                    # process (e.g. an uncorrectable NVLink error poisoned the
+                    # CUDA/NCCL context). Signal that the worker must be restarted
+                    # rather than report a false recovery.
+                    logger.error(
+                        f"[ElasticEP] Rollback to dp={prev_dp} also failed: "
+                        f"{rollback_err}. Engine is unrecoverable and must be "
+                        "restarted."
+                    )
+                    return {
+                        "status": "error",
+                        "recoverable": False,
+                        "message": (
+                            f"scale to dp={new_dp_size} failed ({grow_err}); "
+                            f"rollback to dp={prev_dp} also failed ({rollback_err}); "
+                            "the engine is in an unrecoverable state and must be "
+                            "restarted"
+                        ),
+                    }
+                logger.info(
+                    f"[ElasticEP] Rolled back to dp={prev_dp}; engine still serving"
+                )
+                return {
+                    "status": "error",
+                    "recoverable": True,
+                    "data_parallel_size": prev_dp,
+                    "message": (
+                        f"scale to dp={new_dp_size} failed and was rolled back to "
+                        f"dp={prev_dp}: {grow_err}"
+                    ),
+                }
 
             logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
             return {
