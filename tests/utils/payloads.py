@@ -1343,8 +1343,21 @@ class PoolingPayload(BasePayload):
             self._validate_token_wise_data(data)
             return
 
-        values = data[0] if isinstance(data[0], list) else data
-        assert values and all(isinstance(value, (int, float)) for value in values)
+        self._validate_sequence_wise_data(data)
+
+    @staticmethod
+    def _validate_sequence_wise_data(data: Any) -> None:
+        """Require a flat numeric vector: exactly one vector per input.
+
+        Sequence-level tasks (``embed``, ``classify``) return one vector per
+        input, which the worker enforces itself. Accepting a matrix here and
+        validating only ``data[0]`` would let a rank regression pass while
+        clients can no longer read the result as a vector.
+        """
+        assert all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in data
+        ), f"sequence-level output must be a flat numeric vector, got {data!r}"
 
     @staticmethod
     def _validate_token_wise_data(data: Any) -> None:
@@ -1430,6 +1443,15 @@ class PoolingPayload(BasePayload):
             assert all(
                 isinstance(dim, int) and dim > 0 for dim in shape
             ), f"tensor {index} has a non-positive shape: {shape!r}"
+
+            # Rank matters as much as the byte count: [2, 2] and [4] cover the
+            # same span, but only one is the shape the task promises.
+            expected_rank = 2 if self.body.get("task") in self._TOKEN_WISE_TASKS else 1
+            assert len(shape) == expected_rank, (
+                f"tensor {index} has rank {len(shape)} (shape {shape!r}), "
+                f"expected rank {expected_rank} for task "
+                f"{self.body.get('task', 'embed')!r}"
+            )
 
             element_count = math.prod(shape)
             expected_bytes = element_count * dtype_width

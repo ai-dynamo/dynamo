@@ -57,7 +57,8 @@ def test_classify_payload_validates_truncated_usage():
     assert payload.process_response(response) == "Classified 1 inputs"
 
 
-def test_pooling_payload_validates_nested_float_output():
+def test_pooling_payload_validates_flat_float_output():
+    """A batch of pre-tokenized prompts returns one flat vector per input."""
     payload = pooling_payload(
         input_data=[[0, 1, 2], [3, 4, 5]],
         expected_prompt_tokens=4,
@@ -67,8 +68,8 @@ def test_pooling_payload_validates_nested_float_output():
         json_body={
             "object": "list",
             "data": [
-                {"index": 0, "object": "pooling", "data": [[0.1], [0.2]]},
-                {"index": 1, "object": "pooling", "data": [[0.3], [0.4]]},
+                {"index": 0, "object": "pooling", "data": [0.1, 0.2]},
+                {"index": 1, "object": "pooling", "data": [0.3, 0.4]},
             ],
             "usage": {
                 "prompt_tokens": 4,
@@ -217,6 +218,30 @@ def test_pooling_payload_rejects_nonnumeric_token_wise_rows():
         payload.process_response(response)
 
 
+def _sequence_wise_payload():
+    return pooling_payload(input_data="text", task="classify")
+
+
+def test_pooling_payload_rejects_nested_sequence_wise_output():
+    """Sequence classification returns one vector per input, which the worker
+    enforces. A matrix used to pass because only data[0] was validated, so a
+    rank regression stayed invisible here."""
+    payload = _sequence_wise_payload()
+    response = _token_wise_response([[0.1, 0.2, 0.7], [0.3, 0.4, 0.3]])
+
+    with pytest.raises(AssertionError, match="flat numeric vector"):
+        payload.process_response(response)
+
+
+def test_pooling_payload_rejects_nonnumeric_sequence_wise_values():
+    """Every element is checked, not only the first."""
+    payload = _sequence_wise_payload()
+    response = _token_wise_response([0.1, 0.2, "oops"])
+
+    with pytest.raises(AssertionError, match="flat numeric vector"):
+        payload.process_response(response)
+
+
 def _bytes_payload():
     return pooling_payload(
         input_data="text",
@@ -308,4 +333,26 @@ def test_pooling_payload_rejects_incomplete_body_coverage():
     )
 
     with pytest.raises(AssertionError, match="cover 4 bytes but the body is 6"):
+        payload.process_response(response)
+
+
+def test_pooling_payload_rejects_wrong_rank_binary_shape():
+    """shape=[2, 2] and shape=[4] span the same bytes, so the byte-count check
+    alone cannot tell them apart; sequence classification must stay rank 1."""
+    payload = _bytes_payload()
+    response = _bytes_response(
+        [
+            {
+                "index": 0,
+                "embed_dtype": "float16",
+                "endianness": "big",
+                "start": 0,
+                "end": 8,
+                "shape": [2, 2],
+            }
+        ],
+        content=b"\x00\x01\x02\x03\x04\x05\x06\x07",
+    )
+
+    with pytest.raises(AssertionError, match="has rank 2"):
         payload.process_response(response)
