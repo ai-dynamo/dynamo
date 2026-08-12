@@ -27,7 +27,25 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
 
 <ParamField path="dynamo_namespace" type="string">
   `[Shared]` The Dynamo runtime namespace — the logical scope shared by every component (router / prefill / decode / encode) in one deployment. **Not** the Kubernetes namespace. Example: `dynamo_cloud_vllm_v1_disagg_router_071de157`.
+
+  On worker and router metrics this is the emitting component's own namespace, injected from its position in the hierarchy. On the frontend request metrics listed under [Frontend metrics that carry a namespace](#frontend-metrics-that-carry-a-namespace) it is instead the namespace of the worker set **selected to serve that request** — a frontend discovering one model in several namespaces load-balances across them per request. The two meanings coincide for the frontend's per-namespace routers, so `sum by (dynamo_namespace)` aggregates across both sets consistently.
 </ParamField>
+
+### Frontend metrics that carry a namespace
+
+A frontend can serve one model name from several namespaces at once. These `dynamo_frontend_*` families carry `dynamo_namespace` so their series stay attributable to a single deployment:
+
+- Response metrics, labeled by the namespace that served the request: `output_tokens_total`, `time_to_first_token_seconds`, `inter_token_latency_seconds`, `input_sequence_tokens`, `output_sequence_tokens`, `cached_tokens`, `images_per_request`, `videos_per_request`, `audio_per_request`, `image_tokens_per_request`.
+- Per-deployment configuration gauges, labeled by the namespace whose model card supplied the value: `model_context_length`, `model_kv_cache_block_size`, `model_migration_limit`, `model_total_kv_blocks`, `model_max_num_seqs`, `model_max_num_batched_tokens`.
+- Router scheduler queue metrics, labeled by the namespace whose scheduler owns the queue: `router_queue_pending_requests`, `router_queue_pending_isl_tokens`, `router_queue_pending_cached_tokens`, `router_queue_backpressure_total`.
+
+<Warning>
+`dynamo_frontend_requests_total`, `dynamo_frontend_request_duration_seconds`, and `dynamo_frontend_inflight_requests` deliberately do **not** carry `dynamo_namespace`. They are recorded from a guard created before a worker set is selected, so that errors raised during model resolution are still counted. In a frontend serving several namespaces they aggregate across all of them.
+</Warning>
+
+<Note>
+Configuration gauges are per-deployment facts, so they are not additive: aggregate them with `max by (model)`, not `sum`. Counters and additive gauges aggregate with `sum by (model)`; histograms with `histogram_quantile(..., sum by (model, le) (rate(..._bucket[5m])))`.
+</Note>
 
 <ParamField path="dynamo_component" type="string">
   `[Shared]` Service role of the emitting component. See [Component names](#component-names) for the enumeration of values. Example: `backend`, `prefill`, `router`.

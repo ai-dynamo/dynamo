@@ -106,6 +106,7 @@ static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
 use super::error::{SanitizedError, overload_status_code};
+use crate::discovery::Selected;
 
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
@@ -835,7 +836,10 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
-    let (engine, parsing_options) = state
+    let Selected {
+        value: (engine, parsing_options),
+        namespace,
+    } = state
         .manager()
         .get_completions_engine_with_parsing(&model)
         .map_err(|e| {
@@ -846,7 +850,7 @@ async fn completions_single(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector(&metric_model);
+        .create_response_collector(&metric_model, &namespace);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1103,7 +1107,10 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let (engine, parsing_options) = state
+    let Selected {
+        value: (engine, parsing_options),
+        namespace,
+    } = state
         .manager()
         .get_completions_engine_with_parsing(&model)
         .map_err(|e| {
@@ -1114,7 +1121,7 @@ async fn completions_batch(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector(&metric_model);
+        .create_response_collector(&metric_model, &namespace);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1353,7 +1360,10 @@ async fn embeddings(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
-    let engine = state.manager().get_embeddings_engine(model).map_err(|e| {
+    let Selected {
+        value: engine,
+        namespace,
+    } = state.manager().get_embeddings_engine(model).map_err(|e| {
         let err_response = ErrorMessage::from_model_error(&e);
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -1361,7 +1371,7 @@ async fn embeddings(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector(&metric_model);
+        .create_response_collector(&metric_model, &namespace);
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -1515,7 +1525,10 @@ async fn classify(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let engine = state.manager().get_classify_engine(model).map_err(|e| {
+    let Selected {
+        value: engine,
+        namespace,
+    } = state.manager().get_classify_engine(model).map_err(|e| {
         let err_response = ErrorMessage::from_model_error(&e);
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -1523,7 +1536,7 @@ async fn classify(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector(&metric_model);
+        .create_response_collector(&metric_model, &namespace);
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -1796,7 +1809,10 @@ async fn pooling(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let engine = state.manager().get_pooling_engine(model).map_err(|e| {
+    let Selected {
+        value: engine,
+        namespace,
+    } = state.manager().get_pooling_engine(model).map_err(|e| {
         let err_response = ErrorMessage::from_model_error(&e);
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -1804,7 +1820,7 @@ async fn pooling(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector(&metric_model);
+        .create_response_collector(&metric_model, &namespace);
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -2610,7 +2626,10 @@ async fn chat_completions(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options) = state
+    let Selected {
+        value: (engine, parsing_options),
+        namespace,
+    } = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| {
@@ -2651,7 +2670,7 @@ async fn chat_completions(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector(&metric_model);
+        .create_response_collector(&metric_model, &namespace);
 
     let annotations = request.annotations();
 
@@ -3201,7 +3220,10 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options) = state
+    let Selected {
+        value: (engine, parsing_options),
+        namespace,
+    } = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| {
@@ -3235,7 +3257,7 @@ async fn responses(
 
     let mut response_collector = state
         .metrics_clone()
-        .create_response_collector(&metric_model);
+        .create_response_collector(&metric_model, &namespace);
 
     tracing::trace!("Issuing generate call for responses");
 
@@ -3932,7 +3954,10 @@ async fn images(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // Get the image generation engine
-    let engine = state
+    let Selected {
+        value: engine,
+        namespace,
+    } = state
         .manager()
         .get_images_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
@@ -3945,7 +3970,9 @@ async fn images(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&model, &namespace);
 
     // Issue the generate call on the engine
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
@@ -4053,7 +4080,10 @@ async fn videos(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // Get the video generation engine
-    let engine = state
+    let Selected {
+        value: engine,
+        namespace,
+    } = state
         .manager()
         .get_videos_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
@@ -4066,7 +4096,9 @@ async fn videos(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&model, &namespace);
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
@@ -4167,7 +4199,10 @@ async fn video_stream(
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let engine = state
+    let Selected {
+        value: engine,
+        namespace,
+    } = state
         .manager()
         .get_videos_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
@@ -4177,7 +4212,9 @@ async fn video_stream(
             .metrics_clone()
             .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&model, &namespace);
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
@@ -4355,7 +4392,10 @@ async fn audio_speech(
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let engine = state
+    let Selected {
+        value: engine,
+        namespace,
+    } = state
         .manager()
         .get_audios_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
@@ -4367,7 +4407,9 @@ async fn audio_speech(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&model, &namespace);
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {

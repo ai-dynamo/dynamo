@@ -377,7 +377,7 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
         model_type
     );
     match model_type {
-        ModelUpdate::Added(card) => {
+        ModelUpdate::Added { card, .. } => {
             // Handle all supported endpoint types, not just the first one
             for endpoint_type in card
                 .model_type
@@ -405,10 +405,10 @@ fn update_model_metrics(
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) {
     match model_type {
-        ModelUpdate::Added(card) => {
+        ModelUpdate::Added { card, namespace } => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
-                tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
+            if let Err(err) = metrics.update_metrics_from_mdc(&card, &namespace) {
+                tracing::warn!(%err, model_name=card.display_name, %namespace, "update_metrics_from_mdc failed");
             }
         }
         ModelUpdate::Removed(card) => {

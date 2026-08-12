@@ -5,7 +5,11 @@ title: Metrics Catalog
 subtitle: Every dynamo_* metric emitted by the frontend, backend workers, and router — name, type, and meaning.
 ---
 
-Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix and carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx). This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards).
+Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix. Metrics registered through the runtime hierarchy carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx); frontend metrics live on the frontend's own registry and carry only the labels noted on each field below. This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards).
+
+<Note>
+A frontend can serve one model name from several namespaces at once, so several `dynamo_frontend_*` families carry a `dynamo_namespace` label identifying the deployment a series belongs to. Three do not, by design. See [Frontend metrics that carry a namespace](metric-labels.mdx#frontend-metrics-that-carry-a-namespace) for the split and for how to aggregate each kind.
+</Note>
 
 ## Metric types
 

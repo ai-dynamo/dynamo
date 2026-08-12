@@ -94,6 +94,35 @@ pub struct Model {
     worker_sets: DashMap<String, Arc<WorkerSet>>,
 }
 
+/// A value extracted from one of a model's WorkerSets, paired with the namespace
+/// of the set it came from.
+///
+/// The namespace must come out of the *same* selection that produced the value.
+/// A model with WorkerSets in several namespaces picks one per request by
+/// weighted random choice, so asking again afterwards can name a different
+/// deployment than the one actually serving the request — which would silently
+/// misattribute that request's metrics.
+#[derive(Debug, Clone)]
+pub struct Selected<T> {
+    pub value: T,
+    pub namespace: String,
+}
+
+impl<T> Selected<T> {
+    /// Apply `f` to the value, keeping the namespace it was selected from.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Selected<U> {
+        Selected {
+            value: f(self.value),
+            namespace: self.namespace,
+        }
+    }
+
+    /// Discard the namespace. Use only where the caller records no metrics.
+    pub fn into_value(self) -> T {
+        self.value
+    }
+}
+
 impl Model {
     pub fn new(name: String) -> Self {
         Self {
@@ -599,61 +628,75 @@ impl Model {
 
     pub fn get_chat_engine(
         &self,
-    ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIChatCompletionsStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine(
         &self,
-    ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAICompletionsStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.completions_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     pub fn get_embeddings_engine(
         &self,
-    ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIEmbeddingsStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.embeddings_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
     }
 
-    pub fn get_classify_engine(&self) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+    pub fn get_classify_engine(
+        &self,
+    ) -> Result<Selected<OpenAIClassifyStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.classify_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_classify_engine()))
     }
 
-    pub fn get_pooling_engine(&self) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
+    pub fn get_pooling_engine(
+        &self,
+    ) -> Result<Selected<OpenAIPoolingStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.pooling_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_pooling_engine()))
     }
 
-    pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
+    pub fn get_images_engine(
+        &self,
+    ) -> Result<Selected<OpenAIImagesStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_images_engine()))
     }
 
-    pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
+    pub fn get_videos_engine(
+        &self,
+    ) -> Result<Selected<OpenAIVideosStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_videos_engine()))
     }
 
-    pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+    pub fn get_audios_engine(
+        &self,
+    ) -> Result<Selected<OpenAIAudiosStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.audios_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_audios_engine()))
     }
 
-    pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
+    pub fn get_tensor_engine(&self) -> Result<Selected<TensorStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
     }
 
-    pub fn get_realtime_engine(&self) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+    pub fn get_realtime_engine(
+        &self,
+    ) -> Result<Selected<RealtimeBidirectionalEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.realtime_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
-    pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
+    pub fn get_generate_engine(
+        &self,
+    ) -> Result<Selected<GenerateStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
@@ -661,7 +704,7 @@ impl Model {
     pub fn get_generate_engine_for_capability(
         &self,
         capability: &str,
-    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<GenerateStreamingEngine>, ModelManagerError> {
         self.select_worker_set_with(|worker_set| {
             worker_set
                 .supports_runtime_capability(capability)
@@ -675,14 +718,16 @@ impl Model {
 
     pub fn get_chat_engine_with_parsing(
         &self,
-    ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
+    ) -> Result<Selected<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
+    {
         self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
             .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine_with_parsing(
         &self,
-    ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
+    ) -> Result<Selected<(OpenAICompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
+    {
         self.select_worker_set_with(|ws| {
             ws.completions_engine
                 .clone()
@@ -693,7 +738,7 @@ impl Model {
 
     pub fn get_generate_engine_with_parsing(
         &self,
-    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
+    ) -> Result<Selected<(GenerateStreamingEngine, ParsingOptions)>, ModelManagerError> {
         self.select_worker_set_with(|ws| {
             ws.generate_engine
                 .clone()
@@ -756,7 +801,7 @@ impl Model {
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
     ///
-    fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
+    fn select_worker_set_with<T, F>(&self, extract: F) -> Option<Selected<T>>
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
@@ -786,27 +831,34 @@ impl Model {
             })
             .collect();
 
+        // Every return path pairs the extracted value with the namespace of the
+        // WorkerSet it came from, so callers never have to re-select to learn it.
+        let selected = |ws: &WorkerSet, value: T| Selected {
+            value,
+            namespace: ws.namespace().to_string(),
+        };
+
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
             let ws = &snapshot[0];
             if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
-            return extract(ws);
+            return extract(ws).map(|val| selected(ws, val));
         }
 
         // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
         // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = snapshot
+        let eligible: Vec<(Selected<T>, usize)> = snapshot
             .iter()
             .filter_map(|ws| {
                 let count = ws.worker_count();
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
-                extract(ws).map(|val| (val, count))
+                extract(ws).map(|val| (selected(ws, val), count))
             })
             .collect();
 
@@ -1929,5 +1981,206 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    // -- Selected<T> namespace-attribution tests --
+    //
+    // The namespace on `Selected` is what every per-request metric is labelled
+    // with, so it must name the WorkerSet the engine was actually taken from.
+    // `select_worker_set_with` has three distinct return paths (single-set fast
+    // path, `eligible.len() == 1`, weighted random) and each is covered here.
+
+    /// A legacy-card WorkerSet (no worker_type) with a chat engine: always
+    /// ready, worker_count == 1, and selectable.
+    fn ws_chat(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            mdcsum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.chat_engine = Some(make_test_chat_engine());
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn selected_namespace_matches_set_on_fast_path() {
+        let model = Model::new("llama".to_string());
+        let alpha = ws_chat("alpha", "abc");
+        model.add_worker_set("alpha".to_string(), alpha.clone());
+
+        let selected = model.get_chat_engine().expect("engine available");
+        assert_eq!(selected.namespace, "alpha");
+        assert!(
+            Arc::ptr_eq(&selected.value, alpha.chat_engine.as_ref().unwrap()),
+            "engine must come from the namespace it was attributed to"
+        );
+    }
+
+    #[test]
+    fn selected_namespace_matches_set_when_only_one_is_eligible() {
+        // Two namespaces with live workers, but only one carries a chat engine.
+        // Exercises the `eligible.len() == 1` path: the namespace must be the
+        // one that HAD the engine, not the first set in the map.
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("alpha".to_string(), make_worker_set("alpha", "abc"));
+        let beta = ws_chat("beta", "abc");
+        model.add_worker_set("beta".to_string(), beta.clone());
+
+        for _ in 0..64 {
+            let selected = model.get_chat_engine().expect("engine available");
+            assert_eq!(
+                selected.namespace, "beta",
+                "only 'beta' has a chat engine; attribution must not name 'alpha'"
+            );
+            assert!(Arc::ptr_eq(
+                &selected.value,
+                beta.chat_engine.as_ref().unwrap()
+            ));
+        }
+    }
+
+    #[test]
+    fn selected_namespace_matches_set_on_weighted_path() {
+        // Three eligible namespaces -> weighted random selection. Whichever is
+        // picked, the reported namespace must identify the set the engine came
+        // from, and over many draws every namespace must be reachable (i.e. the
+        // namespace is not pinned to one set).
+        let model = Model::new("llama".to_string());
+        let sets: Vec<Arc<WorkerSet>> = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|ns| {
+                let ws = ws_chat(ns, "abc");
+                model.add_worker_set(ns.to_string(), ws.clone());
+                ws
+            })
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..500 {
+            let selected = model.get_chat_engine().expect("engine available");
+            let owner = sets
+                .iter()
+                .find(|ws| Arc::ptr_eq(&selected.value, ws.chat_engine.as_ref().unwrap()))
+                .expect("engine must belong to one of the registered sets");
+            assert_eq!(
+                selected.namespace,
+                owner.namespace(),
+                "reported namespace must match the set the engine came from"
+            );
+            seen.insert(selected.namespace);
+        }
+        assert_eq!(
+            seen.len(),
+            3,
+            "weighted selection should reach every eligible namespace; saw {seen:?}"
+        );
+    }
+
+    #[test]
+    fn selected_namespace_is_correct_with_unequal_worker_counts() {
+        // Weighted-by-worker-count path with very different weights: the heavy
+        // namespace dominates, but attribution must still be per-draw exact.
+        let model = Model::new("llama".to_string());
+        let (light, _tx_l) = ws_serving_role(
+            "light",
+            "mdc-l",
+            WorkerType::Aggregated,
+            vec![],
+            (0..1).collect(),
+        );
+        let (heavy, _tx_h) = ws_serving_role(
+            "heavy",
+            "mdc-h",
+            WorkerType::Aggregated,
+            vec![],
+            (0..50).collect(),
+        );
+        model.add_worker_set("light".to_string(), light.clone());
+        model.add_worker_set("heavy".to_string(), heavy.clone());
+
+        for _ in 0..500 {
+            let selected = model.get_chat_engine().expect("engine available");
+            let expected = if Arc::ptr_eq(&selected.value, heavy.chat_engine.as_ref().unwrap()) {
+                "heavy"
+            } else {
+                assert!(Arc::ptr_eq(
+                    &selected.value,
+                    light.chat_engine.as_ref().unwrap()
+                ));
+                "light"
+            };
+            assert_eq!(selected.namespace, expected);
+        }
+    }
+
+    #[test]
+    fn selected_namespace_is_carried_through_parsing_accessor() {
+        // `get_chat_engine_with_parsing` extracts a tuple; the namespace must
+        // still be the tuple's own set.
+        let model = Model::new("llama".to_string());
+        let beta = ws_chat("beta", "abc");
+        model.add_worker_set("alpha".to_string(), make_worker_set("alpha", "abc"));
+        model.add_worker_set("beta".to_string(), beta.clone());
+
+        let selected = model
+            .get_chat_engine_with_parsing()
+            .expect("engine available");
+        assert_eq!(selected.namespace, "beta");
+        assert!(Arc::ptr_eq(
+            &selected.value.0,
+            beta.chat_engine.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn selected_map_preserves_namespace() {
+        let selected = Selected {
+            value: 7u32,
+            namespace: "ns-a".to_string(),
+        };
+        let mapped = selected.map(|v| v * 2);
+        assert_eq!(mapped.value, 14);
+        assert_eq!(mapped.namespace, "ns-a");
+    }
+
+    #[test]
+    fn selected_namespace_never_leaks_an_unready_namespace() {
+        // "bad" is decode-only (unready) but has a live worker and a chat
+        // engine; "good" is a complete P/D pair. Every selection must both come
+        // from and be labelled "good".
+        let model = Model::new("llama".to_string());
+        let (good_prefill, _tx_gp) = ws_with_type(
+            "good",
+            "mdc-gp",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (good_decode, _tx_gd) = ws_serving_role(
+            "good",
+            "mdc-gd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        let (bad_decode, _tx_bd) = ws_serving_role(
+            "bad",
+            "mdc-bd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![3],
+        );
+        model.add_worker_set("good:prefill".to_string(), good_prefill);
+        model.add_worker_set("good".to_string(), good_decode.clone());
+        model.add_worker_set("bad".to_string(), bad_decode.clone());
+
+        for _ in 0..200 {
+            let selected = model.get_chat_engine().expect("good namespace serves");
+            assert_eq!(selected.namespace, "good");
+            assert!(
+                Arc::ptr_eq(&selected.value, good_decode.chat_engine.as_ref().unwrap()),
+                "must not hand back the unready namespace's engine"
+            );
+        }
     }
 }

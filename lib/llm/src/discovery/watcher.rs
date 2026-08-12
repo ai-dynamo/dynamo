@@ -198,7 +198,16 @@ fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType)
 
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
-    Added(ModelDeploymentCard),
+    /// A model became servable in `namespace`. The namespace is carried because
+    /// per-deployment metrics (context length, KV block size, migration limit)
+    /// are keyed by it: one frontend can serve the same model name from several
+    /// namespaces, and without it the later card overwrites the earlier one's
+    /// values. `Removed` needs no namespace — metrics are deliberately retained
+    /// on removal to preserve history.
+    Added {
+        card: ModelDeploymentCard,
+        namespace: String,
+    },
     Removed(ModelDeploymentCard),
 }
 
@@ -1108,7 +1117,10 @@ where
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
-        self.emit_update(ModelUpdate::Added(prepared.card.clone()));
+        self.emit_update(ModelUpdate::Added {
+            card: prepared.card.clone(),
+            namespace: spec.representative.endpoint_id.namespace.clone(),
+        });
         let mut adapter_names = HashSet::new();
         for adapter in adapters {
             if adapter_names.insert(adapter.card.name().to_string())
@@ -1117,7 +1129,10 @@ where
                     .copied()
                     .unwrap_or(false)
             {
-                self.emit_update(ModelUpdate::Added(adapter.card.clone()));
+                self.emit_update(ModelUpdate::Added {
+                    card: adapter.card.clone(),
+                    namespace: adapter.endpoint_id.namespace.clone(),
+                });
             }
         }
         if prepared.card.model_type.supports_chat() {
@@ -1147,7 +1162,12 @@ where
             .collect::<HashMap<_, _>>();
         let desired = adapters
             .iter()
-            .map(|adapter| (adapter.card.name().to_string(), adapter.card.clone()))
+            .map(|adapter| {
+                (
+                    adapter.card.name().to_string(),
+                    (adapter.card.clone(), adapter.endpoint_id.namespace.clone()),
+                )
+            })
             .collect::<HashMap<_, _>>();
         let was_available = previous
             .keys()
@@ -1170,11 +1190,14 @@ where
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
-        for (name, card) in &desired {
+        for (name, (card, namespace)) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(name).is_some()
             {
-                self.emit_update(ModelUpdate::Added(card.clone()));
+                self.emit_update(ModelUpdate::Added {
+                    card: card.clone(),
+                    namespace: namespace.clone(),
+                });
             }
         }
         for (name, card) in previous {

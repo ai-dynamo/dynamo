@@ -20,7 +20,7 @@ use dynamo_kv_router::{
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    KvSourceMembershipWatch, Model, RuntimeConfigWatch, Selected, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -1200,7 +1200,7 @@ impl ModelManager {
     pub fn get_embeddings_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIEmbeddingsStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1212,7 +1212,7 @@ impl ModelManager {
     pub fn get_classify_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIClassifyStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1224,7 +1224,7 @@ impl ModelManager {
     pub fn get_pooling_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIPoolingStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1236,7 +1236,7 @@ impl ModelManager {
     pub fn get_completions_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAICompletionsStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1248,7 +1248,7 @@ impl ModelManager {
     pub fn get_chat_completions_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIChatCompletionsStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1260,7 +1260,7 @@ impl ModelManager {
     pub fn get_tensor_engine(
         &self,
         model: &str,
-    ) -> Result<TensorStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<TensorStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1272,7 +1272,7 @@ impl ModelManager {
     pub fn get_images_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIImagesStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1284,7 +1284,7 @@ impl ModelManager {
     pub fn get_videos_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIVideosStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1296,7 +1296,7 @@ impl ModelManager {
     pub fn get_audios_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIAudiosStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1308,7 +1308,7 @@ impl ModelManager {
     pub fn get_realtime_engine(
         &self,
         model: &str,
-    ) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+    ) -> Result<Selected<RealtimeBidirectionalEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1320,7 +1320,7 @@ impl ModelManager {
     pub fn get_generate_engine(
         &self,
         model: &str,
-    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<GenerateStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1333,7 +1333,7 @@ impl ModelManager {
         &self,
         model: &str,
         capability: &str,
-    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<GenerateStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1348,10 +1348,10 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<
-        (
+        Selected<(
             OpenAIChatCompletionsStreamingEngine,
             crate::protocols::openai::ParsingOptions,
-        ),
+        )>,
         ModelManagerError,
     > {
         self.catalog
@@ -1366,10 +1366,10 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<
-        (
+        Selected<(
             OpenAICompletionsStreamingEngine,
             crate::protocols::openai::ParsingOptions,
-        ),
+        )>,
         ModelManagerError,
     > {
         self.catalog
@@ -1384,10 +1384,10 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<
-        (
+        Selected<(
             GenerateStreamingEngine,
             crate::protocols::openai::ParsingOptions,
-        ),
+        )>,
         ModelManagerError,
     > {
         self.catalog
@@ -3591,5 +3591,59 @@ mod tests {
             ),
             "incomplete-but-engine-present model must be ModelUnavailable (503), not 404"
         );
+    }
+
+    // -- namespace propagation through the ModelManager accessors --
+
+    /// In-process (non-discovery) models register under a synthetic namespace.
+    /// That value is what ends up in `dynamo_namespace`, so pin it: the HTTP
+    /// integration test in tests/http_metrics.rs asserts the same string.
+    #[test]
+    fn local_chat_model_reports_synthetic_namespace() {
+        let mm = ModelManager::new();
+        mm.add_chat_completions_model("local-model", "abc", make_chat_engine())
+            .unwrap();
+
+        let selected = mm.get_chat_completions_engine("local-model").unwrap();
+        assert_eq!(selected.namespace, "__local_chat_local-model");
+        assert!(
+            !selected.namespace.is_empty(),
+            "an empty namespace would collapse all in-process models into one series"
+        );
+    }
+
+    /// A model name served from two namespaces must report the namespace of the
+    /// WorkerSet that actually produced the engine, on every draw.
+    #[test]
+    fn manager_propagates_selected_namespace_for_multi_namespace_model() {
+        let mm = ModelManager::new();
+
+        let mut sets = Vec::new();
+        for ns in ["ns-a", "ns-b"] {
+            let mut ws = WorkerSet::new(
+                ns.to_string(),
+                "abc".to_string(),
+                ModelDeploymentCard::default(),
+            );
+            ws.chat_engine = Some(make_chat_engine());
+            let engine = ws.chat_engine.clone().unwrap();
+            assert!(mm.add_worker_set("shared", ns, ws));
+            sets.push((ns, engine));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..300 {
+            let selected = mm.get_chat_completions_engine("shared").unwrap();
+            let (owner_ns, _) = sets
+                .iter()
+                .find(|(_, e)| Arc::ptr_eq(&selected.value, e))
+                .expect("engine must belong to a registered namespace");
+            assert_eq!(
+                &selected.namespace, owner_ns,
+                "metrics would be attributed to the wrong deployment"
+            );
+            seen.insert(selected.namespace);
+        }
+        assert_eq!(seen.len(), 2, "both namespaces must be reachable: {seen:?}");
     }
 }
