@@ -1350,13 +1350,6 @@ pub enum KvCacheEventError {
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     pub worker_id: WorkerId,
-    /// Stable state source that owns this event stream.
-    ///
-    /// This is absent on the legacy Worker-only wire. CacheOwner events are
-    /// valid only on a versioned, residency-aware source where this field is
-    /// present; they must never be sent to legacy consumers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_source: Option<CacheOwnerId>,
     /// The storage tier associated with the event.
     #[serde(default)]
     pub storage_tier: StorageTier,
@@ -1366,6 +1359,14 @@ pub struct RouterEvent {
     pub residency_domain: WireResidencyDomain,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
+    /// Stable state source that owns this event stream.
+    ///
+    /// This is absent on the legacy Worker-only wire. CacheOwner events are
+    /// valid only on a versioned, residency-aware source where this field is
+    /// present; they must never be sent to legacy consumers. Keep this field
+    /// last so legacy positional MessagePack remains prefix-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_source: Option<CacheOwnerId>,
 }
 
 impl RouterEvent {
