@@ -6,11 +6,9 @@
 from __future__ import annotations
 
 import heapq
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Optional, Sequence, Tuple, cast
+from typing import Mapping, Optional, Sequence, Tuple, TypeVar, cast
 
 from dynamo.workflow.types import (
     StageContract,
@@ -21,21 +19,10 @@ from dynamo.workflow.types import (
     validate_name,
 )
 
-WORKFLOW_SCHEMA = "dynamo.workflow.ir"
-WORKFLOW_VERSION = 0
+_T = TypeVar("_T")
 
 
-def _check_keys(data: Mapping[str, Any], required: set[str]) -> None:
-    keys = set(data)
-    missing = required - keys
-    unknown = keys - required
-    if missing:
-        raise WorkflowValidationError(f"missing fields: {sorted(missing)}")
-    if unknown:
-        raise WorkflowValidationError(f"unknown fields: {sorted(unknown)}")
-
-
-def _freeze_mapping(values: Mapping[str, Any]) -> Mapping[str, Any]:
+def _freeze_mapping(values: Mapping[str, _T]) -> Mapping[str, _T]:
     return MappingProxyType(dict(sorted(values.items())))
 
 
@@ -60,33 +47,6 @@ class StageIR:
                 raise WorkflowValidationError(f"stage input {name!r} must use ValueRef")
             frozen[name] = reference
         object.__setattr__(self, "inputs", MappingProxyType(frozen))
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the canonical JSON-ready representation."""
-
-        return {
-            "id": self.id,
-            "contract": self.contract.to_dict(),
-            "inputs": {
-                name: reference.to_dict() for name, reference in self.inputs.items()
-            },
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "StageIR":
-        """Parse one stage instance."""
-
-        if not isinstance(data, Mapping):
-            raise WorkflowValidationError("stage must be an object")
-        _check_keys(data, {"id", "contract", "inputs"})
-        inputs = data["inputs"]
-        if not isinstance(inputs, Mapping):
-            raise WorkflowValidationError("stage inputs must be an object")
-        return cls(
-            id=data["id"],
-            contract=StageContract.from_dict(data["contract"]),
-            inputs={name: ValueRef.from_dict(ref) for name, ref in inputs.items()},
-        )
 
 
 @dataclass(frozen=True)
@@ -268,102 +228,3 @@ class WorkflowIR:
         by_id = {stage.id: stage for stage in self.stages}
         spec, _ = self._resolve_reference(self.outputs[name], self.inputs, by_id)
         return spec
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the canonical JSON-ready representation."""
-
-        return {
-            "schema": WORKFLOW_SCHEMA,
-            "version": WORKFLOW_VERSION,
-            "name": self.name,
-            "inputs": {name: spec.to_dict() for name, spec in self.inputs.items()},
-            "stages": [stage.to_dict() for stage in self.stages],
-            "outputs": {
-                name: reference.to_dict() for name, reference in self.outputs.items()
-            },
-        }
-
-    def to_json(self, indent: Optional[int] = None) -> str:
-        """Serialize deterministically as JSON."""
-
-        separators = None if indent is not None else (",", ":")
-        return json.dumps(
-            self.to_dict(),
-            allow_nan=False,
-            ensure_ascii=False,
-            indent=indent,
-            separators=separators,
-            sort_keys=True,
-        )
-
-    def write_json(self, path: Path) -> None:
-        """Write pretty, deterministic JSON to a file."""
-
-        path.write_text(f"{self.to_json(indent=2)}\n", encoding="utf-8")
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "WorkflowIR":
-        """Parse and validate a canonical workflow object."""
-
-        if not isinstance(data, Mapping):
-            raise WorkflowValidationError("workflow IR must be an object")
-        _check_keys(data, {"schema", "version", "name", "inputs", "stages", "outputs"})
-        if data["schema"] != WORKFLOW_SCHEMA:
-            raise WorkflowValidationError(
-                f"unsupported workflow schema {data['schema']!r}"
-            )
-        version = data["version"]
-        if (
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or version != WORKFLOW_VERSION
-        ):
-            raise WorkflowValidationError(f"unsupported workflow version {version!r}")
-        inputs = data["inputs"]
-        stages = data["stages"]
-        outputs = data["outputs"]
-        if not isinstance(inputs, Mapping) or not isinstance(outputs, Mapping):
-            raise WorkflowValidationError("workflow inputs and outputs must be objects")
-        if not isinstance(stages, list):
-            raise WorkflowValidationError("workflow stages must be an array")
-        return cls(
-            name=data["name"],
-            inputs={name: ValueSpec.from_dict(spec) for name, spec in inputs.items()},
-            stages=tuple(StageIR.from_dict(stage) for stage in stages),
-            outputs={name: ValueRef.from_dict(ref) for name, ref in outputs.items()},
-        )
-
-    @classmethod
-    def from_json(cls, value: str) -> "WorkflowIR":
-        """Parse strict JSON while rejecting duplicate object keys."""
-
-        def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-            result: dict[str, Any] = {}
-            for key, item in pairs:
-                if key in result:
-                    raise WorkflowValidationError(f"duplicate JSON key {key!r}")
-                result[key] = item
-            return result
-
-        def reject_non_finite(constant: str) -> None:
-            raise WorkflowValidationError(
-                f"non-finite JSON constant {constant!r} is not supported"
-            )
-
-        try:
-            data = json.loads(
-                value,
-                object_pairs_hook=reject_duplicates,
-                parse_constant=reject_non_finite,
-            )
-        except json.JSONDecodeError as error:
-            raise WorkflowValidationError(
-                f"invalid workflow JSON: {error.msg}"
-            ) from error
-        return cls.from_dict(data)
-
-    @classmethod
-    def read_json(cls, path: Path) -> "WorkflowIR":
-        """Read and validate workflow JSON from a file."""
-
-        return cls.from_json(path.read_text(encoding="utf-8"))

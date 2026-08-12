@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 from dataclasses import FrozenInstanceError
+from typing import Any
 
 import pytest
 
@@ -84,22 +84,10 @@ def test_builds_fanout_workflow_from_declared_output_attributes():
     ]
     assert workflow.output_spec("scores") == ValueSpec(type="json")
     encoder_ref = workflow.stages[1].inputs["embedding"]
-    assert encoder_ref.to_dict() == {"stage": "encoder", "output": "embedding"}
+    assert encoder_ref == ValueRef.for_stage_output("encoder", "embedding")
 
 
-def test_json_is_deterministic_and_round_trips() -> None:
-    workflow = _workflow()
-    encoded = workflow.to_json()
-
-    assert encoded == workflow.to_json()
-    assert WorkflowIR.from_json(encoded).to_dict() == workflow.to_dict()
-    assert (
-        WorkflowIR.from_json(encoded.replace("vision-response", "视觉-workflow")).name
-        == "视觉-workflow"
-    )
-
-
-def test_json_schema_keeps_complete_contracts_inline() -> None:
+def test_ir_keeps_complete_contracts_inline() -> None:
     workflow = Workflow("echo-flow")
     value = workflow.input("text", type="text")
     echo = workflow.stage(
@@ -113,13 +101,19 @@ def test_json_schema_keeps_complete_contracts_inline() -> None:
     )
     workflow.output("text", echo.text)
 
-    assert workflow.build().to_json() == (
-        '{"inputs":{"text":{"type":"text"}},"name":"echo-flow",'
-        '"outputs":{"text":{"output":"text","stage":"echo"}},'
-        '"schema":"dynamo.workflow.ir","stages":[{"contract":'
-        '{"id":"echo-contract","inputs":{"text":{"type":"text"}},'
-        '"outputs":{"text":{"type":"text"}}},"id":"echo",'
-        '"inputs":{"text":{"input":"text"}}}],"version":0}'
+    workflow_ir = workflow.build()
+    assert workflow_ir.inputs == {"text": ValueSpec(type="text")}
+    assert workflow_ir.outputs == {"text": ValueRef.for_stage_output("echo", "text")}
+    assert workflow_ir.stages == (
+        StageIR(
+            id="echo",
+            contract=StageContract(
+                id="echo-contract",
+                inputs={"text": ValueSpec(type="text")},
+                outputs={"text": ValueSpec(type="text")},
+            ),
+            inputs={"text": ValueRef.for_input("text")},
+        ),
     )
 
 
@@ -175,9 +169,9 @@ def test_contracts_are_deeply_immutable():
         {"type": "object", "class_id": "\ud800"},
     ],
 )
-def test_rejects_invalid_value_specs(spec: dict[str, object]) -> None:
+def test_rejects_invalid_value_specs(spec: dict[str, Any]) -> None:
     with pytest.raises(WorkflowValidationError):
-        ValueSpec.from_dict(spec)
+        ValueSpec(**spec)
 
 
 def test_rejects_incompatible_edge_and_foreign_reference():
@@ -220,30 +214,30 @@ def test_rejects_missing_inputs_and_conflicting_contract_ids():
         workflow.add_stage("second", conflicting, inputs={"value": first_stage.text})
 
 
-def test_parser_rejects_conflicting_inline_contracts() -> None:
-    data = _workflow().to_dict()
-    data["stages"][2]["contract"]["id"] = "classifier"
+def test_ir_rejects_conflicting_inline_contracts() -> None:
+    workflow = _workflow()
+    stages = list(workflow.stages)
+    generator = stages[2]
+    stages[2] = StageIR(
+        id=generator.id,
+        contract=StageContract(
+            id="classifier",
+            inputs=generator.contract.inputs,
+            outputs=generator.contract.outputs,
+        ),
+        inputs=generator.inputs,
+    )
 
     with pytest.raises(WorkflowValidationError, match="conflicting schemas"):
-        WorkflowIR.from_dict(data)
+        WorkflowIR(
+            name=workflow.name,
+            inputs=workflow.inputs,
+            stages=tuple(stages),
+            outputs=workflow.outputs,
+        )
 
 
-def test_parser_rejects_unknown_fields_and_duplicate_json_keys():
-    data = _workflow().to_dict()
-    data["placement"] = {"gpu": 0}
-    with pytest.raises(WorkflowValidationError, match="unknown fields"):
-        WorkflowIR.from_dict(data)
-    with pytest.raises(WorkflowValidationError, match="duplicate JSON key"):
-        WorkflowIR.from_json('{"schema":"one","schema":"two"}')
-
-
-@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
-def test_parser_rejects_non_finite_json_constants(constant: str) -> None:
-    with pytest.raises(WorkflowValidationError, match="non-finite JSON constant"):
-        WorkflowIR.from_json(_workflow().to_json().replace('"RGB"', constant))
-
-
-def test_parser_rejects_cycles_unreachable_and_dead_stages():
+def test_ir_rejects_cycles_unreachable_and_dead_stages():
     text = ValueSpec(type="text")
     contract = StageContract(id="node", inputs={"value": text}, outputs={"value": text})
     cycle = (
@@ -287,27 +281,14 @@ def test_parser_rejects_cycles_unreachable_and_dead_stages():
         )
 
 
-def test_parser_rejects_unknown_references_and_schema_version():
-    data = _workflow().to_dict()
-    data["outputs"]["text"] = {"stage": "missing", "output": "text"}
+def test_ir_rejects_unknown_references():
+    workflow = _workflow()
+    outputs = dict(workflow.outputs)
+    outputs["text"] = ValueRef.for_stage_output("missing", "text")
     with pytest.raises(WorkflowValidationError, match="unknown stage"):
-        WorkflowIR.from_dict(data)
-
-    data = _workflow().to_dict()
-    data["version"] = 1
-    with pytest.raises(WorkflowValidationError, match="unsupported workflow version"):
-        WorkflowIR.from_dict(data)
-
-    malformed = json.loads(_workflow().to_json())
-    malformed["stages"][0]["contract"]["outputs"]["embedding"]["extra"] = "x"
-    with pytest.raises(WorkflowValidationError, match="unknown fields"):
-        WorkflowIR.from_dict(malformed)
-
-
-@pytest.mark.parametrize("version", [False, 0.0])
-def test_parser_rejects_non_integer_version_zero(version: object) -> None:
-    data = _workflow().to_dict()
-    data["version"] = version
-
-    with pytest.raises(WorkflowValidationError, match="unsupported workflow version"):
-        WorkflowIR.from_dict(data)
+        WorkflowIR(
+            name=workflow.name,
+            inputs=workflow.inputs,
+            stages=workflow.stages,
+            outputs=outputs,
+        )
