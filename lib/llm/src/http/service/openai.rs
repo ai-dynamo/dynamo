@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     extract::State,
     http::Request,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -2950,8 +2950,11 @@ pub fn validate_completion_fields_generic(
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateResponse>,
+    body: Bytes,
 ) -> Result<Response, ErrorResponse> {
+    ensure_json_content_type(&headers)?;
+    let mut request: NvCreateResponse = parse_json_request("responses", &body)?;
+
     // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
     // don't bypass the gate.
@@ -3403,6 +3406,24 @@ pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorRes
         return Err(ErrorMessage::_service_unavailable());
     }
     Ok(())
+}
+
+/// Returns an OpenAI-compatible JSON error response for unmatched routes.
+/// Axum's default fallback response has an empty body and does not set a
+/// `Content-Type` header.
+/// This fallback returns `404` with the standard `ErrorMessage` response format.
+pub(crate) async fn unmatched_route_fallback(method: Method, uri: Uri) -> ErrorResponse {
+    let code = StatusCode::NOT_FOUND;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!("Invalid URL ({} {})", method, uri.path()),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
 }
 
 /// Canonical, customer-facing message for "model is registered but not yet

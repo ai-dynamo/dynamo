@@ -1250,6 +1250,10 @@ impl HttpServiceConfigBuilder {
 
         let router = system_router.merge(inference_router);
 
+        // Return an OpenAI-compatible JSON error for unmatched routes.
+        // Configure this after merging routers and before applying layers.
+        let router = router.fallback(super::openai::unmatched_route_fallback);
+
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
 
@@ -1636,6 +1640,120 @@ mod tests {
         assert_eq!(live.status(), reqwest::StatusCode::OK);
 
         cancel_token.cancel();
+        handle.abort();
+    }
+
+    /// Starts a default `HttpService` on an ephemeral local port.
+    /// These tests exercise request handling before the readiness check,
+    /// so no model registration is required.
+    async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .ok();
+        });
+        // Allow the server to begin accepting connections.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (port, handle)
+    }
+
+    /// Verifies that an unsupported content type returns the standard JSON error
+    /// envelope instead of Axum's default plain-text extractor rejection.
+    #[tokio::test]
+    async fn test_responses_non_json_content_type_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/responses"))
+            .header("content-type", "text/plain")
+            .body(r#"{"model":"model","input":"hi"}"#)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 415);
+        assert_eq!(
+            body["message"],
+            "Expected request with Content-Type application/json"
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that malformed JSON returns the standard JSON error envelope
+    /// instead of Axum's default plain-text extractor rejection.
+    #[tokio::test]
+    async fn test_responses_malformed_json_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/responses"))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"model","input":"#)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 400);
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message must be a string")
+                .starts_with("Failed to deserialize the JSON body into the target type"),
+            "unexpected message: {}",
+            body["message"]
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that an unknown response ID returns a JSON `404 Not Found`
+    /// response instead of Axum's default empty fallback response.
+    #[tokio::test]
+    async fn test_unknown_response_id_returns_json_404() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/responses/resp_missing"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 404);
+        assert_eq!(
+            body["message"],
+            "Invalid URL (GET /v1/responses/resp_missing)"
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that an unmatched route returns the standard JSON `404 Not Found`
+    /// error envelope.
+    #[tokio::test]
+    async fn test_unknown_path_returns_json_404() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/not_a_route"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 404);
+
         handle.abort();
     }
 
