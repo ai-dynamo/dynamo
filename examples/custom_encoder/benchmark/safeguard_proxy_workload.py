@@ -13,8 +13,9 @@ import random
 import statistics
 import sys
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -238,6 +239,7 @@ def generate_workload(
     requests: int = REQUESTS,
     unique_images: int = UNIQUE_IMAGES,
     target_isl: int = TARGET_ISL,
+    text_isl: int | None = None,
     seed: int = SEED,
     image_size: int = DEFAULT_IMAGE_SIZE,
     image_size_counts: tuple[tuple[int, int, int], ...] | None = None,
@@ -246,6 +248,8 @@ def generate_workload(
         raise ValueError("concurrencies must be positive")
     if len(set(concurrencies)) != len(concurrencies):
         raise ValueError("concurrencies must be unique")
+    if text_isl is not None and text_isl < 1:
+        raise ValueError("text_isl must be positive")
     normalized_sizes = _normalize_image_size_counts(
         image_size, unique_images, image_size_counts
     )
@@ -275,8 +279,7 @@ def generate_workload(
                     output_dir
                     / "images"
                     / (
-                        f"image_{image_index:04d}_{width}x{height}_"
-                        f"{size_index:04d}.jpg"
+                        f"image_{image_index:04d}_{width}x{height}_{size_index:04d}.jpg"
                     ),
                     seed + image_index,
                     (width, height),
@@ -292,30 +295,49 @@ def generate_workload(
 
     prompts_by_size: dict[str, str] = {}
     observed_isl_by_size: dict[str, int] = {}
-    for width, height, _ in normalized_sizes:
-        size_key = f"{width}x{height}"
-        calibration_record = next(
-            record
-            for record in records
-            if (int(record["width"]), int(record["height"])) == (width, height)
+    shared_prompt: str | None = None
+    if text_isl is not None:
+        shared_prompt, observed_text_isl = _calibrate_prompt(
+            text_isl,
+            lambda prompt: len(tokenizer(prompt, add_special_tokens=False).input_ids),
         )
-        with Image.open(str(calibration_record["path"])) as encoded:
-            calibration_image = encoded.convert("RGB")
-
-        def calculate_isl(prompt: str) -> int:
-            return _calculate_custom_isl_components(
-                tokenizer, processor.image_processor, prompt, calibration_image
+        if observed_text_isl != text_isl:
+            raise RuntimeError(
+                f"raw prompt produced {observed_text_isl} tokens, expected {text_isl}"
             )
+        prompts_by_size = {
+            f"{width}x{height}": shared_prompt for width, height, _ in normalized_sizes
+        }
+    else:
+        for width, height, _ in normalized_sizes:
+            size_key = f"{width}x{height}"
+            calibration_record = next(
+                record
+                for record in records
+                if (int(record["width"]), int(record["height"])) == (width, height)
+            )
+            with Image.open(str(calibration_record["path"])) as encoded:
+                calibration_image = encoded.convert("RGB")
 
-        prompt, observed_isl = _calibrate_prompt(target_isl, calculate_isl)
-        prompts_by_size[size_key] = prompt
-        observed_isl_by_size[size_key] = observed_isl
+            def calculate_isl(
+                prompt: str, image: Image.Image = calibration_image
+            ) -> int:
+                return _calculate_custom_isl_components(
+                    tokenizer, processor.image_processor, prompt, image
+                )
+
+            prompt, observed_isl = _calibrate_prompt(target_isl, calculate_isl)
+            prompts_by_size[size_key] = prompt
+            observed_isl_by_size[size_key] = observed_isl
 
     prompts_by_path: dict[str, str] = {}
+    decoder_isls_by_size: dict[str, set[int]] = {
+        f"{width}x{height}": set() for width, height, _ in normalized_sizes
+    }
     for record in records:
         with Image.open(str(record["path"])) as encoded:
             image = encoded.convert("RGB")
-        size_key = f'{record["width"]}x{record["height"]}'
+        size_key = f"{record['width']}x{record['height']}"
         prompt = prompts_by_size[size_key]
         image_inputs = processor.image_processor(images=[image], return_tensors="pt")
         grid = image_inputs["image_grid_thw"][0]
@@ -324,8 +346,9 @@ def generate_workload(
         observed_isl = _calculate_custom_isl_components(
             tokenizer, processor.image_processor, prompt, image
         )
-        if observed_isl != target_isl:
+        if text_isl is None and observed_isl != target_isl:
             raise RuntimeError(f"{size_key} image produced ISL {observed_isl}")
+        decoder_isls_by_size[size_key].add(observed_isl)
         record["grid_thw"] = [int(value) for value in grid.tolist()]
         record["raw_patch_rows"] = raw_patch_rows
         record["merged_visual_tokens"] = raw_patch_rows // merge_size**2
@@ -343,7 +366,11 @@ def generate_workload(
         }
         for index, image_path in enumerate(schedule)
     ]
-    input_path = output_dir / f"image_custom_{requests}_isl{target_isl}.jsonl"
+    if text_isl is None:
+        input_name = f"image_custom_{requests}_isl{target_isl}.jsonl"
+    else:
+        input_name = f"image_custom_{requests}_textisl{text_isl}.jsonl"
+    input_path = output_dir / input_name
     with input_path.open("w", encoding="utf-8") as output:
         for row in rows:
             output.write(json.dumps(row, separators=(",", ":")) + "\n")
@@ -351,7 +378,7 @@ def generate_workload(
     sizes = [int(record["size_bytes"]) for record in records]
     occurrence_counts = Counter(schedule)
     requests_by_size = Counter(
-        f'{records_by_path[path]["width"]}x{records_by_path[path]["height"]}'
+        f"{records_by_path[path]['width']}x{records_by_path[path]['height']}"
         for path in schedule
     )
     size_manifest = [
@@ -363,7 +390,15 @@ def generate_workload(
         }
         for width, height, count in normalized_sizes
     ]
-    manifest = {
+    observed_decoder_isl_by_size: dict[str, int] = {}
+    for size_key, observed in decoder_isls_by_size.items():
+        if len(observed) != 1:
+            raise RuntimeError(
+                f"{size_key} images produced inconsistent decoder ISLs: {observed}"
+            )
+        observed_decoder_isl_by_size[size_key] = next(iter(observed))
+
+    manifest: dict[str, Any] = {
         "axis": "concurrency",
         "concurrencies": list(concurrencies),
         "decoder_model": decoder_model,
@@ -372,10 +407,8 @@ def generate_workload(
         "warmup_requests": 20,
         "unique_images": unique_images,
         "seed": seed,
-        "target_isl": target_isl,
         "target_osl": TARGET_OSL,
         "prompts_by_image_size": prompts_by_size,
-        "prompt_policy": "exact-ISL calibrated synthetic prompt per image size",
         "image_size_counts": size_manifest,
         "encoding": {
             "format": "JPEG",
@@ -411,13 +444,39 @@ def generate_workload(
             "sha256": _sha256(input_path),
         },
         "images": records,
-        "observed_calibration_isl_by_image_size": observed_isl_by_size,
+        "observed_decoder_isl_by_image_size": observed_decoder_isl_by_size,
     }
+    if text_isl is None:
+        manifest.update(
+            {
+                "target_isl": target_isl,
+                "prompt_policy": (
+                    "exact-ISL calibrated synthetic prompt per image size"
+                ),
+                "observed_calibration_isl_by_image_size": observed_isl_by_size,
+            }
+        )
+    else:
+        if shared_prompt is None:
+            raise RuntimeError("shared text prompt was not generated")
+        manifest.update(
+            {
+                "text_isl": text_isl,
+                "prompt": shared_prompt,
+                "prompt_sha256": hashlib.sha256(
+                    shared_prompt.encode("utf-8")
+                ).hexdigest(),
+                "prompt_policy": (
+                    "one shared exact-token raw-text prompt plus one image per request"
+                ),
+            }
+        )
     manifest_path = output_dir / "workload_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    contract = f"text_isl={text_isl}" if text_isl is not None else f"isl={target_isl}"
     print(
         f"workload={input_path.resolve()} images={unique_images} "
-        f"requests={requests} sizes={size_manifest} isl={target_isl}"
+        f"requests={requests} sizes={size_manifest} {contract}"
     )
     return manifest_path
 
@@ -468,7 +527,10 @@ def validate_workload(
             f"workload has {unique_images} unique images; requested "
             f"{expected_unique_images}"
         )
-    target_isl = int(manifest["target_isl"])
+    text_isl = int(manifest["text_isl"]) if "text_isl" in manifest else None
+    target_isl = int(manifest["target_isl"]) if "target_isl" in manifest else None
+    if (text_isl is None) == (target_isl is None):
+        raise AssertionError("manifest must define exactly one ISL contract")
     default_min_bytes = int(manifest["encoding"]["min_bytes"])
     default_max_bytes = int(manifest["encoding"]["max_bytes"])
     size_targets = manifest["encoding"].get("size_targets", {})
@@ -500,16 +562,45 @@ def validate_workload(
     tokenizer = AutoTokenizer.from_pretrained(manifest["decoder_model"])
     processor = AutoProcessor.from_pretrained(manifest["encoder_model"])
     prompts_by_size = manifest.get("prompts_by_image_size")
-    if prompts_by_size is None:
+    if text_isl is not None:
+        shared_prompt = str(manifest["prompt"])
+        observed_text_isl = len(
+            tokenizer(shared_prompt, add_special_tokens=False).input_ids
+        )
+        if observed_text_isl != text_isl:
+            raise AssertionError(
+                f"raw prompt has {observed_text_isl} tokens, expected {text_isl}"
+            )
+        if (
+            manifest.get("prompt_sha256")
+            != hashlib.sha256(shared_prompt.encode("utf-8")).hexdigest()
+        ):
+            raise AssertionError("prompt hash mismatch")
+        prompts_by_size = {
+            f"{width}x{height}": shared_prompt
+            for width, height, _ in manifest_size_counts
+        }
+        if len({str(row["text"]) for row in rows}) != 1:
+            raise AssertionError("text-ISL workload must use one shared prompt")
+    elif prompts_by_size is None:
         only_width, only_height, _ = manifest_size_counts[0]
         prompts_by_size = {f"{only_width}x{only_height}": str(manifest["prompt"])}
+    expected_decoder_isls = {
+        str(size): int(value)
+        for size, value in manifest.get(
+            "observed_decoder_isl_by_image_size", {}
+        ).items()
+    }
+    actual_decoder_isls: dict[str, set[int]] = {
+        f"{width}x{height}": set() for width, height, _ in manifest_size_counts
+    }
     actual_size_counts: Counter[tuple[int, int]] = Counter()
     total_raw_patch_rows = 0
     total_merged_visual_tokens = 0
     for record in manifest["images"]:
         path = Path(record["path"])
         payload = path.read_bytes()
-        size_key = f'{record["width"]}x{record["height"]}'
+        size_key = f"{record['width']}x{record['height']}"
         size_target = size_targets.get(size_key, {})
         min_bytes = int(size_target.get("min_bytes", default_min_bytes))
         max_bytes = int(size_target.get("max_bytes", default_max_bytes))
@@ -528,13 +619,16 @@ def validate_workload(
             raise AssertionError(f"decoded hash mismatch: {path}")
         size_key = f"{expected_dimensions[0]}x{expected_dimensions[1]}"
         prompt = str(prompts_by_size[size_key])
-        if (
-            _calculate_custom_isl_components(
-                tokenizer, processor.image_processor, prompt, image
-            )
-            != target_isl
-        ):
+        observed_decoder_isl = _calculate_custom_isl_components(
+            tokenizer, processor.image_processor, prompt, image
+        )
+        actual_decoder_isls[size_key].add(observed_decoder_isl)
+        if target_isl is not None and observed_decoder_isl != target_isl:
             raise AssertionError(f"ISL calibration mismatch: {path}")
+        if text_isl is not None and observed_decoder_isl != expected_decoder_isls.get(
+            size_key
+        ):
+            raise AssertionError(f"decoder ISL mismatch: {path}")
         image_inputs = processor.image_processor(images=[image], return_tensors="pt")
         grid = image_inputs["image_grid_thw"][0]
         raw_patch_rows = int(grid.prod().item())
@@ -584,6 +678,14 @@ def validate_workload(
         if row["text"] != prompts_by_size[f"{width}x{height}"]:
             raise AssertionError("request prompt does not match its image size")
 
+    observed_decoder_isl_by_size: dict[str, int] = {}
+    for size_key, observed in actual_decoder_isls.items():
+        if len(observed) != 1:
+            raise AssertionError(
+                f"{size_key} images produced inconsistent decoder ISLs: {observed}"
+            )
+        observed_decoder_isl_by_size[size_key] = next(iter(observed))
+
     result = {
         "manifest_sha256": _sha256(manifest_path),
         "input_sha256": _sha256(input_path),
@@ -593,11 +695,15 @@ def validate_workload(
             {"width": width, "height": height, "count": count}
             for width, height, count in manifest_size_counts
         ],
-        "target_isl": target_isl,
         "reuse_counts": actual_counts,
         "raw_patch_rows": total_raw_patch_rows,
         "merged_visual_tokens": total_merged_visual_tokens,
+        "observed_decoder_isl_by_image_size": observed_decoder_isl_by_size,
     }
+    if text_isl is None:
+        result["target_isl"] = target_isl
+    else:
+        result["text_isl"] = text_isl
     print("WORKLOAD_AUDIT=PASS")
     print(json.dumps(result, indent=2))
     return result
@@ -617,6 +723,11 @@ def main() -> None:
     generate.add_argument("--unique-images", type=int, default=UNIQUE_IMAGES)
     generate.add_argument("--requests", type=int, default=REQUESTS)
     generate.add_argument("--seed", type=int, default=SEED)
+    generate.add_argument(
+        "--text-isl",
+        type=int,
+        help="generate one shared prompt with this raw tokenizer length",
+    )
     generate.add_argument(
         "--image-size-count",
         action="append",
@@ -643,6 +754,7 @@ def main() -> None:
             unique_images=args.unique_images,
             requests=args.requests,
             seed=args.seed,
+            text_isl=args.text_isl,
             image_size_counts=(
                 tuple(args.image_size_count) if args.image_size_count else None
             ),

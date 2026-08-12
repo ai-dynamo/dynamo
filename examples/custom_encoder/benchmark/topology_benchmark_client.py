@@ -58,6 +58,8 @@ def _load_requests(path: Path, model: str, max_tokens: int) -> tuple[list[dict],
                     }
                 ],
                 "max_tokens": max_tokens,
+                "min_tokens": max_tokens,
+                "ignore_eos": True,
                 "temperature": 0,
                 "stream": False,
             }
@@ -87,6 +89,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     latencies = [0.0] * len(requests)
     completions = [0] * len(requests)
+    completion_tokens = [0] * len(requests)
     timeout = aiohttp.ClientTimeout(total=args.timeout)
     connector = aiohttp.TCPConnector(limit=args.concurrency)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
@@ -109,6 +112,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 choices = payload.get("choices") or []
                 if len(choices) != 1 or choices[0].get("finish_reason") is None:
                     raise RuntimeError(f"request {index} returned no finished choice")
+                usage = payload.get("usage") or {}
+                observed_tokens = usage.get("completion_tokens")
+                if observed_tokens != args.max_tokens:
+                    raise RuntimeError(
+                        f"request {index} returned {observed_tokens} completion "
+                        f"tokens, expected {args.max_tokens}"
+                    )
+                completion_tokens[index] = int(observed_tokens)
                 completions[index] = 1
 
         started = time.perf_counter()
@@ -125,6 +136,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "retries": 0,
         "concurrency": args.concurrency,
         "max_tokens": args.max_tokens,
+        "completion_tokens": {
+            "min": min(completion_tokens),
+            "max": max(completion_tokens),
+            "total": sum(completion_tokens),
+        },
         "wall_time_s": wall_time,
         "request_throughput": len(requests) / wall_time,
         "latency_s": {

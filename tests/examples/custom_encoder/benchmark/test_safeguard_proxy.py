@@ -26,6 +26,7 @@ from examples.custom_encoder.benchmark.safeguard_proxy_workload import (
     generate_workload,
     validate_workload,
 )
+from examples.custom_encoder.benchmark.topology_benchmark_client import _load_requests
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -56,6 +57,25 @@ def test_jpeg_generator_supports_300_pixel_workload(tmp_path: Path) -> None:
     record = _generate_jpeg(path, seed=42, image_size=(300, 300))
     assert record["width"] == record["height"] == 300
     assert 50 * 1024 <= path.stat().st_size <= 60 * 1024
+
+
+def test_topology_client_forces_exact_output_length(tmp_path: Path) -> None:
+    image_path = tmp_path / "image_0000_300x300_0000.jpg"
+    _generate_jpeg(image_path, seed=42, image_size=(300, 300))
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {"session_id": "request-0000", "image": str(image_path), "text": "x"}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    requests, _audit = _load_requests(input_path, "model", 7)
+
+    assert requests[0]["max_tokens"] == 7
+    assert requests[0]["min_tokens"] == 7
+    assert requests[0]["ignore_eos"] is True
 
 
 def test_workload_validation_rejects_requested_size_mismatch(tmp_path: Path) -> None:
@@ -112,8 +132,7 @@ def test_workload_generation_records_selected_concurrencies(
         lambda *_args: 644,
     )
     monkeypatch.setattr(
-        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
-        "_calibrate_prompt",
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload._calibrate_prompt",
         lambda target, _calculate: ("prompt", target),
     )
     manifest_path = generate_workload(
@@ -156,8 +175,7 @@ def test_workload_generation_supports_balanced_unique_mixed_sizes(
         lambda *_args: 644,
     )
     monkeypatch.setattr(
-        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
-        "_calibrate_prompt",
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload._calibrate_prompt",
         lambda target, calculate: (f"prompt-{calculate('probe')}", target),
     )
 
@@ -189,6 +207,76 @@ def test_workload_generation_supports_balanced_unique_mixed_sizes(
     )
     assert audit["raw_patch_rows"] == 3560
     assert audit["merged_visual_tokens"] == 890
+
+
+def test_workload_generation_supports_shared_text_isl(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeTokenizer:
+        def __call__(self, text: str, *, add_special_tokens: bool) -> object:
+            assert not add_special_tokens
+            tokens = 600 + text.count("benchmark")
+            return SimpleNamespace(input_ids=list(range(tokens)))
+
+    class FakeImageProcessor:
+        merge_size = 2
+
+        def __call__(self, *, images: list, return_tensors: str) -> dict:
+            assert return_tensors == "pt"
+            width, _height = images[0].size
+            grid = 22 if width == 300 else 36
+            return {"image_grid_thw": torch.tensor([[1, grid, grid]])}
+
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "AutoTokenizer.from_pretrained",
+        lambda _model: FakeTokenizer(),
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "AutoProcessor.from_pretrained",
+        lambda _model: SimpleNamespace(image_processor=FakeImageProcessor()),
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "_calculate_custom_isl_components",
+        lambda _tokenizer, _processor, _prompt, image: (
+            773 if image.size == (300, 300) else 976
+        ),
+    )
+
+    manifest_path = generate_workload(
+        tmp_path,
+        requests=2,
+        text_isl=644,
+        image_size_counts=((300, 300, 1), (500, 500, 1)),
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "image_custom_2_textisl644.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert manifest["text_isl"] == 644
+    assert "target_isl" not in manifest
+    assert len({row["text"] for row in rows}) == 1
+    assert rows[0]["text"] == manifest["prompt"]
+    assert manifest["observed_decoder_isl_by_image_size"] == {
+        "300x300": 773,
+        "500x500": 976,
+    }
+    audit = validate_workload(
+        tmp_path,
+        expected_unique_images=2,
+        expected_image_size_counts=((300, 300, 1), (500, 500, 1)),
+    )
+    assert audit["text_isl"] == 644
+    assert audit["observed_decoder_isl_by_image_size"] == {
+        "300x300": 773,
+        "500x500": 976,
+    }
 
 
 def test_custom_isl_replaces_one_placeholder_with_image_tokens() -> None:
@@ -335,8 +423,10 @@ def test_validation_and_report_cover_selected_cells(
             log_lines.extend(
                 [
                     f"[input] Config: {runtime}  concurrency={concurrency}",
-                    "custom_encoder_dispatch mode=graph batch_size=1 "
-                    "bucket=1 calls=1020",
+                    (
+                        "custom_encoder_dispatch mode=graph batch_size=1 "
+                        "bucket=1 calls=1020"
+                    ),
                 ]
             )
     (tmp_path / "sweep.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
