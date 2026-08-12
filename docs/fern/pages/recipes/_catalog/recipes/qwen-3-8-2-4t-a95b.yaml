@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen-3-8-2-4t-a95b
+title: Qwen3.8-2.4T-A95B
+page: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b.mdx
+provider: qwen
+model:
+  name: Qwen3.8-2.4T-A95B
+  hf_id: Qwen/Qwen3.8-2.4T-A95B
+  precision: FP8 weights, FP8 KV cache
+status: experimental
+targets:
+- id: vllm-agg-gb300-chat
+  recommended: true
+  hardware:
+    gpu: GB300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - mtp-speculative-decode
+  workload:
+    type: chat
+    traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/vllm/agg-gb300-chat/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-gb300-agentic
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - mtp-speculative-decode
+  workload:
+    type: agentic
+    traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/vllm/agg-gb300-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-gb200-chat
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 16
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - mtp-speculative-decode
+  workload:
+    type: chat
+    traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/vllm/agg-gb200-chat/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-gb200-agentic
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 16
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - mtp-speculative-decode
+  workload:
+    type: agentic
+    traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/vllm/agg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: sglang-agg-gb300-chat
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 16
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/sglang/agg-gb300-chat/deploy.yaml
+  expected_performance:
+    available: false
+- id: sglang-disagg-gb300-chat
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 32
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/sglang/disagg-gb300-chat/deploy.yaml
+  expected_performance:
+    available: false
+- id: sglang-agg-gb200-chat
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 16
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/sglang/agg-gb200-chat/deploy.yaml
+  expected_performance:
+    available: false
+- id: sglang-disagg-gb200-chat
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 48
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: 8K ISL / 1K OSL, 70% KV cache hit (shared system prompt)
+  deploy:
+    asset: recipes/qwen3.8-2.4t-a95b/sglang/disagg-gb200-chat/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps: []

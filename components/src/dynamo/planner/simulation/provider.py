@@ -118,6 +118,8 @@ class PlannerSearchSpace(BaseModel):
         default_factory=_default_load_predictors
     )
     min_endpoint: int | None = Field(default=None, ge=1)
+    prefill_min_endpoint: int | None = Field(default=None, ge=1)
+    decode_min_endpoint: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _validate_choices(self) -> PlannerSearchSpace:
@@ -397,6 +399,8 @@ class DynamoPlannerSweepConfigProvider:
             optimization_target=str(state["optimization_target"]),
             sla=state["sla"] if isinstance(state["sla"], dict) else None,
             min_endpoint=space.min_endpoint,
+            prefill_min_endpoint=space.prefill_min_endpoint,
+            decode_min_endpoint=space.decode_min_endpoint,
         )
         hook = RuntimeHookSpec(
             provider=_HOOK.provider,
@@ -418,6 +422,8 @@ def _planner_config_payload(
     optimization_target: str,
     sla: Mapping[str, JSONValue] | None,
     min_endpoint: int | None,
+    prefill_min_endpoint: int | None,
+    decode_min_endpoint: int | None,
 ) -> dict[str, JSONValue]:
     """Build the exact PlannerConfig payload used by the pre-refactor Sweeper."""
 
@@ -438,6 +444,10 @@ def _planner_config_payload(
         payload["min_gpu_budget"] = _int_value(sample, "min_gpu_budget")
     if min_endpoint is not None:
         payload["min_endpoint"] = min_endpoint
+    if mode in ("disagg", "prefill") and prefill_min_endpoint is not None:
+        payload["prefill_min_endpoint"] = prefill_min_endpoint
+    if mode in ("disagg", "decode") and decode_min_endpoint is not None:
+        payload["decode_min_endpoint"] = decode_min_endpoint
 
     if mode == "disagg":
         payload["prefill_engine_num_gpu"] = _int_value(

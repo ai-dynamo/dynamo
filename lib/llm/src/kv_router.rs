@@ -91,6 +91,7 @@ pub(crate) fn to_worker_selection_session_context(
         session_id,
         parent_session_id,
         session_final,
+        compaction: _,
         kv_hints,
         input_trigger,
     } = context;
@@ -1716,6 +1717,7 @@ mod tests {
             session_id: "child-session".into(),
             parent_session_id: Some("root-session".into()),
             session_final: Some(true),
+            compaction: None,
             kv_hints: Some(KvHints {
                 evict_session: true,
             }),

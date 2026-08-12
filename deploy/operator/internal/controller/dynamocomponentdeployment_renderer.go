@@ -54,14 +54,14 @@ type dcdWorkloadRenderer struct {
 	reader                client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commonController.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
 }
 
 func newDCDWorkloadRenderer(
 	reader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *dcdWorkloadRenderer {
 	return &dcdWorkloadRenderer{
 		reader:                reader,

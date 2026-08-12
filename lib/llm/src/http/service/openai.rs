@@ -2418,9 +2418,13 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
 /// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
 /// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
 /// for correct disambiguation when `n > 1`.
+///
+/// Dedup is keyed by `(choice_index, tool_call_id)`, not by id alone: with `n > 1` the
+/// backend may reuse the same tool call id across choices, and keying on the id alone
+/// would silently drop every choice after the first.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
-    dispatched_ids: &mut HashSet<String>,
+    dispatched_ids: &mut HashSet<(u32, String)>,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
     let Some(data) = &response.data else {
@@ -2441,7 +2445,8 @@ fn streaming_tool_dispatch_events(
             if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
                 // Skip already-dispatched tool calls (dedup guard, matches
                 // the stopped/done flags in Anthropic/Responses converters).
-                if !dispatched_ids.insert(id.clone()) {
+                // Scoped per choice so repeated ids across choices still dispatch.
+                if !dispatched_ids.insert((choice.index, id.clone())) {
                     continue;
                 }
                 let payload = ToolCallDispatchPayload {
@@ -2695,7 +2700,7 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
-        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
@@ -4417,7 +4422,7 @@ mod tests {
     use super::*;
     use crate::discovery::ModelManagerError;
     use crate::protocols::common::StopConditionsProvider;
-    use crate::protocols::common::extensions::NvExt;
+    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -4813,6 +4818,10 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
+                compaction: Some(AgentCompaction {
+                    trigger: Some("automatic".to_string()),
+                    ..Default::default()
+                }),
                 kv_hints: None,
                 input_trigger: None,
             },
@@ -4830,6 +4839,38 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.trigger.as_deref()),
+            Some("automatic")
+        );
+    }
+
+    #[test]
+    fn test_context_from_headers_preserves_codex_compaction() {
+        let mut headers = HeaderMap::new();
+        headers.insert("thread-id", "codex-thread".parse().unwrap());
+        headers.insert(
+            "x-codex-turn-metadata",
+            r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"local","phase":"summary_turn","strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let context = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let agent_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context attached");
+        assert_eq!(agent_context.session_id, "codex-thread");
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.implementation.as_deref()),
+            Some("local")
+        );
     }
 
     #[test]
@@ -6582,7 +6623,7 @@ mod tests {
 
     fn collect_tool_dispatch_events(
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
-        dispatched_ids: &mut HashSet<String>,
+        dispatched_ids: &mut HashSet<(u32, String)>,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
         streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
@@ -6884,17 +6925,17 @@ mod tests {
 
     #[test]
     fn test_tool_dispatch_n_greater_than_1_includes_choice_index() {
-        // Regression test: with n > 1, each choice should carry its own choice_index
-        // so clients can disambiguate which choice the tool call belongs to.
+        // Regression test for #12676: with n > 1, identical tool-call ids from different
+        // choices must each dispatch with their own choice_index.
         let choice_0 = make_choice_with_tool_call(
             0,
-            Some("call_a"),
+            Some("call_1"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         );
         let choice_1 = make_choice_with_tool_call(
             1,
-            Some("call_b"),
+            Some("call_1"),
             Some("get_time"),
             Some(r#"{"tz":"UTC"}"#),
         );
@@ -6905,11 +6946,11 @@ mod tests {
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json0["choice_index"], 0);
-        assert_eq!(json0["tool_call"]["id"], "call_a");
+        assert_eq!(json0["tool_call"]["id"], "call_1");
 
         let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
         assert_eq!(json1["choice_index"], 1);
-        assert_eq!(json1["tool_call"]["id"], "call_b");
+        assert_eq!(json1["tool_call"]["id"], "call_1");
     }
 
     #[test]

@@ -48,7 +48,6 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"cgroup_root", opts.CgroupRoot,
 		"target_pod_ip_present", opts.TargetPodIP != "",
 	)
-
 	manifestReadStart := time.Now()
 	m, err := types.ReadManifest(opts.CheckpointPath)
 	if err != nil {
@@ -61,6 +60,16 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"manage_cgroups_mode", m.CRIUDump.CRIU.ManageCgroupsMode,
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
+	cudaJobFile := ""
+	if !m.CUDA.IsEmpty() {
+		cudaJobFile, err = cuda.JobFileFromCheckpoint(opts.CheckpointPath)
+		if err != nil {
+			return nil, err
+		}
+		if len(m.CUDA.SourceGPUUUIDs) > 1 && cudaJobFile == "" {
+			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
+		}
+	}
 
 	// Phase 1: Configure — build CRIU opts from manifest
 	configureStart := time.Now()
@@ -74,7 +83,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	configureDuration := time.Since(configureStart)
 
 	// Phase 2: Execute — rootfs, CRIU restore, CUDA restore
-	executeTimings, restoredPID, err := executeRestore(ctx, criuOpts, m, opts, log)
+	executeTimings, restoredPID, err := executeRestore(ctx, criuOpts, m, opts, cudaJobFile, log)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +110,7 @@ type nsrestorePhaseTimings struct {
 	cudaDuration           time.Duration
 }
 
-func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
+func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, cudaJobFile string, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
 	timings := &nsrestorePhaseTimings{}
 
 	// Apply rootfs diff inside the namespace (target root is /)
@@ -112,6 +121,17 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
 		log.Error(err, "Failed to apply deleted files")
+	}
+	cudaRestoreJobFile := ""
+	if cudaJobFile != "" {
+		liveJobFile, err := cuda.PrepareLiveJobFile(cudaJobFile)
+		if err != nil {
+			return nil, 0, fmt.Errorf("prepare CUDA checkpoint job file: %w", err)
+		}
+		cudaRestoreJobFile = liveJobFile
+		if err := os.Setenv(cuda.JobFileEnv, cudaRestoreJobFile); err != nil {
+			return nil, 0, fmt.Errorf("set CUDA checkpoint job file environment: %w", err)
+		}
 	}
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
@@ -160,6 +180,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
 	cudaStart := time.Now()
+	if cudaRestoreJobFile != "" {
+		uid, gid, err := snapshotruntime.ReadProcessFilesystemIDs("/proc", int(restoredPID))
+		if err != nil {
+			return nil, 0, fmt.Errorf("read restored process credentials: %w", err)
+		}
+		if err := cuda.SetLiveJobFileOwner(cudaRestoreJobFile, uid, gid); err != nil {
+			return nil, 0, fmt.Errorf("set CUDA checkpoint job file ownership: %w", err)
+		}
+	}
 	processes, err := snapshotruntime.ReadProcessTable("/proc")
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read restored process table: %w", err)
