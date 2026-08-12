@@ -21,6 +21,8 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-llm = { workspace = true }
+dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
 anyhow = { workspace = true }
@@ -43,4 +45,5 @@ tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }

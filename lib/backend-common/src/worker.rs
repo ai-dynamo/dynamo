@@ -1727,6 +1727,7 @@ async fn build_local_model(
         total_kv_blocks: llm.total_kv_blocks,
         max_num_seqs: llm.max_num_seqs,
         max_num_batched_tokens: llm.max_num_batched_tokens,
+        max_gpu_lora_count: llm.max_gpu_lora_count,
         data_parallel_size: llm.data_parallel_size.unwrap_or(1),
         data_parallel_start_rank: llm.data_parallel_start_rank.unwrap_or(0),
         tool_call_parser: config.tool_call_parser.clone(),
@@ -2074,6 +2075,7 @@ mod tests {
                 total_kv_blocks: Some(100),
                 max_num_seqs: Some(16),
                 max_num_batched_tokens: Some(8192),
+                max_gpu_lora_count: Some(8),
                 ..Default::default()
             }),
             ..EngineConfig::default()
@@ -2088,6 +2090,7 @@ mod tests {
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
+        assert_eq!(runtime_config.max_gpu_lora_count, Some(8));
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
         assert_eq!(

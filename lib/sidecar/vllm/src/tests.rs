@@ -13,6 +13,11 @@ use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
     PreprocessedRequest, SamplingOptions, StopConditions,
 };
+use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
+use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::{DistributedRuntime, Runtime};
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;
@@ -33,6 +38,7 @@ use crate::proto as pb;
 struct FakeVllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
+    loras: Arc<Mutex<Vec<pb::LoraAdapter>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
     reject: Arc<AtomicBool>,
@@ -45,6 +51,8 @@ struct FakeVllm {
     first_token_pending: Arc<AtomicBool>,
     release_first_token: Arc<Notify>,
     server_stream_dropped: Arc<AtomicBool>,
+    load_commit_error: Arc<AtomicBool>,
+    unload_commit_error: Arc<AtomicBool>,
 }
 
 struct DropSignal(Arc<AtomicBool>);
@@ -221,6 +229,67 @@ impl pb::control_server::Control for FakeVllm {
         Ok(Response::new(pb::AbortResponse {}))
     }
 
+    async fn load_lora(
+        &self,
+        request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        let adapter = request
+            .into_inner()
+            .adapter
+            .ok_or_else(|| Status::invalid_argument("adapter required"))?;
+        let mut loras = self.loras.lock().await;
+        if let Some(existing) = loras
+            .iter()
+            .find(|loaded| loaded.lora_name == adapter.lora_name)
+        {
+            if existing != &adapter {
+                return Err(Status::already_exists(
+                    "adapter name has different identity",
+                ));
+            }
+            return Ok(Response::new(pb::LoadLoraResponse {
+                adapter: Some(existing.clone()),
+                already_loaded: true,
+            }));
+        }
+        loras.push(adapter.clone());
+        if self.load_commit_error.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable("injected error after load commit"));
+        }
+        Ok(Response::new(pb::LoadLoraResponse {
+            adapter: Some(adapter),
+            already_loaded: false,
+        }))
+    }
+
+    async fn unload_lora(
+        &self,
+        request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        let name = request.into_inner().lora_name;
+        let mut loras = self.loras.lock().await;
+        let index = loras
+            .iter()
+            .position(|adapter| adapter.lora_name == name)
+            .ok_or_else(|| Status::not_found("adapter not found"))?;
+        let adapter = loras.remove(index);
+        if self.unload_commit_error.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable("injected error after unload commit"));
+        }
+        Ok(Response::new(pb::UnloadLoraResponse {
+            adapter: Some(adapter),
+        }))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Ok(Response::new(pb::ListLorasResponse {
+            adapters: self.loras.lock().await.clone(),
+        }))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
@@ -251,6 +320,7 @@ fn model_info() -> pb::ModelInfo {
         served_model_aliases: vec!["model-alias".to_string()],
         supports_text_input: true,
         supports_token_ids_input: true,
+        supports_lora: true,
         supports_multimodal: false,
         reasoning_parser: "deepseek_r1".to_string(),
         tool_call_parser: "hermes".to_string(),
@@ -274,6 +344,7 @@ fn server_info() -> pb::ServerInfo {
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
+        max_loras: 4,
     }
 }
 
@@ -557,6 +628,36 @@ fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmS
     )
 }
 
+async fn runtime_endpoint(namespace: &str) -> dynamo_runtime::component::Endpoint {
+    let runtime = Runtime::from_current().expect("current runtime");
+    let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+        .await
+        .expect("process-local DRT");
+    let endpoint = drt
+        .namespace(namespace)
+        .expect("namespace")
+        .component("backend")
+        .expect("component")
+        .endpoint("generate");
+    let mut base = ModelDeploymentCard::with_name_only("model-source");
+    base.source_path = Some("model-source".to_string());
+    endpoint
+        .drt()
+        .discovery()
+        .register(
+            DiscoverySpec::from_model(
+                namespace.to_string(),
+                "backend".to_string(),
+                "generate".to_string(),
+                &base,
+            )
+            .expect("base discovery spec"),
+        )
+        .await
+        .expect("register base model");
+    endpoint
+}
+
 async fn engine_from_args(
     endpoint: &str,
 ) -> (VllmSidecarEngine, dynamo_backend_common::WorkerConfig) {
@@ -648,6 +749,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(registration.total_kv_blocks, Some(4096));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
+    assert_eq!(registration.max_gpu_lora_count, Some(4));
     assert_eq!(registration.data_parallel_size, Some(2));
     assert_eq!(registration.data_parallel_start_rank, Some(0));
 
@@ -732,6 +834,153 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
         struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
+}
+
+#[tokio::test]
+async fn lora_request_selection_reaches_the_grpc_boundary() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    engine.start(0).await.expect("start");
+    let mut value = serde_json::to_value(request()).expect("serialize request");
+    value["routing"] = json!({"lora_name": "math-r8"});
+    let request = serde_json::from_value(value).expect("deserialize request");
+
+    let outputs = collect(&engine, request).await;
+
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(server.service.requests.lock().await[0].lora_name, "math-r8");
+}
+
+#[tokio::test]
+async fn native_lora_lifecycle_reconciles_committed_rpc_errors() {
+    let service = FakeVllm::default();
+    service.load_commit_error.store(true, Ordering::SeqCst);
+    service.unload_commit_error.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    engine.start(0).await.expect("start");
+    let endpoint = runtime_endpoint("lora_lifecycle").await;
+    engine
+        .on_endpoint_ready(endpoint.clone())
+        .await
+        .expect("endpoint ready");
+    assert_eq!(
+        engine.supported_updates().await.unwrap(),
+        ["load_lora", "unload_lora", "list_loras"]
+    );
+
+    let adapter_dir = tempfile::tempdir().expect("adapter tempdir");
+    std::fs::write(adapter_dir.path().join("adapter_config.json"), "{}").unwrap();
+    std::fs::write(adapter_dir.path().join("adapter_model.safetensors"), []).unwrap();
+    let load = engine
+        .engine_update(
+            "load_lora".to_string(),
+            json!({
+                "lora_name": "math-r8",
+                "source": {"uri": format!("file://{}", adapter_dir.path().display())},
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(load["status"], "success");
+    assert_eq!(server.service.loras.lock().await.len(), 1);
+    let models = endpoint
+        .drt()
+        .discovery()
+        .list(DiscoveryQuery::EndpointModels {
+            namespace: "lora_lifecycle".to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
+        })
+        .await
+        .unwrap();
+    let lora_card = models
+        .iter()
+        .find(|instance| {
+            matches!(
+                instance,
+                DiscoveryInstance::Model {
+                    model_suffix: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("LoRA discovery sibling")
+        .deserialize_model::<ModelDeploymentCard>()
+        .unwrap();
+    assert_eq!(lora_card.name(), "math-r8");
+    assert_eq!(lora_card.lora.unwrap().max_gpu_lora_count, Some(4));
+
+    let unload = engine
+        .engine_update("unload_lora".to_string(), json!({"lora_name": "math-r8"}))
+        .await
+        .unwrap();
+    assert_eq!(unload["status"], "success");
+    assert!(server.service.loras.lock().await.is_empty());
+    assert_eq!(
+        endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "lora_lifecycle".to_string(),
+                component: "backend".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn startup_republishes_loras_loaded_before_sidecar_restart() {
+    let service = FakeVllm::default();
+    service.loras.lock().await.push(pb::LoraAdapter {
+        lora_id: 7,
+        lora_name: "math-r8".to_string(),
+        source_path: "/shared/loras/math-r8".to_string(),
+    });
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    engine.start(0).await.expect("start");
+    let endpoint = runtime_endpoint("lora_restart").await;
+    engine.on_endpoint_ready(endpoint.clone()).await.unwrap();
+
+    engine.supported_updates().await.unwrap();
+
+    let models = endpoint
+        .drt()
+        .discovery()
+        .list(DiscoveryQuery::EndpointModels {
+            namespace: "lora_restart".to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(models.iter().any(|instance| {
+        matches!(
+            instance,
+            DiscoveryInstance::Model {
+                model_suffix: Some(_),
+                ..
+            }
+        )
+    }));
+}
+
+#[tokio::test]
+async fn lora_updates_are_capability_gated() {
+    let mut base_only = model_info();
+    base_only.supports_lora = false;
+    let disabled = VllmSidecarEngine::new(
+        GrpcEndpoint::parse("http://127.0.0.1:1", "test endpoint").unwrap(),
+        DiscoveredModel::from_proto(base_only, server_info()).unwrap(),
+        DisaggregationMode::Aggregated,
+        GrpcTransportConfig::default(),
+    );
+    assert!(disabled.supported_updates().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1044,10 +1293,6 @@ async fn unsupported_features_fail_before_rpc_submission() {
     let mut multimodal = request();
     multimodal.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
     requests.push(multimodal);
-
-    let mut lora_request = serde_json::to_value(request()).expect("serialize request");
-    lora_request["routing"] = json!({"lora_name": "adapter"});
-    requests.push(serde_json::from_value(lora_request).expect("deserialize request"));
 
     let mut mismatched_cache_salt = request();
     mismatched_cache_salt.extra_args.as_mut().unwrap()["nvext"]["cache_salt"] =

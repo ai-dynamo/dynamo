@@ -178,6 +178,48 @@ impl VllmClient {
             .map(|response| response.sources)
             .map_err(|status| status_to_dynamo("GetKvEventSources", status))
     }
+
+    pub(crate) async fn load_lora(
+        &self,
+        adapter: pb::LoraAdapter,
+    ) -> Result<pb::LoadLoraResponse, DynamoError> {
+        let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .load_lora(pb::LoadLoraRequest {
+                adapter: Some(adapter),
+            })
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("LoadLora", status))
+    }
+
+    pub(crate) async fn unload_lora(
+        &self,
+        lora_name: String,
+    ) -> Result<pb::UnloadLoraResponse, DynamoError> {
+        let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .unload_lora(pb::UnloadLoraRequest { lora_name })
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("UnloadLora", status))
+    }
+
+    pub(crate) async fn list_loras(&self) -> Result<Vec<pb::LoraAdapter>, DynamoError> {
+        let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .list_loras(pb::ListLorasRequest {})
+            .await
+            .map(tonic::Response::into_inner)
+            .map(|response| response.adapters)
+            .map_err(|status| status_to_dynamo("ListLoras", status))
+    }
 }
 
 pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {

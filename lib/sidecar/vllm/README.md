@@ -26,8 +26,11 @@ It is a standalone Rust executable.
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
+- Dynamic LoRA load, unload, list, discovery, and request selection when vLLM enables LoRA
 
-The protocol does not support multimodal input, LoRA, encode workers, beam search, or `n > 1`.
+The protocol does not support multimodal input, encode workers, beam search, or `n > 1`.
+
+The sidecar resolves `file://`, `hf://`, and `s3://` LoRA sources through Dynamo's LoRA downloader. Local `file://` adapters pass through at their canonical absolute path, S3 adapters use `DYN_LORA_PATH`, and Hugging Face adapters use an immutable snapshot under the configured Hugging Face cache. vLLM and the sidecar must see every resolved directory at the same absolute path, so mount all local paths and cache roots identically when they run in separate containers. Set vLLM's `VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES` to a platform path-list containing those shared roots, for example `/shared/local-loras:/shared/dynamo-loras:/shared/huggingface` on Linux.
 
 ## Run
 
