@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with KV-aware routing, MXFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and model parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains. Pick your framework, GPU architecture and serving topology; every command on this page updates to match.
+Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with MXFP4-packed routed experts and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and model parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains. Pick your framework, GPU architecture and serving topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -67,7 +67,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 <span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
 <span><b>GPUs</b> 24x GB300 — three 8-GPU replicas</span>
 <span><b>Parallelism</b> DCP8 attention, TP8 MoE</span>
-<span><b>Routing</b> KV-aware across replicas</span>
+<span><b>Routing</b> Round-robin across replicas</span>
 <span><b>Speculative decoding</b> DSPARK</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg disagg">

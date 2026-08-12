@@ -61,7 +61,7 @@ spec:
                 - --http-port
                 - "8000"
                 - --router-mode
-                - kv
+                - round-robin
                 - --router-kv-events
                 - --router-min-initial-workers
                 - "1"
