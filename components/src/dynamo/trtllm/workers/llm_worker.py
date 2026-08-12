@@ -38,6 +38,7 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -875,6 +876,7 @@ async def init_llm_worker(
             worker_type=worker_type,
             needs=needs,
         )
+        register_model_taint_route(runtime, endpoint)
 
         health_check_payload = TrtllmHealthCheckPayload(
             tokenizer=tokenizer,

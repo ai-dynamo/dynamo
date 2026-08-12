@@ -1139,6 +1139,36 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   box-shadow: 0 5px 14px rgba(255, 59, 48, 0.28);
 }
 
+/* Days with something on the community calendar. The highlight marks today,
+   so the dot is what carries event information in the grid. */
+.dynamo-calendar__month-grid > .has-event {
+  position: relative;
+  color: var(--grayscale-a12);
+  font-weight: 700;
+}
+
+.dynamo-calendar__month-grid > .has-event::after {
+  content: "";
+  position: absolute;
+  bottom: 0.1rem;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #76b900;
+}
+
+/* Today and an event on the same cell: the dot goes white so it stays legible
+   against the red fill. */
+.dynamo-calendar__month-grid > .has-event.is-selected {
+  color: white;
+}
+
+.dynamo-calendar__month-grid > .has-event.is-selected::after {
+  background: white;
+}
+
 .dynamo-calendar__source {
   display: flex;
   align-items: center;

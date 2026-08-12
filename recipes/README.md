@@ -40,6 +40,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/blackwell/)** | TensorRT-LLM | Aggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, TP4×EP4, DEEPGEMM backend | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/hopper/)** | TensorRT-LLM | Disaggregated (Hopper) | 16x H100/H200 | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/)** | TensorRT-LLM | Disaggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, Prefill + Decode, DEEPGEMM backend | ❌ |
+| **[Qwen3.8-2.4T-A95B](qwen3.8-2.4t-a95b/)** | vLLM, SGLang | Aggregated / Disaggregated | 16x GB300 / GB200 | ✅ | ❌ | Hybrid gated-delta-net + 512-expert MoE (262K ctx), FP8 weights + FP8 KV, TP16 over MNNVL, KV-aware routing + prefix caching, reasoning + tool calling | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | ✅ | ✅ | Prefill/Decode split | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/vllm/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | MXFP4 MoE + FP8 KV, 8x TP1 agg / decode-heavy single-node disagg (2P6D B200, 4P4D H200), EAGLE3 spec decode, KV-aware routing, harmony reasoning + tool calling; agentic profile | ❌ |
@@ -69,6 +70,7 @@ These recipes demonstrate functional deployments with Dynamo features, but have 
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|-------|------|------------|-------|
+| **[Qwen3-32B](qwen3-32b/vllm/cloud-providers/)** | vLLM | Disagg 1P1D Provider Overlays | 8x A100/H100/H200/B200/GB200 | ✅ | Kustomize overlays for AWS EFA, GKE RoCE, AKS/Nebius/Nscale IB |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/agg/)** | SGLang | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing, 1.0+ |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, UCX KV transfer |
@@ -339,7 +341,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 ## Related Documentation
 
 - **[Kubernetes Deployment Guide](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)** - Platform installation and concepts
-- **[API Reference](../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md)** - DynamoGraphDeployment CRD specification
+- **[API Reference](../docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx)** - DynamoGraphDeployment CRD specification
 - **[vLLM Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md)** - vLLM-specific features
 - **[SGLang Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md)** - SGLang-specific features
 - **[TensorRT-LLM Backend Guide](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md)** - TensorRT-LLM features

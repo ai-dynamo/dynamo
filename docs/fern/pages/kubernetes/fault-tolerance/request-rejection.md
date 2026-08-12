@@ -82,7 +82,8 @@ for the complete flag, environment-variable, and validation reference.
 <Step title="Adjust thresholds at runtime">
 
 Optional. Use the Frontend admin API to change thresholds for a discovered model without redeploying.
-The API is available when `DYN_ENABLE_FRONTEND_ADMIN_API=true`, which is the default.
+The API is available by default. Set `DYN_DISABLE_FRONTEND_ADMIN_API` to a truthy value to turn it
+off, which unregisters both `busy_threshold` routes so they return 404.
 
 ```bash
 kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
@@ -131,9 +132,13 @@ Optional. A worker can independently cap concurrent engine work and queue only a
 ```
 
 When all `N` engine slots and the overflow queue are full, the worker rejects the request and the
-Frontend returns HTTP 529. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue
-size, defaults to `16`, must be at least `2`, and has an effect only when the engine limit is set. The
-effective cap is `N + Q` in-flight requests per worker.
+Frontend returns HTTP 529 when migration is disabled or its retry attempts do not find capacity.
+With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on another
+eligible worker first. Split or standalone routing uses global overload and fault state, so its
+retry is best-effort and can select the same worker again.
+`DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size, defaults to `16`, must be
+at least `2`, and has an effect only when the engine limit is set. The effective cap is `N + Q`
+in-flight requests per worker.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
 fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)

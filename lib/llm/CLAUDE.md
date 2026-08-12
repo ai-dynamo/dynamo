@@ -1,17 +1,23 @@
-# N-1 Worker / Frontend Compatibility
+# N-2 Worker / Frontend Compatibility
 
-Assume N-1 mixed-version operation between workers and frontends during rolling
-updates: current-version components must interoperate with components from the
-immediately previous release. N-2 and older combinations are unsupported unless
-a narrower temporary exception is explicitly documented. Treat model deployment
-cards, discovery metadata, and worker/frontend wire formats owned by this crate
-as cross-process compatibility surfaces. Consider both directions: a
-previous-version worker with a current frontend and a current worker with a
-previous-version frontend.
+Assume N-2 mixed-version operation between workers and frontends during rolling
+updates. Frontends and workers from the current release and the two immediately
+previous releases may coexist in any combination and must interoperate across
+the worker/frontend boundary. This includes a single frontend concurrently
+discovering worker cards from multiple supported releases for the same logical
+deployment or worker set. Differences caused only by supported wire evolution
+must not split otherwise compatible workers, fail discovery closed, or remove
+healthy serving state. N-3 and older combinations are unsupported unless a
+narrower temporary exception is explicitly documented.
 
-- Normal, default deployment paths should remain operable across the N-1
-  boundary. Unconditional parsing or discovery failures on those paths are
-  generally compatibility bugs.
+Treat model deployment cards, discovery metadata, and worker/frontend wire
+formats owned by this crate as cross-process compatibility surfaces. Consider
+both age directions: an older worker with a newer frontend and a newer worker
+with an older frontend, anywhere within the supported window.
+
+- Normal, default deployment paths should remain operable across the N-2
+  compatibility window. Unconditional parsing or discovery failures on those
+  paths are generally compatibility bugs.
 - Prefer tolerant readers and conservative writers. Accept known legacy fields
   when they are safe to interpret, and continue emitting required legacy fields
   for the supported compatibility window.
@@ -22,9 +28,11 @@ previous-version frontend.
   semantics cannot be represented safely by the other version. Prefer a
   targeted unsupported-feature error over a generic deserialization failure.
 
-This expectation applies to cross-process worker/frontend wiring. It is not a
-general stability promise for in-process Rust APIs, which are internal unless
-explicitly documented otherwise.
+This expectation applies to cross-process worker/frontend wiring, including the
+frontend's aggregation of mixed-version worker metadata. It does not establish
+a compatibility window for direct worker-to-worker protocols or a general
+stability promise for in-process Rust APIs; those are internal unless explicitly
+documented otherwise.
 
 ## Compatibility Shims
 
@@ -40,8 +48,8 @@ Every shim must name its compatibility window and removal condition, for
 example:
 
 ```rust
-// Compatibility with v1.3 workers during v1.4 rolling upgrades.
-// TODO(v1.5): Remove when v1.3 falls outside the N-1 compatibility window.
+// Compatibility with v1.2 workers and frontends during v1.4 rolling upgrades.
+// TODO(v1.5): Remove when v1.2 falls outside the N-2 compatibility window.
 ```
 
 Remove the shim when the corresponding version leaves the supported window;

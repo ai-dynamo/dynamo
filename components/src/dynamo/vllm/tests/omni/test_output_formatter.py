@@ -20,7 +20,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
