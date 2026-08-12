@@ -42,8 +42,8 @@ from typing import Any, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
-# One-shot guard so a bridge mismatch is loud without a line per request.
-_warned_no_sender = False
+# One-shot latch: say it once, not once per call.
+_logged_no_sender = False
 
 
 async def drive_push_egress(
@@ -51,16 +51,12 @@ async def drive_push_egress(
 ) -> None:
     """Drain ``stream`` into ``response_sender``, then close it.
 
-    ``send()`` per response, ``close()`` on normal completion.
-
-    Nothing is caught. Every way this can fail -- an engine shutdown, a
-    rejected request, a cancellation, the consumer dropping the stream -- is
-    an exception, and the only correct thing to do with it is let it out:
-    Rust's ``map_python_exception`` turns it into a *typed* backend error and
-    terminates the stream with that, exactly as it does for the same exception
-    on the pull path. Catching it to report a string through the sender would
-    erase the type that request migration, worker inhibition and
-    invalid-argument reporting all key on.
+    Nothing is caught. Every way this can fail -- engine shutdown, a rejected
+    request, cancellation, the consumer dropping the stream -- is an exception,
+    and letting it out is what lets Rust's ``map_python_exception`` classify it
+    and terminate the stream with a *typed* backend error, exactly as on the
+    pull path. See invariant 3 in the module docstring for what catching it
+    would cost.
     """
     async for response in stream:
         # The actual Python -> Rust crossing: encode to request-plane bytes
@@ -110,20 +106,18 @@ def push_egress_capable(func):
 
     @functools.wraps(func)
     def dispatch(self, request, context=None, response_sender=None, **kwargs):
-        global _warned_no_sender
+        global _logged_no_sender
 
         # Lazy either way: creating an async generator runs none of its body.
         stream = func(self, request, context, **kwargs)
 
         if response_sender is None:
-            if not _warned_no_sender:
-                _warned_no_sender = True
-                # Expected for in-process and canary calls, which come through
-                # the locally registered pull engine. Only a problem if it is
-                # every request -- that would mean the network ingress is on
-                # pull too, i.e. the signature probe in `serve_endpoint` found
-                # no `response_sender`, and the GIL cost this decorator exists
-                # to remove is still being paid.
+            if not _logged_no_sender:
+                _logged_no_sender = True
+                # Normal for in-process and canary calls. Only a problem if it
+                # is EVERY call, which would mean the signature probe in
+                # `serve_endpoint` found no `response_sender` and network
+                # traffic is on the pull path too.
                 logger.info(
                     "no response_sender for %s; serving this call on the pull "
                     "path (expected for in-process and health-check calls)",

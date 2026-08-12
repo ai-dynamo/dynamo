@@ -176,10 +176,10 @@ async def _gen_empty(self, request, context):
 
 
 @pytest.fixture(autouse=True)
-def reset_warned_no_sender():
-    pe._warned_no_sender = False
+def reset_logged_no_sender():
+    pe._logged_no_sender = False
     yield
-    pe._warned_no_sender = False
+    pe._logged_no_sender = False
 
 
 # ===========================================================================
@@ -547,20 +547,20 @@ class TestFallbackPath:
             f"{notices[0].levelname} cries wolf on every health check"
         )
 
-    def test_warned_no_sender_global_is_module_mutable_state(self):
-        """_warned_no_sender is module-global mutable state.
+    def test_logged_no_sender_global_is_module_mutable_state(self):
+        """_logged_no_sender is module-global mutable state.
 
         This is a correctness risk: if tests don't reset it (or the reset
         fixture fails), warnings bleed across tests.  The autouse fixture covers
         this, but here we verify the guard itself works as a boolean latch.
         """
-        assert pe._warned_no_sender is False  # fixture reset it
+        assert pe._logged_no_sender is False  # fixture reset it
         decorated = push_egress_capable(_gen_empty)
         dummy = object.__new__(object)
         decorated(dummy, request={}, context=None)
-        assert pe._warned_no_sender is True  # latched after first call
+        assert pe._logged_no_sender is True  # latched after first call
         decorated(dummy, request={}, context=None)
-        assert pe._warned_no_sender is True  # stays latched
+        assert pe._logged_no_sender is True  # stays latched
 
 
 # ===========================================================================

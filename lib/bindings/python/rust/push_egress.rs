@@ -11,11 +11,8 @@
 //! side only ever does `rx.recv().await` and never touches Python. Rationale
 //! and measurements: #12845.
 //!
-//! Encoding all the way to bytes on the Python side is what keeps this a net
-//! removal of per-response work: the frame that comes off the queue is already
-//! finished, so the ingress just forwards it. Errors terminate the stream with
-//! the type `map_python_exception` assigned them, which is what request
-//! migration and worker inhibition key on downstream.
+//! Errors terminate the stream with the type `map_python_exception` assigned
+//! them, which is what request migration and worker inhibition key on.
 //!
 //! Selected per handler by signature — [`handler_supports_push`] picks this
 //! path for a handler declaring a `response_sender` parameter, which in
@@ -83,20 +80,16 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// One response, already encoded for the request plane.
 ///
-/// Getting a response from Python object to wire bytes is a single serde pass
-/// on the pull path: `Serialize for PythonPayload` transcodes the Python object
-/// straight into the codec. This path keeps that property. `send` already holds
-/// the GIL, so it encodes all the way here rather than parking an intermediate
-/// Rust value on the queue for a second pass to walk — and, because the payload
-/// is still a [`PythonPayload`] at the moment of encoding, nothing the codec can
-/// represent is narrowed on the way: binary values, non-finite floats and
-/// non-string mapping keys all survive exactly as they do on the pull path.
+/// Encoding happens in `send`, under the GIL the handler already holds, and the
+/// payload is still a [`PythonPayload`] at that moment — so it transcodes
+/// straight into the codec in one pass, exactly as on the pull path, and
+/// nothing the codec can represent is narrowed on the way.
 ///
 /// `codec` records which codec produced `bytes`. `send` has no request in hand,
 /// so it uses the process-global [`RequestPlanePayloadCodec::configured`] — the
-/// same value this worker advertises in its instance record, which is where
-/// callers read the codec they address it with. The two therefore agree except
-/// against a caller old enough to predict neither, which falls back to JSON;
+/// value this worker advertises in its instance record, which is where callers
+/// read the codec they address it with. The two agree except against a caller
+/// old enough to predict neither, which falls back to JSON;
 /// [`PushFrame::into_encoded`] re-encodes for that case rather than putting the
 /// wrong bytes on the wire.
 pub(crate) struct PushFrame {
@@ -116,12 +109,11 @@ impl std::fmt::Debug for PushFrame {
 }
 
 impl PushFrame {
-    /// Encode one Python response object. Called with the GIL held by the
-    /// Python caller; [`python_payload::parse_python_response`] is the same
-    /// interpretation of the object the pull path uses, and
-    /// [`python_payload::encode_annotated_response`] is the same wrapper
-    /// construction and codec invocation, so the bytes are structurally
-    /// identical to what the pull path would produce for the same object.
+    /// Encode one Python response object, with the GIL held by the caller.
+    ///
+    /// Both steps are shared with the pull path — `parse_python_response`
+    /// interprets the object, `encode_annotated_response` produces the bytes —
+    /// so the two cannot drift.
     fn encode(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
         let annotated =
             python_payload::parse_python_response(obj.clone().unbind(), py).map_err(|error| {
@@ -149,20 +141,16 @@ impl PushFrame {
     /// so this is callable from either side of the bridge.
     fn error(annotated: Annotated<serde_json::Value>) -> Self {
         let codec = RequestPlanePayloadCodec::configured();
-        let wrapper = NetworkStreamWrapper {
-            data: Some(annotated),
-            complete_final: false,
-        };
         // An error frame is a string and three `None`s; neither codec can fail
-        // to encode it. Degrade to an empty frame rather than panic if one
-        // somehow does.
-        let bytes = codec.encode(&wrapper).unwrap_or_else(|error| {
-            tracing::error!(%error, "push egress: failed to encode terminal error frame");
-            Vec::new()
-        });
+        // on it. Degrade to an empty frame rather than panic if one somehow does.
+        let (bytes, is_error) = python_payload::encode_annotated_response(codec, annotated)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "push egress: failed to encode terminal error frame");
+                (Vec::new(), true)
+            });
         Self {
             bytes: bytes.into(),
-            is_error: true,
+            is_error,
             codec,
         }
     }

@@ -1288,26 +1288,26 @@ impl Endpoint {
         // rendering the pull path unreachable. Anything else stays on pull.
         let use_push_egress = push_egress::handler_supports_push(&generator);
 
-        // Both outcomes of the branch come out together: the ingress that
-        // serves network requests, and the engine registered in the local
-        // (in-process) registry.
+        // An endpoint has two doors, and this branch answers for both: the
+        // ingress that serves network requests, and the engine registered in
+        // the local (in-process) registry.
         //
-        // Push endpoints get BOTH. The push engine serves the network, but the
-        // local registry — used by in-process callers and, critically, by the
-        // canary health check (`lib/runtime/src/health_check.rs`) — needs a
-        // `SingleIn`/`ManyOut` engine, which the per-request sender does not
-        // model. A pull engine over the SAME handler supplies one: called
-        // without a `response_sender`, `@push_egress_capable` returns the
-        // handler's own async generator untouched, so the local path is
-        // ordinary pull egress. Registering it is what keeps the endpoint in
-        // `SystemHealth::health_check_targets`; drop it and health status falls
-        // through to the process-wide `system_health`, which the TRT-LLM worker
-        // never sets Ready — a permanent 503 on default settings.
+        // Push endpoints need BOTH. The local registry — used by in-process
+        // callers and by the canary health check
+        // (`lib/runtime/src/health_check.rs`) — takes a `SingleIn`/`ManyOut`
+        // engine, which has nowhere to put a per-request sender. A pull engine
+        // over the SAME handler supplies one: called without a
+        // `response_sender`, `@push_egress_capable` hands back the handler's
+        // own async generator, so that door is ordinary pull egress.
+        // Registering it also keeps the endpoint in
+        // `SystemHealth::health_check_targets` — without which health status
+        // ignores endpoint readiness entirely and falls through to the
+        // process-wide `system_health`, a permanent 503 for a worker that never
+        // sets it (see `system_health.rs` tests).
         //
-        // Both outcomes are logged. Push mode is chosen by signature
-        // inspection, which can silently answer "no"; without the pull line the
-        // only symptom would be the absence of the push line, indistinguishable
-        // from a wrong log level.
+        // Both outcomes are logged: push mode is chosen by signature
+        // inspection, which can silently answer "no", and without the pull line
+        // the only symptom would be the absence of the push line.
         let endpoint_name = self.inner.name().to_string();
         let (ingress, local_engine): (
             Arc<dyn rs::pipeline::network::PushWorkHandler>,
