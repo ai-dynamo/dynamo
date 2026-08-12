@@ -34,6 +34,9 @@ pub mod logging {
     /// Enable JSONL logging format
     pub const DYN_LOGGING_JSONL: &str = "DYN_LOGGING_JSONL";
 
+    /// Console log format: "readable" or "jsonl"; blank uses the legacy fallback
+    pub const DYN_LOGGING_CONSOLE_FORMAT: &str = "DYN_LOGGING_CONSOLE_FORMAT";
+
     /// Disable ANSI terminal colors in logs
     pub const DYN_SDK_DISABLE_ANSI_LOGGING: &str = "DYN_SDK_DISABLE_ANSI_LOGGING";
 
@@ -302,9 +305,10 @@ pub mod llm {
 
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
-    /// to 503 for Service Unavailable retry semantics. Any valid HTTP status
-    /// code (100–999) is accepted; an unparseable or out-of-range value falls
-    /// back to 529.
+    /// to 503 for Service Unavailable retry semantics. Status codes from 200
+    /// through 999 are accepted; an informational value from 100 through 199,
+    /// an unparseable value, or an out-of-range value falls back to 529. The
+    /// value is read and cached on first use.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
     /// Emit an SSE comment at this interval while a streaming response has no
@@ -359,6 +363,10 @@ pub mod llm {
     /// Enable streaming reasoning dispatch (`event: reasoning_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
+
+    /// OpenAI-compatible response field used for emitted reasoning content.
+    /// Accepted values: "reasoning_content" (default) or "reasoning".
+    pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
     /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
     /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
@@ -663,8 +671,9 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
-    /// Request plane payload codec selection: "json" or "msgpack".
-    /// JSON is the compatibility default.
+    /// Preferred payload codec advertised by every request-plane endpoint in this process.
+    /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
+    /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
@@ -677,6 +686,35 @@ pub mod tcp_response_stream {
     /// Host/interface for the TCP response stream server.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
+
+    /// TCP request-plane TLS configuration
+    pub mod tls {
+        /// Path to the PEM certificate used by the TCP server.
+        /// When set together with DYN_TCP_TLS_KEY_PATH, TLS is enabled on the
+        /// TCP server. To enable TLS on the client side, also set
+        /// DYN_TCP_TLS_CA_CERT_PATH (or DYN_TCP_TLS_INSECURE for dev).
+        pub const DYN_TCP_TLS_CERT_PATH: &str = "DYN_TCP_TLS_CERT_PATH";
+
+        /// Path to the PEM private key for the TCP server certificate.
+        pub const DYN_TCP_TLS_KEY_PATH: &str = "DYN_TCP_TLS_KEY_PATH";
+
+        /// Path to the PEM CA certificate used by TCP clients to verify the server.
+        /// Required on the client side when the server uses a self-signed or internal CA.
+        pub const DYN_TCP_TLS_CA_CERT_PATH: &str = "DYN_TCP_TLS_CA_CERT_PATH";
+
+        /// Disable TLS certificate verification on the TCP client. Set to "true" to skip.
+        /// WARNING: Only for local development. Never use in production.
+        pub const DYN_TCP_TLS_INSECURE: &str = "DYN_TCP_TLS_INSECURE";
+
+        /// Override the TLS server name (SNI) used by TCP clients when verifying the
+        /// server certificate. When unset, the hostname extracted from the connection
+        /// address is used. Useful when connecting by IP to a server whose certificate
+        /// uses a DNS SAN.
+        pub const DYN_TCP_TLS_SERVER_NAME: &str = "DYN_TCP_TLS_SERVER_NAME";
+
+        /// TLS handshake timeout in seconds (default: 3).
+        pub const DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS: &str = "DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS";
+    }
 }
 
 /// Event Plane transport environment variables
@@ -792,6 +830,7 @@ mod tests {
             logging::DYN_LOG,
             logging::DYN_LOGGING_CONFIG_PATH,
             logging::DYN_LOGGING_JSONL,
+            logging::DYN_LOGGING_CONSOLE_FORMAT,
             logging::DYN_SDK_DISABLE_ANSI_LOGGING,
             logging::DYN_LOG_USE_LOCAL_TZ,
             logging::DYN_LOGGING_SPAN_EVENTS,
@@ -865,6 +904,7 @@ mod tests {
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
@@ -928,6 +968,12 @@ mod tests {
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+            tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_CA_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_INSECURE,
+            tcp_response_stream::tls::DYN_TCP_TLS_SERVER_NAME,
+            tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,

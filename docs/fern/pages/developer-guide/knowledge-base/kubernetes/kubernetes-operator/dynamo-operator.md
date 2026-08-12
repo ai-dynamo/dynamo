@@ -136,7 +136,7 @@ Advanced and operator-owned resources:
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md)**
+**📖 [Dynamo CRD API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx)**
 
 For user-focused workflows, see:
 
@@ -145,6 +145,25 @@ For user-focused workflows, see:
 - **[DGDR Reference](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx)** for DGDR fields, lifecycle, and generated deployments
 - **[Managing Models with DynamoModel Guide](managing-models-dynamomodel.md)**
 - **[Snapshotting GPU Workers](snapshot.md)** for `DynamoCheckpoint`
+
+### CRD Storage Migration
+
+The cluster-wide Operator automatically migrates existing resources to the current Custom Resource
+Definition (CRD) storage version. Migration requires no user action under normal circumstances. The
+`v1alpha1` API remains served during migration, so existing manifests, clients, and older Operator
+versions continue to work through the conversion webhook.
+
+To verify migration progress, inspect the CRD:
+
+```bash
+kubectl get crd dynamographdeployments.nvidia.com \
+  -o jsonpath='generation={.metadata.generation}{"\n"}observedGeneration={.metadata.annotations.crd-migration\.nvidia\.com/observed-generation}{"\n"}storedVersions={.status.storedVersions}{"\n"}'
+```
+
+Migration is complete when the observed-generation annotation matches the CRD generation and
+`status.storedVersions` contains only the CRD's current storage version. The Operator retries
+transient failures. If these values do not converge, check the Operator and conversion webhook before
+upgrading to a release that stops serving `v1alpha1`.
 
 ## Webhooks
 

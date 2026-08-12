@@ -410,6 +410,7 @@ async def async_main():
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+        "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
     }
     if config.migration_max_seq_len is not None:
@@ -423,6 +424,12 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tcp_tls_cert_path:
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
+    if config.tcp_tls_key_path:
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:

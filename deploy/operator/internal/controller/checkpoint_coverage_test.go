@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,7 +53,7 @@ func makeCheckpointReconcilerWithInterceptor(s *runtime.Scheme, funcs intercepto
 			WithStatusSubresource(&nvidiacomv1alpha1.DynamoCheckpoint{}).
 			WithInterceptorFuncs(funcs).Build(),
 		Config:   checkpointTestConfig(),
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 }
 
@@ -92,7 +92,7 @@ func setCheckpointJobOwner(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv
 // drainEvent reports whether the FakeRecorder emitted an event containing want.
 func drainEvent(t *testing.T, r *CheckpointReconciler, want string) bool {
 	t.Helper()
-	rec, ok := r.Recorder.(*record.FakeRecorder)
+	rec, ok := r.Recorder.(*events.FakeRecorder)
 	require.True(t, ok)
 	select {
 	case ev := <-rec.Events:

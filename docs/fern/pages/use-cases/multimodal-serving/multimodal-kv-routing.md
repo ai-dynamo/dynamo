@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Multimodal KV Routing
-subtitle: Route multimodal requests to workers with the best KV cache overlap
+subtitle: Include multimodal identity in the router's combined cache-and-load cost
 ---
 
 ## Overview
 
 Multimodal KV routing extends Dynamo's KV-aware router to account for image content when calculating cache overlap. The frontend assigns each image a stable hash and includes its identity in the routing view of the prompt.
 
-When an image appears again, the KV router sends the request to the worker with the most matching KV cache blocks. This increases prefix-cache reuse and avoids repeating prefill work for cached multimodal content.
+When an image appears again, its identity contributes to each worker's KV overlap. The router balances that cache credit against projected prefill and decode load, so the worker with the largest overlap does not necessarily win when it is busy. Cache-aware placement increases prefix reuse without abandoning load balancing.
 
 > [!IMPORTANT]
 > The KV cache stores attention key/value state so a worker can skip repeated prefill work. The embedding cache stores vision encoder outputs so the encoder can skip repeated image processing. You can use both features together. See [Embedding Cache](embedding-cache.md).
@@ -30,7 +30,14 @@ The routing flow in general has three steps:
 
 1. The frontend computes a stable identity for each image.
 2. The frontend represents the image in a routing-only token view that matches the backend's cache identity.
-3. The KV router selects the worker with the highest block overlap and forwards the same image identity to that worker.
+3. The KV router includes that overlap in its combined cache-and-load score, selects the lowest-cost eligible worker, and forwards the same image identity.
+
+By default, an HTTP image's identity hashes the exact URL bytes, including its
+query string. Reusing the identical URL produces the same identity, but two URLs
+for the same image bytes do not. Enable `--frontend-decoding` when you need
+content-stable identity across URLs; the frontend then hashes decoded image
+content. Data URLs follow the same rule: the default path hashes the full data
+URI string, while frontend decoding hashes the decoded bytes.
 
 <Tabs>
   <Tab title="vLLM" language="vllm">
@@ -106,5 +113,5 @@ The routing flow in general has three steps:
 |---------|--------------|--------|-------|
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Supported families include Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA 1.5, LLaVA-NeXT, Llama 4, Kimi K2.5/K2.6, Qwen3.5, and Qwen3.6. The rest use text-prefix-only routing. |
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> | Uses vLLM’s own multimodal processor — supports any VLM that vLLM supports. |
-| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Dynamo's SGLang image includes hash-forwarding support; custom installations must add it. |
+| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Hash forwarding is upstream in SGLang 0.5.13+; Dynamo pins 0.5.16. Older custom installations need the upstream patch. |
 | [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Supported model scope is the Qwen2-VL family (Qwen2-VL / Qwen2.5-VL / Qwen3-VL) and Kimi (Kimi-K2.5 / Kimi-K2.6). Other multimodal models fall back to text-prefix routing. |
