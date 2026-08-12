@@ -78,7 +78,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -3180,15 +3180,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         request: Dict[str, Any],
         request_id: str,
-    ) -> tuple[EmbedsPrompt | TokensPrompt | None, Dict[str, Any] | None]:
+    ) -> EmbedsPrompt | TokensPrompt | None:
         """Run the in-process CustomEncoder and prepare its engine prompt.
 
-        The CustomEncoder consumes image URLs directly and emits artifacts. Returns
-        ``(prepared_prompt, error)``:
-        - images present: ``(prepared_prompt, None)``,
-        - no image content: ``(None, None)`` — text-only request, nothing
-          to assemble or extract (non-image modalities are rejected above),
-        - failure: ``(None, error_dict)`` for the caller to yield.
+        The CustomEncoder consumes image URLs directly and emits artifacts.
+        Returns the prepared prompt when images are present, or ``None`` for a
+        text-only request with nothing to assemble (non-image modalities are
+        rejected below).
+
+        Raises:
+            InvalidArgument: the request cannot be served as given. This is the
+                request-level failure channel: the frontend maps it to HTTP 400
+                and forwards the message verbatim, so the caller learns which
+                part of their request the encoder rejected. Reporting the same
+                condition through ``finish_reason`` instead would strip the
+                message and surface an unattributed 500.
         """
         # Internal invariant: callers guard on `self._custom_encoder is not None`
         # before reaching here. Use an explicit raise (not assert, which is
@@ -3211,7 +3217,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"unsupported multimodal data: {unsupported}"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            raise InvalidArgument(msg)
 
         image_items = mm_map.get(IMAGE_URL_KEY) or []
         image_urls = [
@@ -3229,17 +3235,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "'Url'; each item must be a dict with a 'Url' key"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            raise InvalidArgument(msg)
 
         if not image_urls:
             # No image items at all — and non-image modalities were already
             # rejected above — so there is nothing to assemble → text-only.
-            return None, None
+            return None
 
         token_ids: list[int] = request.get("token_ids") or []
         # Both encode() and adapter preparation run user/model-specific code, so
-        # keep them inside one guard. A failure becomes a structured request error
-        # instead of escaping the coroutine and tearing down the stream.
+        # keep them inside one guard. The guard exists to turn a failure into a
+        # per-request rejection carrying its message, rather than letting an
+        # arbitrary exception escape as an untyped 500.
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
@@ -3251,14 +3258,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         except Exception as exc:
             msg = f"CustomEncoder failed: {exc}"
             logger.exception("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            # `logger.exception` above keeps the traceback server-side; the
+            # caller gets only `msg`. Classified as a request-level rejection
+            # because this guard wraps per-request work on caller-supplied
+            # images — an encoder that cannot place this request's content
+            # will fail it again on retry, so 400 is the honest answer.
+            raise InvalidArgument(msg) from exc
 
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
             request_id,
             len(artifacts),
         )
-        return prepared, None
+        return prepared
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
@@ -3296,13 +3308,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # A configured CustomEncoder owns the aggregated image path. Bypass
             # raw-media loading and let its decoder-selected adapter prepare the
             # final engine prompt.
-            custom_prompt, assemble_error = await self._assemble_custom_encoder_prompt(
+            # A rejection raises InvalidArgument, which the bindings turn into a
+            # typed backend error the frontend answers with 400 plus the message.
+            custom_prompt = await self._assemble_custom_encoder_prompt(
                 request,
                 request_id,
             )
-            if assemble_error is not None:
-                yield assemble_error
-                return
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None

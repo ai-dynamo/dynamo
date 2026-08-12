@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 import torch
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.handlers import DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     Qwen3VLImageEncoding,
@@ -70,7 +71,7 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
         encode=AsyncMock(return_value=[torch.ones((2, 4), dtype=torch.bfloat16)])
     )
 
-    prompt, error = await handler._assemble_custom_encoder_prompt(
+    prompt = await handler._assemble_custom_encoder_prompt(
         {
             "token_ids": [1, 99, 2],
             "multi_modal_data": {
@@ -80,32 +81,78 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
         "request-id",
     )
 
-    assert error is None
     assert prompt is not None
     assert tuple(prompt["prompt_embeds"].shape) == (4, 4)
     assert prompt["prompt_token_ids"] == [1, 99, 99, 2]
 
 
-async def test_custom_encoder_handler_preserves_string_error_contract():
+async def test_custom_encoder_handler_rejects_encoder_failure_with_message():
+    """An encoder failure must reach the caller as a typed rejection.
+
+    `InvalidArgument` is what the bindings translate into a backend error the
+    frontend answers with HTTP 400, forwarding the message verbatim. Reporting
+    the same condition through `finish_reason` strips the message.
+    """
     handler = object.__new__(DecodeWorkerHandler)
     handler._custom_encoder_adapter = _adapter()
     handler._custom_encoder = SimpleNamespace(
         encode=AsyncMock(side_effect=RuntimeError("encoder failed"))
     )
 
-    prompt, error = await handler._assemble_custom_encoder_prompt(
-        {
-            "token_ids": [99],
-            "multi_modal_data": {
-                "image_url": [{"Url": "data:image/png;base64,unused"}]
+    with pytest.raises(InvalidArgument) as excinfo:
+        await handler._assemble_custom_encoder_prompt(
+            {
+                "token_ids": [99],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "data:image/png;base64,unused"}]
+                },
             },
-        },
+            "request-id",
+        )
+
+    assert str(excinfo.value) == "CustomEncoder failed: encoder failed"
+
+
+async def test_custom_encoder_handler_rejects_unsupported_modality():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    with pytest.raises(InvalidArgument) as excinfo:
+        await handler._assemble_custom_encoder_prompt(
+            {"token_ids": [1], "multi_modal_data": {"video_url": [{"Url": "v"}]}},
+            "request-id",
+        )
+
+    assert "image inputs only" in str(excinfo.value)
+    assert "video_url" in str(excinfo.value)
+
+
+async def test_custom_encoder_handler_rejects_image_item_without_url():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    with pytest.raises(InvalidArgument) as excinfo:
+        await handler._assemble_custom_encoder_prompt(
+            {"token_ids": [1], "multi_modal_data": {"image_url": [{"Decoded": "x"}]}},
+            "request-id",
+        )
+
+    assert "'Url'" in str(excinfo.value)
+
+
+async def test_custom_encoder_handler_returns_none_for_text_only_request():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    prompt = await handler._assemble_custom_encoder_prompt(
+        {"token_ids": [1, 2], "multi_modal_data": {}},
         "request-id",
     )
 
     assert prompt is None
-    assert error is not None
-    assert error["finish_reason"] == "error: CustomEncoder failed: encoder failed"
 
 
 async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
@@ -121,7 +168,7 @@ async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
         )
     )
 
-    prompt, error = await handler._assemble_custom_encoder_prompt(
+    prompt = await handler._assemble_custom_encoder_prompt(
         {
             "token_ids": [100, 101, 102],
             "multi_modal_data": {
@@ -131,7 +178,6 @@ async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
         "request-id",
     )
 
-    assert error is None
     assert prompt is not None
     assert prompt["prompt_token_ids"] == [100, 101, 102]
     image = prompt["multi_modal_data"]["image"]
