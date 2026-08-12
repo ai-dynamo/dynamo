@@ -67,7 +67,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 <span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
 <span><b>GPUs</b> 24x GB300 — three 8-GPU replicas</span>
 <span><b>Parallelism</b> DCP8 attention, TP8 MoE</span>
-<span><b>Routing</b> Least-loaded across replicas</span>
+<span><b>Routing</b> Load-aware</span>
 <span><b>Speculative decoding</b> DSPARK</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg disagg">
