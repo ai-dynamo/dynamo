@@ -22,8 +22,11 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "--grpc-connections",
         "DYN_SIDECAR_GRPC_CONNECTIONS",
         "--grpc-connect-attempt-timeout-secs",
+        "DYN_SIDECAR_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS",
         "--grpc-retry-interval-secs",
+        "DYN_SIDECAR_GRPC_RETRY_INTERVAL_SECS",
         "--grpc-startup-deadline-secs",
+        "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
     ] {
         assert!(stdout.contains(expected), "help omits {expected}");
     }
