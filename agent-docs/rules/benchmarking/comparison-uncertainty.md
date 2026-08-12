@@ -16,7 +16,9 @@ is expensive, so do not collect repetitions only to produce confidence intervals
 - Compare the same metric, statistic, unit, workload phase, and benchmark-series identity.
 - Establish the noise floor of each benchmark series empirically before adopting or retiring any candidate on a
   small delta: run a pilot repetition (n=3) of one configuration at the decision point, compute the run-to-run
-  spread, and derive the minimum detectable effect. Treat any default percentage as a placeholder, never as a
+  spread, and derive the minimum detectable effect. This pilot runs ONCE per benchmark series and is amortized
+  across every candidate measured in that series; candidates themselves stay single-run unless their delta falls
+  inside the measured noise band. Treat any default percentage as a placeholder, never as a
   measured floor; uncontrolled state such as prefix-cache carryover can put the real floor an order of magnitude
   higher.
 - Screening and categorical outcomes (OOM, error storms, wide-margin SLO results) remain valid at n=1.
