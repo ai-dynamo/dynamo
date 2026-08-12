@@ -1226,6 +1226,10 @@ impl HttpServiceConfigBuilder {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
+
+        // Return an OpenAI-compatible JSON error for unmatched routes.
+        inference_router = inference_router.fallback(super::openai::unmatched_route_fallback);
+
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_inference_request_span)
@@ -1249,10 +1253,6 @@ impl HttpServiceConfigBuilder {
         );
 
         let router = system_router.merge(inference_router);
-
-        // Return an OpenAI-compatible JSON error for unmatched routes.
-        // Configure this after merging routers and before applying layers.
-        let router = router.fallback(super::openai::unmatched_route_fallback);
 
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
@@ -1753,6 +1753,30 @@ mod tests {
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
         let body: serde_json::Value = resp.json().await.expect("body must be JSON");
         assert_eq!(body["code"], 404);
+
+        handle.abort();
+    }
+
+    /// Verifies that unsupported methods return `405 Method Not Allowed` with the
+    /// expected `Allow` header instead of the unmatched-route fallback `404`.
+    #[tokio::test]
+    async fn test_registered_route_with_unsupported_method_returns_405() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/responses"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            resp.headers()
+                .get(reqwest::header::ALLOW)
+                .and_then(|value| value.to_str().ok()),
+            Some("POST"),
+            "expected Allow header to contain POST"
+        );
 
         handle.abort();
     }
