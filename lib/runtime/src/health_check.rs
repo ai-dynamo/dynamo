@@ -105,8 +105,12 @@ impl HealthCheckManager {
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
-                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
-                                error!("Failed to send health check for {}: {}", endpoint_subject, e);
+                            if let Err(e) = manager.send_health_check_requests(&endpoint_subject, &target).await {
+                                error!(endpoint = endpoint_subject, error = %e, "Failed to send health check");
+                                manager.drt.system_health().lock().set_endpoint_health_status(
+                                    &endpoint_subject,
+                                    crate::config::HealthStatus::NotReady,
+                                );
                             }
                         } else {
                             // This should never happen - targets are registered at startup and never removed
@@ -196,15 +200,16 @@ impl HealthCheckManager {
         Ok(())
     }
 
-    /// Send a health check request via the local endpoint registry (in-process).
-    async fn send_health_check_request(
+    /// Send every registered payload via the local endpoint registry.
+    async fn send_health_check_requests(
         &self,
         endpoint_subject: &str,
-        payload: &serde_json::Value,
+        target: &crate::system_health::HealthCheckTarget,
     ) -> anyhow::Result<()> {
         debug!(
-            "Sending health check to {} via local registry",
-            endpoint_subject
+            endpoint = endpoint_subject,
+            payload_count = target.payload_count(),
+            "Sending health check requests via local registry"
         );
 
         let engine = self
@@ -218,78 +223,87 @@ impl HealthCheckManager {
                 )
             })?;
 
-        // Clone what we need for the spawned task
-        let system_health = self.drt.system_health().clone();
-        let endpoint_subject_owned = endpoint_subject.to_string();
-        let payload = payload.clone();
         let timeout = self.config.request_timeout;
 
-        // Spawn task to send health check and wait for response
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
-                let request = SingleIn::new(payload);
-                match engine.generate(request).await {
-                    Ok(mut response_stream) => {
-                        // Get the first response to verify endpoint is alive.
-                        // Check for errors
-                        let is_healthy = if let Some(response) = response_stream.next().await {
-                            if let Some(error) = response.err() {
+        let probes = target
+            .payloads()
+            .cloned()
+            .enumerate()
+            .map(|(probe_index, payload)| {
+                let engine = engine.clone();
+                async move {
+                    let result = tokio::time::timeout(timeout, async {
+                        let request = SingleIn::new(payload);
+                        let mut response_stream = match engine.generate(request).await {
+                            Ok(response_stream) => response_stream,
+                            Err(error) => {
+                                error!(
+                                    endpoint = endpoint_subject,
+                                    probe_index,
+                                    error = %error,
+                                    "Health check request failed"
+                                );
+                                return false;
+                            }
+                        };
+
+                        let is_healthy = match response_stream.next().await {
+                            Some(response) if response.err().is_none() => true,
+                            Some(response) => {
                                 warn!(
-                                    "Health check error response from {}: {:?}",
-                                    endpoint_subject_owned, error
+                                    endpoint = endpoint_subject,
+                                    probe_index,
+                                    error = ?response.err(),
+                                    "Health check returned an error response"
                                 );
                                 false
-                            } else {
-                                debug!("Health check successful for {}", endpoint_subject_owned);
-                                true
                             }
-                        } else {
-                            warn!(
-                                "Health check got no response from {}",
-                                endpoint_subject_owned
-                            );
-                            false
+                            None => {
+                                warn!(
+                                    endpoint = endpoint_subject,
+                                    probe_index, "Health check returned no response"
+                                );
+                                false
+                            }
                         };
 
                         tokio::spawn(async move {
-                            // We need to consume the rest of the stream to avoid warnings on the frontend.
                             response_stream.for_each(|_| async {}).await;
                         });
+                        is_healthy
+                    })
+                    .await;
 
-                        // Update health status based on response
-                        system_health.lock().set_endpoint_health_status(
-                            &endpoint_subject_owned,
-                            if is_healthy {
-                                HealthStatus::Ready
-                            } else {
-                                HealthStatus::NotReady
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "Health check request failed for {}: {}",
-                            endpoint_subject_owned, e
-                        );
-                        system_health.lock().set_endpoint_health_status(
-                            &endpoint_subject_owned,
-                            HealthStatus::NotReady,
-                        );
+                    match result {
+                        Ok(is_healthy) => is_healthy,
+                        Err(_) => {
+                            warn!(
+                                endpoint = endpoint_subject,
+                                probe_index, "Health check request timed out"
+                            );
+                            false
+                        }
                     }
                 }
-            })
-            .await;
+            });
 
-            // Handle timeout
-            if result.is_err() {
-                warn!("Health check timeout for {}", endpoint_subject_owned);
-                system_health
-                    .lock()
-                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
-            }
+        let is_healthy = futures::future::join_all(probes)
+            .await
+            .into_iter()
+            .all(|ok| ok);
+        self.drt.system_health().lock().set_endpoint_health_status(
+            endpoint_subject,
+            if is_healthy {
+                HealthStatus::Ready
+            } else {
+                HealthStatus::NotReady
+            },
+        );
 
-            debug!("Health check completed for {}", endpoint_subject_owned);
-        });
+        debug!(
+            endpoint = endpoint_subject,
+            is_healthy, "Health check completed"
+        );
 
         Ok(())
     }
@@ -386,6 +400,8 @@ mod push_handler_notify_tests {
         num_chunks: usize,
         /// If set, chunks at these indices will be error responses.
         error_indices: Vec<usize>,
+        failing_dp_rank: Option<u64>,
+        seen_payloads: Option<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
     }
 
     impl MockStreamingEngine {
@@ -393,6 +409,8 @@ mod push_handler_notify_tests {
             Arc::new(Self {
                 num_chunks,
                 error_indices: vec![],
+                failing_dp_rank: None,
+                seen_payloads: None,
             })
         }
 
@@ -400,6 +418,8 @@ mod push_handler_notify_tests {
             Arc::new(Self {
                 num_chunks,
                 error_indices: (0..num_chunks).collect(),
+                failing_dp_rank: None,
+                seen_payloads: None,
             })
         }
 
@@ -407,6 +427,20 @@ mod push_handler_notify_tests {
             Arc::new(Self {
                 num_chunks,
                 error_indices,
+                failing_dp_rank: None,
+                seen_payloads: None,
+            })
+        }
+
+        fn failing_rank(
+            dp_rank: u64,
+            seen_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                num_chunks: 1,
+                error_indices: vec![],
+                failing_dp_rank: Some(dp_rank),
+                seen_payloads: Some(seen_payloads),
             })
         }
     }
@@ -419,10 +453,17 @@ mod push_handler_notify_tests {
             &self,
             input: SingleIn<TestRequest>,
         ) -> anyhow::Result<ManyOut<TestResponse>> {
-            let (_data, ctx) = input.into_parts();
+            let (data, ctx) = input.into_parts();
+            if let Some(seen_payloads) = &self.seen_payloads {
+                seen_payloads.lock().unwrap().push(data.clone());
+            }
+            let failing_rank = data
+                .pointer("/routing/dp_rank")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|rank| self.failing_dp_rank == Some(rank));
             let chunks: Vec<TestResponse> = (0..self.num_chunks)
                 .map(|i| {
-                    if self.error_indices.contains(&i) {
+                    if failing_rank || self.error_indices.contains(&i) {
                         Annotated::from_error(format!("mock error at chunk {i}"))
                     } else {
                         Annotated::from_data(serde_json::json!({"token": i}))
@@ -614,6 +655,72 @@ mod push_handler_notify_tests {
             endpoint,
             HealthStatus::Ready,
             "canary should fire and set Ready on idle engine",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_payload_cycle_requires_every_rank_to_pass() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.multi_payload";
+        let seen_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = MockStreamingEngine::failing_rank(1, seen_payloads.clone());
+        let payloads = (0..3)
+            .map(|dp_rank| serde_json::json!({"routing": {"dp_rank": dp_rank}}))
+            .collect();
+
+        drt.system_health().lock().register_health_check_targets(
+            endpoint,
+            Instance {
+                component: "test_component".to_string(),
+                endpoint: endpoint.to_string(),
+                namespace: "test_namespace".to_string(),
+                instance_id: 0,
+                transport: TransportType::Nats(endpoint.to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            },
+            payloads,
+        );
+        drt.local_endpoint_registry()
+            .register(endpoint.to_string(), engine);
+
+        let manager = HealthCheckManager::new(
+            drt.clone(),
+            HealthCheckConfig {
+                canary_wait_time: Duration::from_secs(1),
+                request_timeout: Duration::from_secs(1),
+            },
+        );
+        let target = drt
+            .system_health()
+            .lock()
+            .get_health_check_target(endpoint)
+            .unwrap();
+
+        manager
+            .send_health_check_requests(endpoint, &target)
+            .await
+            .unwrap();
+
+        let mut seen_ranks: Vec<u64> = seen_payloads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|payload| {
+                payload
+                    .pointer("/routing/dp_rank")
+                    .unwrap()
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        seen_ranks.sort_unstable();
+        assert_eq!(seen_ranks, vec![0, 1, 2]);
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "one failed DP rank must fail the complete canary cycle",
         );
     }
 

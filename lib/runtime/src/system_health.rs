@@ -33,6 +33,22 @@ pub struct HealthCheckTarget {
     pub payload: serde_json::Value,
 }
 
+impl HealthCheckTarget {
+    pub(crate) fn payloads(&self) -> impl Iterator<Item = &serde_json::Value> {
+        let payloads = self
+            .payload
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let single = (!self.payload.is_array()).then_some(&self.payload);
+        single.into_iter().chain(payloads)
+    }
+
+    pub(crate) fn payload_count(&self) -> usize {
+        self.payload.as_array().map_or(1, Vec::len)
+    }
+}
+
 /// Current Health Status
 /// If use_endpoint_health_status is set then
 /// initialize the endpoint_health hashmap to the
@@ -167,6 +183,30 @@ impl SystemHealth {
         instance: component::Instance,
         payload: serde_json::Value,
     ) {
+        self.register_health_check_targets(endpoint_subject, instance, vec![payload]);
+    }
+
+    /// Register one or more payloads for an endpoint. The health check manager
+    /// requires every payload to pass in each canary cycle.
+    pub fn register_health_check_targets(
+        &self,
+        endpoint_subject: &str,
+        instance: component::Instance,
+        mut payloads: Vec<serde_json::Value>,
+    ) {
+        if payloads.is_empty() {
+            tracing::warn!(
+                endpoint = endpoint_subject,
+                "Ignoring empty health check payload list"
+            );
+            return;
+        }
+
+        let payload = if payloads.len() == 1 {
+            payloads.remove(0)
+        } else {
+            serde_json::Value::Array(payloads)
+        };
         let key = endpoint_subject.to_owned();
 
         // Atomically check+insert under a single write lock to avoid races.

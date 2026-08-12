@@ -10,6 +10,7 @@ This module defines the default health check payload for sglang backends.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any, Optional
 
 import sglang as sgl
@@ -94,9 +95,8 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
     Uses FAKE_BOOTSTRAP_HOST to enable fake-transfer mode, so health checks
     don't require real KV-transfer between prefill/decode workers.
 
-    Uses bootstrap_room=0 (same as SGLang). This means health checks always go to
-    DP rank 0. For proper DP coverage, runtime would need to support dynamic payload
-    generation per health check request.
+    For DP-attention deployments, :meth:`to_runtime_payload` returns one payload
+    per DP rank. The runtime requires every payload to pass each canary cycle.
     """
 
     def __init__(
@@ -113,12 +113,14 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
         from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
         bos_token_id = _get_bos_token_id_from_engine(engine)
+        self.dp_size = 1
 
         # Get bootstrap port from engine
         bootstrap_port = 0
         if engine is not None:
             try:
                 inner_tm = engine.tokenizer_manager
+                self.dp_size = max(1, int(getattr(inner_tm.server_args, "dp_size", 1)))
                 bootstrap_port = getattr(
                     inner_tm.server_args, "disaggregation_bootstrap_port", 0
                 )
@@ -127,8 +129,8 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
 
         # Create bootstrap_info for fake-transfer mode
         # FAKE_BOOTSTRAP_HOST tells SGLang to skip real KV-transfer
-        # bootstrap_room=0 matches SGLang behavior (always routes to DP rank 0)
-        # TODO: For proper DP coverage, runtime needs to support dynamic payload generation
+        # Rank 0 preserves the existing single-DP payload shape. Multi-DP
+        # payloads are derived from this template in to_runtime_payload().
         bootstrap_info = {
             "bootstrap_host": FAKE_BOOTSTRAP_HOST,
             "bootstrap_port": bootstrap_port,
@@ -159,10 +161,36 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
             f"Disagg health check configured: "
             f"bootstrap_host={FAKE_BOOTSTRAP_HOST}, "
             f"bootstrap_port={bootstrap_port}, "
-            f"bootstrap_room=0"
+            f"dp_size={self.dp_size}"
         )
 
         super().__init__()
+
+    def to_runtime_payload(self) -> dict[str, Any] | list[dict[str, Any]]:
+        """Return one payload, or a payload set covering all DP ranks."""
+        payload = self.to_dict()
+        if self.dp_size == 1:
+            return payload
+
+        payloads: list[dict[str, Any]] = []
+        for dp_rank in range(self.dp_size):
+            rank_payload = deepcopy(payload)
+
+            bootstrap_info = dict(self.default_payload["bootstrap_info"])
+            override_bootstrap = rank_payload.get("bootstrap_info")
+            if isinstance(override_bootstrap, dict):
+                bootstrap_info.update(override_bootstrap)
+            bootstrap_info["bootstrap_room"] = dp_rank
+            rank_payload["bootstrap_info"] = bootstrap_info
+
+            routing = rank_payload.get("routing")
+            rank_payload["routing"] = {
+                **(routing if isinstance(routing, dict) else {}),
+                "dp_rank": dp_rank,
+            }
+            payloads.append(rank_payload)
+
+        return payloads
 
     def to_dict(self) -> dict[str, Any]:
         # Layer the canary marker on top of whatever the base class returns

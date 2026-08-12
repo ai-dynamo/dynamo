@@ -158,7 +158,9 @@ async def init_multimodal_worker(
         handler = MultimodalWorkerHandler(engine, config, None, shutdown_event)
 
     if config.serving_mode == DisaggregationMode.DECODE:
-        health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
+        health_check_payload = SglangDisaggHealthCheckPayload(
+            engine
+        ).to_runtime_payload()
     else:
         health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
@@ -224,7 +226,7 @@ async def init_multimodal_prefill_worker(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
-    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_runtime_payload()
 
     register_model_taint_route(runtime, generate_endpoint)
     # No OpenAI surface (ModelType.Empty): internal prefill worker, reached via

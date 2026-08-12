@@ -187,11 +187,23 @@ impl EndpointConfigBuilder {
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
-            guard.register_health_check_target(
-                &endpoint.name,
-                instance,
-                health_check_payload.clone(),
-            );
+            match health_check_payload {
+                serde_json::Value::Object(_) => guard.register_health_check_target(
+                    &endpoint.name,
+                    instance,
+                    health_check_payload.clone(),
+                ),
+                serde_json::Value::Array(payloads)
+                    if !payloads.is_empty()
+                        && payloads.iter().all(|payload| payload.is_object()) =>
+                {
+                    guard.register_health_check_targets(&endpoint.name, instance, payloads.clone())
+                }
+                _ => anyhow::bail!(
+                    "Endpoint '{}' health_check_payload must be a JSON object or a non-empty array of objects",
+                    endpoint.name
+                ),
+            }
             if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
                 handler.set_endpoint_health_check_notifier(notifier)?;
             }

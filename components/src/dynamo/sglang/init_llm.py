@@ -122,7 +122,7 @@ async def init_decode(
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
-        ).to_dict()
+        ).to_runtime_payload()
     else:
         health_check_payload = SglangHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
@@ -278,7 +278,7 @@ async def init_prefill(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_runtime_payload()
 
     ready_event = asyncio.Event()
 

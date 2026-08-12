@@ -9,6 +9,7 @@ no handler reads), and survives DYN_HEALTH_CHECK_PAYLOAD env overrides.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,3 +49,30 @@ def test_disagg_env_override_preserves_marker(monkeypatch):
         ),
     )
     assert SglangDisaggHealthCheckPayload().to_dict()[HEALTH_CHECK_KEY] is True
+
+
+def test_disagg_multi_dp_payloads_cover_every_rank():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=None,
+            server_args=SimpleNamespace(
+                dp_size=3,
+                disaggregation_bootstrap_port=8998,
+            ),
+        )
+    )
+
+    payloads = SglangDisaggHealthCheckPayload(engine).to_runtime_payload()
+
+    assert isinstance(payloads, list)
+    assert [payload["bootstrap_info"]["bootstrap_room"] for payload in payloads] == [
+        0,
+        1,
+        2,
+    ]
+    assert [payload["routing"]["dp_rank"] for payload in payloads] == [0, 1, 2]
+    assert all(payload[HEALTH_CHECK_KEY] is True for payload in payloads)
+
+
+def test_disagg_single_dp_keeps_dict_payload():
+    assert isinstance(SglangDisaggHealthCheckPayload().to_runtime_payload(), dict)

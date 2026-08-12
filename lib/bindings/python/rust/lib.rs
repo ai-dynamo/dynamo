@@ -1350,7 +1350,7 @@ impl Endpoint {
         generator: PyObject,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
-        health_check_payload: Option<&Bound<'p, PyDict>>,
+        health_check_payload: Option<&Bound<'p, PyAny>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -1363,9 +1363,9 @@ impl Endpoint {
         )
         .map_err(to_pyerr)?;
 
-        // Convert Python dict to serde_json::Value if provided and validate it's an object
+        // Convert a Python dict or list of dicts to serde_json::Value.
         let health_payload_json = health_check_payload
-            .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
+            .map(pythonize::depythonize::<serde_json::Value>)
             .transpose()
             .map_err(|err| {
                 pyo3::exceptions::PyTypeError::new_err(format!(
@@ -1374,12 +1374,14 @@ impl Endpoint {
                 ))
             })?;
 
-        // Require an object/dict
+        // A list enables a multi-payload canary cycle, for example one per
+        // data-parallel rank.
         if let Some(ref payload) = health_payload_json
             && !payload.is_object()
+            && !matches!(payload, serde_json::Value::Array(items) if !items.is_empty() && items.iter().all(|item| item.is_object()))
         {
             return Err(pyo3::exceptions::PyTypeError::new_err(
-                "health_check_payload must be a JSON object (dict)",
+                "health_check_payload must be a dict or a non-empty list of dicts",
             ));
         }
 
