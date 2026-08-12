@@ -253,7 +253,7 @@ func dcdHubSpecNeedsSave(src *v1beta1.DynamoComponentDeployment, save *v1beta1.D
 			(src.Spec.ComponentName == "" &&
 				src.ObjectMeta.Name != "" ||
 				saveHubOrigin &&
-					src.Spec.PodTemplate != nil)
+					(src.Spec.PodTemplate != nil || len(src.Spec.ContainerArgsPatches) > 0))
 }
 
 // ConvertToDynamoComponentDeploymentSpec converts the DCD spec from v1beta1 to

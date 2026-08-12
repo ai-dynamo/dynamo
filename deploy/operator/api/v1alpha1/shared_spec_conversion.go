@@ -594,6 +594,9 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 			return err
 		}
 	}
+	if len(src.ContainerArgsPatches) > 0 {
+		save.ContainerArgsPatches = cloneContainerArgsPatches(src.ContainerArgsPatches)
+	}
 	if experimentalIsHubOnlyShape(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
 	} else if src.Experimental != nil && src.Experimental.Grove != nil {
@@ -1619,6 +1622,9 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 		return err
 	}
 	dst.PodTemplate = podTemplate
+	if len(dst.ContainerArgsPatches) == 0 && len(preserved.ContainerArgsPatches) > 0 {
+		dst.ContainerArgsPatches = cloneContainerArgsPatches(preserved.ContainerArgsPatches)
+	}
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
@@ -1629,6 +1635,14 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 		dst.Experimental.Grove = preserved.Experimental.Grove.DeepCopy()
 	}
 	return nil
+}
+
+func cloneContainerArgsPatches(src []v1beta1.ContainerArgsPatch) []v1beta1.ContainerArgsPatch {
+	out := slices.Clone(src)
+	for i := range out {
+		out[i].Append = slices.Clone(out[i].Append)
+	}
+	return out
 }
 
 func restoreSharedHubOnlyFrontendSidecar(dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec) {

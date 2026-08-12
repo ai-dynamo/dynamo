@@ -504,6 +504,9 @@ func prepareBetaComponents(
 			})
 			continue
 		}
+		if err := extractBetaContainerArgsPatches(component, i); err != nil {
+			return warnings, err
+		}
 		filtered = append(filtered, component)
 	}
 
@@ -511,4 +514,69 @@ func prepareBetaComponents(
 		return warnings, fmt.Errorf("prepare beta override components: %w", err)
 	}
 	return warnings, nil
+}
+
+func extractBetaContainerArgsPatches(component map[string]interface{}, componentIndex int) error {
+	containers, found, err := unstructured.NestedSlice(
+		component,
+		"podTemplate",
+		"spec",
+		"containers",
+	)
+	if err != nil {
+		return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers must be a list: %w", componentIndex, err)
+	}
+	if !found {
+		return nil
+	}
+
+	patches := make([]interface{}, 0)
+	for containerIndex, value := range containers {
+		container, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d] must be an object, got %T", componentIndex, containerIndex, value)
+		}
+		modifier, hasModifier := container["$patch"]
+		if !hasModifier {
+			continue
+		}
+		modifierMap, ok := modifier.(map[string]interface{})
+		if !ok || len(modifierMap) != 1 || modifierMap["args"] != "append" {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].$patch only supports args: append", componentIndex, containerIndex)
+		}
+		name, ok := container["name"].(string)
+		if !ok || name == "" {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].name must be a non-empty string when $patch is used", componentIndex, containerIndex)
+		}
+		args, found, err := unstructured.NestedStringSlice(container, "args")
+		if err != nil {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].args must be a list of strings: %w", componentIndex, containerIndex, err)
+		}
+		if !found || len(args) == 0 {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].args must be non-empty when $patch args is append", componentIndex, containerIndex)
+		}
+
+		delete(container, "$patch")
+		delete(container, "args")
+		appendArgs := make([]interface{}, len(args))
+		for i := range args {
+			appendArgs[i] = args[i]
+		}
+		patches = append(patches, map[string]interface{}{
+			"name":   name,
+			"append": appendArgs,
+		})
+		containers[containerIndex] = container
+	}
+	if len(patches) == 0 {
+		return nil
+	}
+	if _, exists := component["containerArgsPatches"]; exists {
+		return fmt.Errorf("beta override spec.components[%d] cannot combine containerArgsPatches with a $patch args directive", componentIndex)
+	}
+	if err := unstructured.SetNestedSlice(component, containers, "podTemplate", "spec", "containers"); err != nil {
+		return fmt.Errorf("prepare beta override component containers: %w", err)
+	}
+	component["containerArgsPatches"] = patches
+	return nil
 }

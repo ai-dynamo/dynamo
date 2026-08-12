@@ -6,6 +6,7 @@
 package dgdoverride
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -136,6 +137,85 @@ func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	assert.Equal(t, "keep", findNamedObject(t, env, "KEEP")["value"])
 	assert.Equal(t, "new", findNamedObject(t, env, "CHANGE")["value"])
 	assert.Equal(t, "added", findNamedObject(t, env, "ADDED")["value"])
+}
+
+func TestApplyExtractsExplicitBetaArgsAppendPatch(t *testing.T) {
+	t.Parallel()
+
+	result, warnings, err := Apply(
+		mustObject(t, betaBlueprintYAML),
+		mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          $patch:
+            args: append
+          args:
+          - --router-mode
+          - kv
+`),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	worker := mustBetaWorker(t, result)
+	main := findNamedObject(
+		t,
+		mustNestedSlice(t, worker, "podTemplate", "spec", "containers"),
+		"main",
+	)
+	require.NotNil(t, main)
+	assert.Equal(t, []interface{}{"--base"}, main["args"], "normal args remain untouched until pod rendering")
+	assert.NotContains(t, main, "$patch")
+	assert.Equal(t, []interface{}{
+		map[string]interface{}{
+			"name":   "main",
+			"append": []interface{}{"--router-mode", "kv"},
+		},
+	}, worker["containerArgsPatches"])
+}
+
+func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		modifier  string
+		argsLine  string
+		wantError string
+	}{
+		{name: "unsupported operation", modifier: "replace", argsLine: "          args: [--flag]\n", wantError: "only supports args: append"},
+		{name: "missing args", modifier: "append", wantError: "args must be non-empty"},
+		{name: "non-string args", modifier: "append", argsLine: "          args: [--flag, 7]\n", wantError: "list of strings"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			override := fmt.Sprintf(`
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          $patch:
+            args: %s
+%s`, test.modifier, test.argsLine)
+			_, _, err := Apply(mustObject(t, betaBlueprintYAML), mustObject(t, override))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.wantError)
+		})
+	}
 }
 
 func TestApplyUsesStructuralSetSemantics(t *testing.T) {

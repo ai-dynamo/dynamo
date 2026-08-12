@@ -6150,6 +6150,64 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 	}
 }
 
+func TestGenerateBasePodSpecAppendsContainerArgsAfterDefaultsAndOverrides(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+	}
+
+	tests := []struct {
+		name         string
+		overrideArgs []string
+		wantArgs     []string
+	}{
+		{
+			name:     "append to generated frontend defaults",
+			wantArgs: []string{"-m", "dynamo.frontend", "--router-mode", "kv"},
+		},
+		{
+			name:         "append after explicit args replacement",
+			overrideArgs: []string{"--custom-entrypoint"},
+			wantArgs:     []string{"--custom-entrypoint", "--router-mode", "kv"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+			})
+			if test.overrideArgs != nil {
+				component.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Args: test.overrideArgs}},
+				}}
+			}
+			component.ContainerArgsPatches = []v1beta1.ContainerArgsPatch{{
+				Name:   commonconsts.MainContainerName,
+				Append: []string{"--router-mode", "kv"},
+			}}
+
+			podSpec, err := GenerateBasePodSpec(
+				component,
+				BackendFrameworkVLLM,
+				secretsRetriever,
+				dynamoDeployment.Name,
+				dynamoDeployment.Namespace,
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+				nil,
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantArgs, podSpec.Containers[0].Args)
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}

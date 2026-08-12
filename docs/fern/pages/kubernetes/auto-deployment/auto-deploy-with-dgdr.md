@@ -403,7 +403,34 @@ cannot add a new worker, EPP, or other topology component.
 > `extraPodSpec.mainContainer.args` values append to the generated arguments. In `v1beta1`, map lists
 > such as components, containers, and environment variables merge by `name`, while atomic lists such
 > as graph-level `spec.env` and container `args` replace the generated list. Use `v1beta1` for new
-> overrides and include the complete desired argument list when overriding `args`.
+> overrides.
+
+To retain generated container arguments and add flags after them, set `$patch.args` to `append` on
+the named container:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      spec:
+        components:
+        - name: Frontend
+          podTemplate:
+            spec:
+              containers:
+              - name: main
+                $patch:
+                  args: append
+                args:
+                - --router-mode
+                - kv
+```
+
+Without `$patch`, specifying `args` keeps the standard `v1beta1` replacement behavior. The append
+modifier supports only `args: append`, requires a non-empty argument list, and targets an existing
+generated component and container by name.
 
 For the complete merge, metadata, and validation rules, see
 [DGDR Reference — Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).

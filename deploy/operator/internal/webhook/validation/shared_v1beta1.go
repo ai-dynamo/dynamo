@@ -118,6 +118,19 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	for i, patch := range spec.ContainerArgsPatches {
+		if patch.Name == nvidiacomv1beta1.MainContainerName {
+			continue
+		}
+		if spec.PodTemplate == nil || !hasContainerNamed(spec.PodTemplate.Spec.Containers, patch.Name) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("containerArgsPatches").Index(i).Child("name"),
+				patch.Name,
+				"must match main or a podTemplate.spec.containers name",
+			))
+		}
+	}
+
 	if spec.Experimental != nil {
 		allErrs = append(allErrs, v.validateExperimentalSpec(
 			spec.Experimental,

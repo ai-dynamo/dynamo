@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 171 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 172 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">73 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">67 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
 
@@ -2509,6 +2509,24 @@ are first-class values: users can set them directly and downstream consumers
 - <Badge intent="note" minimal>epp</Badge>
 </Accordion>
 
+<Accordion id="containerargspatch" title="ContainerArgsPatch">
+ContainerArgsPatch appends command-line arguments to one rendered container.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
+
+<ParamField path="name" type="string">
+name identifies a rendered container. Use main for the generated workload container or the name of a container in podTemplate.spec.containers.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="append" type="string array">
+append contains arguments added after defaults and normal overrides.
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
 <Accordion id="dgdrphase" title="DGDRPhase">
 DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
 
@@ -2686,6 +2704,12 @@ See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="containerArgsPatches" type="ContainerArgsPatch array">
+containerArgsPatches appends arguments to named containers after the operator has generated component defaults and applied podTemplate overrides. The DGDR override engine populates this field from an explicit $patch args=append directive.
+See [ContainerArgsPatch](#containerargspatch).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="replicas" type="integer">
 replicas is the desired number of Pods for this component. When `scalingAdapter` is set on this component, this field is managed by the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
@@ -2786,6 +2810,12 @@ globalDynamoNamespace places the component in the global Dynamo namespace rather
 <ParamField path="podTemplate" type="PodTemplateSpec">
 podTemplate defines the component's Pod configuration. New components must include a container named "main" with a non-empty image. Existing components created without a podTemplate may remain unchanged. The operator merges defaults into the main container. For DGD components whose main image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly. All other containers are user-managed sidecars and must specify their required fields, including image.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="containerArgsPatches" type="ContainerArgsPatch array">
+containerArgsPatches appends arguments to named containers after the operator has generated component defaults and applied podTemplate overrides. The DGDR override engine populates this field from an explicit $patch args=append directive.
+See [ContainerArgsPatch](#containerargspatch).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

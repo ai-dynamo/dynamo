@@ -1660,6 +1660,9 @@ func GenerateBasePodSpec(
 	}
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	if err := applyContainerArgsPatches(&podSpec, component.ContainerArgsPatches); err != nil {
+		return nil, err
+	}
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
@@ -1718,6 +1721,24 @@ func GenerateBasePodSpec(
 	}
 
 	return &podSpec, nil
+}
+
+func applyContainerArgsPatches(podSpec *corev1.PodSpec, patches []v1beta1.ContainerArgsPatch) error {
+	for _, patch := range patches {
+		found := false
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name != patch.Name {
+				continue
+			}
+			podSpec.Containers[i].Args = append(podSpec.Containers[i].Args, patch.Append...)
+			found = true
+			break
+		}
+		if !found {
+			return fmt.Errorf("containerArgsPatches references unknown container %q", patch.Name)
+		}
+	}
+	return nil
 }
 
 func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {

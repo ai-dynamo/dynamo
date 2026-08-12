@@ -294,6 +294,57 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 	})
 }
 
+func TestValidateDynamoComponentDeploymentSharedSpecContainerArgsPatches(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
+	componentPath := field.NewPath("spec", "components").Index(0)
+
+	tests := []struct {
+		name     string
+		template *corev1.PodTemplateSpec
+		target   string
+		want     []string
+	}{
+		{
+			name: "accepts generated main container",
+			template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"},
+			}}},
+			target: consts.MainContainerName,
+		},
+		{
+			name: "accepts named sidecar",
+			template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"},
+				{Name: "metrics", Image: "registry.example/metrics:latest"},
+			}}},
+			target: "metrics",
+		},
+		{
+			name: "rejects unknown container",
+			template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"},
+			}}},
+			target: "missing",
+			want:   []string{"spec.components[0].containerArgsPatches[0].name"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				PodTemplate:            test.template,
+				RuntimeVersionOverride: "1.1.0",
+				ContainerArgsPatches: []nvidiacomv1beta1.ContainerArgsPatch{{
+					Name:   test.target,
+					Append: []string{"--flag"},
+				}},
+			}
+			errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
+			assertFieldPaths(t, errs, test.want)
+		})
+	}
+}
+
 func TestValidateComponentCheckpointJobConfigFieldPaths(t *testing.T) {
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 	fldPath := field.NewPath("spec", "components").Index(0).Child("experimental", "checkpoint", "job")
