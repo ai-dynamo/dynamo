@@ -312,11 +312,23 @@ def get_model_context_length(
         tokenizer_config, "model_max_length"
     )
     candidates = []
+    candidate_ids = set()
+
+    def add_candidate(candidate: object) -> None:
+        if candidate is None or id(candidate) in candidate_ids:
+            return
+        candidate_ids.add(id(candidate))
+        candidates.append(candidate)
+
+    thinker_config = _get_config_value(config, "thinker_config")
+    add_candidate(_get_config_value(thinker_config, "text_config"))
+    if not isinstance(config, dict):
+        get_text_config = getattr(config, "get_text_config", None)
+        if callable(get_text_config):
+            add_candidate(get_text_config())
     for key in ("text_config", "language_config", "decoder", "generator"):
-        nested = _get_config_value(config, key)
-        if nested is not None:
-            candidates.append(nested)
-    candidates.append(config)
+        add_candidate(_get_config_value(config, key))
+    add_candidate(config)
 
     for candidate in candidates:
         lengths = []

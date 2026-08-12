@@ -46,6 +46,13 @@ def test_mamba_cache_align_block_size_from_local_config(tmp_path) -> None:
         ({"n_positions": 1024}, 1024),
         ({"text_config": {"max_sequence_length": 4096}}, 4096),
         (
+            {
+                "max_position_embeddings": 8192,
+                "thinker_config": {"text_config": {"max_position_embeddings": 2048}},
+            },
+            2048,
+        ),
+        (
             {"max_position_embeddings": 8192, "model_max_length": 131072},
             131072,
         ),
@@ -88,6 +95,24 @@ def test_model_context_length_prefers_nested_object_config(monkeypatch) -> None:
     config = SimpleNamespace(
         max_position_embeddings=8192,
         decoder=SimpleNamespace(max_position_embeddings=2048),
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info._load_model_config",
+        lambda *args, **kwargs: config,
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info._load_tokenizer_config",
+        lambda *args, **kwargs: None,
+    )
+
+    assert get_model_context_length("test/model") == 2048
+
+
+def test_model_context_length_prefers_get_text_config(monkeypatch) -> None:
+    text_config = SimpleNamespace(max_position_embeddings=2048)
+    config = SimpleNamespace(
+        max_position_embeddings=8192,
+        get_text_config=lambda: text_config,
     )
     monkeypatch.setattr(
         "dynamo.profiler.utils.model_info._load_model_config",
