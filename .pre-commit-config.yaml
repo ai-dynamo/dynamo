@@ -107,7 +107,7 @@ repos:
       language: system
       files: ^docs/fern/scripts/check_asset_paths\.py$
     - id: check-style-components
-      name: Check *Styles.tsx CSS template literals
+      name: Check component CSS template literals
       entry: python3 docs/fern/scripts/check_style_components.py
       language: system
       # ReleaseSupportMatrix and FeatureInteractions hold large CSS template

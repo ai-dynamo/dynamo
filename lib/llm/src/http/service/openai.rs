@@ -48,8 +48,12 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
-    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, SESSION_AFFINITY_CONTEXT_KEY,
+    SessionAffinityId, agent_context_from_headers, apply_header_routing_overrides,
+    session_affinity_from_headers,
+};
+use crate::protocols::common::input_trigger::{
+    classify_chat_request, classify_completion_request, classify_response_request,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -133,6 +137,12 @@ pub(crate) struct ErrorMessage {
     metric_error_type: Option<ErrorType>,
 }
 
+impl ErrorMessage {
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
@@ -194,7 +204,7 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
 /// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
 /// `Backend(InvalidArgument)`; both variants are 400-worthy.
-fn find_invalid_argument_in_chain<'a>(
+pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
     use dynamo_runtime::error::{BackendError, ErrorType};
@@ -595,11 +605,25 @@ pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request_id: String,
     headers: &HeaderMap,
 ) -> Result<Context<T>, ErrorResponse> {
+    context_from_headers_with_input_trigger(request, request_id, headers, |_| None)
+}
+
+fn context_from_headers_with_input_trigger<T, F>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+    classify_input_trigger: F,
+) -> Result<Context<T>, ErrorResponse>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce(&T) -> Option<InputTrigger>,
+{
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(agent_context) = agent_context_from_headers(headers) {
+    if let Some(mut agent_context) = agent_context_from_headers(headers) {
+        agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity_from_headers(headers) {
@@ -709,7 +733,10 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_completion_request(request))
+        })?;
     let context = request.context();
 
     // create the connection handles
@@ -1875,7 +1902,10 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_chat_request(request))
+        })?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2388,9 +2418,13 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
 /// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
 /// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
 /// for correct disambiguation when `n > 1`.
+///
+/// Dedup is keyed by `(choice_index, tool_call_id)`, not by id alone: with `n > 1` the
+/// backend may reuse the same tool call id across choices, and keying on the id alone
+/// would silently drop every choice after the first.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
-    dispatched_ids: &mut HashSet<String>,
+    dispatched_ids: &mut HashSet<(u32, String)>,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
     let Some(data) = &response.data else {
@@ -2411,7 +2445,8 @@ fn streaming_tool_dispatch_events(
             if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
                 // Skip already-dispatched tool calls (dedup guard, matches
                 // the stopped/done flags in Anthropic/Responses converters).
-                if !dispatched_ids.insert(id.clone()) {
+                // Scoped per choice so repeated ids across choices still dispatch.
+                if !dispatched_ids.insert((choice.index, id.clone())) {
                     continue;
                 }
                 let payload = ToolCallDispatchPayload {
@@ -2665,7 +2700,7 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
-        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
@@ -2956,7 +2991,10 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_response_request(request))
+        })?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4760,6 +4798,7 @@ mod tests {
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
                 kv_hints: None,
+                input_trigger: None,
             },
         );
 
@@ -4775,6 +4814,42 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
+    }
+
+    #[test]
+    fn test_context_from_headers_classifies_only_agent_requests() {
+        let calls = std::cell::Cell::new(0);
+        let classify = |_: &()| {
+            calls.set(calls.get() + 1);
+            Some(InputTrigger::Other)
+        };
+
+        context_from_headers_with_input_trigger(
+            (),
+            "request-1".to_string(),
+            &HeaderMap::new(),
+            classify,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let source = context_from_headers_with_input_trigger(
+            (),
+            "request-2".to_string(),
+            &headers,
+            classify,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            source
+                .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+                .unwrap()
+                .input_trigger,
+            Some(InputTrigger::Other)
+        );
     }
 
     #[test]
@@ -6346,6 +6421,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_responses_conversion_errors_are_client_errors() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::InvalidArgument("ambiguous tools".to_string()).into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
+        );
+    }
+
     // ── streaming dispatch tests ──────────────────────────────────────
 
     use std::collections::{HashMap, HashSet};
@@ -6478,7 +6566,7 @@ mod tests {
 
     fn collect_tool_dispatch_events(
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
-        dispatched_ids: &mut HashSet<String>,
+        dispatched_ids: &mut HashSet<(u32, String)>,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
         streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
@@ -6780,17 +6868,17 @@ mod tests {
 
     #[test]
     fn test_tool_dispatch_n_greater_than_1_includes_choice_index() {
-        // Regression test: with n > 1, each choice should carry its own choice_index
-        // so clients can disambiguate which choice the tool call belongs to.
+        // Regression test for #12676: with n > 1, identical tool-call ids from different
+        // choices must each dispatch with their own choice_index.
         let choice_0 = make_choice_with_tool_call(
             0,
-            Some("call_a"),
+            Some("call_1"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         );
         let choice_1 = make_choice_with_tool_call(
             1,
-            Some("call_b"),
+            Some("call_1"),
             Some("get_time"),
             Some(r#"{"tz":"UTC"}"#),
         );
@@ -6801,11 +6889,11 @@ mod tests {
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json0["choice_index"], 0);
-        assert_eq!(json0["tool_call"]["id"], "call_a");
+        assert_eq!(json0["tool_call"]["id"], "call_1");
 
         let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
         assert_eq!(json1["choice_index"], 1);
-        assert_eq!(json1["tool_call"]["id"], "call_b");
+        assert_eq!(json1["tool_call"]["id"], "call_1");
     }
 
     #[test]

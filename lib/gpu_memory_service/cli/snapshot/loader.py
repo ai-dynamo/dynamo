@@ -12,6 +12,7 @@ restored engine on weight load.
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import os
 import time
@@ -158,8 +159,16 @@ def _list_checkpoint_devices(
 
 
 def main(argv: list[str] | None = None) -> None:
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--use-v1", action="store_true")
+    options, remaining = selector.parse_known_args(argv)
+    if options.use_v1:
+        v1_loader = importlib.import_module("gpu_memory_service.v1.snapshot.loader")
+        v1_loader.main(remaining)
+        return
+
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(remaining)
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"

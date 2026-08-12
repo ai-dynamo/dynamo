@@ -74,6 +74,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
         async def tick(self, scheduled_tick, tick_input):
             del scheduled_tick
             events.append("engine.tick")
+            assert planner._config_lock.locked()
             assert tick_input.worker_counts.ready_num_decode == 2
             return PlannerEffects(
                 scale_to=ScalingDecision(num_decode=3),
@@ -83,6 +84,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
     class RecordingAggPlanner(AggPlanner):
         async def _apply_effects(self, effects):
             events.append("apply effects")
+            assert not self._config_lock.locked()
             await super()._apply_effects(effects)
 
     config = PlannerConfig(

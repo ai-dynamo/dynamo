@@ -19,9 +19,9 @@ use std::sync::{Arc, RwLock};
 
 use crate::indexer::{
     KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
-    ThreadPoolIndexer, WireTieredMatchDetails,
+    ThreadPoolIndexer, WireTieredMatchDetails, record_unsupported_residency_event,
 };
-use crate::protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank};
+use crate::protocols::{LocalBlockHash, RouterEvent, StorageTier, WorkerWithDpRank};
 use crate::router_hint::RouterHintRootCandidates;
 use rustc_hash::FxHashMap;
 
@@ -111,6 +111,10 @@ impl LowerTierIndexers {
         storage_tier: StorageTier,
     ) -> Option<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
         self.indexers.read().unwrap().get(&storage_tier).cloned()
+    }
+
+    pub fn record_unsupported_residency_event(&self, event: &RouterEvent) {
+        record_unsupported_residency_event(self.metrics.as_deref(), event);
     }
 }
 

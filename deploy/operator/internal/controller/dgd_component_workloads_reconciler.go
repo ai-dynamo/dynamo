@@ -30,7 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,7 +45,7 @@ type componentWorkloadsReconciler struct {
 
 func newComponentWorkloadsReconciler(
 	kubeClient client.Client,
-	recorder record.EventRecorder,
+	recorder events.EventRecorder,
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
 	return &componentWorkloadsReconciler{

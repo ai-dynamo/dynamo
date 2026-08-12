@@ -13,11 +13,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::services::selection::SelectionService;
+use dynamo_kv_router::WorkerSelectionPolicyFactory;
+use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
+use dynamo_kv_router::services::selection::{SelectionService, WorkerSelectionPolicyRegistry};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
+use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, Selector, metrics};
 
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
@@ -37,6 +39,15 @@ const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 struct Config {
     namespace: String,
     component: String,
+}
+
+enum StandaloneSelectionService {
+    Default,
+    Existing(SelectionService),
+    LinkedWorkerSelectionPolicy {
+        kv_router_config: Box<KvRouterConfig>,
+        factory: WorkerSelectionPolicyFactory,
+    },
 }
 
 impl Config {
@@ -119,13 +130,60 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 /// Run the stock EPP until it exits.
 pub async fn run() -> Result<()> {
     init_tracing();
-    run_inner(EppMode::from_env()?, None).await
+    let mode = EppMode::from_env()?;
+    if matches!(mode, EppMode::Standalone) {
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        reject_unlinked_worker_selection_policy(&kv_router_config)?;
+    }
+    run_inner(mode, StandaloneSelectionService::Default).await
+}
+
+fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()> {
+    if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+        anyhow::bail!(
+            "worker-selection instance {instance:?} is configured, but this stock EPP has no linked worker-selection policy catalog; run a custom EPP binary that links the catalog"
+        );
+    }
+    Ok(())
 }
 
 /// Run the standalone EPP around a caller-built selection service.
 pub async fn run_with_selection_service(service: SelectionService) -> Result<()> {
     init_tracing();
-    run_inner(EppMode::Standalone, Some(service)).await
+    run_inner(
+        EppMode::Standalone,
+        StandaloneSelectionService::Existing(service),
+    )
+    .await
+}
+
+/// Run EPP with policy types statically linked into the image and instances selected from YAML.
+pub async fn run_with_worker_selection_policy_registry(
+    registry: WorkerSelectionPolicyRegistry,
+) -> Result<()> {
+    init_tracing();
+    let mode = EppMode::from_env()?;
+    let kv_router_config = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+    let Some(factory) = registry.resolve(&kv_router_config)? else {
+        return run_inner(mode, StandaloneSelectionService::Default).await;
+    };
+    require_standalone_mode_for_linked_worker_selection_policy(mode)?;
+    run_inner(
+        mode,
+        StandaloneSelectionService::LinkedWorkerSelectionPolicy {
+            kv_router_config: Box::new(kv_router_config),
+            factory,
+        },
+    )
+    .await
+}
+
+fn require_standalone_mode_for_linked_worker_selection_policy(mode: EppMode) -> Result<()> {
+    if matches!(mode, EppMode::Standalone) {
+        return Ok(());
+    }
+    anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
 }
 
 fn init_tracing() {
@@ -137,7 +195,10 @@ fn init_tracing() {
         .try_init();
 }
 
-async fn run_inner(mode: EppMode, selection_service: Option<SelectionService>) -> Result<()> {
+async fn run_inner(
+    mode: EppMode,
+    standalone_selection_service: StandaloneSelectionService,
+) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
 
     let config = Config::from_env();
@@ -187,11 +248,26 @@ async fn run_inner(mode: EppMode, selection_service: Option<SelectionService>) -
             "Initializing standalone selector mode (no Dynamo runtime)..."
         );
         metrics::set_served_model(&selector_cfg.model_name);
-        let router = Arc::new(match selection_service {
-            Some(service) => {
+        let router = Arc::new(match standalone_selection_service {
+            StandaloneSelectionService::Default => {
+                crate::EppRouter::from_selector(selector_cfg).await?
+            }
+            StandaloneSelectionService::Existing(service) => {
                 crate::EppRouter::from_selection_service(selector_cfg, service).await?
             }
-            None => crate::EppRouter::from_selector(selector_cfg).await?,
+            StandaloneSelectionService::LinkedWorkerSelectionPolicy {
+                kv_router_config,
+                factory,
+            } => {
+                let service =
+                    Selector::build_selection_service_with_worker_selection_policy_factory(
+                        &selector_cfg,
+                        *kv_router_config,
+                        factory,
+                    )
+                    .await?;
+                crate::EppRouter::from_selection_service(selector_cfg, service).await?
+            }
         });
         let ready_router = router.clone();
         serve(router, move || ready_router.is_ready(), health_reporter).await
@@ -316,5 +392,44 @@ async fn serve<P: crate::EndpointPicker>(
             .serve(addr)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linked_policy_requires_standalone_epp() {
+        assert!(
+            require_standalone_mode_for_linked_worker_selection_policy(EppMode::Standalone).is_ok()
+        );
+        assert!(
+            require_standalone_mode_for_linked_worker_selection_policy(EppMode::DynamoRuntime)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn stock_epp_rejects_custom_worker_selection_policy() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  default: custom
+  instances:
+    - name: custom
+      type: acme
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        assert!(reject_unlinked_worker_selection_policy(&config).is_err());
     }
 }

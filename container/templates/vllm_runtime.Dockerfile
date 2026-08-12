@@ -86,11 +86,21 @@ ENV PATH=/opt/uv/bin:${PATH}
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -u 1000 -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && mkdir -p /home/dynamo/.cache/vllm /opt/dynamo \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
-    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /home/dynamo/.cache/vllm /opt/dynamo /workspace \
+    # Arbitrary OpenShift UIDs need to create the vLLM and Triton caches under $HOME.
+    && chmod g+rwx /home/dynamo /home/dynamo/.cache /home/dynamo/.cache/vllm \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
+
+# FlashInfer creates package-local cubin symlinks at runtime. Grant group 0
+# write access so arbitrary OpenShift UIDs can initialize the cubin cache.
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    CUBINS_DIR="$SITE_PACKAGES/flashinfer_cubin/cubins" && \
+    if [ -d "$CUBINS_DIR" ]; then \
+        find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
+    fi
 
 {% if device != "cuda" %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
