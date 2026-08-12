@@ -27,6 +27,26 @@ pub(crate) struct RequestEndTraceState {
     request: RequestTraceRequestEndState,
 }
 
+impl RequestEndTraceState {
+    pub(super) fn new(
+        agent: Option<AgentContextTraceState>,
+        request_tracker: Arc<RequestTracker>,
+        replay_metrics: Arc<RequestReplayMetrics>,
+    ) -> Self {
+        Self {
+            agent,
+            request: RequestTraceRequestEndState {
+                request_tracker,
+                replay_metrics,
+            },
+        }
+    }
+
+    pub(super) fn request_tracker(&self) -> Arc<RequestTracker> {
+        self.request.request_tracker.clone()
+    }
+}
+
 fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'static str> {
     if common_request.prompt_embeds.is_some() {
         return Some("prompt embeddings are not supported");
@@ -117,12 +137,11 @@ fn build_request_end_trace_state_for_policy(
         .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
         .flatten();
 
-    let request = RequestTraceRequestEndState {
+    Some(RequestEndTraceState::new(
+        agent,
         request_tracker,
         replay_metrics,
-    };
-
-    Some(RequestEndTraceState { agent, request })
+    ))
 }
 
 pub(crate) fn finish_reason_metadata_handle(
@@ -134,7 +153,7 @@ pub(crate) fn finish_reason_metadata_handle(
         .map(|state| state.finish_reason_metadata.clone())
 }
 
-fn wrap_request_end_stream<Resp>(
+pub(crate) fn wrap_request_end_stream<Resp>(
     stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
     request_id: String,
