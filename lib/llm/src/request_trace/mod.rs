@@ -25,8 +25,7 @@ use crate::telemetry::bus::TelemetryBus;
 
 pub use agent_context::SharedFinishReasonMetadata;
 pub(crate) use agent_context::{
-    AgentContextTraceState, build_agent_context_trace_state,
-    build_agent_context_trace_state_from_agent, into_owned_replay_metrics,
+    AgentContextTraceState, build_agent_context_trace_state, into_owned_replay_metrics,
     record_backend_finish_reason_metadata, record_chat_finish_reason_metadata,
     record_completion_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
     request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
