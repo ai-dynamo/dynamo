@@ -93,13 +93,7 @@ pub(crate) fn resolve_host_or_interface<R: IpResolver>(
 }
 
 pub(crate) fn resolve_local_host<R: IpResolver>(resolver: &R) -> IpAddr {
-    resolver
-        .local_ip()
-        .or_else(|err| match err {
-            Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-            _ => Err(err),
-        })
-        .unwrap_or(FALLBACK)
+    crate::pipeline::network::tcp::server::resolve_local_ip(resolver).unwrap_or(FALLBACK)
 }
 
 fn resolve<R: IpResolver>(resolver: R) -> String {
@@ -114,6 +108,7 @@ fn resolve<R: IpResolver>(resolver: R) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use local_ip_address::Error;
 
     struct MockIpResolver {
         v4: Result<IpAddr, Error>,
@@ -141,6 +136,20 @@ mod tests {
         }
     }
 
+    struct StrategyErrorThenIpv6Resolver;
+
+    impl IpResolver for StrategyErrorThenIpv6Resolver {
+        fn local_ip(&self) -> Result<IpAddr, Error> {
+            Err(Error::StrategyError(
+                "ifa_prefixlen must be initialized".to_string(),
+            ))
+        }
+
+        fn local_ipv6(&self) -> Result<IpAddr, Error> {
+            Ok(IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]))
+        }
+    }
+
     #[test]
     fn ipv4_returned_unbracketed() {
         let r = MockIpResolver {
@@ -159,6 +168,11 @@ mod tests {
             interfaces: Vec::new(),
         };
         assert_eq!(resolve(r), "[2001:db8::1]");
+    }
+
+    #[test]
+    fn strategy_error_falls_back_to_bracketed_ipv6() {
+        assert_eq!(resolve(StrategyErrorThenIpv6Resolver), "[2001:db8::1]");
     }
 
     #[test]

@@ -52,6 +52,25 @@ use anyhow::{Result, anyhow as error};
 
 pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
+/// Resolve a routable local address, trying IPv6 after any IPv4 resolver error.
+///
+/// If both probes fail, preserve a non-`LocalIpAddressNotFound` error so callers
+/// can distinguish a resolver failure from a host with no routable address.
+pub(crate) fn resolve_local_ip<R: IpResolver>(resolver: &R) -> Result<IpAddr, Error> {
+    match resolver.local_ip() {
+        Ok(ip) => Ok(ip),
+        Err(ipv4_error) => match resolver.local_ipv6() {
+            Ok(ip) => Ok(ip),
+            Err(ipv6_error) => match ipv4_error {
+                Error::LocalIpAddressNotFound => Err(ipv6_error),
+                _ => Err(ipv4_error),
+            },
+        },
+    }
+}
+
+
+
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
 
@@ -182,12 +201,7 @@ impl TcpStreamServer {
                 ))
             })?,
             None => {
-                let resolved_ip = resolver.local_ip().or_else(|err| match err {
-                    Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-                    _ => Err(err),
-                });
-
-                match resolved_ip {
+                match resolve_local_ip(&resolver) {
                     Ok(addr) => addr,
                     // Only fall back to loopback when no routable IP exists at all;
                     // propagate other resolver errors (I/O, platform) so
@@ -1443,6 +1457,76 @@ mod tests {
         fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
             Err(Error::LocalIpAddressNotFound)
         }
+    }
+
+    struct Ipv6OnlyResolver;
+
+    impl IpResolver for Ipv6OnlyResolver {
+        fn local_ip(&self) -> Result<IpAddr, Error> {
+            Err(Error::StrategyError(
+                "ifa_prefixlen must be initialized".to_string(),
+            ))
+        }
+
+        fn local_ipv6(&self) -> Result<IpAddr, Error> {
+            Ok(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
+        }
+    }
+
+    struct BrokenIpv4WithoutIpv6Resolver;
+
+    impl IpResolver for BrokenIpv4WithoutIpv6Resolver {
+        fn local_ip(&self) -> Result<IpAddr, Error> {
+            Err(Error::StrategyError("IPv4 probe failed".to_string()))
+        }
+
+        fn local_ipv6(&self) -> Result<IpAddr, Error> {
+            Err(Error::LocalIpAddressNotFound)
+        }
+    }
+
+    async fn registered_socket_addr(server: &TcpStreamServer) -> SocketAddr {
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending_connection = server.register(stream_options).await;
+        let connection_info = pending_connection
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        tcp_info.address.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn strategy_error_falls_back_to_ipv6_tcp_server() {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, Ipv6OnlyResolver)
+            .await
+            .unwrap();
+
+        let socket_addr = registered_socket_addr(&server).await;
+        assert_eq!(socket_addr.ip(), IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        assert_ne!(socket_addr.port(), 0);
+    }
+
+    #[tokio::test]
+    async fn tcp_server_preserves_ipv4_error_when_ipv6_is_missing() {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let error = TcpStreamServer::new_with_resolver(options, BrokenIpv4WithoutIpv6Resolver)
+            .await
+            .err()
+            .expect("a resolver failure must not fall back to loopback");
+
+        assert!(error.to_string().contains("IPv4 probe failed"));
     }
 
     #[tokio::test]
