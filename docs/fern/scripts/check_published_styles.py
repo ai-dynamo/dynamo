@@ -19,8 +19,8 @@ Production sets `global-theme: nvidia`, which overrides the project `css:` and
 `js:` entries and the custom `footer:` (Fern's docs.yml schema documents the
 override). Components that deliver their CSS through a page-level <style>
 block survive it; anything relying on main.css does not. That failure is
-invisible before merge -- PR previews delete the theme -- so this runs against
-the published site after publish.
+also checked in themed PR previews; this post-publish probe remains the CDN
+backstop for the site people actually read.
 
 Each check asserts a selector appears as a CSS *rule* (followed by `{` or `,`),
 not merely as a class name in markup. A page can be full of `class="foo"` while
@@ -44,6 +44,7 @@ Usage:
 
 Exits 1 with the failing page/selector pairs listed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,6 +64,11 @@ ALLOWED_ORIGINS: frozenset[str] = frozenset({"https://docs.nvidia.com"})
 
 # (page path, selector that must exist as a CSS rule, component that owns it)
 CHECKS: list[tuple[str, str, str]] = [
+    (
+        "",
+        '#fern-sidebar[data-viewport="desktop"][data-state="sticky"]',
+        "SiteStyles",
+    ),
     ("", ".dynamo-story-windowbar", "LandingStyles"),
     ("", ".dynamo-welcome__terminal", "LandingStyles"),
     ("community", ".dynamo-community-page", "LandingStyles"),

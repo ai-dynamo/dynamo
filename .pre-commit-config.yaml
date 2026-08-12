@@ -92,6 +92,12 @@ repos:
       language: system
       files: ^docs/fern/(main\.css|components/CustomFooter\.tsx|scripts/sync_site_css\.py)$
       pass_filenames: false
+    - id: test-inject-site-styles
+      name: Test hosted SiteStyles injection
+      entry: pytest -c docs/fern/scripts/pytest.ini docs/fern/scripts/test_inject_site_styles.py
+      language: system
+      files: ^(docs/fern/(components/SiteStyles\.tsx|scripts/(inject_site_styles|test_inject_site_styles)\.py)|\.github/workflows/fern-docs\.yml)$
+      pass_filenames: false
     - id: check-asset-paths
       name: Check docs asset paths are ones Fern rewrites
       entry: python3 docs/fern/scripts/check_asset_paths.py
