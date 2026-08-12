@@ -411,9 +411,7 @@ where
                 RetryReason::Migration if self.retries_left > 0 => {
                     self.retries_left -= 1;
                 }
-                RetryReason::WorkerDraining
-                    if self.worker_draining_reselections_left > 0 =>
-                {
+                RetryReason::WorkerDraining if self.worker_draining_reselections_left > 0 => {
                     self.worker_draining_reselections_left -= 1;
                 }
                 RetryReason::Migration => return Err(Error::msg("Migration limit exhausted")),

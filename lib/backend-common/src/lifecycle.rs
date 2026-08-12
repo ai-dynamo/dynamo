@@ -334,7 +334,9 @@ impl WorkerLifecycleController {
                     .await
                     .replace(DrainTask { cancel, handle });
                 debug_assert!(
-                    previous.as_ref().is_none_or(|task| task.handle.is_finished()),
+                    previous
+                        .as_ref()
+                        .is_none_or(|task| task.handle.is_finished()),
                     "serving worker must not have active drain work"
                 );
                 Some(started_rx)
@@ -642,10 +644,7 @@ mod tests {
             Self::with_register_permits(unregister_permits, 1)
         }
 
-        fn with_register_permits(
-            unregister_permits: usize,
-            register_permits: usize,
-        ) -> Arc<Self> {
+        fn with_register_permits(unregister_permits: usize, register_permits: usize) -> Arc<Self> {
             Arc::new(Self {
                 unregister_started: Semaphore::new(0),
                 unregister_gate: Semaphore::new(unregister_permits),
@@ -892,12 +891,7 @@ mod tests {
 
         let resume_controller = Arc::clone(&controller);
         let resume_call = tokio::spawn(async move { resume_controller.resume().await });
-        discovery
-            .register_started
-            .acquire()
-            .await
-            .unwrap()
-            .forget();
+        discovery.register_started.acquire().await.unwrap().forget();
 
         let admitted = tracker
             .try_acquire()
