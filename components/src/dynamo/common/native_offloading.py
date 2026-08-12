@@ -5,19 +5,32 @@
 
 from __future__ import annotations
 
-from dynamo.common.token_capacity import get_capacity_tokens, token_capacity_payload
+import math
+from collections.abc import Mapping
 
 NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY = "native_offloading_capacity"
 
 
 def native_offloading_capacity(total_tokens: object) -> dict[str, int] | None:
     """Build runtime metadata from an authoritative backend token capacity."""
-    return token_capacity_payload(total_tokens)
+    if (
+        isinstance(total_tokens, bool)
+        or not isinstance(total_tokens, (int, float))
+        or total_tokens <= 0
+    ):
+        return None
+    if isinstance(total_tokens, float) and not math.isfinite(total_tokens):
+        return None
+    tokens = int(total_tokens)
+    return {"total_tokens": tokens} if tokens > 0 else None
 
 
 def get_native_offloading_capacity_tokens(runtime_data: object) -> int | None:
     """Read native offloading capacity from a worker's runtime metadata."""
-    return get_capacity_tokens(
-        runtime_data,
-        NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
-    )
+    if not isinstance(runtime_data, Mapping):
+        return None
+    capacity = runtime_data.get(NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY)
+    if not isinstance(capacity, Mapping):
+        return None
+    payload = native_offloading_capacity(capacity.get("total_tokens"))
+    return payload["total_tokens"] if payload is not None else None

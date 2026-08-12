@@ -3,10 +3,9 @@
 
 """Per-worker retention budget derived from worker model deployment cards.
 
-Backends may publish an authoritative token capacity through common runtime
-metadata. Legacy cards fall back to ``block_size * total_kv_blocks``. Native
-offloading capacity is added to either device-capacity source. The backend
-remains responsible for admission, spill, restore, and eviction.
+The device KV pool is ``block_size * total_kv_blocks``. Backends may publish
+additional native offloading capacity through common runtime metadata. The
+backend remains responsible for admission, spill, restore, and eviction.
 """
 
 from __future__ import annotations
@@ -16,13 +15,18 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from dynamo.common.kv_cache_capacity import get_kv_cache_capacity_tokens
 from dynamo.common.native_offloading import get_native_offloading_capacity_tokens
-from dynamo.common.token_capacity import positive_int
 from dynamo.llm import FpmEventSubscriber
 from dynamo.runtime import Endpoint
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_int(value: object) -> int | None:
+    """Return a positive integer without coercing worker metadata."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -47,9 +51,9 @@ class WorkerCapacityProvider:
     def __init__(self, endpoint: Endpoint) -> None:
         self._endpoint = endpoint
         self._subscriber: Optional[FpmEventSubscriber] = None
-        # Cache parsed cards keyed on the raw JSON string so a subsequent
-        # snapshot() call avoids re-parsing on the request hot path.
-        self._parsed: dict[str, Optional[WorkerCapacity]] = {}
+        # Keep only the current card for each worker. This avoids repeat JSON
+        # parsing without retaining every historical card body.
+        self._parsed: dict[int, tuple[str, Optional[WorkerCapacity]]] = {}
 
     def start(self) -> None:
         if self._subscriber is not None:
@@ -77,41 +81,55 @@ class WorkerCapacityProvider:
             return {}
 
         out: dict[int, WorkerCapacity] = {}
+        current: dict[int, tuple[str, Optional[WorkerCapacity]]] = {}
         for worker_id_str, card_json in cards.items():
             try:
                 worker_id = int(worker_id_str)
             except (ValueError, TypeError):
                 continue
-            capacity = self._parse_capacity(card_json)
+            cached = self._parsed.get(worker_id)
+            if cached is not None and cached[0] == card_json:
+                capacity = cached[1]
+            else:
+                try:
+                    capacity = self._parse_capacity(card_json)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    logger.debug(
+                        "WorkerCapacityProvider invalid card for worker %s: %s",
+                        worker_id,
+                        exc,
+                    )
+                    capacity = None
+            current[worker_id] = (card_json, capacity)
             if capacity is not None:
                 out[worker_id] = capacity
+        self._parsed = current
         return out
 
     def _parse_capacity(self, card_json: str) -> Optional[WorkerCapacity]:
-        if card_json in self._parsed:
-            return self._parsed[card_json]
-        result: Optional[WorkerCapacity] = None
         try:
             card = json.loads(card_json)
         except (json.JSONDecodeError, TypeError):
-            card = None
-        if isinstance(card, dict):
-            block_size = positive_int(card.get("kv_cache_block_size"))
-            runtime_config = card.get("runtime_config") or {}
-            if block_size is not None and isinstance(runtime_config, dict):
-                runtime_data = runtime_config.get("runtime_data", {})
-                retention_tokens = get_kv_cache_capacity_tokens(runtime_data)
-                if retention_tokens is None:
-                    total_blocks = positive_int(runtime_config.get("total_kv_blocks"))
-                    if total_blocks is not None:
-                        retention_tokens = block_size * total_blocks
-                offloaded_tokens = get_native_offloading_capacity_tokens(runtime_data)
-                if retention_tokens is not None:
-                    if offloaded_tokens is not None:
-                        retention_tokens += offloaded_tokens
-                    result = WorkerCapacity(
-                        retention_tokens=retention_tokens,
-                        block_size=block_size,
-                    )
-        self._parsed[card_json] = result
-        return result
+            return None
+        if not isinstance(card, dict):
+            return None
+
+        block_size = _positive_int(card.get("kv_cache_block_size"))
+        runtime_config = card.get("runtime_config")
+        if block_size is None or not isinstance(runtime_config, dict):
+            return None
+
+        total_blocks = _positive_int(runtime_config.get("total_kv_blocks"))
+        if total_blocks is None:
+            return None
+
+        retention_tokens = block_size * total_blocks
+        offloaded_tokens = get_native_offloading_capacity_tokens(
+            runtime_config.get("runtime_data", {})
+        )
+        if offloaded_tokens is not None:
+            retention_tokens += offloaded_tokens
+        return WorkerCapacity(
+            retention_tokens=retention_tokens,
+            block_size=block_size,
+        )

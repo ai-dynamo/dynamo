@@ -18,7 +18,7 @@ Agentic workloads (SWE-bench, browser-use, anything with a tool loop) make many 
 
 ## The Scheduler
 
-The algorithm groups requests by `program_id` (the header-derived `session_id`) and runs an outer scheduler that moves each program through `(REASONING | ACTING) × (ACTIVE | PAUSED)`. A program enters ACTING at a tool boundary. Under memory pressure the scheduler pauses ACTING programs — logically, with no decode preemption — so the engine is free to evict their KV. When utilization drops it resumes the smallest-token programs first, BFD-packing them back under threshold. The payoff is working-set accounting that counts programs rather than requests, plus pause/resume aimed at tool boundaries rather than arbitrary tokens.
+The algorithm groups requests by `program_id` (the header-derived `session_id`) and runs an outer scheduler that moves each program through `(REASONING | ACTING) × (ACTIVE | PAUSED)`. A program enters ACTING at a tool boundary. Under memory pressure the scheduler pauses ACTING programs — logically, with no decode preemption — so the engine is free to evict their KV. When utilization drops, it processes paused programs by priority group and largest token count, then places each program on the fitting worker with the most headroom. The payoff is working-set accounting that counts programs rather than requests, plus pause/resume aimed at tool boundaries rather than arbitrary tokens.
 
 This is an in-path Dynamo service that owns a `KvRouter` directly and registers as a model handler, so there is no extra proxy hop, and it reads real `prompt_tokens + completion_tokens` off each response rather than estimating token counts from raw bytes.
 
@@ -35,7 +35,7 @@ Resume runs **before** pause on purpose (upstream ThunderAgent ordering): a prog
 ### Tool-Boundary Pause/Resume Semantics
 
 - **Pause** is logical. The scheduler picks the smallest ACTING programs on an over-threshold worker first and pauses them; if no ACTING candidate exists it marks the smallest REASONING program for pause at its next tool boundary. There is no decode preemption — a paused program's in-flight turn is allowed to finish, and the program is held out of admission until a later tick resumes it.
-- **Resume** is greedy and BFD-packed. When a worker has headroom (see the control loop below), the scheduler resumes the smallest-token paused programs first, fitting each back under threshold and accounting for `buffer_per_program`. Resumed requests get a transient priority boost so they re-enter ahead of fresh admissions, and a forced-resume cap (`--resume-timeout-seconds`) guarantees no program is starved indefinitely.
+- **Resume** is greedy and uses worst-fit placement. When a worker has headroom (see the control loop below), the scheduler processes paused programs by priority group and largest token count. It places each program on the fitting worker with the most headroom and accounts for `buffer_per_program`. Resumed requests get a transient priority boost so they re-enter ahead of fresh admissions, and a forced-resume cap (`--resume-timeout-seconds`) guarantees no program is starved indefinitely.
 
 ### Program Lifetime
 
@@ -43,14 +43,14 @@ A program is created on its first turn, keyed by `session_id`. Public session id
 
 ## Utilization-Driven Control Loop
 
-Pause/resume is driven by per-worker utilization — the program working set as a fraction of the worker's retention budget. vLLM publishes its initialized, hybrid-aware `kv_cache_size_tokens` value as `runtime_config.runtime_data.kv_cache_capacity.total_tokens`; ThunderAgent prefers that capacity over multiplying the physical block count and block size. Workers that do not publish the optional token capacity continue to use `kv_cache_block_size × total_kv_blocks`. Native offloading capacity is added to either device-capacity source.
+Pause/resume is driven by per-worker utilization — the program working set as a fraction of the worker's retention budget. ThunderAgent calculates the device retention budget from the physical KV pool: `kv_cache_block_size × total_kv_blocks`. It adds native offloading capacity when the backend publishes it.
 
-Workers serving the same model deployment are expected to publish the same `kv_cache_block_size`. vLLM derives this value from the initialized main-attention cache group, so it is also the granularity used by ThunderAgent's aggregate resume feasibility check.
+The scheduler uses each worker's published `kv_cache_block_size` for that worker's accounting and placement decisions.
 
 ThunderAgent accounts for the worker's allocation granularity on every placement and utilization decision:
 
-- A REASONING program, a new admission, or a resume reserves `ceil((token_total + buffer_per_program) / block_size) × block_size` tokens. The reservation includes the current partial block, which is important when hybrid models use blocks containing thousands of tokens.
-- An ACTING program retains only complete, reusable blocks: `floor(token_total / block_size) × block_size`. The acting weight or idle-time decay is applied after this block calculation.
+- A REASONING program, a new admission, a returning admission, or a resume reserves `ceil((token_total + buffer_per_program) / block_size) × block_size` tokens. The reservation includes the current partial block, which is important when hybrid models use blocks containing thousands of tokens.
+- For an ACTING program, the scheduler applies the acting weight or idle-time decay to `token_total`, adds `buffer_per_program`, and rounds the result up to a full block. This keeps the accounted footprint stable across a tool boundary at the default acting weight.
 
 With SGLang HiCache enabled, Dynamo reads the worker's published GPU KV and host HiCache capacities and uses their sum. The host tier is included so native GPU-to-host spill can happen before this scheduler pauses programs. Mooncake is excluded: it is conditional content-addressed storage, not guaranteed per-program retention. The loop has three bands:
 
@@ -124,7 +124,7 @@ thunderagent.route_selected program=<program_id> worker=<id> source=first_chunk
 
 ```text
 thunderagent.program created program=<program_id> ...
-thunderagent.program paused program=<program_id> reason=<admission_full|pressure> ...
+thunderagent.program paused program=<program_id> reason=<admission_full|returning_full|pressure> ...
 thunderagent.program resumed program=<program_id> worker=<id> ...
 thunderagent.program terminated program=<program_id> ...
 ```
@@ -140,10 +140,10 @@ The scheduler also emits a per-tick INFO summary on each side of the control loo
 **Pause side** — logged when a worker pauses or marks any program in a tick:
 
 ```text
-scheduler.tick worker=<id> paused=<N> marked=<M> util=<X> -> <Y>
+scheduler.tick worker=<id> paused=<N> marked=<M> util=<X> projected=<Y>
 ```
 
-`paused` is the number of ACTING programs paused this tick, `marked` is the number of REASONING programs marked for pause at their next tool boundary, and `util=X -> Y` is the worker utilization before and after the pause cycle.
+`paused` is the number of ACTING programs paused this tick, `marked` is the number of REASONING programs marked for pause at their next tool boundary, and `util=X projected=Y` is the worker utilization before the cycle and after pending releases.
 
 **Resume side** — logged when a worker resumes any program in a tick:
 

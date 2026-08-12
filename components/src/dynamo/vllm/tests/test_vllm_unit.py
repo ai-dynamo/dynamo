@@ -30,7 +30,6 @@ from dynamo.vllm.args import (
     parse_args,
     update_engine_config_with_dynamo,
 )
-from dynamo.vllm.capacity import per_rank_kv_blocks
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
@@ -552,82 +551,6 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
 
     assert default_sampling_params == {"temperature": 0.7}
-
-
-def test_engine_cache_info_includes_authoritative_capacity_and_physical_blocks():
-    from vllm.config import CacheConfig
-
-    vllm_main = _load_vllm_main()
-    cache_config = CacheConfig(block_size=4160)
-    cache_config.num_gpu_blocks = 123
-    cache_config.kv_cache_size_tokens = 456_789
-    engine = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            additional_config={},
-            cache_config=cache_config,
-            scheduler_config=SimpleNamespace(
-                max_num_seqs=32,
-                max_num_batched_tokens=8192,
-            ),
-        )
-    )
-
-    assert vllm_main.get_engine_cache_info(engine) == {
-        "num_gpu_blocks": 123,
-        "block_size": 4160,
-        "kv_event_block_size": 4160,
-        "kv_cache_size_tokens": 456_789,
-        "max_num_seqs": 32,
-        "max_num_batched_tokens": 8192,
-    }
-
-
-class _FakeRuntimeConfig:
-    total_kv_blocks = 123
-
-    def __init__(self):
-        self.runtime_data = {}
-
-    def set_engine_specific(self, key, value):
-        self.runtime_data[key] = json.loads(value)
-
-
-def test_publish_kv_cache_capacity_preserves_physical_block_metadata():
-    vllm_main = _load_vllm_main()
-    runtime_config = _FakeRuntimeConfig()
-
-    assert vllm_main._publish_kv_cache_capacity(runtime_config, 456_789) is None
-    assert runtime_config.runtime_data == {
-        "kv_cache_capacity": {"total_tokens": 456_789}
-    }
-    assert runtime_config.total_kv_blocks == 123
-
-
-def test_publish_kv_cache_capacity_warns_when_unavailable(caplog):
-    vllm_main = _load_vllm_main()
-    runtime_config = _FakeRuntimeConfig()
-
-    with caplog.at_level(logging.WARNING):
-        assert vllm_main._publish_kv_cache_capacity(runtime_config, None) is None
-
-    assert runtime_config.runtime_data == {}
-    assert "legacy block-count fallback" in caplog.text
-
-
-def test_dp_capacity_publication_normalizes_only_aggregate_blocks():
-    vllm_main = _load_vllm_main()
-    runtime_config = _FakeRuntimeConfig()
-    runtime_config.total_kv_blocks = per_rank_kv_blocks(
-        total_kv_blocks=246,
-        data_parallel_size=2,
-    )
-
-    vllm_main._publish_kv_cache_capacity(runtime_config, 456_789)
-
-    assert runtime_config.total_kv_blocks == 123
-    assert runtime_config.runtime_data == {
-        "kv_cache_capacity": {"total_tokens": 456_789}
-    }
 
 
 # --disaggregation-mode tests
