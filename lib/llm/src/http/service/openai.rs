@@ -144,9 +144,17 @@ impl ErrorMessage {
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
+    // The configured overload code is checked before `canonical_reason()`, not
+    // after. `DYN_HTTP_OVERLOAD_STATUS_CODE` accepts any status, and an IANA
+    // registered one has a canonical reason that would otherwise win: set it to
+    // 507 and a load-shed response reported itself as "Insufficient Storage".
+    // 529 never showed that, because IANA does not register it and
+    // `canonical_reason()` returns `None`.
+    if code == overload_status_code() {
+        return "Overloaded".to_string();
+    }
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
-        None if code.as_u16() == 529 => "Overloaded".to_string(),
         // 499 is not IANA-registered (nginx convention for client-closed-request),
         // so canonical_reason() returns None. Use the de facto standard name.
         None if code.as_u16() == 499 => "Client Closed Request".to_string(),
@@ -156,6 +164,13 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
 
 /// Classify error for metrics based on status code and message
 fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
+    // Same reason as `map_error_code_to_error_type`: the configured overload
+    // code goes first. A registered status such as 507 matches an arm below and
+    // would otherwise be counted as `Internal`, so a load shed would look like a
+    // server fault on the dashboards.
+    if code == overload_status_code() {
+        return ErrorType::Overload;
+    }
     match code {
         StatusCode::BAD_REQUEST => {
             // 400
@@ -2306,11 +2321,22 @@ where
 /// into the wire `ErrorResponse`. Shared between the non-streaming preflight
 /// (`check_for_backend_error`) and the streaming preflight so both paths speak
 /// the same sanitization + status contract to the client.
+/// The streaming counterpart of [`ErrorMessage::from_http_error`], and it must
+/// triage identically. Both once called [`SanitizedError::for_backend_status`],
+/// which preserves every 5xx. Only the unary path moved to
+/// [`BackendStatusAction`], so the same backend failure answered 501 when it
+/// arrived mid-stream and 500 when it arrived as an `HttpError`, and a client
+/// could not tell which it would get.
 fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorResponse {
-    match SanitizedError::for_backend_status(status_code) {
-        Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
+    match BackendStatusAction::triage(status_code) {
+        BackendStatusAction::Sanitize(variant) => {
+            ErrorMessage::sanitized_with_details(variant, error_msg)
+        }
+        BackendStatusAction::CoerceToInternal(asserted) => {
+            ErrorMessage::coerced_backend_error(asserted, error_msg)
+        }
         // 4xx (non-499): protocol contract — forward backend message as-is.
-        None => (
+        BackendStatusAction::ForwardClientError => (
             status_code,
             Json(ErrorMessage {
                 message: error_msg,
@@ -6192,6 +6218,105 @@ mod tests {
             assert!(!error_response.1.message.contains("engine pool"));
             assert!(!error_response.1.message.contains("/srv/engine.py"));
         }
+    }
+
+    /// The streaming path must triage a backend status exactly as the unary
+    /// path does. Both once called `SanitizedError::for_backend_status`, which
+    /// preserves every 5xx, and only the unary path moved to
+    /// `BackendStatusAction`. A backend 501 therefore answered 501 mid-stream
+    /// and 500 as an `HttpError`, so the status a client saw depended on which
+    /// door the same failure came through.
+    ///
+    /// The status codes here mirror `test_from_http_error_*` above, which is the
+    /// point: the two lists must not drift apart again.
+    #[tokio::test]
+    async fn test_check_for_backend_error_matches_unary_triage() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        for (code, expected) in [
+            (399u16, 500u16),
+            (500, 500),
+            (501, 500),
+            (507, 500),
+            (503, 503),
+        ] {
+            let error_json =
+                format!(r#"{{"message":"engine failed at /srv/engine.py:88","code":{code}}}"#);
+            let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: Some(vec![error_json]),
+                error: None,
+            };
+
+            let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+            let Err(response) = result else {
+                panic!("backend status {code} should produce an error response");
+            };
+            assert_eq!(response.0.as_u16(), expected, "status for backend {code}");
+            assert_eq!(response.1.code, expected, "body code for backend {code}");
+            // Sanitisation must survive the retriage: a coerced 5xx still hides
+            // the backend's own message, which can carry filesystem paths.
+            assert_eq!(response.1.message, "Internal server error");
+            assert!(!response.1.message.contains("/srv/engine.py"));
+        }
+    }
+
+    /// The configured overload status keeps its meaning on the streaming path,
+    /// and reports as an overload rather than by its registered reason.
+    #[tokio::test]
+    async fn test_check_for_backend_error_preserves_overload_status() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        let overload = overload_status_code();
+        let error_json = format!(
+            r#"{{"message":"shedding load at /srv/pool.py:12","code":{}}}"#,
+            overload.as_u16()
+        );
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![error_json]),
+            error: None,
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+        let Err(response) = result else {
+            panic!("an overload status should produce an error response");
+        };
+        assert_eq!(response.0, overload);
+        assert_eq!(response.1.code, overload.as_u16());
+        assert_eq!(response.1.error_type, "Overloaded");
+        assert_eq!(
+            classify_error_for_metrics(overload, &response.1.message),
+            ErrorType::Overload
+        );
+        assert!(!response.1.message.contains("/srv/pool.py"));
+    }
+
+    /// `map_error_code_to_error_type` and `classify_error_for_metrics` must read
+    /// the configured overload code rather than the literal 529. Both once
+    /// special-cased 529 only, and both consulted `canonical_reason()` first, so
+    /// a registered status such as 507 never reached the overload arm: the
+    /// response said "Insufficient Storage" and the metric said `Internal`. 529
+    /// hid that, because IANA does not register it.
+    ///
+    /// This asserts the wiring, not a non-default value. `overload_status_code`
+    /// caches in a `LazyLock`, so a test cannot change it after first use, and
+    /// only a process started with `DYN_HTTP_OVERLOAD_STATUS_CODE` set exercises
+    /// the non-default path.
+    #[test]
+    fn test_overload_classification_follows_configured_code() {
+        let overload = overload_status_code();
+        assert_eq!(map_error_code_to_error_type(overload), "Overloaded");
+        assert_eq!(
+            classify_error_for_metrics(overload, "Internal server error"),
+            ErrorType::Overload
+        );
     }
 
     #[tokio::test]
