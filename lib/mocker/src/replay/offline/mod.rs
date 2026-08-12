@@ -18,6 +18,7 @@ mod interactive;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod scaling;
+#[cfg(test)]
 pub(crate) mod single;
 pub(crate) mod state;
 mod topology;

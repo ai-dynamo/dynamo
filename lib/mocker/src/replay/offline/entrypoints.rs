@@ -17,6 +17,7 @@ use super::extensions::kv_events::{self, HandoffDisaggRuntime};
 use super::extensions::kv_router::{AggRuntime, DisaggRuntime, ReplayKvRouterConfig};
 use super::normalize_trace_requests;
 use super::scaling::ReplayScalingPolicy;
+#[cfg(test)]
 use super::single::{SingleReplayMode, SingleRuntime};
 use crate::common::handoff::NormalizedHandoffConformance;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
@@ -39,12 +40,6 @@ fn finish_with_replay_wall_time(
     let mut collector = collector;
     collector.set_sla_thresholds(sla);
     collector.finish().with_wall_time_ms(wall_time_ms)
-}
-
-fn use_single_runtime(num_workers: usize, dp_size: u32, router_mode: ReplayRouterMode) -> bool {
-    // dp_size>1 needs one scheduler/KV pool per rank. They still share one
-    // discrete-event runtime, but require the rank-aware AggRuntime path.
-    num_workers == 1 && dp_size <= 1 && router_mode != ReplayRouterMode::KvRouter
 }
 
 fn trace_workload_driver(
@@ -218,30 +213,19 @@ pub(crate) fn simulate_trace_with_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
-    if scaling_policy.is_none() && use_single_runtime(num_workers, args.dp_size, router_mode) {
-        simulate_trace_single(
-            args,
-            requests,
-            arrival_speedup_ratio,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-        )
-    } else {
-        simulate_trace_multi_with_scaling_policy(
-            args,
-            router_config,
-            prefill_load_estimator,
-            requests,
-            num_workers,
-            arrival_speedup_ratio,
-            router_mode,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-        )
-    }
+    simulate_trace_multi_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -287,30 +271,19 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
-    if scaling_policy.is_none() && use_single_runtime(num_workers, args.dp_size, router_mode) {
-        simulate_concurrency_single(
-            args,
-            requests,
-            max_in_flight,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-        )
-    } else {
-        simulate_concurrency_multi_with_scaling_policy(
-            args,
-            router_config,
-            prefill_load_estimator,
-            requests,
-            max_in_flight,
-            num_workers,
-            router_mode,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-        )
-    }
+    simulate_concurrency_multi_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -412,20 +385,16 @@ pub(crate) fn simulate_agentic_trace_workload(
     record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers, args.dp_size, router_mode) {
-        simulate_agentic_trace_workload_single(args, trace, record_per_request, sla)
-    } else {
-        simulate_agentic_trace_workload_multi(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            num_workers,
-            router_mode,
-            record_per_request,
-            sla,
-        )
-    }
+    simulate_agentic_trace_workload_multi(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        record_per_request,
+        sla,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -471,32 +440,20 @@ fn simulate_trace_workload_with_delta_mode(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
-    if scaling_policy.is_none() && use_single_runtime(num_workers, args.dp_size, router_mode) {
-        simulate_trace_workload_single(
-            args,
-            trace,
-            accumulate_session_deltas,
-            emit_session_metadata,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-        )
-    } else {
-        simulate_trace_workload_multi_with_scaling_policy(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            num_workers,
-            router_mode,
-            accumulate_session_deltas,
-            emit_session_metadata,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-        )
-    }
+    simulate_trace_workload_multi_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        accumulate_session_deltas,
+        emit_session_metadata,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -603,32 +560,20 @@ fn simulate_concurrency_workload_with_delta_mode(
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
-    if scaling_policy.is_none() && use_single_runtime(num_workers, args.dp_size, router_mode) {
-        simulate_concurrency_workload_single(
-            args,
-            trace,
-            max_in_flight,
-            accumulate_session_deltas,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-        )
-    } else {
-        simulate_concurrency_workload_multi_with_scaling_policy(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            max_in_flight,
-            num_workers,
-            router_mode,
-            accumulate_session_deltas,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-        )
-    }
+    simulate_concurrency_workload_multi_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        accumulate_session_deltas,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -965,6 +910,8 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+/// Legacy single-worker reference used only by focused kernel-parity tests.
+#[cfg(test)]
 pub(crate) fn simulate_trace_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
@@ -983,6 +930,8 @@ pub(crate) fn simulate_trace_single(
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+/// Legacy single-worker reference used only by focused kernel-parity tests.
+#[cfg(test)]
 pub(crate) fn simulate_concurrency_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
@@ -1005,6 +954,8 @@ pub(crate) fn simulate_concurrency_single(
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+/// Legacy single-worker reference used only by focused kernel-parity tests.
+#[cfg(test)]
 pub(crate) fn simulate_trace_workload_single(
     args: MockEngineArgs,
     trace: Trace,
@@ -1032,6 +983,8 @@ pub(crate) fn simulate_trace_workload_single(
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+/// Legacy single-worker reference used only by focused kernel-parity tests.
+#[cfg(test)]
 pub(crate) fn simulate_agentic_trace_workload_single(
     args: MockEngineArgs,
     trace: AgenticTrace,
@@ -1048,6 +1001,8 @@ pub(crate) fn simulate_agentic_trace_workload_single(
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+/// Legacy single-worker reference used only by focused kernel-parity tests.
+#[cfg(test)]
 pub(crate) fn simulate_concurrency_workload_single(
     args: MockEngineArgs,
     trace: Trace,
@@ -1726,9 +1681,14 @@ pub(super) fn run_concurrency_workload_collect(
 
 #[cfg(test)]
 mod tests {
+    use super::super::scaling::{
+        ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+    };
     #[cfg(feature = "kvbm-offload")]
     use super::simulate_trace_disagg;
-    use super::{generate_trace_worker_artifacts, simulate_trace, use_single_runtime};
+    use super::{
+        generate_trace_worker_artifacts, simulate_concurrency_with_scaling_policy, simulate_trace,
+    };
     use crate::common::perf_model::{AicCallback, PerfModel};
     #[cfg(feature = "kvbm-offload")]
     use crate::common::protocols::WorkerType;
@@ -1742,14 +1702,19 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
-    #[test]
-    fn single_runtime_selection_excludes_kv_router() {
-        assert!(use_single_runtime(1, 1, ReplayRouterMode::RoundRobin));
-        assert!(!use_single_runtime(1, 1, ReplayRouterMode::KvRouter));
-        assert!(!use_single_runtime(2, 1, ReplayRouterMode::RoundRobin));
-        assert!(!use_single_runtime(2, 1, ReplayRouterMode::KvRouter));
-        // dp_size>1 forces the multi (per-rank) path even with a single worker.
-        assert!(!use_single_runtime(1, 8, ReplayRouterMode::RoundRobin));
+    struct DisabledScalingPolicy;
+
+    impl ReplayScalingPolicy for DisabledScalingPolicy {
+        fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+            Ok(f64::INFINITY)
+        }
+
+        fn on_tick(
+            &mut self,
+            _snapshot: ReplayScalingSnapshot,
+        ) -> anyhow::Result<ReplayScalingDecision> {
+            panic!("disabled scaling policy must not receive a tick")
+        }
     }
 
     struct LengthLatency;
@@ -1798,6 +1763,59 @@ mod tests {
             arrival_timestamp_ms: Some(0.0),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn one_shot_and_disabled_policy_share_reconciled_topology_accounting() {
+        let args = rank_timing_args(1);
+        let requests = vec![timed_request(20, 4), timed_request(21, 8)];
+        let normal = simulate_concurrency_with_scaling_policy(
+            args.clone(),
+            None,
+            None,
+            requests.clone(),
+            2,
+            1,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+            None,
+        )
+        .unwrap();
+        let with_disabled_policy = simulate_concurrency_with_scaling_policy(
+            args,
+            None,
+            None,
+            requests,
+            2,
+            1,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+            Some(Box::new(DisabledScalingPolicy)),
+        )
+        .unwrap();
+
+        let normal_accounting = normal
+            .topology_accounting
+            .as_ref()
+            .expect("one-shot replay must report its authored topology");
+        let policy_accounting = with_disabled_policy
+            .topology_accounting
+            .as_ref()
+            .expect("policy replay must report its authored topology");
+        assert!(normal_accounting.reconciliation.all_reconciled());
+        assert!(policy_accounting.reconciliation.all_reconciled());
+        assert_eq!(normal_accounting, policy_accounting);
+
+        // Wall time is host timing rather than simulator state. Once removed,
+        // the complete serialized summaries must conform byte-for-byte.
+        let normal_summary = serde_json::to_value(normal.with_wall_time_ms(0.0)).unwrap();
+        let policy_summary =
+            serde_json::to_value(with_disabled_policy.with_wall_time_ms(0.0)).unwrap();
+        assert_eq!(normal_summary, policy_summary);
     }
 
     #[test]
