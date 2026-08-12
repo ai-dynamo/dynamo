@@ -5,6 +5,7 @@
 
 from dynamo.experimental.workflow.builder import StageHandle, Workflow
 from dynamo.experimental.workflow.compiler import DeploymentSpec, compile_workflow
+from dynamo.experimental.workflow.endpoint import WorkflowEndpointHandler
 from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
 from dynamo.experimental.workflow.orchestrator import WorkflowOrchestrator
 from dynamo.experimental.workflow.plan import (
@@ -34,6 +35,7 @@ __all__ = [
     "ValueRef",
     "Workflow",
     "WorkflowIR",
+    "WorkflowEndpointHandler",
     "WorkflowExecutionError",
     "WorkflowOrchestrator",
     "WorkflowValidationError",
