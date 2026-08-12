@@ -3,8 +3,8 @@
 
 mod model;
 pub(crate) mod readiness;
+pub(crate) use model::GenerateWorkerRuntime;
 pub use model::Model;
-pub(crate) use model::{GenerateTraceConfig, GenerateWorkerRuntime};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{

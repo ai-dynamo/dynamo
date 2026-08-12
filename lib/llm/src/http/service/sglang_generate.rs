@@ -299,7 +299,7 @@ async fn handler(
     };
     let crate::discovery::GenerateWorkerRuntime {
         engine,
-        trace_config,
+        trace_block_size,
     } = generate_context;
 
     let request_context = resolve_request_context(&headers, request.rid.as_deref());
@@ -319,7 +319,7 @@ async fn handler(
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
-    let (request_trace, context) = request_trace.prepare(context, trace_config);
+    let (request_trace, context) = request_trace.prepare(context, trace_block_size);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),

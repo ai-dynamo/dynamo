@@ -68,21 +68,6 @@ impl SharedFinishReasonMetadata {
             .record_choice_finish_reason(choice_index, finish_reason);
     }
 
-    pub(super) fn record_tool_call(
-        &self,
-        choice_index: u32,
-        tool_call_index: u32,
-        id: Option<&str>,
-        name: Option<&str>,
-    ) {
-        self.lock()
-            .record_tool_call_chunk(choice_index, tool_call_index, id, name);
-    }
-
-    pub(super) fn infer_tool_call_finish_reason(&self, choice_index: u32) {
-        self.lock().infer_tool_call_finish_reason(choice_index);
-    }
-
     #[cfg(feature = "request-trace-bench")]
     #[doc(hidden)]
     pub fn record_tool_call_chunk_for_bench(
@@ -133,14 +118,6 @@ impl FinishReasonMetadataState {
         self.metadata.finish_reason = Some(finish_reason);
         self.metadata
             .record_choice_finish_reason(choice_index, finish_reason);
-    }
-
-    fn infer_tool_call_finish_reason(&mut self, choice_index: u32) {
-        use dynamo_protocols::types::FinishReason;
-
-        if matches!(self.metadata.finish_reason, None | Some(FinishReason::Stop)) {
-            self.record_choice_finish_reason(choice_index, FinishReason::ToolCalls);
-        }
     }
 
     fn record_tool_call_chunk(
@@ -288,37 +265,22 @@ pub(crate) fn build_agent_context_trace_state(
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
 ) -> Option<AgentContextTraceState> {
-    let agent_context = common_request.agent_context.as_ref()?;
-    Some(build_agent_context_trace_state_from_agent(
-        common_request,
-        tracker,
-        context,
-        agent_context,
-    ))
-}
-
-pub(crate) fn build_agent_context_trace_state_from_agent(
-    common_request: &PreprocessedRequest,
-    tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
-    agent_context: &AgentContext,
-) -> AgentContextTraceState {
+    let agent_context = common_request.agent_context.clone()?;
     let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
         .and_then(|c| c.x_request_id)
         .or_else(|| {
             context
-                .get_optional::<String>(super::X_REQUEST_ID_CONTEXT_KEY)
+                .get::<String>(super::X_REQUEST_ID_CONTEXT_KEY)
                 .ok()
-                .flatten()
-                .map(|value| value.as_ref().clone())
+                .map(|v| v.as_ref().clone())
         });
-    AgentContextTraceState {
-        agent_context: agent_context.clone(),
+    Some(AgentContextTraceState {
+        agent_context,
         request_model: common_request.model.clone(),
         request_tracker: tracker.clone(),
         x_request_id,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
-    }
+    })
 }
 
 pub(crate) fn record_backend_finish_reason_metadata(
