@@ -493,7 +493,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
@@ -616,7 +618,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-NeXT (anyres multi-crop processor).
