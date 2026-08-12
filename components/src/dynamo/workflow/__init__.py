@@ -7,6 +7,12 @@ from dynamo.workflow.builder import StageHandle, Workflow
 from dynamo.workflow.compiler import DeploymentSpec, compile_workflow
 from dynamo.workflow.frontend import WorkflowTokenEngine, load_workflow_orchestrator
 from dynamo.workflow.ir import StageIR, WorkflowIR
+from dynamo.workflow.nixl import (
+    NixlLeaseRegistry,
+    NixlTensorCarrier,
+    NixlTensorFanout,
+    NixlTensorRef,
+)
 from dynamo.workflow.orchestrator import WorkflowOrchestrator
 from dynamo.workflow.plan import (
     ExecutionPlan,
@@ -15,8 +21,20 @@ from dynamo.workflow.plan import (
     RemoteBinding,
 )
 from dynamo.workflow.remote import RemoteStageClient, RemoteStageServer
-from dynamo.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
-from dynamo.workflow.types import StageContract, ValueRef, WorkflowValidationError
+from dynamo.workflow.runtime import (
+    StageContext,
+    StageRunner,
+    TensorCarrier,
+    WorkflowExecutionError,
+)
+from dynamo.workflow.types import (
+    PortSpec,
+    StageContract,
+    StreamSpec,
+    ValueRef,
+    ValueSpec,
+    WorkflowValidationError,
+)
 
 __all__ = [
     "DeploymentSpec",
@@ -25,6 +43,7 @@ __all__ = [
     "StageIR",
     "StageContext",
     "StageRunner",
+    "TensorCarrier",
     "ValueRef",
     "Workflow",
     "WorkflowIR",
@@ -35,6 +54,10 @@ __all__ = [
     "ExecutionPlan",
     "GenerateEndpointBinding",
     "InlineBinding",
+    "NixlLeaseRegistry",
+    "NixlTensorCarrier",
+    "NixlTensorFanout",
+    "NixlTensorRef",
     "RemoteBinding",
     "RemoteStageClient",
     "RemoteStageServer",

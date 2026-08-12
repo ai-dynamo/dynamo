@@ -13,7 +13,13 @@ from typing import Any
 
 from dynamo.workflow.dispatcher import StageDispatcher
 from dynamo.workflow.plan import ExecutionPlan
-from dynamo.workflow.runtime import StageRunner, WorkflowAttempt, WorkflowExecutionError
+from dynamo.workflow.runtime import (
+    StageRunner,
+    TensorCarrier,
+    WorkflowAttempt,
+    WorkflowExecutionError,
+    _validate_value,
+)
 from dynamo.workflow.scheduler import GraphScheduler
 
 
@@ -31,11 +37,15 @@ class WorkflowOrchestrator:
         *,
         runtime: Any = None,
         inline_runners: Mapping[str, StageRunner] = MappingProxyType({}),
+        tensor_carrier: TensorCarrier | None = None,
     ) -> "WorkflowOrchestrator":
         """Bind initialized resources to an immutable execution plan."""
 
         dispatcher = await StageDispatcher.bind(
-            plan, runtime=runtime, inline_runners=inline_runners
+            plan,
+            runtime=runtime,
+            inline_runners=inline_runners,
+            tensor_carrier=tensor_carrier,
         )
         return cls(plan, dispatcher)
 
