@@ -1478,6 +1478,7 @@ jobs:
           # from KUBE_CONTEXT.
           vcluster_name: ci-${{ github.run_id }}-gb200
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
