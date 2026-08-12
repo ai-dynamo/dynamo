@@ -6107,6 +6107,30 @@ mod tests {
     }
 
     #[test]
+    fn test_gemma4_default_thinking_mode_controls_reasoning_parser() {
+        for (mode, expected_disabled) in [("enabled", false), ("disabled", true)] {
+            let runtime_config = runtime_config_with_default_thinking_mode(mode);
+            let mut request = chat_request_with_args(None);
+
+            OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+                &runtime_config,
+                &mut request,
+            );
+
+            for parser in ["gemma4", "gemma-4"] {
+                assert_eq!(
+                    OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                        Some(parser),
+                        request.chat_template_args.as_ref(),
+                    ),
+                    expected_disabled,
+                    "parser={parser}, default_thinking_mode={mode}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_default_thinking_mode_does_not_override_request() {
         let runtime_config = runtime_config_with_default_thinking_mode("disabled");
         let mut request = chat_request_with_args(Some(HashMap::from([(
