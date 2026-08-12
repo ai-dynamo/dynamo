@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Qwen3-32B: Aggregated Round Robin vs Disaggregated KV Routing Comparison
 
 This recipe demonstrates the performance difference between **aggregated (round-robin)** and **disaggregated (KV-aware)** routing using a real-world conversation trace dataset from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake).

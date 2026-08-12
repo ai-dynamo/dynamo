@@ -420,9 +420,10 @@ def emit_github(out: list, errors: list, scanned: int) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Dynamo docs deterministic linter")
     ap.add_argument("--repo", default=REPO_ROOT)
-    ap.add_argument(
-        "--scan", default="docs,examples,recipes", help="comma-separated trees to scan"
-    )
+    # `docs` only, matching the `Docs Lint` job. Widening this to examples and
+    # recipes surfaces pre-existing violations there that no job gates, so a
+    # local run would fail on work the author never touched.
+    ap.add_argument("--scan", default="docs", help="comma-separated trees to scan")
     ap.add_argument("--json", action="store_true")
     ap.add_argument(
         "--github",

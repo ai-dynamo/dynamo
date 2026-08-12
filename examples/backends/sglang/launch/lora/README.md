@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # LoRA with SGLang Backend
 
 For the full LoRA integration guide (setup, usage, API reference, troubleshooting), see [the shared LoRA guide](../../../../common/lora.md).

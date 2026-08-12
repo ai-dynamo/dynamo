@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Llama-3.3-70B Recipes
 
 Production-ready deployments for **Llama-3.3-70B-Instruct** using vLLM with FP8 dynamic quantization.

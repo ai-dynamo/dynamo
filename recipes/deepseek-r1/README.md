@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # DeepSeek-R1 Recipes
 
 Production-ready deployments for **DeepSeek-R1** (671B MoE) across multiple backends and hardware configurations.

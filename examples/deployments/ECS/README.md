@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Dynamo on Amazon ECS
 
 Task definition JSON files for the ECS deployment guide.

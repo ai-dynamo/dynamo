@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Qwen3.6-35B-A3B-FP8 — 3-way `vllm serve` vs Dynamo benchmark
 
 K8s recipe for benchmarking

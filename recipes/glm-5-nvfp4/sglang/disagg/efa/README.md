@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # GLM-5 NVFP4 — Disaggregated Prefill/Decode on GB200 over AWS EFA
 
 Serves [nvidia/GLM-5-NVFP4](https://huggingface.co/nvidia/GLM-5-NVFP4) using SGLang with disaggregated prefill/decode, EAGLE speculative decoding, and KV cache transfer over AWS Elastic Fabric Adapter (EFA) RDMA via NIXL's LIBFABRIC backend.

@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # DeepSeek R1 SGLang Recipe
 
 This recipe is for running DeepSeek R1 with SGLang in disaggregated mode. It is based on the WideEP recipe from the SGLang team.

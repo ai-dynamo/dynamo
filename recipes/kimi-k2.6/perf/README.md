@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Kimi-K2.6 Benchmark Recipe
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job — [perf.yaml](perf.yaml) — covers every Kimi-K2.6 DGD variant (B200/H200 × chat/agent traces). The benchmark is identical across variants; only `ENDPOINT` and `TRACE_FILE` need to change.

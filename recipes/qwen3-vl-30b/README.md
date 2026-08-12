@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Qwen3-VL-30B-A3B-Instruct-FP8: Aggregated Embedding Cache On vs Off Comparison
 
 This recipe demonstrates the performance difference when embedding cache is enabled for multi-modal payloads. It includes guidance on creating an artificial dataset with user-defined image re-use, and production-ready deployments for `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`.

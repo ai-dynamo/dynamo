@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # S3-compatible Storage Backend LoRA Integration Guide
 
 This guide explains how to set up and use LoRA (Low-Rank Adaptation) adapters with Dynamo using S3-compatible storage backend (e.g. MinIO, AWS S3, GCS, etc.).

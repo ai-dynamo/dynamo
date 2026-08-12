@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Kimi-K2.5 NVFP4 Recipes: Agentic Coding Workload
 
 Deployment recipes for **Kimi-K2.5-NVFP4** on an agentic coding workload.

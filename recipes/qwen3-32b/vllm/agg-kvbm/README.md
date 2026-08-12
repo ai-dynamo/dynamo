@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Qwen3-32B: Aggregated + KVBM (single GPU)
 
 Single-GPU aggregated deployment of `Qwen/Qwen3-32B` with the KV Block Manager

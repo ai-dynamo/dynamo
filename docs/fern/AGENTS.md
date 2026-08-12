@@ -40,8 +40,9 @@ The linter separates the rules that fail the job from the ones it only reports:
 Two rules are advisory for a reason: the generated Kubernetes API reference carries a body `# H1`
 that comes from the `crd-ref-docs` template rather than the page, and a `TODO` sometimes marks a
 page whose fate is an open decision. Advisory does not mean optional — fix them in the pages you
-touch. The CI job scans `docs/` only; run the linter with its default `--scan docs,examples,recipes`
-before changing an example or recipe README.
+touch. The linter scans `docs/` by default, matching the CI job. Pass `--scan docs,examples,recipes`
+to cover example and recipe READMEs too, but expect pre-existing findings there: no job gates those
+trees, so they carry violations this PR does not clear.
 
 ## This directory
 
@@ -99,8 +100,8 @@ immediately before merge rather than earlier in review.
 ## Validate
 
 ```bash
-python3 docs/fern/scripts/docs_lint.py --scan docs              # the `Docs Lint` pull request job
-python3 docs/fern/scripts/docs_lint.py                          # same rules over docs + examples + recipes
+python3 docs/fern/scripts/docs_lint.py                          # the `Docs Lint` pull request job
+python3 docs/fern/scripts/docs_lint.py --scan docs,examples,recipes  # ungated trees; expect existing findings
 fern check                                            # nav + frontmatter structure
 fern docs broken-links                                # link resolution
 python3 docs/fern/pages/recipes/_catalog/validate.py  # recipe or benchmark changes only
