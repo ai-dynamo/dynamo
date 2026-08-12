@@ -98,7 +98,6 @@ targets:
     framework: sglang
   topology: aggregated
   techniques:
-  - kv-aware-routing
   - mxfp4
   - fp8-kv-cache
   - dspark-speculative-decoding
