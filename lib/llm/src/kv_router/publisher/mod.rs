@@ -28,6 +28,7 @@ mod batching;
 mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
+mod normalizer;
 mod sinks;
 #[cfg(test)]
 mod tests;
