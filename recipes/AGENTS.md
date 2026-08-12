@@ -18,14 +18,25 @@ SPDX-License-Identifier: Apache-2.0
   A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and a
   `components` list. The matrix, recipe-local base and Components, and shared
-  Components are source. Kustomize is both the authoring model and recipe
+  Components are source. A dimension value may also select `templates` and set
+  `values`. Shared template sources live in `recipes/kustomize/templates/`; a
+  template directory has `kustomization.yaml.j2` and optional `values.yaml`.
+  `unfold` evaluates the template with strict sandboxed Jinja, the variant values,
+  and the fully rendered base indexed as `base.<lowercase-kind>[metadata.name]`.
+  Use `base.<lowercase-kind> | only` only when exactly one such resource is
+  required. Templates render one Component. `unfold` materializes the complete
+  template directory under the generated Component, so its local Kustomize paths
+  remain valid; additional `*.j2` files render without their suffix. Select
+  shared Components through the matrix's `components` list. Kustomize is both
+  the authoring model and recipe
   documentation: the base and Components explain settings, public overlay
   `kustomization.yaml` files document a concrete variant, and `deploy-*.yaml`
   files are the fully materialized result. Users may apply a checked-in manifest
   with `kubectl apply -f`, a checked-in public overlay with `kubectl apply -k`,
   or an overlay they compose themselves. Contributors run all matrix commands
   from the repository root. `scripts/kustomize-matrix.py unfold <matrix.yaml>`
-  writes every generated public overlay for that matrix; follow it with
+  writes every generated public overlay and selected generated Component for that
+  matrix; follow it with
   `scripts/kustomize-matrix.py render <matrix.yaml>` to regenerate every
   checked-in manifest for that matrix and the central schema. To inspect only
   one concrete overlay, run `kustomize build <deployment>/kustomize/overlays/<name>`.
