@@ -15,6 +15,7 @@ use crate::kv_router::metrics::kv_publisher_metrics;
 use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
 use super::dedup::EventDedupFilter;
+use super::normalizer::ChunkNormalizer;
 use super::sinks::{RouterEventBatchSink, emit};
 
 pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
@@ -28,6 +29,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
 ) {
     let mut batching_state = BatchingState::new();
     let mut dedup = EventDedupFilter::new();
+    let mut normalizer = ChunkNormalizer::default();
     let mut last_raw_input_id: Option<u64> = None;
 
     loop {
@@ -90,7 +92,15 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                         && storage_tier != batching_state.last_storage_tier;
 
                     match event.data {
-                        KvCacheEventData::Removed(data) => {
+                        KvCacheEventData::Removed(mut data) => {
+                            // Expand chunk-tail keys to block-wise before batching
+                            // erases chunk boundaries. Union-dedup keeps fat removals
+                            // (constituents already listed) unchanged.
+                            data.block_hashes = normalizer.expand_remove(
+                                event.dp_rank,
+                                storage_tier,
+                                data.block_hashes,
+                            );
                             if batching_state.pending_stored.is_some()
                                 || dp_rank_changed
                                 || storage_tier_changed
@@ -105,25 +115,31 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                             }
                         }
                         KvCacheEventData::Stored(data) => {
-                            let should_flush = dp_rank_changed
-                                || storage_tier_changed
-                                || batching_state.pending_removed.is_some()
-                                || batching_state.pending_stored.as_ref().is_some_and(|p| {
-                                    data.parent_hash != p.blocks.last().map(|b| b.block_hash)
-                                });
-                            if should_flush {
-                                batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
-                            }
-                            match &mut batching_state.pending_stored {
-                                Some(pending) => pending.blocks.extend(data.blocks),
-                                None => {
-                                    batching_state.pending_stored = Some(data);
+                            // Record the chunk's tail->members mapping for later
+                            // removal expansion; suppress a duplicate/retry store so
+                            // the dedup filter counts each chunk exactly once.
+                            if normalizer.record_store(event.dp_rank, storage_tier, &data) {
+                                let should_flush = dp_rank_changed
+                                    || storage_tier_changed
+                                    || batching_state.pending_removed.is_some()
+                                    || batching_state.pending_stored.as_ref().is_some_and(|p| {
+                                        data.parent_hash != p.blocks.last().map(|b| b.block_hash)
+                                    });
+                                if should_flush {
+                                    batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                                }
+                                match &mut batching_state.pending_stored {
+                                    Some(pending) => pending.blocks.extend(data.blocks),
+                                    None => {
+                                        batching_state.pending_stored = Some(data);
+                                    }
                                 }
                             }
                         }
                         KvCacheEventData::Cleared => {
                             batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                             dedup.clear_rank(event.dp_rank);
+                            normalizer.clear_rank(event.dp_rank);
                             emit(
                                 &local_indexer,
                                 worker_id,

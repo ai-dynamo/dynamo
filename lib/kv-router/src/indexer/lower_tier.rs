@@ -288,14 +288,21 @@ impl LowerTierIndexer {
         worker: WorkerWithDpRank,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<(), KvCacheEventError> {
+        // Lower-tier removals are idempotent no-ops for state we do not hold.
+        // With the publisher-side normalizer + dedup filter, the indexer can
+        // legitimately receive a removal for a block (or worker) it never indexed
+        // — an untracked-hash removal the dedup filter passes through, a race
+        // with a Cleared reset, or a store that only indexed a prefix under an
+        // edge conflict. Skipping (rather than aborting the batch) avoids leaving
+        // a partial removal behind.
         let remove_worker_entry = {
             let Some(worker_map) = worker_blocks.get_mut(&worker) else {
-                return Err(KvCacheEventError::BlockNotFound);
+                return Ok(());
             };
 
             for block_hash in block_hashes {
                 let Some(key) = worker_map.remove(block_hash) else {
-                    return Err(KvCacheEventError::BlockNotFound);
+                    continue;
                 };
 
                 self.remove_worker_from_edge(key, worker);
