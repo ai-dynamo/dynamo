@@ -1042,6 +1042,7 @@ pub(crate) struct KvEventPublisher {
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
     image_token_id: Option<u32>,
+    event_loop: PyObject,
 }
 
 #[derive(Deserialize)]
@@ -1077,6 +1078,7 @@ impl KvEventPublisher {
     pub(crate) fn from_arc(
         inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
         dp_rank: DpRank,
+        event_loop: PyObject,
     ) -> Self {
         let kv_block_size = inner.kv_block_size() as usize;
         Self {
@@ -1087,6 +1089,7 @@ impl KvEventPublisher {
             // This bridge has no image-token configuration. Python callers can
             // set one through the public constructor when needed.
             image_token_id: None,
+            event_loop,
         }
     }
 
@@ -1190,6 +1193,7 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
+        let event_loop = endpoint.event_loop.clone();
         let inner =
             llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id_at(
                 endpoint.inner.clone(),
@@ -1212,7 +1216,18 @@ impl KvEventPublisher {
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
             image_token_id,
+            event_loop,
         })
+    }
+
+    #[getter]
+    fn local_indexer_endpoint(&self) -> Option<Endpoint> {
+        self.inner
+            .local_indexer_query_endpoint()
+            .map(|inner| Endpoint {
+                inner,
+                event_loop: self.event_loop.clone(),
+            })
     }
 
     #[allow(clippy::too_many_arguments)]

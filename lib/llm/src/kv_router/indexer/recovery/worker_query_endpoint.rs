@@ -19,6 +19,17 @@ use dynamo_runtime::{
 };
 use tokio::sync::Semaphore;
 
+/// Return the address used by this publisher's recovery service.
+///
+/// This is only an address; it does not imply that the endpoint has finished
+/// registering or is ready to serve requests.
+pub(crate) fn worker_kv_query_endpoint(
+    component: &Component,
+    publisher_id: u64,
+) -> dynamo_runtime::component::Endpoint {
+    component.endpoint(format!("worker_kv_query_source_{publisher_id:x}"))
+}
+
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 pub(crate) async fn start_worker_kv_query_endpoint(
     component: Component,
@@ -37,14 +48,14 @@ pub(crate) async fn start_worker_kv_query_endpoint(
     let ingress = Ingress::for_engine(engine)?;
 
     let route_worker_id = component.drt().connection_id();
-    let endpoint_name = format!("worker_kv_query_source_{publisher_id:x}");
+    let endpoint = worker_kv_query_endpoint(&component, publisher_id);
+    let endpoint_name = endpoint.name().to_string();
     tracing::info!(
         "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} \
          routed by instance {route_worker_id} on endpoint '{endpoint_name}'"
     );
 
-    component
-        .endpoint(&endpoint_name)
+    endpoint
         .endpoint_builder()
         .handler(ingress)
         .graceful_shutdown(true)

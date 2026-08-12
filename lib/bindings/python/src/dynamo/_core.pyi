@@ -1195,6 +1195,13 @@ class KvEventPublisher:
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
         """
 
+    @property
+    def local_indexer_endpoint(self) -> Optional[Endpoint]:
+        """
+        Worker-local KV indexer query endpoint created by this publisher, if enabled.
+        """
+        ...
+
     def publish_stored(
         self,
         token_ids: List[int],

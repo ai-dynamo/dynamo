@@ -44,7 +44,9 @@ pub(crate) use recovery::{
 };
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
-pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
+pub(crate) use recovery::{
+    start_subscriber, start_worker_kv_query_endpoint, worker_kv_query_endpoint,
+};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
