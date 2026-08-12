@@ -30,6 +30,8 @@
 #      because 2, 3 and 6 are vacuous without it — and because a selector that
 #      quietly stops matching is exactly how this broke: #12410 flattened the
 #      Reference tab and the old label-keyed selector no-opped for six days.
+#  10. The composed default version starts with the shared Home tab so the
+#      bare site URL renders Home instead of the release snapshot's first page.
 #
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
@@ -153,6 +155,7 @@ cp "$SRC/docs.yml" docs.yml
 yq -i '."landing-page".path = "./index.mdx"' docs.yml
 PRESERVED="$WT/.preserved_versions.yml" \
   yq -i '.versions = load(strenv(PRESERVED))' docs.yml
+"$SRC/scripts/ensure_default_version_home.sh" "$WT/fern"
 
 echo "=== RELEASE-VERSION JOB (replayed, tag $TAG) ==="
 cd "$WT"
@@ -211,6 +214,12 @@ yq -i ".versions[0].path = \"./versions/$TAG.yml\"" fern/docs.yml
 yq -i ".versions[0].display-name = \"Latest ($TAG)\"" fern/docs.yml
 
 echo "=== ASSERTIONS ==="
+default_nav=$(yq -r '.versions[0].path' fern/docs.yml)
+default_nav="fern/${default_nav#./}"
+default_first_tab=$(yq -r '.navigation[0].tab // ""' "$default_nav")
+[ "$default_first_tab" = "home" ] && s11=ok || s11=FAIL
+assert "10. default version starts with the shared Home tab" "$s11"
+
 # 9 first: everything below assumes the shared group is findable at all. This is
 # the tripwire the old label-keyed selector lacked — it no-opped silently for six
 # days after #12410 renamed the nav out from under it.
