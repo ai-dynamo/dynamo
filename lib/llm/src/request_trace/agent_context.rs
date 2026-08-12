@@ -636,6 +636,7 @@ mod tests {
                 parent_session_id: None,
                 session_final: None,
                 kv_hints: None,
+                input_trigger: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,
@@ -676,6 +677,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 inner: CreateChatCompletionStreamResponse {
@@ -701,6 +703,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
         ];
         for response in &responses {
@@ -751,6 +754,7 @@ mod tests {
                 parent_session_id: None,
                 session_final: None,
                 kv_hints: None,
+                input_trigger: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,

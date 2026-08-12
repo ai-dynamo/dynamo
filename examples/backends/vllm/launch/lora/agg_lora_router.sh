@@ -59,8 +59,7 @@ echo "=========================================="
 # run frontend + KV router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

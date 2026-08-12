@@ -26,7 +26,8 @@ pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
-    BootstrapInfo, PrefillResult, PreprocessedRequest,
+    BootstrapInfo, MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest,
+    RoutingHints,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
@@ -128,13 +129,12 @@ pub struct LlmRegistration {
     /// load from it.
     pub data_parallel_size: Option<u32>,
     /// First DP rank this worker hosts (default 0). Non-zero only when a worker
-    /// owns a sub-range (vLLM hybrid/external LB, multi-node SGLang
-    /// DP-attention); the router enumerates `[start, start + data_parallel_size)`.
+    /// owns a sub-range; the router enumerates
+    /// `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
-    /// Bootstrap host advertised to decode peers — only for Dynamo-handshake
-    /// backends (SGLang); internal-KV-transport backends (TRT-LLM, vLLM
-    /// `NixlConnector`) leave it `None`. When host+port are set, `Worker`
-    /// publishes them for the frontend's `PrefillRouter` Bootstrap path.
+    /// Bootstrap host advertised to decode peers. Backends with an internal
+    /// KV-transport handshake leave it `None`. When host+port are set, `Worker`
+    /// publishes them for the frontend's `PrefillRouter` bootstrap path.
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
@@ -144,15 +144,17 @@ pub struct LlmRegistration {
 ///
 /// `Worker` consumes this to build a `ModelDeploymentCard` and register the
 /// model with discovery. The neutral fields (`model`, `served_model_name`,
-/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
-/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
-/// leave `None`.
+/// `model_aliases`, `runtime_data`) apply to every modality; the token-pipeline
+/// metadata lives in the optional [`llm`](Self::llm) sub-record, which raw
+/// media engines leave `None`.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     /// Canonical model identifier (e.g. HF repo name).
     pub model: String,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
+    /// Additional public-facing model names accepted by the engine.
+    pub model_aliases: Vec<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
     /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
@@ -179,11 +181,10 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// `worker_id` is an opaque, runtime-allocated unique identifier for
     /// this worker. It is stable from `start()` onward for the worker's
     /// lifetime and unique across replicas in the cluster. Engines that
-    /// need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
-    /// 10-bit `disagg_machine_id` snowflake field) should derive it from
-    /// this value rather than hashing host/pid or asking operators for a
-    /// CLI override. The internal mechanism (discovery instance ID) is
-    /// not part of the contract — engines should treat it as opaque.
+    /// need a per-worker key for cluster-wide bookkeeping should derive it
+    /// from this value rather than hashing host/pid or asking operators for a
+    /// CLI override. The internal mechanism (discovery instance ID) is not
+    /// part of the contract — engines should treat it as opaque.
     ///
     /// `start()` is async and may take minutes for real backends (e.g.
     /// compiling a model graph on an accelerator). Emit
@@ -328,7 +329,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     ///
     /// Engines advertise control keys and implement them via
     /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
-    /// owned by the unified backend layer.
+    /// owned by the Backend SDK layer.
     async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }
@@ -348,11 +349,11 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// Semantic engine updates this engine supports. Empty by default.
     ///
     /// Updates are a sibling surface to [`supported_controls`](LLMEngine::supported_controls)
-    /// for operations that mutate engine-managed assets (e.g. vLLM dynamic
-    /// LoRA load/unload/list) rather than the engine's serving lifecycle.
+    /// for operations that mutate engine-managed assets rather than the
+    /// engine's serving lifecycle.
     /// Keeping them separate avoids inflating the control surface. Engines
     /// advertise update keys and implement them via [`LLMEngine::engine_update`];
-    /// the unified backend maps each key onto an `/engine/update/{key}` route.
+    /// the Backend SDK maps each key onto an `/engine/update/{key}` route.
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }
@@ -372,9 +373,8 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// Hand the engine its runtime serving [`Endpoint`](dynamo_runtime::component::Endpoint),
     /// exactly once, after it exists and before serving begins. Default no-op.
     ///
-    /// Engines that publish their own discovery records (e.g. vLLM dynamic
-    /// LoRA via `register_model`) stash it here for later use from
-    /// [`engine_update`](LLMEngine::engine_update). Mirrors the
+    /// Engines that publish their own discovery records stash it here for
+    /// later use from [`engine_update`](LLMEngine::engine_update). Mirrors the
     /// [`on_publisher_ready`](MetricsBindings::on_publisher_ready) handoff idiom.
     /// Errors abort startup; `cleanup` runs on the partial state.
     async fn on_endpoint_ready(
@@ -515,10 +515,7 @@ pub struct ComponentSnapshot {
     ///   gauge is NOT updated — distinguishes "0% hits" (which is a
     ///   legitimate measurement) from "we never measured."
     ///
-    /// Each backend computes from its native counters
-    /// (vLLM: `PrefixCacheStats.hits/queries`,
-    ///  SGLang: `kv_metrics.cache_hit_rate_perc`,
-    ///  TRT-LLM: `kv_stats["cacheHitRate"]`).
+    /// Each backend computes the value from its native counters.
     pub kv_cache_hit_rate: Option<f32>,
     pub dp_rank: u32,
 }
@@ -592,6 +589,17 @@ pub trait LLMEngineOutputExt: Sized {
     fn with_tokens(self, tokens: Vec<u32>) -> Self;
     /// Attach usage stats.
     fn with_usage(self, usage: CompletionUsage) -> Self;
+    /// Attach an `encoder_result` handoff payload.
+    ///
+    /// Signature takes `serde_json::Map<String, serde_json::Value>` (not
+    /// bare `Value`) so the object-only Wire Shape invariant is
+    /// type-enforced and the setter stays infallible -- there is no way
+    /// to pass an array or scalar through this API. The setter wraps the
+    /// `Map` in `Value::Object(...)` internally.
+    fn with_encoder_result(
+        self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self;
 }
 
 impl LLMEngineOutputExt for LLMEngineOutput {
@@ -601,6 +609,13 @@ impl LLMEngineOutputExt for LLMEngineOutput {
     }
     fn with_usage(mut self, usage: CompletionUsage) -> Self {
         self.completion_usage = Some(usage);
+        self
+    }
+    fn with_encoder_result(
+        mut self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.encoder_result = Some(serde_json::Value::Object(encoder_result));
         self
     }
 }
@@ -650,5 +665,27 @@ mod tests {
     fn usage_saturates_on_overflow() {
         let u = usage(u32::MAX, 10);
         assert_eq!(u.total_tokens, u32::MAX);
+    }
+
+    /// `with_encoder_result` takes `Map<String, Value>` (object-only by
+    /// type) and stores it as `Value::Object(_)` so the Wire Shape
+    /// invariant holds end-to-end. Round-trip: input Map -> stored
+    /// Value::Object -> as_object() returns the same Map.
+    #[test]
+    fn ext_with_encoder_result_round_trips_map() {
+        let mut input = serde_json::Map::new();
+        input.insert(
+            "embedding_handle".into(),
+            serde_json::json!({"uri": "nixl://encoder/0", "shape": [1, 1024]}),
+        );
+        input.insert("aux".into(), serde_json::Value::String("extra".into()));
+
+        let chunk = LLMEngineOutput::stop().with_encoder_result(input.clone());
+        let stored = chunk
+            .encoder_result
+            .as_ref()
+            .expect("encoder_result must be set after with_encoder_result");
+        assert!(stored.is_object(), "encoder_result must be Value::Object");
+        assert_eq!(stored.as_object().unwrap(), &input);
     }
 }

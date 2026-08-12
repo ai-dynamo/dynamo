@@ -7,13 +7,16 @@ import time
 from typing import Any, Callable, ContextManager
 
 from tests.router.common import (
+    _test_kv_event_publisher_disabled_diagnostic,
     _test_router_basic,
+    _test_router_cache_salt_isolation,
     _test_router_decisions,
     _test_router_decisions_disagg,
     _test_router_indexers_sync,
 )
-from tests.router.helper import generate_random_suffix, get_runtime
-from tests.utils.constants import DefaultPort
+from tests.router.helper import generate_random_suffix, managed_runtime
+from tests.router.router_process import FrontendRouterProcess
+from tests.utils.constants import DynamoPortRange
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
 
@@ -32,7 +35,7 @@ TEST_PROMPT = (
 
 
 def allocate_frontend_ports(request, count: int) -> list[int]:
-    ports = allocate_ports(count, DefaultPort.FRONTEND.value)
+    ports = allocate_ports(count, DynamoPortRange.FRONTEND.value)
     request.addfinalizer(lambda: deallocate_ports(ports))
     return ports
 
@@ -156,11 +159,6 @@ class ManagedEngineProcessMixin:
         time.sleep(self.cleanup_delay_seconds)
 
 
-def get_engine_endpoint(engine_workers, request_plane: str, component_name: str):
-    runtime = get_runtime(request_plane=request_plane)
-    return runtime.endpoint(f"{engine_workers.namespace}.{component_name}.generate")
-
-
 def _create_engine_process(
     *,
     engine_process_cls,
@@ -231,6 +229,96 @@ def run_basic_router_test(
         )
 
 
+def run_kv_event_publisher_disabled_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    block_size: int,
+    model_name: str,
+    expected_rank_count: int,
+    engine_process_kwargs: dict[str, Any],
+    test_payload: dict[str, Any] | None = None,
+):
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
+        request_plane=request_plane,
+        default_process_kwargs={},
+        engine_process_kwargs=engine_process_kwargs,
+    )
+    frontend_port = allocate_frontend_ports(request, 1)[0]
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        process.namespace,
+        request_plane=request_plane,
+        router_mode="kv",
+        min_initial_workers=1,
+        extra_env={"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"},
+    ) as frontend:
+        with process as engine_workers:
+            _test_kv_event_publisher_disabled_diagnostic(
+                frontend=frontend,
+                engine_workers=engine_workers,
+                diagnostic_workers=engine_workers,
+                frontend_port=frontend_port,
+                test_payload=test_payload or build_test_payload(model_name),
+                model_name=model_name,
+                expected_worker_role="aggregated",
+                expected_requirement="cache_aware_routing",
+                expected_rank_count=expected_rank_count,
+                request_plane=request_plane,
+            )
+
+
+def run_disagg_kv_event_publisher_disabled_test(
+    *,
+    request,
+    request_plane: str,
+    block_size: int,
+    model_name: str,
+    expected_prefill_rank_count: int,
+    worker_context_factory: Callable[[str], ContextManager[tuple[Any, Any]]],
+    test_payload: dict[str, Any] | None = None,
+):
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    frontend_port = allocate_frontend_ports(request, 1)[0]
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        shared_namespace,
+        request_plane=request_plane,
+        router_mode="kv",
+        min_initial_workers=1,
+        extra_env={"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"},
+    ) as frontend:
+        with worker_context_factory(shared_namespace) as (
+            prefill_workers,
+            decode_workers,
+        ):
+            _test_kv_event_publisher_disabled_diagnostic(
+                frontend=frontend,
+                engine_workers=[prefill_workers, decode_workers],
+                diagnostic_workers=prefill_workers,
+                frontend_port=frontend_port,
+                test_payload=test_payload or build_test_payload(model_name),
+                model_name=model_name,
+                expected_worker_role="prefill",
+                expected_requirement="cache_aware_routing",
+                expected_rank_count=expected_prefill_rank_count,
+                unexpected_worker_roles=("decode",),
+                request_plane=request_plane,
+            )
+
+
 def run_router_decisions_test(
     *,
     engine_process_cls,
@@ -263,8 +351,13 @@ def run_router_decisions_test(
         default_process_kwargs=default_process_kwargs,
         engine_process_kwargs=engine_process_kwargs,
     )
-    with process as engine_workers:
-        endpoint = get_engine_endpoint(engine_workers, request_plane, component_name)
+    with (
+        process as engine_workers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{component_name}.generate"
+        )
         scenario_kwargs = dict(test_kwargs or {})
         for argument, attribute in (
             ("standalone_indexer_url", "standalone_indexer_url"),
@@ -282,6 +375,41 @@ def run_router_decisions_test(
             block_size=block_size,
             initial_wait=initial_wait,
             **scenario_kwargs,
+        )
+
+
+def run_cache_salt_isolation_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    model_name: str,
+    block_size: int,
+    component_name: str,
+):
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
+        request_plane=request_plane,
+        default_process_kwargs={"num_workers": 2, "single_gpu": True},
+        engine_process_kwargs=None,
+    )
+    with (
+        process as engine_workers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{component_name}.generate"
+        )
+        _test_router_cache_salt_isolation(
+            engine_workers,
+            endpoint,
+            model_name,
+            block_size,
         )
 
 
@@ -357,8 +485,8 @@ def run_indexers_sync_test(
     request,
     runtime_services_dynamic_ports,
     store_backend: str,
-    durable_kv_events: bool,
     request_plane: str,
+    event_plane: str,
     block_size: int,
     model_name: str,
     num_workers: int,
@@ -367,6 +495,7 @@ def run_indexers_sync_test(
 ):
     nats_process, _etcd_process = runtime_services_dynamic_ports
     process_kwargs = extra_process_kwargs or {}
+    test_nats_interruption = request_plane == "tcp" and event_plane == "nats"
 
     process = _create_engine_process(
         engine_process_cls=engine_process_cls,
@@ -378,7 +507,6 @@ def run_indexers_sync_test(
             "num_workers": num_workers,
             "single_gpu": True,
             "store_backend": store_backend,
-            "durable_kv_events": durable_kv_events,
             **process_kwargs,
         },
         engine_process_kwargs=engine_process_kwargs,
@@ -391,9 +519,9 @@ def run_indexers_sync_test(
             num_workers=num_workers,
             store_backend=store_backend,
             request_plane=request_plane,
-            test_nats_interruption=not durable_kv_events,
-            nats_server=nats_process if not durable_kv_events else None,
-            durable_kv_events=durable_kv_events,
+            event_plane=event_plane,
+            test_nats_interruption=test_nats_interruption,
+            nats_server=nats_process if test_nats_interruption else None,
             standalone_indexer_url=getattr(
                 engine_workers, "standalone_indexer_url", None
             ),

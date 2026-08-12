@@ -27,10 +27,9 @@ limitations under the License.
 package disagg
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
@@ -70,15 +69,7 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 
 // buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
 func buildRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
-	requestBody, err := dynscorer.BuildOpenAIRequest(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to build OpenAI request: %w", err)
-	}
-	data, err := json.Marshal(requestBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request JSON: %w", err)
-	}
-	return string(data), nil
+	return dynscorer.BuildOpenAIRequestJSON(req)
 }
 
 // serializeEndpoints converts endpoints to a JSON string for the FFI filter.
@@ -119,8 +110,10 @@ func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger
 		tokenIDs[i] = uint32(t)
 	}
 
-	req.TokenizedPrompt = &schedtypes.TokenizedPrompt{
-		TokenIDs: tokenIDs,
+	if req.Body != nil {
+		req.Body.TokenizedPrompt = &schedtypes.TokenizedPrompt{
+			TokenIDs: tokenIDs,
+		}
 	}
 
 	// Inject into the PayloadMap so the body includes nvext.token_data.
@@ -158,4 +151,14 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+var enforceDisaggDeprecationOnce sync.Once
+
+func warnDeprecatedEnforceDisagg(logger logr.Logger) {
+	if getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false) {
+		enforceDisaggDeprecationOnce.Do(func() {
+			logger.Info("DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness come from registered worker types")
+		})
+	}
 }

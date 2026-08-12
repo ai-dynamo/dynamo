@@ -28,7 +28,8 @@ from sglang.srt.parser.jinja_template_utils import (
 )
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-from .utils import random_call_id
+from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,7 @@ class SglangPreprocessResult:
 #
 # A static, per-server boolean is plenty: per-request decoding of prompt
 # tails adds latency on the hot path with nothing to show for it. The
-# per-request knobs live downstream (``separate_reasoning``,
-# ``chat_template_kwargs.enable_thinking``), matching sglang's API.
+# per-request reasoning knobs live downstream, matching sglang's API.
 _FORCE_REASONING_PATTERNS = (
     # qwen3-family: <|im_start|>assistant\n<think>\n
     re.compile(r"<\|im_start\|>assistant\\n<think>\\n"),
@@ -93,8 +93,30 @@ def detect_force_reasoning_from_template(chat_template: str | None) -> bool:
 # Reasoning parsers that default to "thinking on" unless the client
 # explicitly opts out via chat_template_kwargs. Mirrors sglang's
 # serving_chat._get_reasoning_from_request table.
-_THINKING_BY_DEFAULT = {"qwen3", "glm45", "nemotron_3", "interns1", "kimi_k2"}
+_THINKING_BY_DEFAULT = {
+    "qwen3",
+    "glm45",
+    "nemotron_3",
+    "interns1",
+    "kimi_k2",
+    "kimi_k3",
+}
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
+
+_SGLANG_PARSER_NAME_ALIASES = {
+    # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
+    # builds that include MiniMax-M3 expose the parser as "minimax-m3".
+    "minimax_m3": "minimax-m3",
+    "minimax_m3_nom": "minimax-m3",
+    "minimax-m3-nom": "minimax-m3",
+    "kimi-k3": "kimi_k3",
+}
+
+
+def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
+    if not parser_name:
+        return parser_name
+    return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
 
 
 def resolve_request_force_reasoning(
@@ -107,13 +129,19 @@ def resolve_request_force_reasoning(
     Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
     combined with template_manager.force_reasoning:
 
-      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/``kimi_k3``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
-        ``thinking=False`` for ``kimi_k2``) disables it.
+        ``thinking=False`` for Kimi) disables it.
+      * MiniMax-M3 defaults to adaptive, but SGLang still enables the
+        reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
+        explicitly ``"disabled"``.
+      * Mistral is enabled only when ``reasoning_effort`` is present and not
+        ``"none"``.
       * opt-in families (``deepseek-v3``/``gemma4``): off by default,
         enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
       * anything else: follow the statically-detected template default.
     """
+    reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
     if not reasoning_parser_name:
         return False
 
@@ -121,9 +149,20 @@ def resolve_request_force_reasoning(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
 
+    if reasoning_parser_name == "minimax-m3":
+        return kwargs.get("thinking_mode") != "disabled"
+
+    if reasoning_parser_name == "mistral":
+        reasoning_effort = request.get("reasoning_effort")
+        if reasoning_effort is None:
+            reasoning_effort = kwargs.get("reasoning_effort")
+        return reasoning_effort is not None and reasoning_effort != "none"
+
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
-            "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"kimi_k2", "kimi_k3"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is not False
 
@@ -258,6 +297,7 @@ def create_parsers(
         if tool_choice == "required" or _is_named_tool_choice(tool_choice):
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
+            tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
@@ -267,7 +307,8 @@ def create_parsers(
     guided_decoding_active = tool_choice == "required" or _is_named_tool_choice(
         tool_choice
     )
-    if reasoning_parser_name and not guided_decoding_active:
+    if reasoning_parser_name and (not guided_decoding_active or force_reasoning):
+        reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
@@ -283,6 +324,16 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
         and tool_choice.get("type") == "function"
         and isinstance(tool_choice.get("function"), dict)
         and bool(tool_choice["function"].get("name"))
+    )
+
+
+def _guided_tool_choice_requires_reasoning(
+    request: dict[str, Any], force_reasoning: bool
+) -> bool:
+    """Return whether SGLang should reason before guided tool-call JSON."""
+    tool_choice = request.get("tool_choice", "auto")
+    return force_reasoning and (
+        tool_choice == "required" or _is_named_tool_choice(tool_choice)
     )
 
 
@@ -364,6 +415,7 @@ def _flatten_message_content(content: Any) -> Any:
 
 def _normalize_openai_thinking_template_kwargs(
     request: dict[str, Any],
+    default_thinking_mode: str | None = None,
 ) -> dict[str, Any]:
     request = copy.copy(request)
     chat_template_kwargs = dict(
@@ -374,6 +426,9 @@ def _normalize_openai_thinking_template_kwargs(
         # Different SGLang model families consult different template toggles.
         chat_template_kwargs.setdefault("thinking", enabled)
         chat_template_kwargs.setdefault("enable_thinking", enabled)
+        chat_template_kwargs.setdefault(
+            "thinking_mode", "enabled" if enabled else "disabled"
+        )
 
     thinking = request.get("thinking")
     if isinstance(thinking, bool):
@@ -385,8 +440,17 @@ def _normalize_openai_thinking_template_kwargs(
         elif thinking_type == "disabled":
             setdefault_reasoning(False)
 
-    if request.get("reasoning_effort") == "none":
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = reasoning_effort
+    if reasoning_effort == "none":
         setdefault_reasoning(False)
+
+    chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
+        chat_template_kwargs,
+        default_thinking_mode,
+        request_has_root_thinking=request.get("thinking") is not None,
+    )
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -534,7 +598,19 @@ def build_tool_call_guided_decoding(
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
+    # TODO: this applies a structural-tag constraint for tool_choice="auto"
+    # whenever a tool-call parser is configured, and reads NONE of
+    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
+    # knobs are accepted on the CLI and published into the model card by
+    # sglang/register.py, so an operator setting the mode to "off" still gets a
+    # constraint on this path. prepost.py requires structural_tag_mode == "on"
+    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
+    # requires StructuralTagMode != Off, so at the default mode ("off") the same
+    # request is unconstrained on both of those paths and constrained here.
+    # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
+    # scope="always" with no way to narrow it.
     elif tool_call_parser_name:
+        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
             tools=sglang_tools,
             tool_call_parser=tool_call_parser_name,
@@ -558,6 +634,46 @@ def build_tool_call_guided_decoding(
             return {"structural_tag": tag_value}
 
     return None
+
+
+def build_response_format_guided_decoding(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build Dynamo guided decoding from OpenAI chat response_format."""
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return None
+
+    response_format_type = response_format.get("type")
+    if response_format_type == "json_object":
+        return {"json": {"type": "object"}}
+    if response_format_type == "structural_tag":
+        return {"structural_tag": response_format}
+    if response_format_type != "json_schema":
+        return None
+
+    json_schema = response_format.get("json_schema")
+    if isinstance(json_schema, dict):
+        schema = json_schema.get("schema")
+    else:
+        schema = response_format.get("schema")
+    if schema is None:
+        raise PreprocessError(
+            "schema is required for json_schema response format request."
+        )
+    if not isinstance(schema, dict):
+        raise PreprocessError(
+            "schema must be a JSON object for json_schema response format request."
+        )
+    if not isinstance(json_schema, dict):
+        # This only the effective schema mutation from SGLang's
+        # ChatCompletionRequest.set_json_schema(), not the full response_format
+        # normalization into {"json_schema": {"name", "schema", "strict"}}.
+        schema = copy.deepcopy(schema)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("strict", None)
+    return {"json": schema}
 
 
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
@@ -613,29 +729,29 @@ def preprocess_chat_request(
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
     ``template_force_reasoning`` is the static per-server flag derived from
     the chat template (see :func:`detect_force_reasoning_from_template`);
-    the effective per-request value combines it with client knobs
-    (``separate_reasoning``, ``chat_template_kwargs.{thinking,enable_thinking}``).
+    the effective per-request value combines it with the configured parser and
+    request-level thinking controls.
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
-    request = _normalize_openai_thinking_template_kwargs(request)
+    request = _normalize_openai_thinking_template_kwargs(request, default_thinking_mode)
     messages = _materialize_messages(request.get("messages", []))
 
-    # Per-request client escape hatch: skip reasoning parsing entirely when
-    # the client sends ``separate_reasoning=False`` -- thinking text then
-    # lands in ``delta.content`` instead of ``delta.reasoning_content``.
-    effective_reasoning_parser_name = (
-        reasoning_parser_name if _client_wants_separate_reasoning(request) else None
-    )
+    # Generation mode is independent of whether the client wants reasoning
+    # separated into reasoning_content or retained in content.
     force_reasoning = resolve_request_force_reasoning(
         request,
-        effective_reasoning_parser_name,
+        reasoning_parser_name,
         template_force_reasoning,
+    )
+    effective_reasoning_parser_name = (
+        reasoning_parser_name if _client_wants_separate_reasoning(request) else None
     )
 
     # Convert tools to SGLang format (done once, shared with parser creation)
@@ -708,11 +824,32 @@ def preprocess_chat_request(
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
     )
-    guided_decoding = build_tool_call_guided_decoding(
+    response_format_guided_decoding = build_response_format_guided_decoding(request)
+    tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    # TODO: response_format wins here even when tool_choice is "required" or names
+    # a function, so a request that demanded a tool call can come back with none
+    # -- the tool constraint is dropped and only logged. The other two paths do
+    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
+    # and keeps the tool constraint, and prepost.py does the same after narrowing
+    # its conflict check. response_format is scoped by the OpenAI spec to the
+    # message the model returns to the user, not to tool calls, so the tool
+    # constraint is the one that must survive.
+    #
+    # This path also never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields at all, so those are dropped silently
+    # while both other paths honor them (and reject them against a forced choice).
+    if (
+        response_format_guided_decoding is not None
+        and tool_call_guided_decoding is not None
+    ):
+        logger.warning(
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+        )
+    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
@@ -821,16 +958,10 @@ class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
     Handles:
-    - Incremental detokenization via sliding-window decode (6-token lookback)
+    - Incremental detokenization across tokenizer-safe boundaries
     - Reasoning content extraction via SGLang ReasoningParser
     - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
     """
-
-    # Lookback window size for incremental detokenization.  UTF-8 characters
-    # can span up to 4 bytes, each potentially its own token.  A lookback of
-    # 6 covers the worst case (4-token char) plus margin for BPE merges that
-    # cross the old/new boundary.
-    LOOKBACK = 6
 
     def __init__(
         self,
@@ -841,20 +972,39 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        eos_token_ids: list[int] | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
         self.history_tool_calls_count = history_tool_calls_count
         self._sglang_tools = sglang_tools or []
-        self._tool_call_parser_name = tool_call_parser_name
+        self._tool_call_parser_name = _normalize_sglang_parser_name(
+            tool_call_parser_name
+        )
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
-        # Preserve special tokens when a tool call parser is active so
-        # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
-        self._skip_special_tokens = tool_call_parser is None
+        # Preserve special tokens when a parser is active so tool-call and
+        # reasoning delimiters remain visible during incremental decoding.
+        self._skip_special_tokens = self._fast_plain_text
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
+        # Required/named guided output may be either bare JSON or
+        # reasoning followed by JSON. Delay only the ambiguous bracket-leading
+        # prefix so bare JSON does not get trapped as reasoning.
+        self._pending_guided_reasoning_parts: list[str] | None = (
+            [] if self._is_json_array_parser and reasoning_parser is not None else None
+        )
+        self._eos_token_ids = set(eos_token_ids or [])
 
-        self._all_token_ids: list[int] = []
+        # Keep a small, known-complete prompt suffix as decode context. Generated
+        # tokens are promoted to context only after they decode without a
+        # trailing replacement character, so the boundary never moves into an
+        # incomplete byte-fallback sequence.
+        self._decode_context_ids = list((prompt_token_ids or [])[-5:])
+        self._pending_decode_ids: list[int] = []
+        self._logprob_context_ids: list[int] = []
+        self._pending_logprobs_content: list[dict[str, Any]] = []
+        self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
         # chunks).  However, the base detector processes at most one event
@@ -869,6 +1019,13 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
 
+    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
+        if not self._eos_token_ids:
+            return token_ids
+        while token_ids and token_ids[-1] in self._eos_token_ids:
+            token_ids.pop()
+        return token_ids
+
     def _tool_call_id(self, name: str, index: int) -> str:
         return _tool_call_id_for_parser(
             self._tool_call_parser_name,
@@ -877,43 +1034,192 @@ class SglangStreamingPostProcessor:
             self.history_tool_calls_count,
         )
 
-    def _incremental_decode(self, new_token_ids: list[int]) -> str:
-        """Decode new tokens with lookback window for multi-byte char boundaries.
+    def _decode_ids(self, token_ids: list[int]) -> str:
+        if not token_ids:
+            return ""
+        return self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=self._skip_special_tokens,
+        )
 
-        Re-decodes a small window of previous tokens alongside new tokens so that
-        multi-byte characters spanning token boundaries are correctly resolved.
-        Only retains the last LOOKBACK tokens to bound memory usage.
-        """
-        prev_count = len(self._all_token_ids)
-        self._all_token_ids.extend(new_token_ids)
+    def _with_initial_role(self, delta: dict[str, Any]) -> dict[str, Any]:
+        if not self._has_emitted_role:
+            delta["role"] = "assistant"
+            self._has_emitted_role = True
+        return delta
 
-        start = max(0, prev_count - self.LOOKBACK)
+    def _incremental_decode(
+        self, new_token_ids: list[int], *, flush: bool = False
+    ) -> str:
+        """Decode generated tokens without splitting a byte-fallback sequence."""
+        self._pending_decode_ids.extend(new_token_ids)
+        if not self._pending_decode_ids:
+            return ""
 
-        # Trim to avoid unbounded growth -- only the tail matters for decoding
-        if len(self._all_token_ids) > self.LOOKBACK * 16:
-            self._all_token_ids = self._all_token_ids[
-                -(self.LOOKBACK + len(new_token_ids)) :
-            ]
-            prev_count = len(self._all_token_ids) - len(new_token_ids)
-            start = max(0, prev_count - self.LOOKBACK)
+        context_text = self._decode_ids(self._decode_context_ids)
+        decoded_text = self._decode_ids(
+            self._decode_context_ids + self._pending_decode_ids
+        )
+        delta_text = decoded_text[len(context_text) :]
 
-        # Decode lookback-only prefix (before new tokens)
-        prefix_tokens = self._all_token_ids[start:prev_count]
-        prefix_text = (
-            self.tokenizer.decode(
-                prefix_tokens, skip_special_tokens=self._skip_special_tokens
+        if not flush and (not delta_text or delta_text.endswith("\ufffd")):
+            return ""
+
+        self._decode_context_ids = self._pending_decode_ids
+        self._pending_decode_ids = []
+        return delta_text
+
+    def _build_openai_logprobs(
+        self,
+        log_probs: list[float],
+        top_logprobs: list[list[dict[str, Any]]] | None,
+        token_ids: list[int],
+    ) -> dict[str, Any] | None:
+        if len(log_probs) != len(token_ids):
+            return None
+
+        content: list[dict[str, Any]] = []
+        for index, (token_id, logprob) in enumerate(zip(token_ids, log_probs)):
+            context_token_ids = (self._logprob_context_ids + token_ids[:index])[-4:]
+            token = self._decode_logprob_token(token_id, None, context_token_ids)
+            candidates = top_logprobs[index] if top_logprobs else []
+            openai_top_logprobs = []
+            for candidate in candidates:
+                candidate_token = self._decode_logprob_token(
+                    candidate.get("token_id"),
+                    candidate.get("token"),
+                    context_token_ids,
+                )
+                candidate_bytes = candidate.get("bytes")
+                if candidate_bytes is None:
+                    candidate_bytes = (
+                        list(candidate_token.encode("utf-8"))
+                        if candidate_token
+                        else None
+                    )
+                openai_top_logprobs.append(
+                    {
+                        "token": candidate_token,
+                        "logprob": float(candidate["logprob"]),
+                        "bytes": candidate_bytes,
+                    }
+                )
+            content.append(
+                {
+                    "token": token,
+                    "logprob": float(logprob),
+                    "bytes": list(token.encode("utf-8")) if token else None,
+                    "top_logprobs": openai_top_logprobs,
+                }
             )
-            if prefix_tokens
-            else ""
+
+        return {"content": content, "refusal": None} if content else None
+
+    def _decode_logprob_token(
+        self,
+        token_id: int | None,
+        token: str | None,
+        context_token_ids: list[int],
+    ) -> str:
+        if token is None:
+            if token_id is None:
+                return ""
+            token = self.tokenizer.decode([token_id], skip_special_tokens=False)
+
+        if not token.endswith("\ufffd") or token_id is None:
+            return token
+
+        for context_size in range(1, min(len(context_token_ids), 4) + 1):
+            context = context_token_ids[-context_size:]
+            decoded = self.tokenizer.decode(
+                context + [token_id], skip_special_tokens=False
+            )
+            if decoded.endswith("\ufffd"):
+                continue
+
+            clean_end = len(context)
+            for context_index in range(len(context) - 1, -1, -1):
+                context_token = self.tokenizer.decode(
+                    [context[context_index]], skip_special_tokens=False
+                )
+                if context_token.endswith("\ufffd"):
+                    clean_end = context_index
+                else:
+                    break
+
+            clean_prefix = (
+                self.tokenizer.decode(context[:clean_end], skip_special_tokens=False)
+                if clean_end
+                else ""
+            )
+            if decoded.startswith(clean_prefix):
+                return decoded[len(clean_prefix) :]
+
+            common_prefix_length = 0
+            for prefix_char, decoded_char in zip(clean_prefix, decoded):
+                if prefix_char != decoded_char:
+                    break
+                common_prefix_length += 1
+            return decoded[common_prefix_length:]
+
+        return ""
+
+    def _take_pending_logprobs(self) -> dict[str, Any] | None:
+        if not self._pending_logprobs_content:
+            return None
+        content = self._pending_logprobs_content
+        self._pending_logprobs_content = []
+        return {"content": content, "refusal": None}
+
+    def _parse_reasoning_delta(
+        self, delta_text: str, finish_reason: str | None
+    ) -> tuple[str | None, str]:
+        assert self.reasoning_parser is not None
+
+        pending = self._pending_guided_reasoning_parts
+        if pending is None:
+            if not delta_text:
+                return None, ""
+            reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(
+                delta_text
+            )
+            return reasoning_text or None, normal_text or ""
+
+        if delta_text:
+            pending.append(delta_text)
+        buffered = "".join(pending)
+        stripped = buffered.lstrip()
+
+        detector = getattr(self.reasoning_parser, "detector", None)
+        think_start = getattr(detector, "think_start_token", "")
+        starts_reasoning = bool(think_start and stripped.startswith(think_start))
+        could_be_partial_start = bool(
+            stripped
+            and think_start
+            and len(stripped) < len(think_start)
+            and think_start.startswith(stripped)
         )
 
-        # Decode lookback + new tokens together
-        window_tokens = self._all_token_ids[start:]
-        window_text = self.tokenizer.decode(
-            window_tokens, skip_special_tokens=self._skip_special_tokens
-        )
+        if not finish_reason and (
+            not stripped
+            or could_be_partial_start
+            or (stripped[0] in "[{" and not starts_reasoning)
+        ):
+            return None, ""
 
-        return window_text[len(prefix_text) :]
+        self._pending_guided_reasoning_parts = None
+        if finish_reason and _try_parse_json_array(buffered) is not None:
+            return None, buffered
+
+        if finish_reason and stripped and stripped[0] in "[{" and not starts_reasoning:
+            reasoning_text, normal_text = self.reasoning_parser.parse_non_stream(
+                buffered
+            )
+        else:
+            reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(
+                buffered
+            )
+        return reasoning_text or None, normal_text or ""
 
     def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single engine response chunk into an OpenAI SSE choice dict.
@@ -927,23 +1233,45 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        log_probs = engine_response.get("log_probs")
+        top_logprobs = engine_response.get("top_logprobs")
+        if finish_reason is not None:
+            raw_token_count = len(token_ids)
+            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            retained_token_count = len(token_ids)
+            if log_probs is not None and len(log_probs) == raw_token_count:
+                log_probs = log_probs[:retained_token_count]
+            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
+                top_logprobs = top_logprobs[:retained_token_count]
 
-        delta_text = self._incremental_decode(token_ids) if token_ids else ""
+        delta_text = (
+            self._incremental_decode(token_ids, flush=finish_reason is not None)
+            if token_ids or finish_reason is not None
+            else ""
+        )
+        openai_logprobs = None
+        if log_probs is not None:
+            openai_logprobs = self._build_openai_logprobs(
+                log_probs, top_logprobs, token_ids
+            )
+            if openai_logprobs is not None:
+                self._pending_logprobs_content.extend(openai_logprobs["content"])
+        self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
 
         if self._fast_plain_text:
             if delta_text:
                 return {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": delta_text},
+                    "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             elif finish_reason:
                 return {
                     "index": 0,
-                    "delta": {},
+                    "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             return None
 
@@ -951,10 +1279,10 @@ class SglangStreamingPostProcessor:
         reasoning_text = None
         normal_text = delta_text
 
-        if self.reasoning_parser and delta_text:
-            r_text, n_text = self.reasoning_parser.parse_stream_chunk(delta_text)
-            reasoning_text = r_text or None
-            normal_text = n_text or ""
+        if self.reasoning_parser and (delta_text or finish_reason):
+            reasoning_text, normal_text = self._parse_reasoning_delta(
+                delta_text, finish_reason
+            )
 
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
@@ -984,7 +1312,7 @@ class SglangStreamingPostProcessor:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
 
         # -- Assemble delta --
-        delta: dict[str, Any] = {"role": "assistant"}
+        delta: dict[str, Any] = {}
         has_content = False
 
         if content_text:
@@ -1158,9 +1486,9 @@ class SglangStreamingPostProcessor:
         if has_content or effective_finish:
             return {
                 "index": 0,
-                "delta": delta if has_content else {},
+                "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
-                "logprobs": None,
+                "logprobs": self._take_pending_logprobs(),
             }
 
         return None

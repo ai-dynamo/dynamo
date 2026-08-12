@@ -25,6 +25,7 @@ from typing import List
 __all__ = [
     "PlannerError",
     "DynamoGraphDeploymentNotFoundError",
+    "DynamoGraphDeploymentNotReadyError",
     "ComponentError",
     "ModelNameNotFoundError",
     "DeploymentModelNameMismatchError",
@@ -35,6 +36,9 @@ __all__ = [
     "DuplicateSubComponentError",
     "DeploymentValidationError",
     "EmptyTargetReplicasError",
+    "PowerAnnotationMissingError",
+    "PowerAnnotationInvalidError",
+    "RolloutFailedError",
 ]
 
 
@@ -66,6 +70,30 @@ class DynamoGraphDeploymentNotFoundError(PlannerError):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(deployment_name={self.deployment_name!r}, namespace={self.namespace!r})"
+
+
+class DynamoGraphDeploymentNotReadyError(PlannerError):
+    """Raised when a DynamoGraphDeployment is not ready for scaling."""
+
+    def __init__(self, deployment_name: str, namespace: str | None = None):
+        self.deployment_name = deployment_name
+        self.namespace = namespace
+
+        if namespace:
+            message = (
+                "DynamoGraphDeployment is not ready "
+                f"(name: '{deployment_name}' in namespace '{namespace}')"
+            )
+        else:
+            message = f"DynamoGraphDeployment is not ready (name: '{deployment_name}')"
+
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"deployment_name={self.deployment_name!r}, namespace={self.namespace!r})"
+        )
 
 
 class ComponentError(PlannerError):
@@ -208,3 +236,80 @@ class EmptyTargetReplicasError(PlannerError):
     ):
         message = "target_replicas cannot be empty"
         super().__init__(message)
+
+
+class PowerAnnotationMissingError(ComponentError):
+    """Raised when a worker component has no per-GPU power-limit annotation.
+
+    The per-GPU cap is authored on the worker component's
+    ``podTemplate.metadata.annotations`` (key
+    ``dynamo.nvidia.com/gpu-power-limit``); a missing key means the DGD did not
+    declare a cap for this role. When power awareness is enabled every managed
+    worker role must carry one, so the planner fails closed rather than
+    guessing a cap.
+    """
+
+    def __init__(self, component_name: str):
+        self.component_name = component_name
+        message = (
+            f"Component '{component_name}' has no "
+            "'dynamo.nvidia.com/gpu-power-limit' annotation on its worker "
+            "podTemplate. Author the per-GPU cap on the DGD worker "
+            "podTemplate.metadata.annotations."
+        )
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(component_name={self.component_name!r})"
+
+
+class PowerAnnotationInvalidError(ComponentError):
+    """Raised when a per-GPU power-limit annotation is not a positive integer.
+
+    The annotation value is watts and must parse to an integer ``> 0``. Empty,
+    non-numeric, zero, or negative values are configuration errors — the
+    planner cannot compute a power budget from them and refuses to silently
+    substitute a default.
+    """
+
+    def __init__(self, component_name: str, value: str):
+        self.component_name = component_name
+        self.value = value
+        message = (
+            f"Component '{component_name}' has an invalid "
+            f"'dynamo.nvidia.com/gpu-power-limit' annotation {value!r}; "
+            "expected a positive integer number of watts."
+        )
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"component_name={self.component_name!r}, value={self.value!r})"
+        )
+
+
+class RolloutFailedError(PlannerError):
+    """Raised when the operator marks a DGD rolling update as Failed.
+
+    Failed is a terminal rollout state (the operator sets ``endTime``).
+    Retrying until a generic timeout would leave the planner stuck for up to
+    30 minutes; instead we surface this as an immediate actionable error so
+    the operator or user can investigate and recover.
+    """
+
+    def __init__(self, deployment_name: str, reason: str = ""):
+        self.deployment_name = deployment_name
+        self.reason = reason
+        detail = f": {reason}" if reason else ""
+        message = (
+            f"DGD '{deployment_name}' rollingUpdate.phase is Failed{detail}. "
+            "Investigate the operator status and recover before restarting the planner."
+        )
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"deployment_name={self.deployment_name!r}, reason={self.reason!r})"
+        )

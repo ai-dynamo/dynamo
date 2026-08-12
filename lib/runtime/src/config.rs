@@ -418,55 +418,79 @@ impl RuntimeConfigBuilder {
     }
 }
 
-/// Check if a string is truthy
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value.
-pub fn is_truthy(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+// Canonical truthy/falsy/bool parsing for user-supplied configuration
+// (environment variables, headers, config values). The single implementation
+// lives in the zero-dependency `dynamo-truthy` crate so that crates which
+// cannot depend on `dynamo-runtime` share it too; this re-export is the
+// canonical import path for everything that can.
+pub use dynamo_truthy::{
+    env_is_falsey, env_is_truthy, is_falsey, is_truthy, parse_bool, parse_bool_opt,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleLogFormat {
+    Readable,
+    Jsonl,
 }
 
-pub fn parse_bool(val: &str) -> anyhow::Result<bool> {
-    if is_truthy(val) {
-        Ok(true)
-    } else if is_falsey(val) {
-        Ok(false)
-    } else {
-        anyhow::bail!(
-            "Invalid boolean value: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
-            val
-        )
+impl ConsoleLogFormat {
+    fn from_env_value(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "readable" => Some(Self::Readable),
+            "jsonl" => Some(Self::Jsonl),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Readable => "readable",
+            Self::Jsonl => "jsonl",
+        }
     }
 }
 
-/// Check if a string is falsey
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value (opposite of is_truthy).
-pub fn is_falsey(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no")
-}
-
-/// Check if an environment variable is truthy
-pub fn env_is_truthy(env: &str) -> bool {
-    match std::env::var(env) {
-        Ok(val) => is_truthy(val.as_str()),
-        Err(_) => false,
-    }
-}
-
-/// Check if an environment variable is falsey
-pub fn env_is_falsey(env: &str) -> bool {
-    match std::env::var(env) {
-        Ok(val) => is_falsey(val.as_str()),
-        Err(_) => false,
-    }
-}
-
-/// Check whether JSONL logging enabled
-/// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value
-pub fn jsonl_logging_enabled() -> bool {
+/// Return whether the legacy `DYN_LOGGING_JSONL` switch is enabled.
+///
+/// This remains a separate compatibility signal because older deployments
+/// also use it to enable local trace-context propagation.
+pub(crate) fn legacy_jsonl_logging_enabled() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOGGING_JSONL)
+}
+
+/// Return the console log format.
+///
+/// `DYN_LOGGING_CONSOLE_FORMAT` takes precedence. `DYN_LOGGING_JSONL` remains
+/// supported as a legacy fallback when the new setting is unset or blank.
+pub fn console_log_format() -> ConsoleLogFormat {
+    let legacy_format = || {
+        if legacy_jsonl_logging_enabled() {
+            ConsoleLogFormat::Jsonl
+        } else {
+            ConsoleLogFormat::Readable
+        }
+    };
+
+    match std::env::var(environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT) {
+        Ok(value) if value.trim().is_empty() => legacy_format(),
+        Ok(value) => match ConsoleLogFormat::from_env_value(value.trim()) {
+            Some(format) => format,
+            None => {
+                eprintln!(
+                    "Invalid {} value '{}'; using readable console logs",
+                    environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT,
+                    value
+                );
+                ConsoleLogFormat::Readable
+            }
+        },
+        Err(_) => legacy_format(),
+    }
+}
+
+/// Return whether the effective console log format is JSONL.
+pub fn jsonl_logging_enabled() -> bool {
+    console_log_format() == ConsoleLogFormat::Jsonl
 }
 
 /// Check whether logging with ANSI terminal escape codes and colors is disabled.
@@ -547,5 +571,36 @@ mod tests {
         // Test opposite behavior
         assert!(!is_truthy("0"));
         assert!(!is_falsey("1"));
+    }
+
+    #[test]
+    fn test_console_log_format() {
+        use environment_names::logging;
+
+        for (console_format, legacy_jsonl, expected) in [
+            (None, None, ConsoleLogFormat::Readable),
+            (None, Some("true"), ConsoleLogFormat::Jsonl),
+            (Some(""), Some("true"), ConsoleLogFormat::Jsonl),
+            (Some("   "), Some("true"), ConsoleLogFormat::Jsonl),
+            (Some(" jsonl "), Some("false"), ConsoleLogFormat::Jsonl),
+            (Some("readable"), Some("true"), ConsoleLogFormat::Readable),
+            (Some("jsonl"), Some("false"), ConsoleLogFormat::Jsonl),
+            (
+                Some("unsupported"),
+                Some("true"),
+                ConsoleLogFormat::Readable,
+            ),
+        ] {
+            temp_env::with_vars(
+                [
+                    (logging::DYN_LOGGING_CONSOLE_FORMAT, console_format),
+                    (logging::DYN_LOGGING_JSONL, legacy_jsonl),
+                ],
+                || {
+                    assert_eq!(console_log_format(), expected);
+                    assert_eq!(jsonl_logging_enabled(), expected == ConsoleLogFormat::Jsonl);
+                },
+            );
+        }
     }
 }

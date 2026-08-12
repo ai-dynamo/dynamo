@@ -17,7 +17,7 @@ rules:
   # annotation. When namespace-scoped RBAC is in effect (production mode
   # with rbac.namespaceRestricted=true, OR dev mode), the agent is invoked
   # with --namespace={{ .Release.Namespace }} via the downward API so its
-  # list call targets `list_namespaced_pod` (power_agent.py:438-442)
+  # list call targets `list_namespaced_pod` (power_agent.py `_list_pods_on_node`)
   # instead of the cluster-wide default; see daemonset.yaml + dev-pod.yaml.
   - apiGroups: [""]
     resources: ["pods"]

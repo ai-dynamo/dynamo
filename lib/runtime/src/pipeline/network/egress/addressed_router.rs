@@ -23,6 +23,7 @@ use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
 use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
+use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
@@ -54,6 +55,7 @@ fn decode_response_stream<U>(
     queue_start: Instant,
     tx_start: Instant,
     inflight_guard: InflightGuard,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> ManyOut<U>
 where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
@@ -76,7 +78,7 @@ where
                 );
                 return Some(U::from_err(err));
             }
-            match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
+            match payload_codec.decode::<NetworkStreamWrapper<U>>(&res_bytes) {
                 Ok(item) => {
                     is_complete_final = item.complete_final;
                     if let Some(data) = item.data {
@@ -90,8 +92,13 @@ where
                     }
                 }
                 Err(err) => {
-                    let json_str = String::from_utf8_lossy(&res_bytes);
-                    tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                    let response_bytes_len = res_bytes.len();
+                    tracing::warn!(
+                        %err,
+                        codec = payload_codec.name(),
+                        response_bytes_len,
+                        "failed deserializing request-plane response"
+                    );
                     Some(U::from_err(DynamoError::msg(err.to_string())))
                 }
             }
@@ -141,9 +148,10 @@ fn build_request_envelope<T>(
     recv_conn_info: ConnectionInfo,
     send_conn_info: Option<ConnectionInfo>,
     request: Option<&T>,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> Result<bytes::Bytes, Error>
 where
-    T: serde::Serialize + ?Sized,
+    T: serde::Serialize,
 {
     let request_id = context.id();
     let request_type = if send_conn_info.is_some() {
@@ -155,6 +163,7 @@ where
         id: request_id.to_string(),
         request_type,
         response_type: ResponseType::ManyOut,
+        payload_codec,
         connection_info: recv_conn_info,
         metadata: context.metadata().clone(),
         frontend_send_ts_ns: None,
@@ -163,7 +172,7 @@ where
 
     let ctrl = serialize_control_message(&control_message)?;
     let data: Option<Vec<u8>> = match request {
-        Some(req) => Some(serde_json::to_vec(req)?),
+        Some(req) => Some(payload_codec.encode(req)?),
         None => None,
     };
 
@@ -192,6 +201,12 @@ where
     Ok(buffer)
 }
 
+fn payload_codec_for_worker(instance: Option<&Instance>) -> RequestPlanePayloadCodec {
+    instance
+        .and_then(|instance| instance.request_plane_codec)
+        .unwrap_or(RequestPlanePayloadCodec::Json)
+}
+
 /// Await the network request-stream dial-in (if `request_stream_provider` is `Some`)
 /// and spawn a detached task that forwards every item from `input_stream` onto
 /// the request stream. Returns once the forwarder is spawned; `Err` if request-stream
@@ -200,6 +215,7 @@ async fn spawn_request_stream_forwarder<T>(
     request_stream_provider: Option<StreamProvider<StreamSender>>,
     mut input_stream: crate::engine::DataStream<T>,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> Result<(), Error>
 where
     T: serde::Serialize + Send + 'static,
@@ -244,7 +260,7 @@ where
                     None => break,
                 },
             };
-            let bytes = match serde_json::to_vec(&item) {
+            let bytes = match payload_codec.encode(&item) {
                 Ok(b) => b,
                 Err(e) => {
                     // Stream-side framing failure: the engine sees a
@@ -253,6 +269,7 @@ where
                     // dropping frames.
                     tracing::error!(
                         error = %e,
+                        codec = payload_codec.name(),
                         "failed to serialize bidirectional request frame; killing context"
                     );
                     engine_ctx.kill();
@@ -357,7 +374,9 @@ impl<T> AddressedRequest<T> {
         Self::with_instance(request, address, instance)
     }
 
-    pub(crate) fn into_parts(self) -> (T, String, Option<Instance>) {
+    /// `(request, address, instance)` — public so an external [`StreamingDispatch`]
+    /// impl can read the routed address + instance.
+    pub fn into_parts(self) -> (T, String, Option<Instance>) {
         (self.request, self.address, self.instance)
     }
 }
@@ -419,7 +438,7 @@ impl AddressedPushRouter {
     /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
     /// sugar, so we just do it inline here. Will consider only if we do want to call this from
     /// typed erased AsyncEngine impls.
-    pub async fn generate_bidirectional<T, U>(
+    pub async fn dispatch_bidirectional<T, U>(
         &self,
         instance: Instance,
         address: String,
@@ -470,6 +489,7 @@ impl AddressedPushRouter {
         let inflight_guard = InflightGuard::new();
 
         let enable_request_stream = input_stream.is_some();
+        let payload_codec = payload_codec_for_worker(instance);
 
         // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
         // which simplifies the cancellation of registration on error. Each side is
@@ -513,6 +533,7 @@ impl AddressedPushRouter {
             recv_registered.connection_info.clone(),
             send_registered.as_ref().map(|r| r.connection_info.clone()),
             request,
+            payload_codec,
         )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
@@ -543,8 +564,13 @@ impl AddressedPushRouter {
                 let (_conn_info, provider) = r.into_parts();
                 provider
             });
-            spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
-                .await?;
+            spawn_request_stream_forwarder(
+                request_stream_provider,
+                stream,
+                engine_ctx.clone(),
+                payload_codec,
+            )
+            .await?;
         }
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
@@ -592,6 +618,7 @@ impl AddressedPushRouter {
             queue_start,
             tx_start,
             inflight_guard,
+            payload_codec,
         ))
     }
 
@@ -678,7 +705,10 @@ fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
 
     let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
-        ErrorType::ResourceExhausted
+        // This ACK came from the one worker addressed by this dispatch. It says
+        // nothing about capacity elsewhere in the eligible pool, so preserve
+        // worker scope for migration instead of reporting pool exhaustion.
+        ErrorType::WorkerOverloaded
     } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
         ErrorType::Unavailable
     } else {
@@ -699,10 +729,10 @@ mod rejection_detection_tests {
     use super::*;
 
     #[test]
-    fn overload_payload_maps_to_resource_exhausted() {
+    fn overload_payload_maps_to_worker_overloaded() {
         let err = detect_worker_rejection_response(b"Server overloaded: worker at capacity")
             .expect("should detect overload");
-        assert_eq!(err.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
     }
 
     #[test]
@@ -713,14 +743,13 @@ mod rejection_detection_tests {
     }
 
     #[test]
-    fn detected_overload_satisfies_http_529_gate() {
-        // request_was_rejected (http/service/metrics.rs) → 529 keys on ResourceExhausted.
+    fn detected_overload_preserves_worker_scope() {
         let err =
             detect_worker_rejection_response(b"Server overloaded: test").expect("should detect");
         let any_err: anyhow::Error = err.into();
         assert!(crate::error::match_error_chain(
             any_err.as_ref(),
-            &[ErrorType::ResourceExhausted],
+            &[ErrorType::WorkerOverloaded],
             &[]
         ));
     }
@@ -747,12 +776,103 @@ where
     }
 }
 
+/// Transport seam beneath `PushRouter`: given an already-selected worker (typed
+/// request + resolved address), dispatch the final hop and return a typed stream.
+/// Selection, occupancy, fault detection, and migration stay in `PushRouter`
+/// above the seam; only the transport below it changes. [`AddressedPushRouter`]
+/// (the request plane) is the default impl.
+///
+/// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
+/// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
+/// `WorkerOverloaded` / `ResourceExhausted` / `Cancelled`), or
+/// `wrap_with_fault_detection`'s
+/// report-down / overload / migration won't fire.
+///
+/// The removal watcher behind `on_instance_removed` / `on_instance_added` is
+/// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
+/// holding per-instance state must share it per endpoint (the default cleans up
+/// shared per-runtime state, so it is unaffected).
+#[async_trait::async_trait]
+pub trait StreamingDispatch<T, U>: Send + Sync
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    /// Unary final hop: typed request in, typed response stream out.
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error>;
+
+    /// Bidirectional final hop (streaming input).
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error>;
+
+    /// Discovery-driven cleanup when an instance leaves — the request plane
+    /// cancels its call-home streams; another transport frees per-instance state.
+    async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
+
+    /// Discovery-driven notification when an instance (re)appears — the request
+    /// plane clears its tombstone.
+    async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
+}
+
+#[async_trait::async_trait]
+impl<T, U> StreamingDispatch<T, U> for AddressedPushRouter
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        // Delegate to the existing `AsyncEngine` impl (still used directly by the
+        // KV recovery worker-query path); behavior unchanged.
+        <Self as AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error>>::generate(
+            self, request,
+        )
+        .await
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error> {
+        self.dispatch_bidirectional(instance, address, input).await
+    }
+
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        let n = self.cancel_instance_streams(id).await;
+        if n > 0 {
+            tracing::warn!(
+                namespace = %id.namespace,
+                component = %id.component,
+                endpoint = %id.endpoint,
+                instance_id = id.instance_id,
+                cancelled = n,
+                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+            );
+        }
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        self.clear_instance_tombstone(id).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestType,
-        ResponseType, serialize_control_message,
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestPlanePayloadCodec,
+        RequestType, ResponseType, TwoPartCodec, build_request_envelope, payload_codec_for_worker,
+        serialize_control_message,
     };
+    use crate::{
+        component::{Instance, TransportType},
+        pipeline::Context,
+    };
+    use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
@@ -760,6 +880,7 @@ mod tests {
             id: "request-123".to_string(),
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
+            payload_codec: RequestPlanePayloadCodec::Json,
             connection_info: ConnectionInfo {
                 transport: "tcp".to_string(),
                 info: "{}".to_string(),
@@ -768,6 +889,49 @@ mod tests {
             frontend_send_ts_ns: None,
             request_stream_connection_info: None,
         }
+    }
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+    struct TestRequest {
+        value: u64,
+    }
+
+    #[test]
+    fn legacy_worker_without_codec_metadata_receives_json() {
+        let worker = Instance {
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            namespace: "default".to_string(),
+            instance_id: 42,
+            transport: TransportType::Nats("worker.generate".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let payload_codec = payload_codec_for_worker(Some(&worker));
+        assert_eq!(payload_codec, RequestPlanePayloadCodec::Json);
+
+        let request = TestRequest { value: 123 };
+        let buffer = build_request_envelope(
+            &Context::new(()),
+            ConnectionInfo {
+                transport: "tcp".to_string(),
+                info: "{}".to_string(),
+            },
+            None,
+            Some(&request),
+            payload_codec,
+        )
+        .expect("legacy-worker request envelope should encode");
+        let message = TwoPartCodec::default()
+            .decode_message(buffer)
+            .expect("request envelope should decode");
+
+        let control: RequestControlMessage = serde_json::from_slice(&message.header).unwrap();
+        assert_eq!(control.payload_codec, RequestPlanePayloadCodec::Json);
+        assert_eq!(
+            serde_json::from_slice::<TestRequest>(&message.data).unwrap(),
+            request
+        );
     }
 
     #[test]

@@ -59,6 +59,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tcp_tls_cert_path: Optional[str] = None
+    tcp_tls_key_path: Optional[str] = None
+    tcp_tls_ca_cert_path: Optional[str] = None
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -82,12 +85,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
+    reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
     trust_remote_code: bool
+    frontend_route_extensions: list[str]
 
-    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
         if self.load_aware:
@@ -157,7 +162,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
-        self.apply_admission_control()
+        self.validate_rejection_thresholds()
+        self.log_rejection_thresholds()
 
 
 @register_encoder(FrontendConfig)
@@ -246,6 +252,30 @@ class FrontendArgGroup(ArgGroup):
             arg_type=pathlib.Path,
         )
 
+        add_argument(
+            g,
+            flag_name="--tcp-tls-cert-path",
+            env_var="DYN_TCP_TLS_CERT_PATH",
+            default=None,
+            help="Path to PEM certificate for the TCP server.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-key-path",
+            env_var="DYN_TCP_TLS_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP server certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used to verify the TCP peer's certificate.",
+        )
+
         # Router options (shared with dynamo.router)
         RouterArgGroup().add_arguments(parser)
 
@@ -272,7 +302,8 @@ class FrontendArgGroup(ArgGroup):
             default=0,
             help=(
                 "Maximum number of times a request may be migrated to a different engine worker. "
-                "When > 0, enables request migration on worker disconnect."
+                "When > 0, enables migration after worker disconnects, response timeouts, "
+                "incomplete streams, and worker-local overload rejection."
             ),
             arg_type=int,
         )
@@ -346,6 +377,21 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--frontend-route-extension",
+            env_var="DYN_FRONTEND_ROUTE_EXTENSIONS",
+            default=[],
+            dest="frontend_route_extensions",
+            action="append",
+            help=(
+                "Trusted frontend route extension: a name registered under the "
+                "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
+                "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
+                "whitespace-separated values."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--discovery-backend",
             env_var="DYN_DISCOVERY_BACKEND",
             default="etcd",
@@ -373,8 +419,8 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_EVENT_PLANE",
             default=None,
             help="Determines how events are published [nats|zmq]. If unset, "
-            "auto-detected from --discovery-backend (zmq for file/mem, nats "
-            "for etcd/kubernetes).",
+            "defaults to 'zmq' for all discovery backends. Set to 'nats' to use a "
+            "NATS-based event plane.",
             choices=["nats", "zmq"],
         )
         add_negatable_bool_argument(
@@ -420,6 +466,16 @@ class FrontendArgGroup(ArgGroup):
                 "with the complete reasoning block once thinking ends. "
                 "Can be combined with --enable-streaming-tool-dispatch."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--reasoning-field-name",
+            env_var="DYN_REASONING_FIELD_NAME",
+            default="reasoning_content",
+            help=(
+                "OpenAI-compatible response field used for emitted reasoning content."
+            ),
+            choices=["reasoning_content", "reasoning"],
         )
         # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
         # Both definitions are needed: runtime_args controls the Rust-native
@@ -488,11 +544,12 @@ class FrontendArgGroup(ArgGroup):
             default="default",
             dest="tokenizer_backend",
             help=(
-                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
-                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
-                "Decoding always uses HuggingFace. Has no effect on TikToken models."
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library), "
+                "'fastokens' (fastokens crate for high-performance BPE encoding), or "
+                "'basetenkenizer' (Baseten Tokenizer for native encoding and decoding). "
+                "Has no effect on TikToken models."
             ),
-            choices=["default", "fastokens"],
+            choices=["default", "fastokens", "basetenkenizer"],
         )
 
         add_negatable_bool_argument(

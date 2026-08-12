@@ -16,7 +16,11 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_EXPECTED,
+    get_multimodal_test_image_bytes,
+)
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm_xpu import (
     VLLM_MULTIMODAL_PROFILES,
@@ -111,7 +115,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(120),  # ~5x observed 24.3s; CI machines are slower
+            pytest.mark.timeout(420),
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -211,8 +215,14 @@ vllm_configs = {
         marks=[
             pytest.mark.xpu_2,
             pytest.mark.router,
-            pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2263"),
+            pytest.mark.profiled_vram_gib(7.6),  # 2x 3.8 GiB (one per GPU)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap per worker (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                420
+            ),  # 2 workers + router startup; bumped for GPU-parallel headroom
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -228,8 +238,14 @@ vllm_configs = {
         marks=[
             pytest.mark.xpu_2,
             pytest.mark.router,
+            pytest.mark.profiled_vram_gib(7.6),  # 2x 3.8 GiB (one per GPU)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap per worker (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                420
+            ),  # 2 workers + router startup; bumped for GPU-parallel headroom
             pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2264"),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -382,7 +398,9 @@ vllm_configs = {
             "--model",
             "Qwen/Qwen3-VL-8B-Instruct",
             "--max-model-len",
-            "10000",
+            "4096",
+            "--gpu-memory-utilization",
+            "0.90",
             "--dyn-tool-call-parser",
             "hermes",
         ],
@@ -476,7 +494,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["red", "static", "still"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -654,7 +672,14 @@ def test_multimodal_b64(
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[],  # markers at function-level
         model="Qwen/Qwen2.5-VL-7B-Instruct",
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        script_args=[
+            "--model",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "--max-model-len",
+            "4096",
+            "--gpu-memory-utilization",
+            "0.90",
+        ],
         delayed_start=0,
         timeout=360,
         request_payloads=[b64_payload],

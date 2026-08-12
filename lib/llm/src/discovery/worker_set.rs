@@ -1,17 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A WorkerSet represents a group of workers deployed from the same configuration,
-//! identified by their shared namespace. Each WorkerSet owns a complete pipeline
-//! (engines, KV router, prefill router) built from its specific ModelDeploymentCard.
+//! A WorkerSet represents a group of workers behind one serving endpoint. Each
+//! WorkerSet owns a complete pipeline (engines, KV router, prefill router) built
+//! from its specific ModelDeploymentCard.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use dynamo_runtime::engine::{AsyncEngine, Data};
+use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::KvWorkerMonitor,
-    kv_router::{KvRouter, PrefillRouter},
+    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -19,17 +24,82 @@ use crate::{
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
-            completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
+            classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
+            images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
             videos::OpenAIVideosStreamingEngine,
         },
     },
 };
 
+type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
+
+struct LoraContextEngine<Req: Data, Resp: Data> {
+    inner: StreamingEngine<Req, Resp>,
+    lora_name: String,
+}
+
+#[async_trait]
+impl<Req: Data, Resp: Data> AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>
+    for LoraContextEngine<Req, Resp>
+{
+    async fn generate(&self, mut request: SingleIn<Req>) -> Result<ManyOut<Resp>, Error> {
+        request.insert(
+            crate::preprocessor::LORA_NAME_CONTEXT_KEY,
+            self.lora_name.clone(),
+        );
+        self.inner.generate(request).await
+    }
+}
+
+struct LoraGenerateEngine {
+    inner: GenerateStreamingEngine,
+    lora_name: String,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+        ManyOut<crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        Error,
+    > for LoraGenerateEngine
+{
+    async fn generate(
+        &self,
+        mut request: SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+    ) -> Result<
+        ManyOut<crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        Error,
+    > {
+        request.routing.get_or_insert_default().lora_name = Some(self.lora_name.clone());
+        self.inner.generate(request).await
+    }
+}
+
+fn lora_context_engine<Req: Data, Resp: Data>(
+    engine: &Option<StreamingEngine<Req, Resp>>,
+    lora_name: &str,
+) -> Option<StreamingEngine<Req, Resp>> {
+    engine.as_ref().map(|inner| {
+        Arc::new(LoraContextEngine {
+            inner: inner.clone(),
+            lora_name: lora_name.to_string(),
+        }) as Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>
+    })
+}
+
 /// A set of workers from the same namespace/configuration with their own pipeline.
 pub struct WorkerSet {
     /// Full namespace (e.g., "ns-abc12345")
     namespace: String,
+
+    /// Exact serving pool identity. Discovery-backed WorkerSets always set
+    /// this; in-process models have no distributed endpoint.
+    endpoint_id: Option<EndpointId>,
+
+    /// Endpoint handle used only by committed topology reconciliation.
+    topology_endpoint: Option<Endpoint>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -41,50 +111,76 @@ pub struct WorkerSet {
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
+    pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
+    pub(crate) pooling_engine: Option<OpenAIPoolingStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
-
-    /// KV router for this set's workers (if KV mode)
-    pub(crate) kv_router: Option<Arc<KvRouter>>,
+    pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
-    pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
+    pub(crate) prefill_router: Option<Arc<dyn PrefillRouterLifecycle>>,
+
+    /// Optional multimodal encoder hop. Stored for discovery-driven
+    /// deactivation/reactivation when Encode workers leave or rejoin.
+    pub(crate) encoder_router: Option<Arc<EncoderRouter>>,
 
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
+
+    /// Cancels background work created while materializing this WorkerSet.
+    lifecycle_cancellation: Option<CancellationToken>,
 }
 
 impl WorkerSet {
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
+            endpoint_id: None,
+            topology_endpoint: None,
             mdcsum,
             card,
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
+            classify_engine: None,
+            pooling_engine: None,
             images_engine: None,
             videos_engine: None,
             audios_engine: None,
             tensor_engine: None,
             realtime_engine: None,
-            kv_router: None,
+            generate_engine: None,
             worker_monitor: None,
             prefill_router: None,
+            encoder_router: None,
             instance_count_rx: None,
+            lifecycle_cancellation: None,
         }
     }
 
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    pub fn endpoint_id(&self) -> Option<&EndpointId> {
+        self.endpoint_id.as_ref()
+    }
+
+    pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
+        self.endpoint_id = Some(endpoint.id());
+        self.topology_endpoint = Some(endpoint);
+    }
+
+    pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
+        self.topology_endpoint.as_ref()
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -107,6 +203,14 @@ impl WorkerSet {
         self.embeddings_engine.is_some()
     }
 
+    pub fn has_classify_engine(&self) -> bool {
+        self.classify_engine.is_some()
+    }
+
+    pub fn has_pooling_engine(&self) -> bool {
+        self.pooling_engine.is_some()
+    }
+
     pub fn has_images_engine(&self) -> bool {
         self.images_engine.is_some()
     }
@@ -127,6 +231,18 @@ impl WorkerSet {
         self.realtime_engine.is_some()
     }
 
+    pub fn has_generate_engine(&self) -> bool {
+        self.generate_engine.is_some()
+    }
+
+    /// Check whether this worker set advertises `capability` in its runtime configuration.
+    pub fn supports_runtime_capability(&self, capability: &str) -> bool {
+        matches!(
+            self.card.runtime_config.runtime_data.get(capability),
+            Some(serde_json::Value::Bool(true))
+        )
+    }
+
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
         self.has_chat_engine() || self.has_completions_engine()
@@ -140,16 +256,42 @@ impl WorkerSet {
         self.has_chat_engine()
             || self.has_completions_engine()
             || self.has_embeddings_engine()
+            || self.has_classify_engine()
+            || self.has_pooling_engine()
             || self.has_images_engine()
             || self.has_tensor_engine()
             || self.has_videos_engine()
             || self.has_audios_engine()
             || self.has_realtime_engine()
+            || self.has_generate_engine()
     }
 
-    /// Whether this set tracks a prefill model (no engine, just lifecycle)
+    /// Whether this set tracks an Encode worker. Encode WorkerSets carry
+    /// no serving engines (the watcher's Encode role gate skips
+    /// pipeline construction) -- if we let `is_prefill_set` classify
+    /// them, model-displayability logic would gate /v1/models on a
+    /// PrefillRouter that doesn't exist for Encode. Keep the two
+    /// mutually exclusive.
+    ///
+    /// **Role-based, not engine-field-based.** Unlike `has_chat_engine()`
+    /// / `has_completions_engine()` / etc. (which inspect typed engine
+    /// slots on the WorkerSet), `is_encode_set` reads `card.worker_type`
+    /// directly. The Encode role intentionally has no `encode_engine`
+    /// field -- Encode workers don't expose a public OpenAI-shaped
+    /// endpoint, so there is nothing to slot. The role itself is the
+    /// contract.
+    pub fn is_encode_set(&self) -> bool {
+        matches!(
+            self.card.worker_type,
+            Some(crate::worker_type::WorkerType::Encode),
+        )
+    }
+
+    /// Whether this set tracks a prefill model (no engine, just
+    /// lifecycle). Excludes Encode sets, which also lack engines but
+    /// are not gated through PrefillRouter.
     pub fn is_prefill_set(&self) -> bool {
-        !self.has_any_serving_engine()
+        !self.is_encode_set() && !self.has_any_serving_engine()
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
@@ -175,14 +317,56 @@ impl WorkerSet {
         self.instance_count_rx = Some(rx);
     }
 
-    /// Whether this WorkerSet can serve requests. Delegates to the prefill router
-    /// if one exists; otherwise always returns true.
-    /// When the prefill router is deactivated and enforce_disagg is set, this returns
-    /// false, causing the model to be hidden from /v1/models and requests to be rejected.
-    pub fn can_serve_requests(&self) -> bool {
-        self.prefill_router
+    pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {
+        self.lifecycle_cancellation = Some(cancellation);
+    }
+
+    pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
+        let lora_name = card
+            .lora
             .as_ref()
-            .is_none_or(|pr| pr.can_serve_requests())
+            .expect("adapter views require LoRA metadata")
+            .name
+            .clone();
+        let generate_engine = self.generate_engine.as_ref().map(|inner| {
+            Arc::new(LoraGenerateEngine {
+                inner: inner.clone(),
+                lora_name: lora_name.clone(),
+            }) as GenerateStreamingEngine
+        });
+        Self {
+            namespace: self.namespace.clone(),
+            endpoint_id: self.endpoint_id.clone(),
+            topology_endpoint: self.topology_endpoint.clone(),
+            mdcsum: self.mdcsum.clone(),
+            card,
+            chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
+            completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
+            embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
+            classify_engine: lora_context_engine(&self.classify_engine, &lora_name),
+            pooling_engine: lora_context_engine(&self.pooling_engine, &lora_name),
+            images_engine: lora_context_engine(&self.images_engine, &lora_name),
+            videos_engine: lora_context_engine(&self.videos_engine, &lora_name),
+            audios_engine: lora_context_engine(&self.audios_engine, &lora_name),
+            tensor_engine: lora_context_engine(&self.tensor_engine, &lora_name),
+            // Realtime is bidirectional, so the server-streaming LoRA context wrapper cannot
+            // inject the adapter identity. Fail closed instead of serving the base weights.
+            realtime_engine: None,
+            generate_engine,
+            worker_monitor: self.worker_monitor.clone(),
+            prefill_router: self.prefill_router.clone(),
+            encoder_router: self.encoder_router.clone(),
+            instance_count_rx: self.instance_count_rx.clone(),
+            lifecycle_cancellation: None,
+        }
+    }
+}
+
+impl Drop for WorkerSet {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.lifecycle_cancellation.take() {
+            cancellation.cancel();
+        }
     }
 }
 
@@ -190,22 +374,26 @@ impl WorkerSet {
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    use crate::protocols::common::llm_backend::LLMEngineOutput;
+    use crate::protocols::common::preprocessor::PreprocessedRequest;
     use crate::types::Annotated;
     use crate::types::generic::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
     use crate::types::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
     use crate::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     };
+    use crate::types::openai::classify::{NvCreateClassifyRequest, NvCreateClassifyResponse};
     use crate::types::openai::completions::{
         NvCreateCompletionRequest, NvCreateCompletionResponse,
     };
     use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
     use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
+    use crate::types::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
     use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
     use async_trait::async_trait;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
-    use std::marker::PhantomData;
+    use std::{marker::PhantomData, sync::Mutex};
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
         WorkerSet::new(
@@ -239,11 +427,83 @@ mod tests {
         }
     }
 
+    struct CaptureGenerateEngine {
+        observed_lora: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CaptureGenerateEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            *self.observed_lora.lock().unwrap() = request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.clone());
+            Err(anyhow::anyhow!("captured request"))
+        }
+    }
+
     #[test]
     fn test_worker_set_basics() {
         let ws = make_worker_set("ns1", "abc123");
         assert_eq!(ws.namespace(), "ns1");
         assert_eq!(ws.mdcsum(), "abc123");
+    }
+
+    #[tokio::test]
+    async fn adapter_view_routes_generate_requests_with_adapter_identity() {
+        let observed_lora = Arc::new(Mutex::new(None));
+        let mut base = make_worker_set("ns1", "abc123");
+        base.generate_engine = Some(Arc::new(CaptureGenerateEngine {
+            observed_lora: observed_lora.clone(),
+        }));
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+        let request = PreprocessedRequest::builder()
+            .model("adapter-model".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+
+        let result = adapter
+            .generate_engine
+            .as_ref()
+            .unwrap()
+            .generate(SingleIn::new(request))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            observed_lora.lock().unwrap().as_deref(),
+            Some("adapter-model")
+        );
+    }
+
+    #[test]
+    fn adapter_view_does_not_advertise_unwrapped_realtime_engine() {
+        let mut base = make_worker_set("ns1", "abc123");
+        base.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+
+        let adapter = base.adapter_view(adapter_card);
+
+        assert!(base.has_realtime_engine());
+        assert!(!adapter.has_realtime_engine());
     }
 
     #[test]
@@ -252,11 +512,14 @@ mod tests {
         assert!(!ws.has_chat_engine());
         assert!(!ws.has_completions_engine());
         assert!(!ws.has_embeddings_engine());
+        assert!(!ws.has_classify_engine());
+        assert!(!ws.has_pooling_engine());
         assert!(!ws.has_images_engine());
         assert!(!ws.has_videos_engine());
         assert!(!ws.has_audios_engine());
         assert!(!ws.has_tensor_engine());
         assert!(!ws.has_realtime_engine());
+        assert!(!ws.has_generate_engine());
         assert!(!ws.has_decode_engine());
         assert!(ws.is_prefill_set());
     }
@@ -300,6 +563,18 @@ mod tests {
             "embeddings"
         );
         check!(
+            classify_engine,
+            has_classify_engine,
+            StubEngine::<NvCreateClassifyRequest, NvCreateClassifyResponse>::new(),
+            "classify"
+        );
+        check!(
+            pooling_engine,
+            has_pooling_engine,
+            StubEngine::<NvCreatePoolingRequest, NvCreatePoolingResponse>::new(),
+            "pooling"
+        );
+        check!(
             images_engine,
             has_images_engine,
             StubEngine::<NvCreateImageRequest, NvImagesResponse>::new(),
@@ -328,6 +603,12 @@ mod tests {
             has_realtime_engine,
             Arc::new(crate::engines::EchoBidirectionalEngine),
             "realtime"
+        );
+        check!(
+            generate_engine,
+            has_generate_engine,
+            StubEngine::<PreprocessedRequest, LLMEngineOutput>::new(),
+            "generate"
         );
     }
 
@@ -381,5 +662,60 @@ mod tests {
 
         tx.send(vec![100, 200, 300]).unwrap();
         assert_eq!(ws.worker_count(), 3);
+    }
+
+    // -------------------------------------------------------------------
+    // Encode-set classification
+    //
+    // Encode WorkerSets carry no serving engines (the watcher's role
+    // gate skips pipeline construction), so the legacy "no engines =
+    // prefill" rule would misclassify them. is_encode_set distinguishes
+    // them via card.worker_type and is_prefill_set excludes them so the
+    // two predicates stay mutually exclusive.
+    // -------------------------------------------------------------------
+
+    fn make_encode_worker_set() -> WorkerSet {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Encode);
+        WorkerSet::new("ns1".to_string(), "abc".to_string(), card)
+    }
+
+    #[test]
+    fn encode_set_is_classified_as_encode_not_prefill() {
+        let ws = make_encode_worker_set();
+        assert!(ws.is_encode_set());
+        // The two predicates must be mutually exclusive: an Encode set
+        // has no engines but must NOT be classified as prefill, since
+        // model-displayability logic gates /v1/models on PrefillRouter
+        // for prefill sets and Encode workers have no such router.
+        assert!(!ws.is_prefill_set());
+    }
+
+    #[test]
+    fn non_encode_engineless_set_stays_classified_as_prefill() {
+        // Regression guard: the existing "engineless = prefill" rule
+        // must still hold for worker_type = None / Prefill / Decode /
+        // Aggregated. Only Encode is carved out.
+        let mut card_none = ModelDeploymentCard::default();
+        card_none.worker_type = None;
+        let ws = WorkerSet::new("ns1".to_string(), "abc".to_string(), card_none);
+        assert!(!ws.is_encode_set());
+        assert!(ws.is_prefill_set());
+
+        for role in [
+            crate::worker_type::WorkerType::Prefill,
+            crate::worker_type::WorkerType::Decode,
+            crate::worker_type::WorkerType::Aggregated,
+        ] {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(role);
+            let ws = WorkerSet::new("ns1".to_string(), "abc".to_string(), card);
+            assert!(!ws.is_encode_set(), "{:?} should not be Encode", role);
+            assert!(
+                ws.is_prefill_set(),
+                "{:?} should remain prefill-classified",
+                role
+            );
+        }
     }
 }

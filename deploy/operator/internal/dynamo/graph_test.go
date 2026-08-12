@@ -33,6 +33,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -854,6 +855,23 @@ func TestAppendMissingPVCVolumesForMountsAddsMissingPVCs(t *testing.T) {
 	assert.Equal(t, "config", got[2].Name)
 }
 
+func TestAppendMissingPVCVolumesForMountsKeepsRepeatedVolumeMountsUnique(t *testing.T) {
+	volumes := []corev1.Volume{
+		{Name: "shared-model", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-cache-pvc"}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "shared-model", MountPath: "/model-store", SubPath: "models/glm"},
+		{Name: "shared-model", MountPath: "/cache/sglang", SubPath: "cache/sglang/glm"},
+	}
+
+	got := appendMissingPVCVolumesForMounts(volumes, mounts)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "shared-model", got[0].Name)
+	require.NotNil(t, got[0].PersistentVolumeClaim)
+	assert.Equal(t, "model-cache-pvc", got[0].PersistentVolumeClaim.ClaimName)
+}
+
 func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnnotations(t *testing.T) {
 	className := "nginx"
 	alpha := &v1alpha1.DynamoGraphDeployment{
@@ -1144,9 +1162,9 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
-	clusterTopology := &grovev1alpha1.ClusterTopology{
+	clusterTopology := &grovev1alpha1.ClusterTopologyBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
-		Spec: grovev1alpha1.ClusterTopologySpec{
+		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
 				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
 				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
@@ -1175,11 +1193,13 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 		},
 	}
 
+	operatorConfig := &configv1alpha1.OperatorConfiguration{}
+	runtimeConfig := &controller_common.RuntimeConfig{}
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
 		dgd,
-		&configv1alpha1.OperatorConfiguration{},
-		&controller_common.RuntimeConfig{},
+		operatorConfig,
+		runtimeConfig,
 		kubeClient,
 		nil,
 		nil,
@@ -1220,6 +1240,83 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	}, topologyItems)
 	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
 	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
+}
+
+func TestGenerateGrovePodCliqueSet_InjectsReadyCheckpointRestore(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "checkpoint-storage",
+				Namespace: "default",
+			},
+		}).
+		Build()
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+			}},
+		},
+	}
+	operatorConfig := &configv1alpha1.OperatorConfiguration{
+		Checkpoint: configv1alpha1.CheckpointConfiguration{
+			Enabled: true,
+			Storage: configv1alpha1.CheckpointStorageConfiguration{
+				Type: snapshotprotocol.StorageTypePVC,
+				PVC: configv1alpha1.CheckpointPVCConfig{
+					PVCName:  "checkpoint-storage",
+					BasePath: "/checkpoints",
+				},
+			},
+		},
+	}
+	runtimeConfig := &controller_common.RuntimeConfig{
+		Gate: features.Gates{Checkpoint: true},
+	}
+	checkpointInfos := map[string]*checkpoint.CheckpointInfo{
+		"worker": {
+			Enabled:       true,
+			Ready:         true,
+			Hash:          "ready-checkpoint",
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		operatorConfig,
+		runtimeConfig,
+		kubeClient,
+		nil,
+		nil,
+		nil,
+		checkpointInfos,
+	)
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Cliques, 1)
+
+	podSpec := got.Spec.Template.Cliques[0].Spec.PodSpec
+	var checkpointVolume *corev1.Volume
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == snapshotprotocol.CheckpointVolumeName {
+			checkpointVolume = &podSpec.Volumes[i]
+			break
+		}
+	}
+	require.NotNil(t, checkpointVolume)
+	require.NotNil(t, checkpointVolume.PersistentVolumeClaim)
+	assert.Equal(t, "checkpoint-storage", checkpointVolume.PersistentVolumeClaim.ClaimName)
 }
 
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
@@ -1691,6 +1788,48 @@ func Test_mergeEnvs(t *testing.T) {
 			})
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("mergeEnvs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAddStandardEnvVars_NATS(t *testing.T) {
+	tests := []struct {
+		name        string
+		natsAddress string
+		wantNATS    bool
+	}{
+		{
+			name: "default configuration omits NATS_SERVER",
+		},
+		{
+			name:        "bundled NATS injects NATS_SERVER",
+			natsAddress: "nats://dynamo-nats.dynamo-system.svc.cluster.local:4222",
+			wantNATS:    true,
+		},
+		{
+			name:        "external NATS injects NATS_SERVER",
+			natsAddress: "nats://external-nats:4222",
+			wantNATS:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					NATSAddress: tt.natsAddress,
+				},
+			}
+
+			AddStandardEnvVars(container, operatorConfig)
+			envByName := envVarsToMap(container.Env)
+
+			if tt.wantNATS {
+				assert.Equal(t, tt.natsAddress, envByName["NATS_SERVER"])
+			} else {
+				assert.NotContains(t, envByName, "NATS_SERVER")
 			}
 		})
 	}
@@ -4647,7 +4786,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeWorker,
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
-						Args: []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+						Args: []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 					},
 				},
 			},
@@ -4655,7 +4794,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleMain,
 			numberOfNodes:     1,
 			expectError:       false,
-			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 			expectNotContains: []string{"ray start"},
 		},
 	}
@@ -4943,6 +5082,23 @@ func TestExpandRolesForService(t *testing.T) {
 	}
 }
 
+// forceScalingGroup is v1beta1-only, so it gets its own case instead of a
+// row in the alpha-shaped table above: the engine PCLQ holds one pod
+// regardless of the component replica count (the PCSG carries the scale).
+func TestExpandRolesForComponent_SingleNodeForceScalingGroup(t *testing.T) {
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Replicas: ptr.To(int32(4)),
+		Experimental: &v1beta1.ExperimentalSpec{
+			Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+		},
+	}
+	got := expandRolesForComponent("svc", component.Replicas, 1, component)
+	want := []ServiceRole{{Name: "svc", Role: RoleMain, Replicas: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("expandRolesForComponent() = %v, want %v", got, want)
+	}
+}
+
 func TestRoleEnum(t *testing.T) {
 	// Test that role constants are defined correctly
 	if RoleLeader != "leader" {
@@ -5064,7 +5220,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := detectBackendFrameworkFromArgs(tt.command, tt.args)
+			result, err := DetectBackendFrameworkFromArgs(tt.command, tt.args)
 
 			if tt.expectError {
 				if err == nil {
@@ -6227,30 +6383,34 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 }
 
 func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T) {
-	podSpec, err := GenerateBasePodSpec(
-		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType: commonconsts.ComponentTypeWorker,
-			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
-				Enabled:               true,
-				Mode:                  v1alpha1.GMSModeIntraPod,
-				ExtraClientContainers: []string{"gms-loader"},
-			},
-			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-				MainContainer: &corev1.Container{
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-						},
+	t.Log("Set up intra-pod GMS with two declared extra clients")
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled:               true,
+			Mode:                  v1alpha1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader", "metrics-client"},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 					},
 				},
-				PodSpec: &corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:  "gms-loader",
-						Image: "loader:latest",
-					}},
+			},
+			PodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "gms-loader", Image: "loader:latest"},
+					{Name: "metrics-client", Image: "metrics:latest"},
 				},
 			},
-		}),
+		},
+	})
+
+	t.Log("Render the pod specification")
+	podSpec, err := GenerateBasePodSpec(
+		component,
 		BackendFrameworkVLLM,
 		&mockSecretsRetriever{},
 		"test-deployment",
@@ -6265,43 +6425,53 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 	)
 	require.NoError(t, err)
 
+	t.Log("Verify every requested container is wired as a GMS client")
 	require.NotNil(t, findInitContainerByName(podSpec, gmsruntime.ServerContainerName))
 	var main *corev1.Container
 	var loader *corev1.Container
+	var metricsClient *corev1.Container
 	for i := range podSpec.Containers {
 		switch podSpec.Containers[i].Name {
 		case commonconsts.MainContainerName:
 			main = &podSpec.Containers[i]
 		case "gms-loader":
 			loader = &podSpec.Containers[i]
+		case "metrics-client":
+			metricsClient = &podSpec.Containers[i]
 		}
 	}
 	require.NotNil(t, main)
 	require.NotNil(t, loader)
+	require.NotNil(t, metricsClient)
 
 	assertGMSClientContainer(t, main)
 	assertGMSClientContainer(t, loader)
+	assertGMSClientContainer(t, metricsClient)
 }
 
-func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(t *testing.T) {
-	podSpec, err := GenerateBasePodSpec(
-		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType: commonconsts.ComponentTypeWorker,
-			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
-				Enabled:               true,
-				Mode:                  v1alpha1.GMSModeIntraPod,
-				ExtraClientContainers: []string{"missing"},
-			},
-			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-				MainContainer: &corev1.Container{
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-						},
+func TestGenerateBasePodSpec_GPUMemoryServiceRejectsMissingExtraClientContainers(t *testing.T) {
+	t.Log("Set up intra-pod GMS with two unresolved extra clients")
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled:               true,
+			Mode:                  v1alpha1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"missing-b", "missing-a"},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 					},
 				},
 			},
-		}),
+		},
+	})
+
+	t.Log("Render the invalid pod specification")
+	podSpec, err := GenerateBasePodSpec(
+		component,
 		BackendFrameworkVLLM,
 		&mockSecretsRetriever{},
 		"test-deployment",
@@ -6314,20 +6484,13 @@ func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(
 		nil,
 		nil,
 	)
-	require.NoError(t, err)
-	var main *corev1.Container
-	var missing *corev1.Container
-	for i := range podSpec.Containers {
-		switch podSpec.Containers[i].Name {
-		case commonconsts.MainContainerName:
-			main = &podSpec.Containers[i]
-		case "missing":
-			missing = &podSpec.Containers[i]
-		}
-	}
-	require.NotNil(t, main)
-	assertGMSClientContainer(t, main)
-	assert.Nil(t, missing)
+
+	t.Log("Verify rendering fails with every unresolved client named")
+	require.Error(t, err)
+	assert.Nil(t, podSpec)
+	assert.Contains(t, err.Error(), "gpuMemoryService.extraClientContainers")
+	assert.Contains(t, err.Error(), "missing-a")
+	assert.Contains(t, err.Error(), "missing-b")
 }
 
 func assertGMSClientContainer(t *testing.T, container *corev1.Container) {
@@ -6368,6 +6531,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 		expectError    bool
 		expectedPVCs   []string
 		expectedMounts []corev1.VolumeMount
+		expectedInit   []corev1.VolumeMount
 	}{
 		{
 			name: "valid volumeMounts",
@@ -6388,7 +6552,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 			},
 		},
 		{
-			name: "volumeMounts keep generated PVC when podTemplate has other volumes",
+			name: "volumeMounts compose with extra main container mounts",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeFrontend,
 				VolumeMounts: []v1alpha1.VolumeMount{
@@ -6399,6 +6563,14 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				},
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					PodSpec: &corev1.PodSpec{
+						InitContainers: []corev1.Container{
+							{
+								Name: "init",
+								VolumeMounts: []corev1.VolumeMount{
+									{Name: "test-pvc", MountPath: "/data"},
+								},
+							},
+						},
 						Volumes: []corev1.Volume{
 							{
 								Name: "config",
@@ -6410,13 +6582,22 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 							},
 						},
 					},
+					MainContainer: &corev1.Container{
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "config", MountPath: "/config"},
+						},
+					},
 				},
 			},
 			expectError:  false,
 			expectedPVCs: []string{"test-pvc"},
 			expectedMounts: []corev1.VolumeMount{
+				{Name: "config", MountPath: "/config"},
 				{Name: "test-pvc", MountPath: "/data"},
 				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+			expectedInit: []corev1.VolumeMount{
+				{Name: "test-pvc", MountPath: "/data"},
 			},
 		},
 		{
@@ -6521,6 +6702,10 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				if !found {
 					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", expectedMount)
 				}
+			}
+			if tt.expectedInit != nil {
+				require.NotEmpty(t, podSpec.InitContainers)
+				assert.Equal(t, tt.expectedInit, podSpec.InitContainers[0].VolumeMounts)
 			}
 		})
 	}
@@ -7014,6 +7199,302 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", tt.expectedMount)
 				}
 			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		VolumeMounts: []v1alpha1.VolumeMount{
+			{Name: "model-cache", MountPoint: "/models"},
+			{
+				Name:                  "compilation-cache",
+				MountPoint:            "/home/dynamo/.cache/vllm",
+				UseAsCompilationCache: true,
+			},
+		},
+	}
+
+	for _, deploymentType := range []commonconsts.MultinodeDeploymentType{
+		commonconsts.MultinodeDeploymentTypeGrove,
+		commonconsts.MultinodeDeploymentTypeLWS,
+	} {
+		t.Run(string(deploymentType), func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				betaComponent(t, component),
+				BackendFrameworkVLLM,
+				nil,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				&configv1alpha1.OperatorConfiguration{},
+				deploymentType,
+				"test-service",
+				nil,
+				nil,
+			)
+			require.NoError(t, err)
+			require.NotEmpty(t, podSpec.Containers)
+
+			var compilationCacheMounts []corev1.VolumeMount
+			for _, mount := range podSpec.Containers[0].VolumeMounts {
+				if mount.MountPath == "/home/dynamo/.cache/vllm" {
+					compilationCacheMounts = append(compilationCacheMounts, mount)
+				}
+			}
+			require.Equal(t, []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/home/dynamo/.cache/vllm",
+			}}, compilationCacheMounts)
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_ConvertedCompilationCacheUsesDefaultMount(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		VolumeMounts: []v1alpha1.VolumeMount{
+			{Name: "model-cache", MountPoint: "/models"},
+			{Name: "compilation-cache", UseAsCompilationCache: true},
+		},
+	}
+
+	podSpec, err := GenerateBasePodSpec(
+		betaComponent(t, component),
+		BackendFrameworkVLLM,
+		nil,
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, podSpec.Containers)
+	assert.Contains(t, podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      "compilation-cache",
+		MountPath: commonconsts.DefaultVLLMCacheMountPoint,
+	})
+}
+
+func TestApplyCompilationCacheRepairsLegacyMounts(t *testing.T) {
+	container := &corev1.Container{
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "model-cache", MountPath: "/models"},
+			{Name: "compilation-cache"},
+			{Name: "compilation-cache"},
+		},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"},
+	}
+
+	require.NoError(t, applyCompilationCache(container, component, BackendFrameworkVLLM))
+	assert.Equal(t, []corev1.VolumeMount{
+		{Name: "model-cache", MountPath: "/models"},
+		{Name: "compilation-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint},
+	}, container.VolumeMounts)
+	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, component.CompilationCache.MountPath)
+}
+
+func TestApplyCompilationCacheVolume(t *testing.T) {
+	const volumeName = "compilation-cache"
+	cache := &v1beta1.CompilationCacheConfig{PVCName: volumeName}
+
+	tests := []struct {
+		name            string
+		volumes         []corev1.Volume
+		expectedVolumes []corev1.Volume
+		expectedError   string
+	}{
+		{
+			name: "missing volume is added",
+			expectedVolumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+		},
+		{
+			name: "matching PVC volume is preserved",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+			expectedVolumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+		},
+		{
+			name: "non-PVC volume is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			}},
+			expectedError: `compilation cache volume "compilation-cache" must reference PVC "compilation-cache"`,
+		},
+		{
+			name: "different PVC is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "other-pvc"},
+				},
+			}},
+			expectedError: `compilation cache volume "compilation-cache" references PVC "other-pvc" instead of "compilation-cache"`,
+		},
+		{
+			name: "read-only PVC is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName, ReadOnly: true},
+				},
+			}},
+			expectedError: `compilation cache PVC "compilation-cache" must be writable`,
+		},
+		{
+			name: "duplicate matching PVC volumes are rejected",
+			volumes: []corev1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+			},
+			expectedError: `compilation cache volume "compilation-cache" is defined more than once`,
+		},
+		{
+			name: "conflicting duplicate volume is rejected",
+			volumes: []corev1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+			},
+			expectedError: `compilation cache volume "compilation-cache" must reference PVC "compilation-cache"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec := &corev1.PodSpec{Volumes: append([]corev1.Volume(nil), tt.volumes...)}
+
+			err := applyCompilationCacheVolume(podSpec, cache)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError)
+				assert.Equal(t, tt.volumes, podSpec.Volumes)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedVolumes, podSpec.Volumes)
+		})
+	}
+}
+
+func TestApplyCompilationCacheExistingMount(t *testing.T) {
+	const mountPath = "/home/dynamo/.cache/vllm"
+
+	tests := []struct {
+		name           string
+		mounts         []corev1.VolumeMount
+		expectedMounts []corev1.VolumeMount
+		expectedError  string
+	}{
+		{
+			name: "matching writable mount is preserved",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+			expectedMounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+		},
+		{
+			name: "different volume at mount path is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "other-volume",
+				MountPath: mountPath,
+			}},
+			expectedError: `compilationCache.mountPath "/home/dynamo/.cache/vllm" is already used by volume "other-volume"`,
+		},
+		{
+			name: "read-only cache mount is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				ReadOnly:  true,
+			}},
+			expectedError: `compilation cache volume "compilation-cache" at "/home/dynamo/.cache/vllm" must be writable`,
+		},
+		{
+			name: "same volume at another path does not satisfy cache mount",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/other-path",
+			}},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "compilation-cache", MountPath: "/other-path"},
+				{Name: "compilation-cache", MountPath: mountPath},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{
+				VolumeMounts: append([]corev1.VolumeMount(nil), tt.mounts...),
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "compilation-cache",
+					MountPath: mountPath,
+				},
+			}
+
+			err := applyCompilationCache(container, component, BackendFrameworkVLLM)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError)
+				assert.Equal(t, tt.mounts, container.VolumeMounts)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedMounts, container.VolumeMounts)
 		})
 	}
 }
@@ -7891,7 +8372,7 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, nil, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8002,7 +8483,7 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8129,7 +8610,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8186,7 +8667,7 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 		context.Background(),
 		betaDGD(t, dgd),
 		&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
-		&controller_common.RuntimeConfig{DRAEnabled: true},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
 		nil,
 		nil,
 		nil,
@@ -8316,6 +8797,62 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 	}
 }
 
+// TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup pins the
+// experimental grove.forceScalingGroup opt-in: a single-node component
+// renders as a PCSG whose replica count carries the horizontal scale, with a
+// single one-pod engine PCLQ per PCSG replica.
+func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(4)),
+					MinAvailable:  ptr.To(int32(2)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+				},
+			},
+		},
+	}
+
+	// grove.forceScalingGroup is v1beta1-only, so set it after conversion.
+	beta := betaDGD(t, dgd)
+	require.Len(t, beta.Spec.Components, 1)
+	beta.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		beta,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	require.Len(t, got.Spec.Template.Cliques, 1)
+	clique := got.Spec.Template.Cliques[0]
+	assert.Equal(t, "worker", clique.Name)
+	assert.EqualValues(t, 1, clique.Spec.Replicas, "engine PCLQ must hold exactly one pod per PCSG replica")
+	require.NotNil(t, clique.Spec.MinAvailable)
+	assert.EqualValues(t, 1, *clique.Spec.MinAvailable)
+
+	require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
+	assert.Equal(t, "worker", pcsg.Name)
+	assert.Equal(t, []string{"worker"}, pcsg.CliqueNames)
+	require.NotNil(t, pcsg.Replicas)
+	assert.EqualValues(t, 4, *pcsg.Replicas, "PCSG replicas must carry the component replica count")
+	require.NotNil(t, pcsg.MinAvailable)
+	assert.EqualValues(t, 2, *pcsg.MinAvailable)
+}
+
 // TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant pins
 // the contract that per-rank engine cliques in an inter-pod failover cohort
 // use MinAvailable=1 even when multinode (numberOfNodes > 1). Replicas here
@@ -8353,7 +8890,7 @@ func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *t
 			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
 		},
-		&controller_common.RuntimeConfig{DRAEnabled: true},
+		&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 		nil, nil, nil, nil, nil,
 	)
 	require.NoError(t, err)
@@ -8685,6 +9222,14 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	}
 	compCtx2 := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
+
+	// Legacy is the active suffix for DCD generations created before managed rolling updates.
+	componentLegacy := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash},
+	}
+	compCtxLegacy := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
 	// Frontend never gets WorkerHashSuffix, even with the label
 	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -9287,6 +9832,186 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 		"service-level annotation should take precedence over spec.metadata")
 }
 
+func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T) {
+	tests := []struct {
+		name                string
+		metadataAnnotations map[string]string
+		specAnnotations     map[string]string
+		runtimeConfig       *controller_common.RuntimeConfig
+		expectedQueue       string
+		expectQueue         bool
+	}{
+		{
+			name: "dynamo metadata annotation maps to grove annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "qa-volcano-e2e",
+			expectQueue:   true,
+		},
+		{
+			name: "dynamo metadata annotation is trimmed and takes precedence over spec annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " metadata-queue ",
+			},
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "metadata-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "whitespace-only metadata annotation does not override spec annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
+			},
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "spec-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "whitespace-only metadata annotation is ignored",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectQueue: false,
+		},
+		{
+			name: "grove spec annotation remains a direct pass-through",
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "spec-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "metadata annotation is ignored when volcano scheduler integration is disabled",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true},
+			},
+			expectQueue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-dgd",
+					Namespace:   "ns",
+					Annotations: tt.metadataAnnotations,
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Annotations: tt.specAnnotations,
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+						},
+					},
+				},
+			}
+
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, tt.runtimeConfig, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.NotNil(t, pcs)
+			if tt.expectQueue {
+				require.NotNil(t, pcs.Annotations)
+				assert.Equal(t, tt.expectedQueue, pcs.Annotations[commonconsts.GroveAnnotationVolcanoQueue])
+				return
+			}
+			assert.NotContains(t, pcs.Annotations, commonconsts.GroveAnnotationVolcanoQueue)
+		})
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_VolcanoSchedulerInjection(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "gpu-training",
+			},
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, VolcanoScheduler: true}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, pcs.Spec.Template.Cliques, 1)
+	assert.Equal(t, "gpu-training", pcs.Annotations[commonconsts.GroveAnnotationVolcanoQueue])
+	assert.Equal(t, commonconsts.VolcanoSchedulerName, pcs.Spec.Template.Cliques[0].Spec.PodSpec.SchedulerName)
+}
+
+func TestGenerateGrovePodCliqueSet_SchedulerIntegrationMutualExclusion(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	_, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, KaiScheduler: true, VolcanoScheduler: true}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kai-scheduler and volcano scheduler integrations cannot both be enabled")
+}
+
 func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -9308,6 +10033,88 @@ func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "high-priority", pcs.Spec.Template.PriorityClassName)
+}
+
+func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
+	tests := []struct {
+		name          string
+		annotation    string
+		hasAnnotation bool
+		wantStrategy  *grovev1alpha1.UpdateStrategyType
+		wantErr       string
+	}{
+		{
+			name: "default leaves Grove strategy unset",
+		},
+		{
+			name:          "RollingRecreate annotation maps to Grove strategy",
+			annotation:    "RollingRecreate",
+			hasAnnotation: true,
+			wantStrategy:  ptr.To(grovev1alpha1.RollingRecreateStrategy),
+		},
+		{
+			name:          "OnDelete annotation maps to Grove strategy",
+			annotation:    "OnDelete",
+			hasAnnotation: true,
+			wantStrategy:  ptr.To(grovev1alpha1.OnDeleteStrategy),
+		},
+		{
+			name:          "lowercase annotation is rejected",
+			annotation:    "ondelete",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+		{
+			name:          "annotation with whitespace is rejected",
+			annotation:    " OnDelete ",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+		{
+			name:          "unknown annotation is rejected",
+			annotation:    "BlueGreen",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+						},
+					},
+				},
+			}
+			if tt.hasAnnotation {
+				dgd.Annotations = map[string]string{
+					commonconsts.KubeAnnotationGroveUpdateStrategy: tt.annotation,
+				}
+			}
+
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantStrategy == nil {
+				assert.Nil(t, pcs.Spec.UpdateStrategy)
+				return
+			}
+			require.NotNil(t, pcs.Spec.UpdateStrategy)
+			assert.Equal(t, *tt.wantStrategy, pcs.Spec.UpdateStrategy.Type)
+		})
+	}
 }
 
 func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.T) {
@@ -9412,10 +10219,50 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				},
 			},
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
-				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+				TopologyName: "test-topology",
+				Pack: &grovev1alpha1.TopologyPackConstraint{
+					RequiredDomain: grovev1alpha1.TopologyDomain("zone"),
+				},
 			},
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
-				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
+				"worker": {
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("rack"),
+					},
+				},
+			},
+			wantPCSGCount: 0,
+		},
+		{
+			name: "service-only topology constraint - topology name is explicit on clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("rack"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {
+					TopologyName: "test-topology",
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("rack"),
+					},
+				},
 			},
 			wantPCSGCount: 0,
 		},
@@ -9446,14 +10293,61 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				},
 			},
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
-				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+				TopologyName: "test-topology",
+				Pack: &grovev1alpha1.TopologyPackConstraint{
+					RequiredDomain: grovev1alpha1.TopologyDomain("zone"),
+				},
 			},
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
 				"worker-ldr": nil,
 				"worker-wkr": nil,
 			},
 			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
-				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
+				"worker": {
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("block"),
+					},
+				},
+			},
+			wantPCSGCount: 1,
+		},
+		{
+			name: "service-only multinode constraint - topology name is explicit on scaling group",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							Multinode: &v1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("block"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker-ldr": nil,
+				"worker-wkr": nil,
+			},
+			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {
+					TopologyName: "test-topology",
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("block"),
+					},
+				},
 			},
 			wantPCSGCount: 1,
 		},
@@ -9479,8 +10373,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			if tt.wantPCSTemplateTC == nil {
 				assert.Nil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be nil")
 			} else {
-				assert.NotNil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be set")
-				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
+				assert.Equal(t, tt.wantPCSTemplateTC, pcs.Spec.Template.TopologyConstraint)
 			}
 
 			// Verify clique-level TopologyConstraints (exhaustive)
@@ -9496,8 +10389,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				if expectedTC == nil {
 					assert.Nil(t, clique.TopologyConstraint, "clique %q: expected nil TopologyConstraint", clique.Name)
 				} else {
-					assert.NotNil(t, clique.TopologyConstraint, "clique %q: expected non-nil TopologyConstraint", clique.Name)
-					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
+					assert.Equal(t, expectedTC, clique.TopologyConstraint, "clique %q: topologyConstraint mismatch", clique.Name)
 				}
 			}
 			for expectedName := range tt.wantCliqueTC {
@@ -9520,8 +10412,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 					if expectedTC == nil {
 						assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
 					} else {
-						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
-						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+						assert.Equal(t, expectedTC, pcsg.TopologyConstraint, "PCSG %q: topologyConstraint mismatch", pcsg.Name)
 					}
 				}
 			}

@@ -10,8 +10,6 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: inference-gateway
-      # Adjust to the namespace where your Gateway is installed.
-      namespace: kgateway-system
   rules:
     - matches:
         - headers:

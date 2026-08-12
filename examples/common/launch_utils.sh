@@ -235,39 +235,34 @@ wait_for_ready() {
     return 1
 }
 
-# pick_worker_module <legacy_module> <unified_module> "$@"
-#
-# Strips `--unified` from argv and selects the matching `python -m <module>`
-# target. Sets two globals:
-#
-#   WORKER_MODULE    The chosen module (legacy by default; unified if --unified seen).
-#   REMAINING_ARGS   Array of surviving argv. Caller does `set -- "${REMAINING_ARGS[@]}"`.
-#
-# Why this lives here:
-#   Every disagg launch script needs the same switch. Inlining it three times
-#   means three places to keep in sync; centralising here means the
-#   "consume --unified BEFORE installing the EXIT trap" discipline is enforced
-#   by construction. Other flags (--enable-otel, --model-name, ...) stay in
-#   the caller's own arg loop so engine-specific options keep working.
-#
-# Usage:
-#   pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
-#   set -- "${REMAINING_ARGS[@]}"
-#   trap 'echo Cleaning up...; kill 0' EXIT
-#   # ... caller's own argument parsing on the surviving $@ ...
-pick_worker_module() {
-    local _legacy="$1"
-    local _unified="$2"
-    shift 2
-    WORKER_MODULE="$_legacy"
-    REMAINING_ARGS=()
-    for _arg in "$@"; do
-        if [[ "$_arg" == "--unified" ]]; then
-            WORKER_MODULE="$_unified"
-        else
-            REMAINING_ARGS+=("$_arg")
-        fi
-    done
+allocate_free_port() {
+    python3 - <<'PY'
+import random
+import socket
+
+PORT_MIN = 1024
+PORT_MAX = 49151
+MAX_ATTEMPTS = 256
+
+for _ in range(MAX_ATTEMPTS):
+    port = random.randint(PORT_MIN, PORT_MAX)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        continue
+
+    try:
+        print(port)
+        break
+    finally:
+        sock.close()
+else:
+    raise RuntimeError(
+        f"could not find a free port in the registered range {PORT_MIN}-{PORT_MAX}"
+    )
+PY
 }
 
 # print_curl_footer

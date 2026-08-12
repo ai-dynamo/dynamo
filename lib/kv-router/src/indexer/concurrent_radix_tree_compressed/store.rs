@@ -67,6 +67,8 @@ impl ConcurrentRadixTreeCompressed {
     ) -> Result<StoreParentResolution, KvCacheEventError> {
         loop {
             let node = self.lookup_store_parent_node(lookup, worker, parent_hash, op, id)?;
+            // NOTE(perf): Combining coverage rejection and edge planning into
+            // one state snapshot regressed throughput. Keep these phases separate.
             self.reject_uncovered_store_parent(lookup, worker, &node, parent_hash, id)?;
 
             let Some(plan) = node.plan_store_parent_edge(parent_hash, &op.blocks) else {
@@ -274,7 +276,8 @@ impl ConcurrentRadixTreeCompressed {
                 });
             }
             ParentChildPlan::Descend(child) => return Ok(StoreInsertStep::Descend(child)),
-            ParentChildPlan::MissingChild { shape_version } => shape_version,
+            ParentChildPlan::InteriorParent { shape_version }
+            | ParentChildPlan::MissingChild { shape_version } => shape_version,
         };
 
         if let Some(parent_hash) = cursor.last_ext_hash
@@ -571,5 +574,17 @@ impl ConcurrentRadixTreeCompressed {
         }
 
         Ok(StoreInsertOutcome { duplicate_store })
+    }
+
+    #[cfg(test)]
+    pub(super) fn insert_blocks_from_for_test(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker: WorkerWithDpRank,
+        parent: &SharedNode,
+        seed_hash: ExternalSequenceBlockHash,
+        blocks: &[KvCacheStoredBlockData],
+    ) -> Result<StoreInsertOutcome, KvCacheEventError> {
+        self.insert_blocks_from(lookup, worker, parent, false, Some(seed_hash), blocks)
     }
 }

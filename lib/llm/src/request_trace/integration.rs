@@ -64,7 +64,7 @@ pub(crate) fn build_request_end_trace_state(
         tracker,
         context,
         trace_block_size,
-        super::is_enabled(),
+        super::policy().emit_request_end_records(),
     )
 }
 
@@ -86,7 +86,7 @@ fn build_request_end_trace_state_for_policy(
         tracing::warn!(
             %request_id,
             reason,
-            "request trace skipped because the request cannot be represented as one Mooncake row"
+            "request trace skipped because the request cannot be represented as one replay request"
         );
         return None;
     }
@@ -210,7 +210,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::protocols::common::extensions::AgentContext;
+    use crate::protocols::common::extensions::{AgentContext, InputTrigger};
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
@@ -370,6 +370,7 @@ mod tests {
                     parent_session_id: None,
                     session_final: None,
                     kv_hints: None,
+                    input_trigger: Some(InputTrigger::ToolResult),
                 },
                 request_model: "test-model".to_string(),
                 request_tracker: Some(tracker.clone()),
@@ -410,14 +411,9 @@ mod tests {
         .unwrap();
         assert!(dropped.load(Ordering::Acquire));
         assert_eq!(record.event_source, Some(RequestTraceEventSource::Dynamo));
-        assert_eq!(
-            record
-                .agent_context
-                .as_ref()
-                .expect("agent context")
-                .session_id,
-            "root"
-        );
+        let agent_context = record.agent_context.as_ref().expect("agent context");
+        assert_eq!(agent_context.session_id, "root");
+        assert_eq!(agent_context.input_trigger, Some(InputTrigger::ToolResult));
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.model.as_deref(), Some("test-model"));
         assert_eq!(request.x_request_id.as_deref(), Some("llm-call-1"));
@@ -443,6 +439,7 @@ mod tests {
             parent_session_id: None,
             session_final: None,
             kv_hints: None,
+            input_trigger: None,
         });
         let tracker = Some(Arc::new(RequestTracker::new()));
         let context = Context::new(());

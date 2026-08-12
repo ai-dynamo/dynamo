@@ -9,6 +9,7 @@ from dynamo.frontend.utils import (
     handle_engine_error,
     make_backend_error,
     make_internal_error,
+    resolve_chat_template,
 )
 
 pytestmark = [
@@ -39,6 +40,20 @@ class TestMakeBackendError:  # FRONTEND.8 — BackendError construction
         resp = {"status": "error", "message": ""}
         err = make_backend_error(resp)
         assert err["error"]["message"] == "unknown backend error"
+
+
+class TestResolveChatTemplate:
+    def test_jinja_backend_file_semantics(self, tmp_path):
+        template_file = tmp_path / "chat_template.jinja"
+        template_file.write_text("custom template\\n\n", encoding="utf-8")
+
+        assert resolve_chat_template(str(tmp_path)) == "custom template\\n\n"
+        assert resolve_chat_template(str(tmp_path), backend="vllm") == (
+            "custom template\\n\n"
+        )
+        assert resolve_chat_template(str(tmp_path), backend="sglang") == (
+            "custom template\n"
+        )
 
 
 class TestMakeInternalError:  # FRONTEND.8 — InternalError construction

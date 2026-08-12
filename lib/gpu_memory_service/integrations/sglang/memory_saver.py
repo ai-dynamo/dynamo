@@ -27,8 +27,8 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
+from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
+from gpu_memory_service.integrations.common.utils import finalize_gms_write
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,8 @@ class GMSMemorySaverImpl:
         self.imported_weights_bytes = 0
         self.preloaded_weights_bytes = 0
         self.ro_connect_timeout_ms = ro_connect_timeout_ms
+        self._active_region_depth = 0
+        self._pending_write_model: Optional[torch.nn.Module] = None
         requested_mode = mode or RequestedLockType.RW_OR_RO
         self.allocators = {
             tag: get_or_create_gms_client_memory_manager(
@@ -95,7 +97,7 @@ class GMSMemorySaverImpl:
 
     @contextmanager
     def region(self, tag: str, enable_cpu_backup: bool):
-        """Mark allocation region with tag."""
+        """Use the tag's RW pool and publish pending weights after clean exit."""
         if enable_cpu_backup:
             raise ValueError(
                 "SGLang with GMS does not support CPU backup for allocations."
@@ -134,8 +136,19 @@ class GMSMemorySaverImpl:
                 f"SGLang with GMS requires {tag!r} to be RW for allocations; got {mode}"
             )
 
-        with gms_use_mem_pool(tag, self._device):
-            yield
+        self._active_region_depth += 1
+        clean_exit = False
+        try:
+            with gms_use_mem_pool(tag, self._device):
+                yield
+            clean_exit = True
+        finally:
+            self._active_region_depth -= 1
+            if not clean_exit:
+                self._pending_write_model = None
+
+        if self._active_region_depth == 0:
+            self._finalize_pending_write()
 
     @contextmanager
     def cuda_graph(
@@ -184,9 +197,27 @@ class GMSMemorySaverImpl:
             self.allocators[target_tag].remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
-        """Finalize write mode: register tensors, commit, and switch to read."""
+        """Publish write-mode weights after all managed GMS regions exit."""
+        if model is None:
+            raise TypeError("GMS weight publication model must not be None")
+
         if self.allocators["weights"].granted_lock_type != GrantedLockType.RW:
             # Read-only import mode never republishes weights.
+            self._pending_write_model = None
+            return
+
+        if self._pending_write_model is not None:
+            raise RuntimeError("GMS weight publication is already pending")
+
+        self._pending_write_model = model
+        if self._active_region_depth == 0:
+            self._finalize_pending_write()
+
+    def _finalize_pending_write(self) -> None:
+        """Consume and publish pending weights outside managed GMS regions."""
+        model = self._pending_write_model
+        self._pending_write_model = None
+        if model is None:
             return
 
         stats = finalize_gms_write(self.allocators["weights"], model)

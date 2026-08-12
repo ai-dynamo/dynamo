@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicU32;
 use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{DpRank, PlacementEvent, WorkerWithDpRank};
+use crate::protocols::{DpRank, PlacementEvent, StorageTier, WorkerWithDpRank};
 
 mod convert;
 mod deserialize;
@@ -23,10 +23,14 @@ mod filter;
 mod tests;
 mod types;
 
-pub use convert::{convert_event, create_stored_block_from_parts, create_stored_blocks};
-pub use extra_keys::{extra_keys_to_block_mm_infos, parse_mm_hash_from_extra_key};
+pub use convert::{
+    StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
+};
+pub use extra_keys::{
+    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
+};
 pub use filter::KvCacheSpecKind;
-pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, RawKvEvent};
+pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, Locality, RawKvEvent};
 
 use filter::KvCacheEventMetadata;
 
@@ -43,6 +47,13 @@ pub struct ZmqEventNormalizer {
     image_token_id: Option<u32>,
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
+    cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CacheNamespaceState {
+    Namespaced(Arc<str>),
+    Ambiguous,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +65,9 @@ struct KvCacheGroupMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZmqEventFilterReason {
     IgnoredEvent,
+    NonLocalLocality,
+    UnknownMedium,
+    AmbiguousCacheNamespace,
     NonMainAttentionKind,
     UnknownKind,
     NonMainAttentionGroup,
@@ -64,6 +78,9 @@ impl ZmqEventFilterReason {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::IgnoredEvent => "ignored_event",
+            Self::NonLocalLocality => "non_local_locality",
+            Self::UnknownMedium => "unknown_medium",
+            Self::AmbiguousCacheNamespace => "ambiguous_cache_namespace",
             Self::NonMainAttentionKind => "non_main_attention_kind",
             Self::UnknownKind => "unknown_kind",
             Self::NonMainAttentionGroup => "non_main_attention_group",
@@ -79,6 +96,7 @@ impl ZmqEventNormalizer {
             image_token_id: None,
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
+            cache_namespaces: FxHashMap::default(),
         }
     }
 
@@ -88,6 +106,7 @@ impl ZmqEventNormalizer {
             image_token_id: None,
             warning_count,
             group_metadata: FxHashMap::default(),
+            cache_namespaces: FxHashMap::default(),
         }
     }
 
@@ -105,11 +124,42 @@ impl ZmqEventNormalizer {
 
     pub fn preprocess_with_reason(
         &mut self,
-        raw: RawKvEvent,
+        mut raw: RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
             return Err(ZmqEventFilterReason::IgnoredEvent);
+        }
+
+        // Non-local events are dropped by policy (no shared-index consumer yet).
+        // Classify them here, before the lower-tier bypass, so the gate covers
+        // every tier (including Disk/External). Otherwise the listener would
+        // accept the event, burn a next_event_id, and only drop it in
+        // conversion, leaving an id gap the event processor mistakes for an
+        // engine drop (engines_dropped_events).
+        if matches!(raw.locality(), Some(Locality::Remote | Locality::Unknown)) {
+            return Err(ZmqEventFilterReason::NonLocalLocality);
+        }
+
+        // Classify by medium before touching normalizer state:
+        //  - Device / HostPinned (GPU, CPU offload #10368) stay on the normalizer
+        //    path so their salted namespaces still propagate.
+        //  - Disk / External (STORAGE) are hash-only lower-tier events with no
+        //    extra_keys/cache_namespace, so they must not mutate per-group
+        //    metadata or the salted-namespace chain and are outside the SW/SSM
+        //    group filter's semantics; bypass straight to conversion, which keeps
+        //    them (no event id is wasted).
+        //  - Unrecognized media (e.g. vLLM 0.26.0 FS/OBJ) fail closed here so the
+        //    listener records an intentional filter. Bypassing to conversion,
+        //    which drops them, would instead accept the event, burn a
+        //    next_event_id, and leave an id gap the event processor mistakes for
+        //    an engine drop -- the same trap the locality gate above avoids.
+        if let Some(m) = raw.medium() {
+            match StorageTier::from_kv_medium(m) {
+                Some(StorageTier::Device | StorageTier::HostPinned) => {}
+                Some(_) => return Ok(raw),
+                None => return Err(ZmqEventFilterReason::UnknownMedium),
+            }
         }
 
         let metadata = raw.metadata();
@@ -119,6 +169,7 @@ impl ZmqEventNormalizer {
         if let Some(reason) = self.filter_reason(metadata, worker.dp_rank) {
             return Err(reason);
         }
+        self.propagate_cache_namespace(&mut raw, worker)?;
         Ok(raw)
     }
 
@@ -161,6 +212,106 @@ impl ZmqEventNormalizer {
                 sliding_window: metadata.kv_cache_spec_sliding_window,
             },
         );
+    }
+
+    fn propagate_cache_namespace(
+        &mut self,
+        raw: &mut RawKvEvent,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), ZmqEventFilterReason> {
+        match raw {
+            RawKvEvent::BlockStored {
+                block_hashes,
+                parent_block_hash,
+                cache_namespace,
+                ..
+            } => {
+                if cache_namespace.as_deref() == Some("") {
+                    *cache_namespace = None;
+                }
+                let namespace = if let Some(namespace) = cache_namespace.as_deref() {
+                    parent_block_hash
+                        .as_ref()
+                        .and_then(|parent| {
+                            self.cache_namespaces.get(&(worker, (*parent).into_u64()))
+                        })
+                        .and_then(|state| match state {
+                            CacheNamespaceState::Namespaced(parent_namespace)
+                                if parent_namespace.as_ref() == namespace =>
+                            {
+                                Some(Arc::clone(parent_namespace))
+                            }
+                            _ => None,
+                        })
+                        .or_else(|| Some(Arc::from(namespace)))
+                } else if let Some(parent) = parent_block_hash.as_ref() {
+                    match self.cache_namespaces.get(&(worker, (*parent).into_u64())) {
+                        Some(CacheNamespaceState::Namespaced(namespace)) => {
+                            *cache_namespace = Some(namespace.to_string());
+                            Some(Arc::clone(namespace))
+                        }
+                        Some(CacheNamespaceState::Ambiguous) => {
+                            return Err(ZmqEventFilterReason::AmbiguousCacheNamespace);
+                        }
+                        None => {
+                            // Deliberately preserve the unsalted interpretation when a
+                            // listener joins in the middle of a chain. The vLLM wire
+                            // format cannot distinguish an unknown salted parent from a
+                            // genuinely unsalted one, and retaining every unsalted block
+                            // here would duplicate the index on the event hot path. The
+                            // backend still enforces its own cache isolation; this narrow
+                            // fail-open case can only pollute the router overlap score.
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(namespace) = namespace {
+                    let state = CacheNamespaceState::Namespaced(namespace);
+                    for block_hash in block_hashes.iter() {
+                        self.cache_namespaces
+                            .entry((worker, (*block_hash).into_u64()))
+                            .and_modify(|existing| {
+                                if *existing != state {
+                                    *existing = CacheNamespaceState::Ambiguous;
+                                }
+                            })
+                            .or_insert_with(|| state.clone());
+                    }
+                } else {
+                    // Do not retain every unsalted block. If this hash already
+                    // belongs to a namespace, however, fail closed on future
+                    // propagation because the external hash is now ambiguous.
+                    for block_hash in block_hashes.iter() {
+                        if let Some(existing) = self
+                            .cache_namespaces
+                            .get_mut(&(worker, (*block_hash).into_u64()))
+                        {
+                            *existing = CacheNamespaceState::Ambiguous;
+                        }
+                    }
+                }
+            }
+            RawKvEvent::BlockRemoved { block_hashes, .. } => {
+                for block_hash in block_hashes.iter() {
+                    let key = (worker, (*block_hash).into_u64());
+                    if !matches!(
+                        self.cache_namespaces.get(&key),
+                        Some(CacheNamespaceState::Ambiguous)
+                    ) {
+                        self.cache_namespaces.remove(&key);
+                    }
+                }
+            }
+            RawKvEvent::AllBlocksCleared => {
+                self.cache_namespaces
+                    .retain(|(known_worker, _), _| *known_worker != worker);
+            }
+            RawKvEvent::Ignored => {}
+        }
+        Ok(())
     }
 
     fn filter_reason(

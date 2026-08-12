@@ -14,7 +14,7 @@ use crate::metrics::work_handler_pool::{
     WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
@@ -22,8 +22,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
+
+type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
@@ -150,6 +154,8 @@ pub struct SharedTcpServer {
     /// Overflow-queue capacity; `read_loop` compares against it to tell whether
     /// the queue is empty for the FIFO direct-dispatch rule.
     queue_capacity: usize,
+    /// Optional TLS acceptor for encrypting request plane connections.
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 struct EndpointHandler {
@@ -164,7 +170,10 @@ struct EndpointHandler {
 }
 
 impl SharedTcpServer {
-    pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
+    pub fn new(
+        bind_addr: SocketAddr,
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<Arc<Self>> {
         let SizingConfig {
             pool_size: worker_pool_size,
             queue_size: work_queue_size,
@@ -195,17 +204,71 @@ impl SharedTcpServer {
         // Dispatcher drains the overflow queue.
         Self::start_worker_pool(engine_sem.clone(), work_rx, cancellation_token.clone());
 
-        Arc::new(Self {
+        // Build TLS acceptor from the same env vars as the call-home transport.
+        let tls_acceptor = {
+            use crate::config::environment_names::tcp_response_stream::tls as env;
+            let cert = std::env::var(env::DYN_TCP_TLS_CERT_PATH).ok();
+            let key = std::env::var(env::DYN_TCP_TLS_KEY_PATH).ok();
+            match (cert, key) {
+                (Some(c), Some(k)) => {
+                    let config = crate::tls_utils::server_tls_config(c.as_ref(), k.as_ref())
+                        .context(
+                            "Failed to build TCP request plane TLS config — check cert/key paths",
+                        )?;
+                    tracing::info!("TCP request plane: TLS enabled");
+                    // Warn if the client side is not configured for TLS — peers
+                    // dialing this server without a CA (or insecure) will fail the
+                    // handshake with no obvious diagnostic.
+                    let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
+                        || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+                    if !client_tls_set {
+                        tracing::warn!(
+                            "TCP request plane server has TLS enabled but client TLS env vars are \
+                             not set. Set {} (or {}) so clients can connect, or unset {}/{}.",
+                            env::DYN_TCP_TLS_CA_CERT_PATH,
+                            env::DYN_TCP_TLS_INSECURE,
+                            env::DYN_TCP_TLS_CERT_PATH,
+                            env::DYN_TCP_TLS_KEY_PATH,
+                        );
+                    }
+                    Some(TlsAcceptor::from(Arc::new(config)))
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    anyhow::bail!(
+                        "Both {} and {} must be set to enable TCP request plane TLS",
+                        env::DYN_TCP_TLS_CERT_PATH,
+                        env::DYN_TCP_TLS_KEY_PATH,
+                    );
+                }
+                (None, None) => {
+                    // Warn on the reverse mismatch: server plaintext but client TLS
+                    // env is set (mirrors the call-home server warning).
+                    let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
+                        || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+                    if client_tls_set {
+                        tracing::warn!(
+                            "TCP request plane server is running in plaintext mode but client TLS \
+                             env vars are set. Set {} and {} to enable server-side TLS, or unset \
+                             client TLS vars.",
+                            env::DYN_TCP_TLS_CERT_PATH,
+                            env::DYN_TCP_TLS_KEY_PATH,
+                        );
+                    }
+                    None
+                }
+            }
+        };
+
+        Ok(Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
-            // address we requested to bind to.
             bind_addr,
-            // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
             actual_addr: RwLock::new(None),
             cancellation_token,
             work_tx,
             engine_sem,
             queue_capacity: work_queue_size,
-        })
+            tls_acceptor,
+        }))
     }
 
     /// Start the worker pool dispatcher that processes requests with bounded concurrency
@@ -395,8 +458,41 @@ impl SharedTcpServer {
                             let work_tx = self.work_tx.clone();
                             let engine_sem = self.engine_sem.clone();
                             let queue_capacity = self.queue_capacity;
+                            let tls_acceptor = self.tls_acceptor.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, handlers, work_tx, engine_sem, queue_capacity).await {
+                                let (reader, writer): (BoxRead, BoxWrite) =
+                                    if let Some(ref tls) = tls_acceptor {
+                                        match tokio::time::timeout(
+                                            crate::tls_utils::handshake_timeout(),
+                                            tls.accept(stream),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(tls_stream)) => {
+                                                let (r, w) = tokio::io::split(tls_stream);
+                                                (Box::new(r), Box::new(w))
+                                            }
+                                            Ok(Err(e)) => {
+                                                tracing::warn!(
+                                                    peer_addr = %peer_addr,
+                                                    error = %e,
+                                                    "Request-plane TLS handshake failed"
+                                                );
+                                                return;
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    peer_addr = %peer_addr,
+                                                    "Request-plane TLS handshake timed out"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        let (r, w) = tokio::io::split(stream);
+                                        (Box::new(r), Box::new(w))
+                                    };
+                                if let Err(e) = Self::handle_connection(reader, writer, handlers, work_tx, engine_sem, queue_capacity).await {
                                     tracing::error!("TCP connection error: {e}");
                                 }
                             });
@@ -463,21 +559,13 @@ impl SharedTcpServer {
                 "Unregistered TCP endpoint handler"
             );
 
-            let inflight_count = handler.inflight.load(Ordering::SeqCst);
-            if inflight_count > 0 {
-                tracing::info!(
-                    endpoint_name = %endpoint_name,
-                    inflight_count = inflight_count,
-                    "Waiting for inflight TCP requests to complete"
-                );
-                while handler.inflight.load(Ordering::SeqCst) > 0 {
-                    handler.notify.notified().await;
-                }
-                tracing::info!(
-                    endpoint_name = %endpoint_name,
-                    "All inflight TCP requests completed"
-                );
-            }
+            super::drain_inflight(
+                handler.inflight.clone(),
+                handler.notify.clone(),
+                endpoint_name,
+                crate::runtime::graceful_shutdown_timeout(),
+            )
+            .await;
         }
     }
 
@@ -494,16 +582,14 @@ impl SharedTcpServer {
     }
 
     async fn handle_connection(
-        stream: TcpStream,
+        read_half: BoxRead,
+        write_half: BoxWrite,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
         engine_sem: Arc<Semaphore>,
         queue_capacity: usize,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
-
-        // Split stream into read and write halves for concurrent operations
-        let (read_half, write_half) = tokio::io::split(stream);
 
         // Channel for sending responses to the write task (zero-copy Bytes)
         let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
@@ -530,7 +616,7 @@ impl SharedTcpServer {
 
     #[allow(clippy::too_many_arguments)]
     async fn read_loop(
-        mut read_half: tokio::io::ReadHalf<TcpStream>,
+        mut read_half: BoxRead,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
@@ -696,7 +782,7 @@ impl SharedTcpServer {
     }
 
     async fn write_loop(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: BoxWrite,
         mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     ) -> Result<()> {
         while let Some(response) = response_rx.recv().await {
@@ -844,7 +930,7 @@ mod tests {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         // Create SharedTcpServer
-        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone()).unwrap();
 
         // Create a handler that takes 1s to process requests
         let handler = Arc::new(SlowMockHandler::new(Duration::from_secs(1)));
@@ -1195,7 +1281,7 @@ mod tests {
         // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone()).unwrap();
 
         assert!(
             WORK_HANDLER_POOL_CAPACITY.get() > 0,
@@ -1206,5 +1292,83 @@ mod tests {
             "queue_capacity should be set to DEFAULT_WORK_QUEUE_SIZE"
         );
         cancellation_token.cancel();
+    }
+
+    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
+
+    #[tokio::test]
+    async fn new_no_tls_env_is_plaintext() {
+        let token = CancellationToken::new();
+        temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
+            let server =
+                SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).unwrap();
+            assert!(server.tls_acceptor.is_none());
+        });
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn new_partial_tls_config_errors() {
+        let (cert, key) = make_cert_files();
+        let cert_str = cert.path().to_str().unwrap();
+        let key_str = key.path().to_str().unwrap();
+        let token = CancellationToken::new();
+        // only cert set -> returns Err (must not panic)
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert_str)),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+            ],
+            || {
+                assert!(
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).is_err()
+                );
+            },
+        );
+        // only key set -> returns Err
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key_str)),
+            ],
+            || {
+                assert!(
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).is_err()
+                );
+            },
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn new_both_paths_enables_tls() {
+        let (cert, key) = make_cert_files();
+        let token = CancellationToken::new();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+            ],
+            || {
+                let server =
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).unwrap();
+                assert!(server.tls_acceptor.is_some());
+            },
+        );
+        token.cancel();
     }
 }

@@ -54,7 +54,36 @@ const (
 	DGDStateFailed       DGDState = "failed"
 )
 
+// PlacementScoreState describes whether placement score is available and how
+// complete the reported score is for a graph deployment. See the v1beta1
+// PlacementScoreState for the authoritative semantics of each value.
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
+type PlacementScoreState string
+
+const (
+	PlacementScoreStateReported    PlacementScoreState = "Reported"
+	PlacementScoreStatePartial     PlacementScoreState = "Partial"
+	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
+	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
+)
+
+// PlacementStatus groups DGD-level scheduler placement fields under a single
+// status object so future placement signals can be added without a schema
+// break. See the v1beta1 PlacementStatus for the authoritative field docs.
+type PlacementStatus struct {
+	// Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]
+	// where higher is better and 1.0 is the best possible placement.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Score *float64 `json:"score,omitempty"`
+	// State indicates placement score reporting state.
+	// +optional
+	State PlacementScoreState `json:"state,omitempty"`
+}
+
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
 	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
 	// Service-level annotations take precedence over these values.
@@ -168,6 +197,10 @@ type DynamoGraphDeploymentStatus struct {
 	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+	// Placement groups DGD-level scheduler placement signals (score, reporting
+	// state, and any future placement fields).
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.
@@ -259,6 +292,13 @@ type ServiceReplicaStatus struct {
 	// +optional
 	ComponentNames []string `json:"componentNames,omitempty"`
 
+	// RuntimeNamespace is the effective Dynamo runtime namespace for this
+	// component. Worker components may include a generation suffix; non-workers and
+	// Grove-backed workers use the base namespace. During rolling updates, worker
+	// status keeps the old active revision namespace until cutover completes.
+	// +optional
+	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
+
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
 	// +kubebuilder:validation:Minimum=0
@@ -285,10 +325,17 @@ type ServiceReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+
+	// ScheduledReplicas is the number of replicas the backend scheduler has
+	// scheduled, in Dynamo component-replica units. Optional; omitted (nil)
+	// when the backend cannot derive it reliably. A nil value means "not
+	// reported", never "zero scheduled".
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ScheduledReplicas *int32 `json:"scheduledReplicas,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeployment is deprecated; use nvidia.com/v1beta1 DynamoGraphDeployment"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgd
@@ -322,10 +369,6 @@ type DynamoGraphDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeployment{}, &DynamoGraphDeploymentList{})
 }
 
 func (s *DynamoGraphDeployment) GetSpec() any {

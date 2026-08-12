@@ -26,6 +26,10 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 # Import-time skip: if the extension hasn't been built, all tests below
 # are skipped rather than crashing the collection phase.
+core = pytest.importorskip(
+    "dynamo._core",
+    reason="dynamo._core not built — run `maturin develop` first",
+)
 backend = pytest.importorskip(
     "dynamo._core.backend",
     reason="dynamo._core.backend not built — run `maturin develop` first",
@@ -63,6 +67,7 @@ def test_engine_config_required_model_only():
     cfg = backend.EngineConfig(model="m1")
     assert cfg.model == "m1"
     assert cfg.served_model_name is None
+    assert cfg.model_aliases == []
     assert cfg.llm is None
 
 
@@ -70,6 +75,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     cfg = backend.EngineConfig(
         model="m2",
         served_model_name="m2-serving",
+        model_aliases=["m2-alias"],
         runtime_data={"sglang_worker_group_id": "group-a"},
         llm=backend.LlmRegistration(
             context_length=2048,
@@ -81,6 +87,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     )
     assert cfg.model == "m2"
     assert cfg.served_model_name == "m2-serving"
+    assert cfg.model_aliases == ["m2-alias"]
     assert cfg.runtime_data == {"sglang_worker_group_id": "group-a"}
     llm = cfg.llm
     assert llm.context_length == 2048
@@ -114,8 +121,66 @@ def test_worker_config_accepts_parser_runtime_settings():
         namespace="dynamo",
         tool_call_parser="kimi_k2",
         reasoning_parser="kimi_k25",
+        default_thinking_mode="disabled",
         exclude_tools_when_tool_choice_none=False,
         enable_local_indexer=False,
+    )
+
+
+def test_worker_config_preserves_legacy_positional_argument_order():
+    """New optional fields must be appended after every existing argument."""
+    backend.WorkerConfig(
+        "dynamo",  # namespace
+        "backend",  # component
+        "generate",  # endpoint
+        "",  # model_name
+        None,  # served_model_name
+        core.ModelInput.Tokens,  # model_input
+        "chat,completions",  # endpoint_types
+        None,  # custom_jinja_template
+        None,  # tool_call_parser
+        None,  # reasoning_parser
+        False,  # exclude_tools_when_tool_choice_none
+        False,  # enable_local_indexer
+    )
+
+
+@pytest.mark.unified
+def test_python_worker_config_preserves_legacy_positional_argument_order():
+    from dynamo.common.backend.worker import WorkerConfig
+
+    config = WorkerConfig(
+        "dynamo",  # namespace
+        "backend",  # component
+        "generate",  # endpoint
+        "",  # model_name
+        None,  # served_model_name
+        core.ModelInput.Tokens,  # model_input
+        "chat,completions",  # endpoint_types
+        "etcd",  # discovery_backend
+        "tcp",  # request_plane
+        None,  # event_plane
+        False,  # use_kv_events
+        None,  # custom_jinja_template
+        None,  # tool_call_parser
+        None,  # reasoning_parser
+        False,  # exclude_tools_when_tool_choice_none
+        False,  # enable_local_indexer
+    )
+
+    assert config.exclude_tools_when_tool_choice_none is False
+    assert config.enable_local_indexer is False
+    assert config.default_thinking_mode is None
+
+
+def test_worker_config_accepts_media_configuration():
+    """Unified registration can advertise frontend media decoding."""
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    backend.WorkerConfig(
+        namespace="dynamo",
+        media_decoder=MediaDecoder(),
+        media_fetcher=MediaFetcher(),
     )
 
 
@@ -146,6 +211,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     runtime_cfg.custom_jinja_template = None
     runtime_cfg.dyn_tool_call_parser = "kimi_k2"
     runtime_cfg.dyn_reasoning_parser = "kimi_k25"
+    runtime_cfg.dyn_default_thinking_mode = "disabled"
     runtime_cfg.exclude_tools_when_tool_choice_none = False
     runtime_cfg.enable_local_indexer = False
     runtime_cfg.dyn_enable_structural_tag = True
@@ -160,6 +226,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
 
     assert config.tool_call_parser == "kimi_k2"
     assert config.reasoning_parser == "kimi_k25"
+    assert config.default_thinking_mode == "disabled"
     assert config.exclude_tools_when_tool_choice_none is False
     assert config.enable_local_indexer is False
     assert config.structural_tag_mode == "on"
@@ -184,6 +251,7 @@ def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_a
     assert cfg.endpoint_types == "chat,completions"
     assert cfg.use_kv_events is False
     assert cfg.custom_jinja_template is None
+    assert cfg.default_thinking_mode is None
     assert cfg.structural_tag_mode == "off"
     assert cfg.structural_tag_scope == "auto"
     assert cfg.structural_tag_schema == "auto"
@@ -310,16 +378,61 @@ def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
 
 
 @pytest.mark.unified
-def test_python_worker_config_rejects_unsupported_mode_when_running():
-    """ENCODE has no unified-path implementation yet; the shim must raise
-    NotImplementedError when it tries to translate the mode for the Rust
-    binding instead of silently treating ENCODE as aggregated."""
-    from dynamo.common.backend.worker import WorkerConfig, _to_rust_disaggregation_mode
+def test_python_worker_config_translates_all_disagg_modes():
+    """Every variant of dynamo.common.constants.DisaggregationMode must map
+    to a Rust binding value -- including ENCODE, which gained unified-path
+    support. Regression for the prior `NotImplementedError`
+    behavior where ENCODE was rejected at translation time."""
+    from dynamo.common.backend.worker import _to_rust_disaggregation_mode
     from dynamo.common.constants import DisaggregationMode
 
-    cfg = WorkerConfig(namespace="ns", disaggregation_mode=DisaggregationMode.ENCODE)
-    with pytest.raises(NotImplementedError):
-        _to_rust_disaggregation_mode(cfg.disaggregation_mode)
+    rust_mode_for = {
+        DisaggregationMode.AGGREGATED: backend.DisaggregationMode.Aggregated,
+        DisaggregationMode.PREFILL: backend.DisaggregationMode.Prefill,
+        DisaggregationMode.DECODE: backend.DisaggregationMode.Decode,
+        DisaggregationMode.ENCODE: backend.DisaggregationMode.Encode,
+    }
+    for py_mode, expected_rust in rust_mode_for.items():
+        assert _to_rust_disaggregation_mode(py_mode) == expected_rust
+
+
+@pytest.mark.unified
+def test_python_worker_config_round_trips_route_to_encoder():
+    """route_to_encoder must flow from runtime_cfg -> WorkerConfig dataclass
+    -> Rust pyclass without being silently dropped at any layer. vLLM is the
+    only Python backend with the field today; SGLang/TRT-LLM get False via
+    the getattr default until they add the field."""
+    from dynamo.common.backend.worker import WorkerConfig
+
+    # Simulated vLLM-style runtime config that exposes the field.
+    class _RuntimeWithRoute:
+        namespace = "ns"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = None
+        route_to_encoder = True
+
+    cfg = WorkerConfig.from_runtime_config(_RuntimeWithRoute(), model_name="m")
+    assert cfg.route_to_encoder is True
+
+    # Simulated SGLang/TRT-LLM-style runtime config that doesn't expose the
+    # field yet -- the getattr default keeps it False so legacy behavior is
+    # preserved until the backend adds the field on its own runtime config.
+    class _RuntimeWithoutRoute:
+        namespace = "ns"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = None
+
+    cfg_default = WorkerConfig.from_runtime_config(
+        _RuntimeWithoutRoute(), model_name="m"
+    )
+    assert cfg_default.route_to_encoder is False
+
+    # Verify the Rust pyclass accepts the kwarg at the end of its signature
+    # (appended for backward-compat with positional callers).
+    rust_cfg = backend.WorkerConfig(namespace="ns", route_to_encoder=True)
+    assert rust_cfg is not None
 
 
 def test_worker_constructor_requires_engine_config_loop():

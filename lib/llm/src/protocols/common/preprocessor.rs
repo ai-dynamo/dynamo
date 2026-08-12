@@ -2,14 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
+    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
 };
+use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
+
+const KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: &str = "kv_transfer_params";
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
@@ -53,6 +57,14 @@ pub struct RoutingHints {
     /// Used for LORA-aware routing and tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
+
+    /// Cache namespace for request-scoped KV cache isolation.
+    #[serde(
+        default,
+        rename = "cache_salt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_namespace: Option<String>,
 
     /// Priority jump in seconds for queue ordering.
     /// A positive value decreases the effective arrival time, moving the request
@@ -108,6 +120,77 @@ pub struct TraceLink {
     pub span_id: String,
 }
 
+/// Frontend-local state shared by every attempt from one migration manager.
+/// The selected router records a failed worker before the error is exposed;
+/// later attempts use the accumulated set as an attempt-local exclusion.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MigrationState {
+    inner: Arc<OnceLock<Mutex<MigrationStateInner>>>,
+}
+
+#[derive(Debug, Default)]
+struct MigrationStateInner {
+    excluded_worker_ids: Vec<WorkerId>,
+    last_error: Option<DynamoError>,
+}
+
+impl MigrationState {
+    pub(crate) fn record_failure(&self, worker_id: WorkerId, error: Option<DynamoError>) {
+        let mut inner = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inner.excluded_worker_ids.contains(&worker_id) {
+            inner.excluded_worker_ids.push(worker_id);
+        }
+        if error.is_some() {
+            inner.last_error = error;
+        }
+    }
+
+    pub(crate) fn excluded_worker_ids(&self) -> Vec<WorkerId> {
+        let Some(inner) = self.inner.get() else {
+            return Vec::new();
+        };
+        inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .excluded_worker_ids
+            .clone()
+    }
+
+    pub(crate) fn exhausted_error(&self) -> Option<DynamoError> {
+        let inner = self.inner.get()?;
+        let last_error = inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_error
+            .clone()?;
+        let (error_type, message) = if match_error_chain(
+            &last_error,
+            &[ErrorType::WorkerOverloaded],
+            &[ErrorType::ResourceExhausted],
+        ) {
+            (
+                ErrorType::ResourceExhausted,
+                "all eligible workers rejected the request as overloaded",
+            )
+        } else {
+            (
+                ErrorType::Unavailable,
+                "no untried eligible worker remains after migration",
+            )
+        };
+        Some(
+            DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build(),
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
     /// Disaggregated execution parameters. Engine-owned; the framework
@@ -144,10 +227,15 @@ pub enum MultimodalData {
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
+    /// Payload-free media slot resolved by a backend processor cache.
+    UuidOnly(String),
 }
 
 // multimodal map containing {mm_part_type: [data...]}
 pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
+
+/// Backend cache UUIDs aligned positionally with multimodal data slots.
+pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
@@ -162,6 +250,12 @@ pub struct PreprocessedRequest {
     #[serde(default)]
     pub model: String,
 
+    /// Attempt-local migration state. Frontend-only: it is neither serialized
+    /// to workers nor exposed as a caller-controlled routing hint.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) migration_state: Option<MigrationState>,
+
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
@@ -175,6 +269,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// User-provided backend cache identities aligned with `multi_modal_data`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_uuids: Option<MultimodalUuidMap>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]
@@ -226,6 +325,20 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
 
+    /// Multimodal encoder handoff payload, set by the frontend when
+    /// forwarding a request from an Encode worker to a downstream
+    /// Prefill/Aggregated peer. Engine-opaque JSON object;
+    /// the framework neither inspects nor mutates the contents. Object-
+    /// only by contract (see Python `require_encoder_result` and the
+    /// Rust `LLMEngineOutput::encode_terminal` constructor).
+    #[builder(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_object"
+    )]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Directional link to a predecessor worker's `engine.generate` span.
     /// Set by `PrefillRouter` on the decode side (prefill→decode handoff)
     /// and by the migration `RetryManager` on retry attempts. Framework-
@@ -244,6 +357,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Whether the backend should allow a reasoning phase before enforcing
+    /// guided output. SGLang consumes this as its per-request
+    /// `require_reasoning` engine argument.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_reasoning: bool,
 
     /// Router-specific parameters forwarded from `nvext.router`.
     /// Consumed by router implementations (e.g. the global router) and ignored
@@ -291,6 +411,27 @@ pub struct PreprocessedRequest {
     pub is_probe: bool,
 }
 
+/// Enforce the object-only `encoder_result` contract at the serde boundary.
+/// The handoff payload is engine-opaque but must be a JSON object at every hop;
+/// reject arrays/scalars here so a non-conforming (e.g. cross-language)
+/// producer fails fast instead of leaking a malformed shape downstream.
+fn deserialize_optional_object<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    if let Some(v) = &value
+        && !v.is_object()
+    {
+        return Err(serde::de::Error::custom(
+            "encoder_result must be a JSON object",
+        ));
+    }
+    Ok(value)
+}
+
 impl PreprocessedRequest {
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
@@ -315,6 +456,22 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
+    pub fn attach_router_hint(&mut self, hint: &RouterHint) -> serde_json::Result<()> {
+        let hint_value = serde_json::to_value(hint)?;
+        let mut map = extra_args_object(self.extra_args.take());
+        let mut kv_transfer_params = match map.remove(KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY) {
+            Some(serde_json::Value::Object(params)) => params,
+            Some(_) | None => serde_json::Map::new(),
+        };
+        kv_transfer_params.insert(ROUTER_HINT_EXTRA_ARGS_KEY.to_string(), hint_value);
+        map.insert(
+            KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY.to_string(),
+            serde_json::Value::Object(kv_transfer_params),
+        );
+        self.extra_args = Some(serde_json::Value::Object(map));
+        Ok(())
+    }
+
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
@@ -326,6 +483,15 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
+}
+
+fn extra_args_object(
+    extra_args: Option<serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    match extra_args {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
     }
 }
 
@@ -369,6 +535,88 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_router_hint_preserves_extra_args_object() {
+        use dynamo_kv_router::{
+            protocols::ExternalSequenceBlockHash,
+            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+        };
+
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .extra_args(Some(serde_json::json!({
+                "caller": "kept",
+                "kv_transfer_params": {"existing": "kept"}
+            })))
+            .build()
+            .unwrap();
+        let hint = RouterHint {
+            source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+            block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
+        };
+
+        req.attach_router_hint(&hint).unwrap();
+
+        let extra_args = req.extra_args.unwrap();
+        assert_eq!(extra_args["caller"], "kept");
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY]["existing"],
+            "kept"
+        );
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["source_control_endpoint"],
+            "tcp://127.0.0.1:23280"
+        );
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
+            serde_json::json!([11, 22])
+        );
+    }
+
+    #[test]
+    fn attach_router_hint_replaces_non_object_kv_transfer_params() {
+        use dynamo_kv_router::{
+            protocols::ExternalSequenceBlockHash,
+            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+        };
+
+        for invalid_params in [
+            serde_json::Value::Null,
+            serde_json::json!("invalid"),
+            serde_json::json!(["invalid"]),
+        ] {
+            let mut req = PreprocessedRequest::builder()
+                .model("t".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .extra_args(Some(serde_json::json!({
+                    "caller": "kept",
+                    "kv_transfer_params": invalid_params
+                })))
+                .build()
+                .unwrap();
+            let hint = RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                block_hashes: vec![ExternalSequenceBlockHash(33)],
+            };
+
+            req.attach_router_hint(&hint).unwrap();
+
+            let extra_args = req.extra_args.unwrap();
+            assert_eq!(extra_args["caller"], "kept");
+            assert_eq!(
+                extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
+                serde_json::json!([33])
+            );
+        }
+    }
 
     #[test]
     fn bootstrap_info_carries_only_stable_handoff_identity() {
@@ -423,6 +671,36 @@ mod tests {
         assert!(back.is_probe);
     }
 
+    /// Covers the wire contract for the backend reasoning gate: old payloads
+    /// default to false, false is omitted, and true survives serialization.
+    #[test]
+    fn require_reasoning_serde_round_trip() {
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        let normal = serde_json::to_value(&req).unwrap();
+        assert!(
+            !normal
+                .as_object()
+                .unwrap()
+                .contains_key("require_reasoning")
+        );
+        let back: PreprocessedRequest = serde_json::from_value(normal).unwrap();
+        assert!(!back.require_reasoning);
+
+        req.require_reasoning = true;
+        let guided = serde_json::to_value(&req).unwrap();
+        assert_eq!(guided["require_reasoning"], true);
+        let back: PreprocessedRequest = serde_json::from_value(guided).unwrap();
+        assert!(back.require_reasoning);
+    }
+
     /// Canary payloads carry only engine-relevant fields. All other required
     /// fields (`model`, `stop_conditions`, `sampling_options`, etc.) must
     /// pick up `serde(default)` so the runtime's `JsonProbeAdapter` can
@@ -438,5 +716,73 @@ mod tests {
         assert_eq!(req.token_ids, vec![1]);
         assert!(req.is_probe);
         assert_eq!(req.model, "");
+    }
+
+    /// `encoder_result` is the multimodal encoder handoff payload set by
+    /// the frontend when forwarding a request to a downstream
+    /// Prefill/Aggregated worker. The wire shape is engine-opaque -- the
+    /// framework must round-trip the value byte-identical without
+    /// inspecting or wrapping it.
+    #[test]
+    fn encoder_result_round_trips_through_serde() {
+        let payload = serde_json::json!({
+            "embedding_handle": {
+                "shape": [1, 1024],
+                "dtype": "fp16",
+                "uri": "nixl://encoder-0/embedding-42",
+            },
+            "processed_token_ids": [128_000_u32, 200_001_u32, 200_002_u32],
+        });
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .encoder_result(Some(payload.clone()))
+            .build()
+            .unwrap();
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["encoder_result"], payload);
+
+        let back: PreprocessedRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.encoder_result, Some(payload));
+    }
+
+    /// `encoder_result` defaults to `None` and is absent from the
+    /// serialized payload when unset (via `skip_serializing_if`), matching
+    /// the convention used by sibling optional fields like `prefill_result`.
+    #[test]
+    fn encoder_result_is_absent_when_none() {
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+        assert!(req.encoder_result.is_none());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("encoder_result"),
+            "encoder_result must be absent from wire when None; got {json}"
+        );
+    }
+
+    #[test]
+    fn routing_hints_cache_namespace_serializes_as_cache_salt() {
+        let hints = RoutingHints {
+            cache_namespace: Some("tenant-a".to_string()),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&hints).unwrap();
+
+        assert_eq!(value["cache_salt"], "tenant-a");
+        assert!(value.get("cache_namespace").is_none());
+
+        let decoded: RoutingHints = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.cache_namespace.as_deref(), Some("tenant-a"));
     }
 }

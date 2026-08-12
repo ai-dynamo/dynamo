@@ -19,8 +19,7 @@ print_launch_banner "Launching Disaggregated + KVBM + KV Routing (4 GPUs)" "$MOD
 
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # two decode workers (without KVBM)
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
@@ -28,6 +27,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
     --disaggregation-mode decode \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
@@ -35,6 +35,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
     --disaggregation-mode decode \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # two prefill workers with KVBM enabled
@@ -47,6 +48,7 @@ CUDA_VISIBLE_DEVICES=2 DYN_KVBM_CPU_CACHE_GB=20 \
     --model $MODEL \
     --enforce-eager \
     --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
@@ -58,6 +60,7 @@ CUDA_VISIBLE_DEVICES=3 DYN_KVBM_CPU_CACHE_GB=20 \
     --model $MODEL \
     --enforce-eager \
     --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
 

@@ -30,7 +30,6 @@ import (
 type CheckpointInfo struct {
 	Enabled          bool
 	Exists           bool
-	Identity         *nvidiacomv1alpha1.DynamoCheckpointIdentity
 	GPUMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	Hash             string
 	ArtifactVersion  string
@@ -50,7 +49,6 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	return &CheckpointInfo{
 		Enabled:          true,
 		Exists:           true,
-		Identity:         &ckpt.Spec.Identity,
 		GPUMemoryService: ckpt.Spec.GPUMemoryService,
 		Hash:             hash,
 		ArtifactVersion:  checkpointArtifactVersion(ckpt),
@@ -68,7 +66,7 @@ func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string 
 
 func ResolveCheckpointForService(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 ) (*CheckpointInfo, error) {
@@ -90,9 +88,6 @@ func ResolveCheckpointForService(
 
 		info, err := checkpointInfoFromObject(ckpt)
 		if err != nil {
-			return nil, err
-		}
-		if err := validateResolvedGMSSnapshotGate(info); err != nil {
 			return nil, err
 		}
 		if config.TargetContainerName != "" {
@@ -119,7 +114,6 @@ func ResolveCheckpointForService(
 	if existing == nil {
 		return &CheckpointInfo{
 			Enabled:       true,
-			Identity:      config.Identity,
 			Hash:          hash,
 			StartupPolicy: startupPolicy,
 		}, nil
@@ -129,20 +123,9 @@ func ResolveCheckpointForService(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateResolvedGMSSnapshotGate(info); err != nil {
-		return nil, err
-	}
-	info.Identity = config.Identity
 	if config.TargetContainerName != "" {
 		info.RestoreTargetContainers = []string{config.TargetContainerName}
 	}
 	info.StartupPolicy = startupPolicy
 	return info, nil
-}
-
-func validateResolvedGMSSnapshotGate(info *CheckpointInfo) error {
-	if info == nil {
-		return nil
-	}
-	return ValidateGMSSnapshotGate("checkpoint.gpuMemoryService", info.Enabled, info.GPUMemoryService)
 }

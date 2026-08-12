@@ -7,13 +7,19 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use flate2::read::MultiGzDecoder;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RequestTraceRecord {
@@ -34,24 +40,84 @@ pub(crate) enum TraceSchema {
     RequestV1,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct AgentContextFields {
     pub(crate) session_id: String,
     #[serde(default)]
     pub(crate) parent_session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct RequestTraceRequestMetrics {
     pub(crate) request_id: String,
     #[serde(default)]
+    pub(crate) x_request_id: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) input_tokens: Option<u64>,
+    #[serde(default)]
     pub(crate) output_tokens: Option<u64>,
+    #[serde(default)]
+    pub(crate) cached_tokens: Option<u64>,
     #[serde(default)]
     pub(crate) request_received_ms: Option<u64>,
     #[serde(default)]
+    pub(crate) prefill_wait_time_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) prefill_time_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) ttft_ms: Option<f64>,
+    #[serde(default)]
     pub(crate) total_time_ms: Option<f64>,
     #[serde(default)]
+    pub(crate) avg_itl_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) kv_hit_rate: Option<f64>,
+    #[serde(default)]
+    pub(crate) kv_transfer_estimated_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) queue_depth: Option<u64>,
+    #[serde(default)]
+    pub(crate) worker: Option<RequestTraceWorkerInfo>,
+    #[serde(default)]
     pub(crate) replay: Option<RequestTraceReplayMetrics>,
+    #[serde(default)]
+    pub(crate) finish_reason_metadata: Option<RequestTraceFinishReasonMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestTraceWorkerInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prefill_worker_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prefill_dp_rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) decode_worker_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) decode_dp_rank: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestTraceFinishReasonMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) backend_finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stop_reason: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tool_calls: Vec<RequestTraceToolCall>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestTraceToolCall {
+    pub(crate) choice_index: u32,
+    pub(crate) tool_call_index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +132,8 @@ pub(crate) struct RequestTraceToolEventMetrics {
     pub(crate) tool_call_id: String,
     pub(crate) tool_class: String,
     #[serde(default)]
+    pub(crate) claude: Option<ClaudeToolReplayMetrics>,
+    #[serde(default)]
     pub(crate) started_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub(crate) ended_at_unix_ms: Option<u64>,
@@ -79,6 +147,58 @@ pub(crate) struct RequestTraceToolEventMetrics {
     pub(crate) output_tokens: Option<u64>,
     #[serde(default)]
     pub(crate) error_type: Option<String>,
+}
+
+/// Claude-only evidence used to disambiguate an offline replay DAG.
+///
+/// A completed session reveals the future request that consumed a tool result;
+/// live ZMQ tool producers do not have that information. Missing metadata is
+/// expected and leaves agentic lowering on its timestamp-based fallback.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaudeToolReplayMetrics {
+    /// Request that emitted the tool call.
+    pub(crate) source_request_id: String,
+    /// Later request that consumed the terminal result.
+    #[serde(default)]
+    pub(crate) consumer_request_id: Option<String>,
+    /// Child agent session launched by the tool, when present in the export.
+    #[serde(default)]
+    pub(crate) child_session_id: Option<String>,
+    /// Whether parent execution blocked or continued in the background.
+    pub(crate) execution_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum JsonLineEnvelope {
+    Object(TraceRecordEnvelope),
+    Other(IgnoredAny),
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRecordEnvelope {
+    #[serde(default)]
+    event_type: Option<String>,
+    #[serde(default)]
+    event: Option<TraceEventEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TraceEventEnvelope {
+    Object(TraceEventFields),
+    Other(IgnoredAny),
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceEventFields {
+    #[serde(default)]
+    event_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrappedTraceRecord {
+    event: RequestTraceRecord,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +217,7 @@ pub struct ToolEntry {
     pub(crate) end_ms: i64,
     pub(crate) tool_call_id: String,
     pub(crate) tool_class: String,
+    pub(crate) claude: Option<ClaudeToolReplayMetrics>,
     pub(crate) status: String,
     pub(crate) duration_ms: f64,
     pub(crate) output_bytes: Option<u64>,
@@ -145,8 +266,8 @@ impl LoadedAgentTrace {
     }
 }
 
-/// Records other than `request_end` / `tool_end` / `tool_error` are skipped.
-/// Errors if no `request_end` rows were found.
+/// `request_payload` records are skipped; replay consumes `request_end` and
+/// terminal tool events only. Errors if no `request_end` rows were found.
 pub fn load_request_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
     let mut loaded = LoadedAgentTrace::default();
     let mut request_ids = HashSet::new();
@@ -166,12 +287,15 @@ pub fn load_request_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace>
                 continue;
             };
             let _schema = record.schema;
+            if record.event_type == "request_payload" {
+                continue;
+            }
             if !matches!(
                 record.event_type.as_str(),
                 "request_end" | "tool_start" | "tool_end" | "tool_error"
             ) {
                 bail!(
-                    "request trace schema only supports request_end/tool_* events, got {} at {}:{}",
+                    "request trace schema only supports request_end/tool_* and request_payload events, got {} at {}:{}",
                     record.event_type,
                     path.display(),
                     line_index + 1
@@ -221,12 +345,28 @@ fn open_trace_reader(path: &Path) -> Result<Box<dyn BufRead>> {
 }
 
 fn parse_trace_record(line: &str) -> Result<Option<RequestTraceRecord>> {
-    let value: Value = serde_json::from_str(line)?;
-    let event = value.get("event").unwrap_or(&value);
-    if !event.is_object() {
-        return Ok(None);
+    let envelope = match serde_json::from_str::<JsonLineEnvelope>(line)? {
+        JsonLineEnvelope::Object(envelope) => envelope,
+        JsonLineEnvelope::Other(_) => return Ok(None),
+    };
+
+    match envelope.event {
+        Some(TraceEventEnvelope::Object(event)) => {
+            if event.event_type.as_deref() == Some("request_payload") {
+                return Ok(None);
+            }
+            Ok(Some(
+                serde_json::from_str::<WrappedTraceRecord>(line)?.event,
+            ))
+        }
+        Some(TraceEventEnvelope::Other(_)) => Ok(None),
+        None => {
+            if envelope.event_type.as_deref() == Some("request_payload") {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::from_str(line)?))
+        }
     }
-    Ok(Some(serde_json::from_value(event.clone())?))
 }
 
 fn request_entry(record: RequestTraceRecord) -> Result<RequestEntry> {
@@ -301,6 +441,7 @@ fn tool_entry(record: RequestTraceRecord, terminal_event: String) -> Option<Tool
         end_ms,
         tool_call_id: tool.tool_call_id,
         tool_class: tool.tool_class,
+        claude: tool.claude,
         status,
         duration_ms,
         output_bytes: tool.output_bytes,
@@ -348,8 +489,7 @@ mod tests {
             request_id: "req".to_string(),
             output_tokens: Some(1),
             request_received_ms: Some(1_000),
-            total_time_ms: None,
-            replay: None,
+            ..Default::default()
         };
 
         assert_eq!(request_times(1_250, &request), (1_000, 1_250));
@@ -369,6 +509,74 @@ mod tests {
         assert!(loaded.requests[0].agent_context.is_none());
         assert_eq!(loaded.requests[0].start_ms, 1_000);
         assert_eq!(loaded.requests[0].end_ms, 1_100);
+    }
+
+    #[test]
+    fn loads_wrapped_request_trace_record() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":1,"event":{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}}}"#
+        )
+        .unwrap();
+
+        let loaded = load_request_trace_records(&[file.path().to_path_buf()]).unwrap();
+        assert_eq!(loaded.requests.len(), 1);
+        assert_eq!(loaded.requests[0].request.request_id, "req-1");
+    }
+
+    #[test]
+    fn skips_request_payload_records() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_payload","event_time_unix_ms":1050,"payload":{{"request_id":"req-1","endpoint":"openai.chat_completion","model":"test","request":{{"model":"test","messages":[{{"role":"user","content":"hi"}}]}},"payload_complete":true}}}}"#
+        )
+        .unwrap();
+        let large_payload = "x".repeat(4096);
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "timestamp": 1051,
+                "event": {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_payload",
+                    "event_time_unix_ms": 1051,
+                    "payload": {
+                        "request_id": "req-1",
+                        "endpoint": "openai.chat_completion",
+                        "model": "test",
+                        "request": {
+                            "model": "test",
+                            "messages": [{
+                                "role": "user",
+                                "content": large_payload.clone(),
+                            }],
+                        },
+                        "response": {
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": large_payload,
+                                },
+                            }],
+                        },
+                        "payload_complete": true,
+                    },
+                },
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}"#
+        )
+        .unwrap();
+
+        let loaded = load_request_trace_records(&[file.path().to_path_buf()]).unwrap();
+        assert_eq!(loaded.requests.len(), 1);
+        assert_eq!(loaded.requests[0].request.request_id, "req-1");
     }
 
     #[test]
@@ -436,7 +644,7 @@ mod tests {
         .unwrap();
         writeln!(
             file,
-            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","claude":{{"source_request_id":"req-1","consumer_request_id":"req-2","child_session_id":"child","execution_mode":"background"}},"started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
         )
         .unwrap();
 
@@ -454,5 +662,10 @@ mod tests {
         assert_eq!(loaded.tools.len(), 1);
         assert_eq!(loaded.tools[0].tool_call_id, "tool-1");
         assert_eq!(loaded.tools[0].tool_class, "search");
+        let claude = loaded.tools[0].claude.as_ref().expect("Claude metadata");
+        assert_eq!(claude.source_request_id, "req-1");
+        assert_eq!(claude.consumer_request_id.as_deref(), Some("req-2"));
+        assert_eq!(claude.child_session_id.as_deref(), Some("child"));
+        assert_eq!(claude.execution_mode, "background");
     }
 }

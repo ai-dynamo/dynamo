@@ -24,6 +24,7 @@ import (
 )
 
 // DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
 	// annotations to propagate to all child resources (PCS, DCD, Deployments,
 	// and pod templates). Component-level (`podTemplate`) values take precedence
@@ -125,10 +126,48 @@ type DynamoGraphDeploymentStatus struct {
 	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+
+	// placement groups DGD-level scheduler placement signals (score, reporting
+	// state, and any future placement fields).
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
 }
+
+// DGD Ready condition reasons used to classify Grove-backed not-ready
+// deployments on status.conditions[type=Ready].reason. These distinguish
+// capacity/scheduling blockers from pods that are scheduled but not yet
+// runtime-ready.
+const (
+	// DGDReadyReasonAllResourcesReady: every component is fully ready. This is
+	// the pre-existing success reason, unchanged.
+	DGDReadyReasonAllResourcesReady = "all_resources_are_ready"
+
+	// DGDReadyReasonInsufficientCapacity: at least one component is blocked
+	// before runtime readiness because Grove reports insufficient scheduled
+	// replicas, schedule-gated pods, or a scheduling/capacity condition.
+	DGDReadyReasonInsufficientCapacity = "insufficient_capacity"
+
+	// DGDReadyReasonPodsNotReady: required pods are scheduled, but at least
+	// one component does not have enough ready/available replicas.
+	DGDReadyReasonPodsNotReady = "pods_not_ready"
+
+	// DGDReadyReasonUpdating: scheduling is sufficient, but at least one
+	// component has not finished rolling out updated replicas.
+	DGDReadyReasonUpdating = "updating"
+
+	// DGDReadyReasonMixedNotReadyReasons: more than one not-ready component
+	// exists and they don't all share the same classification.
+	DGDReadyReasonMixedNotReadyReasons = "mixed_not_ready_reasons"
+
+	// DGDReadyReasonSomeResourcesNotReady: fallback used when the controller
+	// cannot classify the cause of a not-ready component. This is the
+	// pre-existing generic not-ready reason, unchanged.
+	DGDReadyReasonSomeResourcesNotReady = "some_resources_are_not_ready"
+)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgd
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready status of the graph deployment"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -136,9 +175,8 @@ type DynamoGraphDeploymentStatus struct {
 
 // DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 //
-// v1beta1 is a served version: the API server accepts reads and writes
-// against it, and transparently converts to/from v1alpha1 (still the
-// storage version until a later MR flips it). Conversion goes through the
+// v1beta1 is the storage version. The API server transparently converts
+// to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -157,10 +195,6 @@ type DynamoGraphDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeployment{}, &DynamoGraphDeploymentList{})
 }
 
 // SetState updates the high-level lifecycle state.

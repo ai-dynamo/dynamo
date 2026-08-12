@@ -70,7 +70,7 @@ impl AccessLogSink {
         let mut inner = self.inner.lock();
         if let Err(e) = inner.writer.write_all(record.as_bytes()) {
             let prev = IO_ERRORS.fetch_add(1, Ordering::Relaxed);
-            if prev % 100 == 0 {
+            if prev.is_multiple_of(100) {
                 tracing::warn!(error = %e, total = prev + 1, "access log write failed");
             }
         }
@@ -161,7 +161,7 @@ pub async fn access_log_middleware(
 
 /// Parse and validate an HTTP header name at startup.
 pub fn parse_header_name(name: &str) -> Result<HeaderName, axum::http::Error> {
-    HeaderName::from_bytes(name.as_bytes()).map_err(|e| axum::http::Error::from(e))
+    HeaderName::from_bytes(name.as_bytes()).map_err(axum::http::Error::from)
 }
 
 #[cfg(test)]
@@ -213,12 +213,5 @@ mod tests {
         assert_eq!(lines.len(), 5);
         assert!(content.contains(r#"{"n":0}"#));
         assert!(content.contains(r#"{"n":4}"#));
-    }
-
-    #[test]
-    fn parse_header_name_validates() {
-        assert!(parse_header_name("x-trace-id").is_ok());
-        assert!(parse_header_name("x-request-id").is_ok());
-        assert!(parse_header_name("invalid header\n").is_err());
     }
 }

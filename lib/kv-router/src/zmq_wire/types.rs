@@ -54,6 +54,19 @@ pub enum KvTokenIds {
     Bigram(Vec<(u32, u32)>),
 }
 
+/// Per-event storage locality emitted by vLLM alongside `medium`. Absent on
+/// legacy events; vLLM never infers it. `Unknown` captures any future value so
+/// deserialization stays forward-compatible and unrecognized values fail closed
+/// downstream.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Locality {
+    Local,
+    Remote,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 pub enum RawKvEvent {
@@ -69,6 +82,14 @@ pub enum RawKvEvent {
         /// LoRA adapter name for adapter-aware block hashing
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
+        /// Cache namespace for salted block hashing. The wire field remains `cache_salt`
+        /// to match backend event schemas.
+        #[serde(
+            default,
+            rename = "cache_salt",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cache_namespace: Option<String>,
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
@@ -80,6 +101,8 @@ pub enum RawKvEvent {
         kv_cache_spec_kind: Option<KvCacheSpecKind>,
         #[serde(skip_serializing_if = "Option::is_none")]
         kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -91,6 +114,8 @@ pub enum RawKvEvent {
         kv_cache_spec_kind: Option<KvCacheSpecKind>,
         #[serde(skip_serializing_if = "Option::is_none")]
         kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
     },
     AllBlocksCleared,
     Ignored,
@@ -108,6 +133,27 @@ impl RawKvEvent {
 
     pub fn is_ignored(&self) -> bool {
         matches!(self, Self::Ignored)
+    }
+
+    /// Wire `medium` string for store/remove events, if present. Lets the
+    /// normalizer and consolidator ingress gate on the storage tier without
+    /// re-matching every variant.
+    pub fn medium(&self) -> Option<&str> {
+        match self {
+            Self::BlockStored { medium, .. } | Self::BlockRemoved { medium, .. } => {
+                medium.as_deref()
+            }
+            Self::AllBlocksCleared | Self::Ignored => None,
+        }
+    }
+
+    /// Per-event locality, if present. Absent or `Local` is worker-local;
+    /// `Remote` or an unrecognized value is treated as non-local.
+    pub fn locality(&self) -> Option<Locality> {
+        match self {
+            Self::BlockStored { locality, .. } | Self::BlockRemoved { locality, .. } => *locality,
+            Self::AllBlocksCleared | Self::Ignored => None,
+        }
     }
 
     pub(crate) fn metadata(&self) -> KvCacheEventMetadata {

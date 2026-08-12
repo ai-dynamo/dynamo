@@ -238,6 +238,7 @@ spec:
                 --pipeline-parallel-size 1 \
                 --data-parallel-size 8 \
                 --data-parallel-rpc-port 29500 \
+                --disaggregation-mode decode \
                 --enable-expert-parallel \
                 --max-model-len 9280 \
                 --max-num-seqs 128 \

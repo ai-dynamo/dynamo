@@ -11,7 +11,7 @@ use crate::protocols::{
     StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
-use super::types::{BlockHashValue, RawKvEvent};
+use super::types::{BlockHashValue, Locality, RawKvEvent};
 
 /// Convert a raw event coming from the ZMQ channel into a placement-aware worker event.
 pub fn convert_event(
@@ -22,13 +22,48 @@ pub fn convert_event(
     warning_count: &Arc<AtomicU32>,
     image_token_id: Option<u32>,
 ) -> Option<PlacementEvent> {
-    let storage_tier = match &raw {
-        RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
-            StorageTier::from_kv_medium_or_default(medium.as_deref())
+    // Read the wire tier/locality facts up front, before any indexing work.
+    let (medium, locality) = match &raw {
+        RawKvEvent::BlockStored {
+            medium, locality, ..
         }
-        RawKvEvent::AllBlocksCleared => StorageTier::Device,
+        | RawKvEvent::BlockRemoved {
+            medium, locality, ..
+        } => (medium.as_deref(), *locality),
+        RawKvEvent::AllBlocksCleared => (None, None),
         RawKvEvent::Ignored => return None,
     };
+
+    // No consumer exists for a shared/global index yet (dynamo #10457), so
+    // REMOTE and any unrecognized locality fail closed. Absent or LOCAL keeps
+    // the event worker-local, matching legacy CPU-offload events that never
+    // carried a locality field. The normalizer's preprocess step classifies
+    // these as filtered first; this guard is a defensive backstop for direct
+    // convert_event callers that bypass preprocess.
+    if matches!(locality, Some(Locality::Remote | Locality::Unknown)) {
+        tracing::trace!(event_id, "Dropping non-local KV event (locality != LOCAL)");
+        return None;
+    }
+
+    // Fail closed on unrecognized media instead of silently indexing them on
+    // the device (G1) primary tree. vLLM 0.26.0 ships `FS` / `OBJ` (pre-#48123
+    // wire); those and any future medium strings are dropped, not misfiled. The
+    // normalizer's preprocess step classifies these as filtered first (so no
+    // event id is burned); this guard is a defensive backstop for direct
+    // convert_event callers that bypass preprocess, mirroring the locality gate.
+    let storage_tier = match medium {
+        None => StorageTier::Device,
+        Some(medium) => match StorageTier::from_kv_medium(medium) {
+            Some(tier) => tier,
+            None => {
+                if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
+                    tracing::warn!(event_id, medium, "Dropping KV event with unknown medium");
+                }
+                return None;
+            }
+        },
+    };
+
     let dp_rank = worker.dp_rank;
     let event = match raw {
         RawKvEvent::BlockStored {
@@ -37,12 +72,14 @@ pub fn convert_event(
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             block_mm_infos,
             medium: _,
             is_eagle,
             group_idx: _,
             kv_cache_spec_kind: _,
             kv_cache_spec_sliding_window: _,
+            locality: _,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -90,6 +127,7 @@ pub fn convert_event(
                         &num_block_tokens,
                         &block_hashes_u64,
                         lora_name.as_deref(),
+                        cache_namespace.as_deref(),
                         warning_count,
                         block_mm_infos.as_deref(),
                         is_eagle,
@@ -175,15 +213,29 @@ fn substitute_pad_values(token_ids: &[u32], image_token_id: u32, mm_objects: &[u
     out
 }
 
+#[derive(Default)]
+pub struct StoredBlockOptions<'a> {
+    pub lora_name: Option<&'a str>,
+    pub cache_namespace: Option<&'a str>,
+    pub mm_extra_info: Option<BlockExtraInfo>,
+    pub is_eagle: Option<bool>,
+    pub image_token_id: Option<u32>,
+}
+
 pub fn create_stored_block_from_parts(
     kv_block_size: u32,
     block_hash: u64,
     token_ids: &[u32],
-    lora_name: Option<&str>,
-    mm_extra_info: Option<BlockExtraInfo>,
-    is_eagle: Option<bool>,
-    image_token_id: Option<u32>,
+    options: StoredBlockOptions<'_>,
 ) -> KvCacheStoredBlockData {
+    let StoredBlockOptions {
+        lora_name,
+        cache_namespace,
+        mm_extra_info,
+        is_eagle,
+        image_token_id,
+    } = options;
+
     // When the model has a routing image token and this block carries mm
     // objects (vLLM events), normalize to the canonical pad_value scheme:
     // substitute pad_value over the image_token_id runs and hash WITHOUT
@@ -200,6 +252,7 @@ pub fn create_stored_block_from_parts(
                 BlockHashOptions {
                     block_mm_infos: None,
                     lora_name,
+                    cache_namespace,
                     is_eagle,
                 },
             )[0]
@@ -212,6 +265,7 @@ pub fn create_stored_block_from_parts(
                 BlockHashOptions {
                     block_mm_infos: block_mm_infos.as_deref(),
                     lora_name,
+                    cache_namespace,
                     is_eagle,
                 },
             )[0]
@@ -240,6 +294,7 @@ pub fn create_stored_blocks(
     num_block_tokens: &[u64],
     block_hashes: &[u64],
     lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: Option<bool>,
@@ -285,10 +340,13 @@ pub fn create_stored_blocks(
             kv_block_size,
             *block_hash_it,
             tokens,
-            lora_name,
-            mm_extra_info,
-            is_eagle,
-            image_token_id,
+            StoredBlockOptions {
+                lora_name,
+                cache_namespace,
+                mm_extra_info,
+                is_eagle,
+                image_token_id,
+            },
         ));
         token_offset += *num_tokens_it as usize;
     }
@@ -322,10 +380,11 @@ mod normalize_tests {
             block_size,
             0xabcd,
             &vllm_tokens,
-            None,
-            Some(mm_info),
-            None,
-            Some(image_token_id),
+            StoredBlockOptions {
+                mm_extra_info: Some(mm_info),
+                image_token_id: Some(image_token_id),
+                ..Default::default()
+            },
         );
 
         // Frontend side: same tokens but image positions already pad_value,
@@ -354,13 +413,13 @@ mod normalize_tests {
             block_size,
             0x1,
             &tokens,
-            None,
-            None,
-            None,
-            Some(151655),
+            StoredBlockOptions {
+                image_token_id: Some(151655),
+                ..Default::default()
+            },
         );
         let without =
-            create_stored_block_from_parts(block_size, 0x1, &tokens, None, None, None, None);
+            create_stored_block_from_parts(block_size, 0x1, &tokens, StoredBlockOptions::default());
         assert_eq!(with_img.tokens_hash, without.tokens_hash);
     }
 }

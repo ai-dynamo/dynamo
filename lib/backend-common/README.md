@@ -5,28 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
-> **Work in progress.** The unified backend covers aggregated and
-> disaggregated (prefill/decode) inference, metrics + Prometheus
-> bridging, KV event publishing, KV-aware (DP-rank) routing,
-> health-check canaries, OpenTelemetry tracing, request-side
-> guided decoding, and both completion-side and prompt-side
-> logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
-> routes (pause/resume, profiling, weight updates), text-in-text-out,
-> and snapshot/CRIU are still on the non-unified path. See the
-> [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
-> for the per-engine matrix. The Python `Worker`
-> ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
-> is a thin shim over this crate.
+`dynamo-backend-common` provides the shared Rust engine contract and Worker
+lifecycle. Engine implementations own inference behavior; the Worker owns
+runtime registration, endpoint serving, cancellation monitoring, and shutdown.
+The Python `Worker`
+([`dynamo.common.backend`](../../components/src/dynamo/common/backend/)) is a
+thin shim over this crate.
 
 > **Looking for a walkthrough?** Start with
-> [Writing Unified Backends](../../docs/development/unified-backends.md)
+> [Writing Unified Backends](../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
 > and choose the Rust tab.
 > This README is the in-tree reference: trait shape, file layout,
 > disaggregation contract, error taxonomy, and the conformance kit.
 
 A two-type abstraction that separates **runtime integration** (common
-across all backends) from **engine logic** (vLLM, SGLang, TRT-LLM, your
-custom engine, etc.).
+across all backends) from **engine logic** in your custom engine.
 
 ## Architecture
 
@@ -94,7 +87,7 @@ lives at
 cargo run --release -- --help
 ```
 
-See the [walkthrough](../../docs/development/unified-backends.md) and choose
+See the [walkthrough](../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md) and choose
 the Rust tab for how to set up the crate (Cargo.toml, `tokio_unstable` cfg
 flag, toolchain pin) and write the engine.
 
@@ -150,7 +143,7 @@ fn main() -> anyhow::Result<()> {
 
 See [`examples/mocker/src/engine.rs`](examples/mocker/src/engine.rs)
 for a complete, runnable reference and the
-[walkthrough](../../docs/development/unified-backends.md) for the
+[walkthrough](../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md) for the
 Rust step-by-step including Cargo.toml, `tokio_unstable` cfg, and the
 conformance kit.
 
@@ -186,9 +179,9 @@ these decorate `PreprocessedRequest` on decode-bound requests. Prefill
 terminals carry their handoff payload via the engine's terminal chunk
 (e.g. `disaggregated_params`).
 
-For backends with an internal KV transport (vLLM `NixlConnector`,
-TRT-LLM's transceiver), leave `EngineConfig.bootstrap_host`/`port` `None`
-— only SGLang uses the Dynamo-level handshake today.
+For backends with an internal KV transport, leave
+`EngineConfig.bootstrap_host`/`port` as `None`. Set them only when the engine
+uses a Dynamo-level bootstrap handshake.
 
 ## Request / Response Contract
 
@@ -256,7 +249,7 @@ Mid-stream errors have two equivalent terminal forms:
   pure message-level failures. Loses the typed `BackendError` variant.
 
 A tiny helper per backend keeps call sites clean — see the
-[guide's Rust Step 6](../../docs/development/unified-backends.md) for the
+[guide's Rust Step 6](../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md) for the
 `invalid_arg` pattern.
 
 ## Conformance Kit
@@ -278,6 +271,23 @@ async fn my_engine_passes_conformance() {
     .expect("conformance");
 }
 ```
+
+Encode-role engines use the narrower handoff contract:
+
+```rust
+#[tokio::test]
+async fn my_encoder_passes_conformance() {
+    dynamo_backend_common::testing::run_encode_conformance(MyEncoder::new_for_test)
+        .await
+        .expect("encode conformance");
+}
+```
+
+`run_encode_conformance` sends a multimodal request and requires one terminal
+`FinishReason::Stop` chunk, empty `token_ids`, and an object-shaped
+`encoder_result`. When terminal usage is provided, it must consistently report
+zero completion tokens. The suite also applies the same KV source, metrics,
+concurrency, cancellation, and cleanup checks as token-engine conformance.
 
 The kit asserts:
 
@@ -398,13 +408,13 @@ lib/backend-common/
         mocker/          # CPU-only reference backend + docker-compose stack
 ```
 
-The Python `Worker` shim that drives this crate from `dynamo.*.unified_main`
-entry points lives at
+The Python `Worker` shim that drives this crate from a backend's entry point
+(e.g. `dynamo.common.backend.sample_main`) lives at
 [`components/src/dynamo/common/backend/worker.py`](../../components/src/dynamo/common/backend/worker.py).
 
 ## See Also
 
-- [Writing Unified Backends](../../docs/development/unified-backends.md)
+- [Writing Unified Backends](../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
   — step-by-step walkthrough; choose the Rust tab.
 - [`CLAUDE.md`](CLAUDE.md) — design notes (rationale, invariants,
   Phase 2 PyO3 plans).

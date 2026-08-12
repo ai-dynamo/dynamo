@@ -32,6 +32,19 @@ func parseManageCgroupsMode(raw string) (criurpc.CriuCgMode, string, error) {
 	}
 }
 
+// parseImageIoMode normalizes and validates the CRIU image I/O mode setting.
+// Empty defaults to DIRECT (O_DIRECT), matching the Helm default.
+func parseImageIoMode(raw string) (criurpc.CriuImageIoMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "direct":
+		return criurpc.CriuImageIoMode_IMAGE_IO_DIRECT, nil
+	case "writeback":
+		return criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK, nil
+	default:
+		return criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK, fmt.Errorf("invalid imageIoMode %q", raw)
+	}
+}
+
 func shouldSetCgroupRoot(cgMode criurpc.CriuCgMode) bool {
 	switch cgMode {
 	case criurpc.CriuCgMode_SOFT, criurpc.CriuCgMode_FULL, criurpc.CriuCgMode_STRICT:
@@ -61,6 +74,12 @@ func applyCommonSettings(opts *criurpc.CriuOpts, settings *types.CRIUSettings) e
 		return fmt.Errorf("invalid cgroup mode: %w", err)
 	}
 	opts.ManageCgroupsMode = &cgMode
+
+	ioMode, err := parseImageIoMode(settings.ImageIoMode)
+	if err != nil {
+		return fmt.Errorf("invalid image I/O mode: %w", err)
+	}
+	opts.ImageIoMode = ioMode.Enum()
 	return nil
 }
 

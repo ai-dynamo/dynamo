@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::protocols::*;
+use crate::router_hint::RouterHintRootCandidates;
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
+
+#[cfg(feature = "bench")]
+use super::{EventCompletionBuffer, EventCompletionWriter, ObservationSeal};
 
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
@@ -75,18 +79,25 @@ pub struct WorkerKvQueryRequest {
     /// Successful buffer-backed recovery may still return through the current
     /// newest buffered event.
     pub end_event_id: Option<u64>,
+
+    /// Opt in to an explicit [`WorkerKvQueryResponse::TreeDumpFailed`] result.
+    /// Named MessagePack clients that predate this field deserialize it as false.
+    #[serde(default)]
+    pub supports_tree_dump_failed: bool,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[non_exhaustive]
 pub enum WorkerKvQueryResponse {
     /// Events served from the circular buffer with original event IDs. The batch
     /// is recovery-equivalent to replaying the requested `start_event_id` through
-    /// the current buffered tail. If the range contains one or more `Cleared`
-    /// barriers, the worker may omit events before the last clear while preserving
-    /// that clear event and all following events. `last_event_id` is taken from the
-    /// same buffer snapshot and should be used as the recovery watermark after
-    /// applying the batch.
+    /// the current buffered tail. If the rank stream contains one or more `Cleared`
+    /// all-domain `Cleared` events, the source may omit events before the latest such
+    /// clear while preserving that clear event and all following events. Domain-scoped
+    /// clears remain ordinary ordered events. `last_event_id` is taken from the same
+    /// buffer snapshot and should be used as the recovery watermark after applying the
+    /// batch.
     Events {
         events: Vec<RouterEvent>,
         last_event_id: u64,
@@ -97,7 +108,15 @@ pub enum WorkerKvQueryResponse {
     TreeDump {
         events: Vec<RouterEvent>,
         last_event_id: u64,
+        /// Scope authoritatively represented by this snapshot. Legacy responses
+        /// omitted this field and always represented the whole rank.
+        #[serde(default)]
+        reset_scope: ResetScope,
     },
+    /// The exact tree dump could not be produced. This is distinct from an
+    /// authoritative empty tree; recovery must leave indexed state and its
+    /// admission cursor unchanged.
+    TreeDumpFailed { last_event_id: u64, message: String },
     /// Requested range is newer than available data
     TooNew {
         requested_start: Option<u64>,
@@ -192,9 +211,8 @@ impl From<WireOverlapScores> for OverlapScores {
 
 /// Wire-friendly lower-tier match payload for JSON serialization.
 ///
-/// Mirrors `LowerTierMatchDetails.hits`. `next_continuations` is server-side
-/// intermediate state (used only while walking the tier chain) and is not
-/// carried over the wire.
+/// Mirrors `LowerTierMatchDetails.hits`. `next_continuations` and router hint
+/// candidates are server-side intermediate state and are not carried over the wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct WireLowerTierMatchDetails {
     pub hits: Vec<(WorkerWithDpRank, usize)>,
@@ -216,6 +234,8 @@ impl From<WireLowerTierMatchDetails> for super::lower_tier::LowerTierMatchDetail
         Self {
             hits: w.hits.into_iter().collect(),
             next_continuations: Default::default(),
+            router_hint_root_candidates: None,
+            router_hint_extensions: None,
         }
     }
 }
@@ -345,11 +365,42 @@ pub struct MatchDetails {
     pub overlap_scores: OverlapScores,
     /// Last matched device sequence hash per worker, used to seed lower-tier queries.
     pub last_matched_hashes: FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
+    /// Optional root-aligned device candidates used to build compact router hints.
+    pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
 }
 
 impl MatchDetails {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn retain_router_hint_root_candidates(
+        &mut self,
+        mut block_hashes: Vec<ExternalSequenceBlockHash>,
+    ) {
+        let mut owner_prefix_blocks: Vec<_> = self
+            .overlap_scores
+            .scores
+            .iter()
+            .filter_map(|(worker, blocks)| {
+                let blocks = usize::try_from(*blocks).ok()?;
+                (blocks > 0 && blocks <= block_hashes.len()).then_some((*worker, blocks))
+            })
+            .collect();
+        if block_hashes.is_empty() || owner_prefix_blocks.is_empty() {
+            return;
+        }
+        let max_owner_prefix_blocks = owner_prefix_blocks
+            .iter()
+            .map(|(_, blocks)| *blocks)
+            .max()
+            .unwrap_or(0);
+        block_hashes.truncate(max_owner_prefix_blocks);
+        owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
+        self.router_hint_root_candidates = Some(RouterHintRootCandidates {
+            block_hashes,
+            owner_prefix_blocks,
+        });
     }
 }
 
@@ -388,6 +439,8 @@ pub struct MatchDetailsRequest {
     pub sequence: Vec<LocalBlockHash>,
     /// A boolean indicating whether to exit early if a single match is found.
     pub early_exit: bool,
+    /// When true, retain the matched root-aligned external hash chain for router hints.
+    pub retain_router_hint_chain: bool,
     /// A channel sender to send the `MatchDetails` response.
     pub resp: oneshot::Sender<MatchDetails>,
 }
@@ -396,11 +449,13 @@ impl MatchDetailsRequest {
     pub(super) fn new(
         sequence: Vec<LocalBlockHash>,
         early_exit: bool,
+        retain_router_hint_chain: bool,
         resp: oneshot::Sender<MatchDetails>,
     ) -> Self {
         Self {
             sequence,
             early_exit,
+            retain_router_hint_chain,
             resp,
         }
     }
@@ -465,14 +520,39 @@ pub enum WorkerTask {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
+    #[cfg(feature = "bench")]
+    InstallObservation {
+        writer: EventCompletionWriter,
+        resp: oneshot::Sender<bool>,
+    },
+    #[cfg(feature = "bench")]
+    ObservedEvent {
+        event: RouterEvent,
+        correlation_id: u32,
+    },
+    #[cfg(feature = "bench")]
+    SealObservation(oneshot::Sender<Option<ObservationSeal>>),
+    #[cfg(feature = "bench")]
+    HarvestObservation(oneshot::Sender<EventCompletionBuffer>),
     Anchor {
         worker: WorkerWithDpRank,
         anchor: AnchorTask,
     },
-    /// Permanently remove a worker from tracking (keep_worker: false).
-    RemoveWorker(WorkerId),
+    /// Permanently remove a worker from tracking.
+    RemoveWorker {
+        worker_id: WorkerId,
+        /// True for the one shared-state backend task that owns structural cleanup.
+        sweep_tree: bool,
+        /// Acknowledges completion of this lane's cold-path removal phase.
+        resp: oneshot::Sender<()>,
+    },
     /// Remove a single dp_rank for a worker.
-    RemoveWorkerDpRank(WorkerId, DpRank),
+    RemoveWorkerDpRank {
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        /// True for the one shared-state backend task that owns structural cleanup.
+        sweep_tree: bool,
+    },
     /// Best-effort maintenance task for shared-state backends.
     CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),

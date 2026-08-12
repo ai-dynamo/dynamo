@@ -84,7 +84,7 @@ class TestSerializePromptLogprobs:
 
 
 class TestCacheSaltWiring:
-    """Verify cache_salt is extracted from extra_args and placed on the prompt."""
+    """Verify cache_salt is extracted and tagged for vLLM's prompt."""
 
     @staticmethod
     def _build_token_mode_request(cache_salt=None, token_ids=None):
@@ -100,7 +100,7 @@ class TestCacheSaltWiring:
         return req
 
     def test_cache_salt_attached_to_prompt(self):
-        """When extra_args.nvext.cache_salt is set, the prompt dict gets it."""
+        """The prompt receives an internal tag around the public cache salt."""
         from vllm.inputs import TokensPrompt
 
         from dynamo.vllm.handlers import _apply_nvext_cache_salt
@@ -109,7 +109,7 @@ class TestCacheSaltWiring:
         prompt = TokensPrompt(prompt_token_ids=req["token_ids"])
         _apply_nvext_cache_salt(req, prompt)
 
-        assert prompt.get("cache_salt") == "step_42"
+        assert prompt.get("cache_salt") == "dynamo-cache-salt:step_42"
 
     def test_no_cache_salt_when_absent(self):
         """When extra_args has no cache_salt, prompt should not gain the key."""
@@ -134,8 +134,8 @@ class TestCacheSaltWiring:
         _apply_nvext_cache_salt(req, prefill_prompt)
         _apply_nvext_cache_salt(req, decode_prompt)
 
-        assert prefill_prompt["cache_salt"] == "step_43"
-        assert decode_prompt["cache_salt"] == "step_43"
+        assert prefill_prompt["cache_salt"] == "dynamo-cache-salt:step_43"
+        assert decode_prompt["cache_salt"] == "dynamo-cache-salt:step_43"
 
     def test_cache_salt_from_top_level_nvext(self):
         """cache_salt under the raw request["nvext"] shape is also honored,
@@ -146,7 +146,25 @@ class TestCacheSaltWiring:
         prompt = {"prompt_token_ids": req["token_ids"]}
         _apply_nvext_cache_salt(req, prompt)
 
-        assert prompt["cache_salt"] == "top_level"
+        assert prompt["cache_salt"] == "dynamo-cache-salt:top_level"
+
+    def test_empty_cache_salt_is_absent(self):
+        from dynamo.vllm.handlers import _apply_nvext_cache_salt
+
+        req = self._build_token_mode_request(cache_salt="")
+        prompt = {"prompt_token_ids": req["token_ids"]}
+        _apply_nvext_cache_salt(req, prompt)
+
+        assert "cache_salt" not in prompt
+
+    def test_cache_salt_prefix_is_escaped_by_reprefixing(self):
+        from dynamo.vllm.handlers import _apply_nvext_cache_salt
+
+        req = self._build_token_mode_request(cache_salt="dynamo-cache-salt:tenant-a")
+        prompt = {"prompt_token_ids": req["token_ids"]}
+        _apply_nvext_cache_salt(req, prompt)
+
+        assert prompt["cache_salt"] == ("dynamo-cache-salt:dynamo-cache-salt:tenant-a")
 
 
 class TestTokenInSamplingDefaults:

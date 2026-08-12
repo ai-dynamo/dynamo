@@ -16,9 +16,9 @@ import json
 import os
 from collections import defaultdict
 
-from aiperf.common.tokenizer import Tokenizer
 from common import DEFAULT_BLOCK_SIZE, DEFAULT_TOKENIZER, texts_to_hashes_and_lengths
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 AGENT_PREFIX_MAP = {
     "You are a Deep Research agent": "deep_coordinator",
@@ -175,7 +175,7 @@ def convert_to_mooncake(
 
     # Phase 3: tokenize and hash
     print(f"Tokenizing and hashing {len(all_texts)} texts...")
-    tokenizer = Tokenizer.from_pretrained(tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     all_hash_ids, all_input_lengths = texts_to_hashes_and_lengths(
         tokenizer, all_texts, block_size
     )

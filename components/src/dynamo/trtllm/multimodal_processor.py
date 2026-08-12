@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
@@ -23,12 +25,51 @@ import httpx
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
+from tensorrt_llm.inputs.multimodal_data import VideoData
+from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
+from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    video_decoder_missing,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.media_source import describe_media_source
+from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
+from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
+
+
+def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
+    """Decode H.264/H.265 via NVDEC into TRT-LLM's ``VideoData`` (format="pt").
+
+    Mirrors ``tensorrt_llm.inputs.media_io._load_video_by_cv2``'s "pt" output for
+    the pinned v1.3.0rc21: RGB, a list of ``(C, H, W)`` float32 [0,1] tensors,
+    with the same metadata keys. Synchronous -- call via ``asyncio.to_thread``.
+    """
+    from dynamo.common.multimodal.nvdec_decoder import decode_video_nvdec
+
+    frames_np, meta = decode_video_nvdec(content, num_frames)  # (N,H,W,3) uint8 RGB
+    stacked = frames_np.astype("float32") * (1.0 / 255.0)
+    nchw = torch.from_numpy(stacked).permute(0, 3, 1, 2).contiguous()
+    frames_pt = list(torch.unbind(nchw, dim=0))
+    fps = float(meta.get("fps") or 0.0)
+    total = int(meta["total_num_frames"])
+    metadata = {
+        "total_num_frames": total,
+        "fps": fps,
+        "duration": (total / fps) if fps > 0 else 0.0,
+        "frames_indices": meta["frames_indices"],
+    }
+    return VideoData(frames=frames_pt, metadata=metadata, audio=None)
 
 
 class TokenizerProtocol(Protocol):
@@ -78,6 +119,46 @@ class MultimodalRequestProcessor:
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
+
+        # Reuse the shared default so this preprocessor and the vLLM/SGLang
+        # backends agree on DYN_MM_VIDEO_NUM_FRAMES.
+        self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
+        self._url_policy = UrlValidationPolicy.from_env()
+
+        # Input processor used only to size an omitted max_tokens (see
+        # _expanded_prompt_len). Optional: unavailable for models without a
+        # registered processor, in which case max_tokens sizing is left to the engine.
+        self.input_processor = None
+        try:
+            from tensorrt_llm.inputs import create_input_processor
+
+            self.input_processor = create_input_processor(model_dir, self.tokenizer)
+        except Exception as e:
+            logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
+
+    def _expanded_prompt_len(
+        self, token_ids: List[int], images: Optional[List[Any]]
+    ) -> Optional[int]:
+        """Post-expansion prompt length: text tokens plus per-image tokens, with
+        image placeholders in token_ids replaced by their expanded token counts.
+
+        Returns None when it cannot be computed, so callers fall back to the
+        engine default instead of an over/underestimate.
+        """
+        if not self.input_processor or not images or not token_ids:
+            return None
+        try:
+            mm_ids = self.input_processor.get_mm_token_ids()
+            mm_id_set = set(mm_ids.tolist()) if mm_ids is not None else set()
+            num_placeholders = sum(1 for t in token_ids if t in mm_id_set)
+            image_tokens = sum(
+                int(self.input_processor.get_num_tokens_per_image(image=img))
+                for img in images
+            )
+            return len(token_ids) - num_placeholders + image_tokens
+        except Exception as e:
+            logging.warning("Could not compute expanded prompt length: %s", e)
+            return None
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -341,6 +422,10 @@ class MultimodalRequestProcessor:
                             logging.info(
                                 f"Loaded {len(pil_images)} image(s) as PIL Images"
                             )
+                    except (UrlValidationError, HttpStatusError):
+                        # Client errors: let them reach the frontend as a 4xx
+                        # instead of the generic catch below swallowing them to None.
+                        raise
                     except Exception as e:
                         logging.error(f"Failed to load images: {e}")
                         return None
@@ -372,7 +457,118 @@ class MultimodalRequestProcessor:
                         logging.error(f"Failed to load embeddings: {e}")
                         return None
 
-            # TODO: Add support for video_url, audio_url
+            # Video is forwarded as raw URLs ({"Url": ...}); reject local-file
+            # schemes for the same SSRF reason as the image path above.
+            video_items = multi_modal_data.get("video_url") or []
+            if not isinstance(video_items, list):
+                raise HttpStatusError(
+                    400, "Malformed video_url field: expected a list", str(video_items)
+                )
+            videos = []
+            for item in video_items:
+                url = item.get("Url") if isinstance(item, dict) else item
+                # Everything user-supplied that can reach an error message or a
+                # log line goes through this bounded label: a data: URI carries
+                # the entire media payload inline, so echoing one back would
+                # serialize megabytes of base64 to the client and to every log
+                # sink that records the failure.
+                source = describe_media_source(
+                    url if isinstance(url, str) else str(item)
+                )
+                if not isinstance(url, str):
+                    raise HttpStatusError(
+                        400, f"Unsupported video item: {source}", source
+                    )
+                if urlparse(url).scheme in ("", "file"):
+                    raise HttpStatusError(
+                        400, "Local file access is not allowed for video", source
+                    )
+                try:
+                    normalized_url = await validate_media_url(url, self._url_policy)
+                    if urlparse(normalized_url).scheme in ("http", "https"):
+                        content = await fetch_bytes(
+                            normalized_url, 30.0, policy=self._url_policy
+                        )
+                        # Dual decode path: H.264/H.265 via NVDEC (hardware); other
+                        # codecs via the vendor cv2 loader. NVDEC failure falls back.
+                        nvdec_video = None
+                        codec = probe_video_codec(content)
+                        if should_use_nvdec(codec):
+                            try:
+                                nvdec_video = await asyncio.to_thread(
+                                    _nvdec_video_data, content, self.num_video_frames
+                                )
+                            except Exception as exc:  # noqa: BLE001 - fall back
+                                logging.warning(
+                                    "NVDEC decode failed (%s); using the vendor "
+                                    "video decoder",
+                                    exc,
+                                )
+                        if nvdec_video is not None:
+                            videos.append(nvdec_video)
+                        else:
+                            with tempfile.NamedTemporaryFile(
+                                suffix=".mp4"
+                            ) as video_file:
+                                await asyncio.to_thread(video_file.write, content)
+                                await asyncio.to_thread(video_file.flush)
+                                try:
+                                    videos.append(
+                                        await async_load_video(
+                                            video_file.name, self.num_video_frames
+                                        )
+                                    )
+                                except ImportError as exc:
+                                    # The vendor loader needs cv2, which the
+                                    # image deliberately omits; its bare error
+                                    # names neither codec nor remedy. Carry its
+                                    # text as the cause so the underlying
+                                    # reason still reaches the client.
+                                    raise video_decoder_missing(
+                                        "trtllm",
+                                        "opencv-python-headless",
+                                        "cv2",
+                                        codec,
+                                        cause=str(exc),
+                                    ) from exc
+                    else:
+                        try:
+                            videos.append(
+                                await async_load_video(
+                                    normalized_url, self.num_video_frames
+                                )
+                            )
+                        except ImportError as exc:
+                            # No bytes fetched on this branch, so no codec probe.
+                            raise video_decoder_missing(
+                                "trtllm",
+                                "opencv-python-headless",
+                                "cv2",
+                                None,
+                                cause=str(exc),
+                            ) from exc
+                except UrlValidationError as e:
+                    raise HttpStatusError(400, str(e), source) from e
+                except HttpStatusError:
+                    raise
+                except MissingMediaDecoderError as e:
+                    # A missing decoder is deployment configuration, not a bad
+                    # request: 500, not the 400 the generic handler below
+                    # assigns. The actionable text (codec, bounded spec,
+                    # installer command, vendor cause) is the message.
+                    raise HttpStatusError(
+                        500, f"Failed to load video ({source}): {e}", source
+                    ) from e
+                except Exception as e:
+                    status = getattr(e, "status", None) or getattr(e, "code", None)
+                    raise HttpStatusError(
+                        status if isinstance(status, int) and status >= 400 else 400,
+                        f"Failed to load video ({source}): {e}",
+                        source,
+                    ) from e
+            if videos:
+                processed_mm_data["video"] = videos
+                logging.info("Loaded %d video(s)", len(videos))
 
             if loaded_embeddings:
                 # For TRT-LLM MM embeddings, the currently
@@ -391,12 +587,32 @@ class MultimodalRequestProcessor:
             if processed_mm_data:
                 processed_inputs["multi_modal_data"] = processed_mm_data
 
+                # TRT-LLM echoes these UUIDs into its KV-reuse events, so the
+                # router's per-image identity matches what the worker caches.
+                images = processed_mm_data.get("image")
+                mm_hashes = extra_args.get("mm_hashes")
+                if (
+                    images
+                    and isinstance(mm_hashes, list)
+                    and len(mm_hashes) == len(images)
+                ):
+                    processed_inputs["multi_modal_uuids"] = {"image": list(mm_hashes)}
+
         # Get token_ids from request (already tokenized by Rust frontend)
         token_ids = request.get("token_ids")
         if not token_ids:
             logging.warning("No token_ids in request")
             return None
         processed_inputs["prompt_token_ids"] = token_ids
+
+        # Post-expansion prompt length, so an omitted max_tokens can be sized
+        # against the real context usage rather than the unexpanded placeholders.
+        mm_data = processed_inputs.get("multi_modal_data")
+        expanded_len = self._expanded_prompt_len(
+            token_ids, mm_data.get("image") if mm_data else None
+        )
+        if expanded_len is not None:
+            processed_inputs["expanded_prompt_len"] = expanded_len
 
         return processed_inputs
 

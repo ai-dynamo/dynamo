@@ -101,11 +101,11 @@ class WorkloadSpec(BaseModel):
     )
     concurrency: Optional[float] = Field(
         default=None,
-        description="Concurrency is the target concurrency level. Required (or RequestRate) when the planner is disabled.",
+        description="Concurrency is the target concurrency level. Mutually exclusive with the requestRate field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.",
     )
     requestRate: Optional[float] = Field(
         default=None,
-        description="RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.",
+        description="RequestRate is the target request rate (req/s). Mutually exclusive with the concurrency field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.",
     )
 
 
@@ -161,7 +161,7 @@ class ModelCacheSpec(BaseModel):
     )
     pvcModelPath: Optional[str] = Field(
         default=None,
-        description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").',
+        description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a container-visible absolute path already under PVCMountPath. Such an absolute path is interpreted as container-visible; use the relative form without a leading slash to address the same path prefix within the PVC.',
     )
     pvcMountPath: str = Field(
         default="/opt/model-cache",
@@ -178,7 +178,7 @@ class OverridesSpec(BaseModel):
     )
     dgd: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment to use as the base for the generated deployment. Fields from profiling results are merged on top. Use this to override backend worker images.  The field is stored as a raw embedded resource rather than a typed *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub and Go does not allow import cycles.  The EmbeddedResource marker tells the API server to validate that the value is a well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion, kind, and field schema) is performed by the controller during reconciliation. TODO(future MR): add webhook admission validation for the DGD field type.",
+        description="DGD provides a partial, versioned DynamoGraphDeployment override for the profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or nvidia.com/v1beta1 and kind to DynamoGraphDeployment.  The profiler merges the override using the schema for its declared version. If the generated DGD uses another supported version, the complete DGD is converted before the merge and converted back afterward. The final DGD selected or created by a DGDR is nvidia.com/v1beta1.  The override can update DGD fields, but topology entries are limited to services or components already present in the generated DGD. Metadata labels and annotations are merged, metadata.name selects the final DGD name, and other identity or runtime metadata is ignored. V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows structural schema merge behavior, including map-list merging and atomic-list replacement.  The raw embedded resource preserves either supported schema. The API server validates that it has apiVersion and kind; override processing validates the DGD kind, supported version, and field schema.",
     )
 
 
@@ -205,7 +205,7 @@ class FeaturesSpec(BaseModel):
 
     planner: Optional[PlannerConfig] = Field(
         default=None,
-        description="Planner contains the raw Planner configuration passed to the Planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference. DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
+        description="Planner contains the raw Planner configuration passed to the Planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference. DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,
@@ -256,6 +256,10 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default=None,
         description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1". For Dynamo < 1.1.0, use dynamo-frontend.',
     )
+    runtimeVersionOverride: Optional[str] = Field(
+        default=None,
+        description="RuntimeVersionOverride supplies the default Dynamo runtime version for generated DynamoGraphDeployment components that do not set their own override. Set this when Image uses a non-semantic-version tag or digest, or when its tag does not identify the Dynamo runtime version. An explicit component value in overrides.dgd takes precedence.",
+    )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
         description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.",
@@ -291,7 +295,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
 
 
 class ParetoConfig(BaseModel):
-    """ParetoConfig represents a single Pareto-optimal deployment configuration discovered during profiling."""
+    """ParetoConfig is retained for compatibility with status objects produced by older profiler releases. Deprecated: The profiler no longer generates Pareto configurations."""
 
     config: Dict[str, Any] = Field(
         description="Config is the full deployment configuration for this Pareto point."
@@ -303,7 +307,7 @@ class ProfilingResultsStatus(BaseModel):
 
     pareto: Optional[List[ParetoConfig]] = Field(
         default=None,
-        description="Pareto is the list of Pareto-optimal deployment configurations discovered during profiling. Each entry represents a different cost/performance trade-off.",
+        description="Pareto is retained for compatibility with existing status objects. Deprecated: The controller no longer populates this field.",
     )
     selectedConfig: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -344,7 +348,7 @@ class DynamoGraphDeploymentRequestStatus(BaseModel):
     )
     profilingResults: Optional[ProfilingResultsStatus] = Field(
         default=None,
-        description="ProfilingResults contains the output of the profiling process including Pareto-optimal configurations and the selected deployment configuration.",
+        description="ProfilingResults contains the selected deployment configuration produced by profiling. Deprecated compatibility fields may remain on objects created by older releases.",
     )
     deploymentInfo: Optional[DeploymentInfoStatus] = Field(
         default=None,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,20 +17,24 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::frontend_extension::{
+    FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
+};
 use super::metrics;
-use super::metrics::register_worker_timing_metrics;
+use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::config::{env_is_falsey, env_is_truthy};
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
@@ -44,6 +48,11 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::local_model::runtime_config::{
+    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+};
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -97,7 +106,66 @@ pub struct State {
     service_observer: Arc<ServiceObserver>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    // Frontend API behavior read by request handlers after the service is built.
+    frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
+}
+
+/// Typed config needed only to construct HTTP shared state.
+///
+/// `MetricsConfig` initializes the per-service metrics object, while
+/// `FrontendApiConfig` is retained in `State` for route and handler decisions.
+struct StateConfig {
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
+    nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
+}
+
+fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            return None;
+        }
+    };
+
+    match value.parse::<u64>() {
+        Ok(0) => None,
+        Ok(milliseconds) => {
+            let interval = Duration::from_millis(milliseconds);
+            if std::time::Instant::now().checked_add(interval).is_some() {
+                Some(interval)
+            } else {
+                tracing::warn!(
+                    env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                    value,
+                    "ignoring SSE keep-alive interval outside the platform range"
+                );
+                None
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                value,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            None
+        }
+    }
+}
+
+fn sse_keep_alive_from_env() -> Option<Duration> {
+    parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
 }
 
 /// Lifecycle stage for the HTTP frontend.
@@ -268,12 +336,16 @@ struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
+    classify_endpoints_enabled: AtomicBool,
+    pooling_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
     realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
+    generate_endpoints_enabled: AtomicBool,
+    batch_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -282,6 +354,8 @@ impl StateFlags {
             EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Classify => self.classify_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Pooling => self.pooling_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
@@ -290,6 +364,8 @@ impl StateFlags {
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
+            EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Batch => self.batch_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -303,6 +379,12 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Embedding => self
                 .embeddings_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Classify => self
+                .classify_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Pooling => self
+                .pooling_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Images => self
                 .images_endpoints_enabled
@@ -322,43 +404,47 @@ impl StateFlags {
             EndpointType::AnthropicMessages => self
                 .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Generate => self
+                .generate_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Batch => self
+                .batch_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
         }
     }
 }
 
 impl State {
-    pub fn new(
+    fn new(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
-    ) -> Self {
-        Self::new_with_nvext_enabled(manager, discovery_client, cancel_token, true)
-    }
-
-    pub fn new_with_nvext_enabled(
-        manager: Arc<ModelManager>,
-        discovery_client: Arc<dyn Discovery>,
-        cancel_token: CancellationToken,
-        nvext_enabled: bool,
+        config: StateConfig,
     ) -> Self {
         Self {
             manager,
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
             service_observer: Arc::new(ServiceObserver::default()),
-            nvext_enabled,
+            nvext_enabled: config.nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
+                classify_endpoints_enabled: AtomicBool::new(false),
+                pooling_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
                 realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
+                generate_endpoints_enabled: AtomicBool::new(false),
+                batch_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            frontend_api_config: config.frontend_api_config,
+            sse_keep_alive: config.sse_keep_alive,
         }
     }
 
@@ -419,7 +505,7 @@ impl State {
     }
 
     /// Master switch for the `nvext` extension protocol (see
-    /// [`environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT`]).
+    /// [`environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT`]).
     #[inline]
     pub fn nvext_enabled(&self) -> bool {
         self.nvext_enabled
@@ -430,29 +516,50 @@ impl State {
         &self.cancel_token
     }
 
-    // TODO
+    /// Interval for SSE comment frames while the response stream is idle.
+    ///
+    /// Disabled by default because some OpenAI-compatible clients do not
+    /// ignore SSE comments. Provider-facing deployments can opt in with
+    /// `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS`.
     pub fn sse_keep_alive(&self) -> Option<Duration> {
-        None
+        self.sse_keep_alive
     }
 
-    /// Returns true if streaming tool call dispatch is enabled via
-    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    /// Returns true if Anthropic billing preamble stripping is enabled.
+    pub fn strip_anthropic_preamble_enabled(&self) -> bool {
+        self.frontend_api_config.anthropic().strip_preamble()
+    }
+
+    /// Returns true if the Anthropic Messages API is enabled by service config.
+    pub fn anthropic_api_enabled(&self) -> bool {
+        self.frontend_api_config.anthropic().enabled()
+    }
+
+    /// Returns true if streaming tool call dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
     /// SSE events for each complete tool call, letting clients start processing tool calls
     /// before `finish_reason="tool_calls"` arrives.
     pub fn streaming_tool_dispatch_enabled(&self) -> bool {
-        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+        self.frontend_api_config
+            .streaming_dispatch()
+            .tool_dispatch()
     }
 
-    /// Returns true if streaming reasoning dispatch is enabled via
-    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    /// Returns true if streaming reasoning dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path accumulates reasoning tokens and
     /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
     /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
     pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
-        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
+        self.frontend_api_config
+            .streaming_dispatch()
+            .reasoning_dispatch()
+    }
+
+    /// Response field used for emitted OpenAI-compatible reasoning content.
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 }
 
@@ -468,6 +575,8 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    /// Worker capabilities accepted by the mounted engine-native Generate routes.
+    generate_engine_capabilities: Vec<&'static str>,
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
@@ -491,8 +600,15 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     tls_key_path: Option<PathBuf>,
 
-    // #[builder(default)]
-    // custom: Vec<axum::Router>
+    /// Metrics naming config used when initializing the HTTP service metrics registry.
+    #[builder(default)]
+    metrics_config: MetricsConfig,
+
+    /// Additional system routes merged with the built-in health, metrics, and model routes.
+    /// Each extension is invoked with a read-only [`FrontendExtensionContext`].
+    #[builder(default)]
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
+
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
@@ -505,8 +621,23 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
+    /// OpenAI-compatible Batch API placeholders. Disabled by default until
+    /// batch storage and job lifecycle support are implemented; when enabled,
+    /// the placeholder handlers return 501.
     #[builder(default = "false")]
-    enable_anthropic_endpoints: bool,
+    enable_batch_endpoints: bool,
+
+    /// Experimental engine-native Generate APIs. **Disabled by default**. The
+    /// builder flag mounts both vLLM `/inference/v1/generate` and SGLang
+    /// `/generate`; the backend-specific `DYN_*_ENABLE_*` variables mount one.
+    /// Capability-scoped discovery prevents either opaque request envelope from
+    /// reaching the other backend. Disabled routes return 404.
+    #[builder(default = "false")]
+    enable_engine_apis: bool,
+
+    /// API behavior config retained in HTTP state for route and streaming decisions.
+    #[builder(default)]
+    frontend_api_config: FrontendApiConfig,
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
@@ -531,14 +662,14 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_rl: bool,
 
-    /// Master switch for the `nvext` extension protocol. Default `true`,
-    /// env-falsey on `DYN_ENABLE_FRONTEND_NVEXT` overrides to `false`.
+    /// Master switch for the `nvext` extension protocol. Default `true`;
+    /// env-truthy `DYN_DISABLE_FRONTEND_NVEXT` overrides to `false`.
     #[builder(default = "true")]
     enable_nvext: bool,
 
     /// Master switch for the frontend admin API surface (`GET` /
-    /// `POST /busy_threshold`). Default `true`, env-falsey on
-    /// `DYN_ENABLE_FRONTEND_ADMIN_API` overrides to `false`.
+    /// `POST /busy_threshold`). Default `true`; env-truthy
+    /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
 
@@ -549,6 +680,11 @@ pub struct HttpServiceConfig {
     /// Distributed runtime used by the RL worker discovery API.
     #[builder(default = "None")]
     runtime: Option<Arc<DistributedRuntime>>,
+
+    /// Interval for SSE comment frames while a streaming response is idle.
+    /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
+    #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
+    sse_keep_alive: Option<Duration>,
 }
 
 fn default_rl_port() -> u16 {
@@ -573,6 +709,14 @@ impl HttpService {
 
     pub fn model_manager(&self) -> &ModelManager {
         self.state().manager()
+    }
+
+    pub fn anthropic_api_enabled(&self) -> bool {
+        self.state().anthropic_api_enabled()
+    }
+
+    pub(crate) fn generate_engine_capabilities(&self) -> Vec<&'static str> {
+        self.generate_engine_capabilities.clone()
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -831,14 +975,94 @@ static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 /// Environment variable to set the embeddings endpoint path (default: `/v1/embeddings`)
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
+/// Environment variable to set the classify endpoint path (default: `/v1/classify`)
+static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
+/// Environment variable to set the pooling endpoint path (default: `/v1/pooling`)
+static HTTP_SVC_POOLING_PATH_ENV: &str = "DYN_HTTP_SVC_POOLING_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+/// Environment variable to set the batch files endpoint path (default: `/v1/files`)
+static HTTP_SVC_FILES_PATH_ENV: &str = "DYN_HTTP_SVC_FILES_PATH";
+/// Environment variable to set the batches endpoint path (default: `/v1/batches`)
+static HTTP_SVC_BATCHES_PATH_ENV: &str = "DYN_HTTP_SVC_BATCHES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
+/// Environment variable to enable the experimental vLLM-compatible
+/// `/inference/v1/generate` endpoint. Truthy value opts in; disabled by default.
+pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
+    "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE";
+
+/// Environment variable to set the vLLM Generate endpoint path
+/// (default: `/inference/v1/generate`).
+pub(super) static HTTP_SVC_VLLM_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_VLLM_GENERATE_PATH";
+/// Environment variable to enable the experimental SGLang-compatible
+/// `/generate` endpoint. Truthy value opts in; disabled by default.
+pub(super) static SGLANG_ENABLE_GENERATE_ENV: &str = "DYN_SGLANG_ENABLE_GENERATE";
+/// Environment variable to set the SGLang Generate endpoint path
+/// (default: `/generate`).
+pub(super) static HTTP_SVC_SGLANG_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_SGLANG_GENERATE_PATH";
+fn validate_generate_route_path(path: &str) -> Result<()> {
+    if !path.starts_with("/") {
+        anyhow::bail!("Generate route path must start with '/': {path:?}");
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.starts_with([':', '*']))
+    {
+        anyhow::bail!("Generate route path segment must not start with ':' or '*': {path:?}");
+    }
+    Ok(())
+}
+
+fn append_route_docs(
+    all_docs: &mut Vec<RouteDoc>,
+    seen_routes: &mut HashSet<RouteDoc>,
+    route_docs: Vec<RouteDoc>,
+) -> Result<()> {
+    for route_doc in route_docs {
+        if let Some(existing) = seen_routes.get(&route_doc) {
+            anyhow::bail!("duplicate HTTP route registered: {route_doc} conflicts with {existing}");
+        }
+        seen_routes.insert(route_doc.clone());
+        all_docs.push(route_doc);
+    }
+    Ok(())
+}
 
 impl HttpServiceConfigBuilder {
+    pub fn add_frontend_route_extension<F>(mut self, extension: F) -> Self
+    where
+        F: Fn(FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> + Send + Sync + 'static,
+    {
+        self.frontend_route_extensions
+            .get_or_insert_with(Vec::new)
+            .push(Arc::new(extension));
+        self
+    }
+
+    pub fn add_frontend_route_extension_arc(mut self, extension: FrontendRouteExtension) -> Self {
+        self.frontend_route_extensions
+            .get_or_insert_with(Vec::new)
+            .push(extension);
+        self
+    }
+
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        let metrics_config = config.metrics_config.clone();
+        let frontend_api_config = config.frontend_api_config.clone();
+        let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
+        let vllm_generate_enabled =
+            config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
+        let sglang_generate_enabled =
+            config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV);
+        let generate_engine_capabilities = [
+            vllm_generate_enabled.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+            sglang_generate_enabled.then_some(SGLANG_GENERATE_CAPABILITY),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -851,17 +1075,22 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        // Env-falsey overrides the builder; unset preserves the builder default.
+        // Both surfaces are on by default; an env-truthy DISABLE var turns them
+        // off. The builder flag can also force off (e.g. tests), and wins.
         let nvext_enabled =
-            config.enable_nvext && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_NVEXT);
+            config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
         let admin_api_enabled =
-            config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
-
-        let state = Arc::new(State::new_with_nvext_enabled(
+            config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
+        let state = Arc::new(State::new(
             model_manager,
             discovery_client,
             cancel_token,
-            nvext_enabled,
+            StateConfig {
+                metrics_config,
+                frontend_api_config,
+                nvext_enabled,
+                sse_keep_alive: config.sse_keep_alive,
+            },
         ));
         state
             .flags
@@ -875,9 +1104,16 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Batch, config.enable_batch_endpoints);
         state.flags.set(
             &EndpointType::AnthropicMessages,
-            config.enable_anthropic_endpoints,
+            anthropic_endpoints_enabled,
+        );
+        state.flags.set(
+            &EndpointType::Generate,
+            !generate_engine_capabilities.is_empty(),
         );
 
         // enable prometheus metrics
@@ -921,8 +1157,12 @@ impl HttpServiceConfigBuilder {
         if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
             tracing::warn!("Failed to register transport metrics: {}", e);
         }
+        if let Err(e) = register_lora_allocation_metrics(&registry) {
+            tracing::warn!("Failed to register LoRA allocation metrics: {}", e);
+        }
 
         let mut all_docs = Vec::new();
+        let mut seen_route_docs = HashSet::new();
 
         // Shared on_response callback for both system and inference routes
         let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
@@ -942,7 +1182,7 @@ impl HttpServiceConfigBuilder {
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
                 config.drt_metrics,
             ),
-            if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+            if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
                     state.clone(),
                     var(HTTP_SVC_MODELS_PATH_ENV).ok(),
@@ -960,22 +1200,31 @@ impl HttpServiceConfigBuilder {
             ));
         } else {
             tracing::info!(
-                env = env_llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+                env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
                 "frontend admin API disabled — busy_threshold routes not registered"
             );
         }
+        for extension in &config.frontend_route_extensions {
+            let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
+            system_routes.push(route_set.into_parts());
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
+            append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             system_router = system_router.merge(route);
-            all_docs.extend(route_docs);
         }
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
-        let endpoint_routes =
-            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
+        let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
+            state.clone(),
+            &config.request_template,
+            anthropic_endpoints_enabled,
+            vllm_generate_enabled,
+            sglang_generate_enabled,
+        )?;
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
+            append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
-            all_docs.extend(route_docs);
         }
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
@@ -990,8 +1239,8 @@ impl HttpServiceConfigBuilder {
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
             super::openapi_docs::openapi_router(all_docs.clone(), None);
+        append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
-        all_docs.extend(openapi_docs);
 
         system_router = system_router.layer(
             TraceLayer::new_for_http()
@@ -1037,6 +1286,7 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            generate_engine_capabilities,
             rl_router,
             rl_port: config.rl_port,
         })
@@ -1047,10 +1297,57 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn metrics_prefix(mut self, prefix: Option<String>) -> Self {
+        self.metrics_config = Some(MetricsConfig::new(prefix));
+        self
+    }
+
+    pub fn enable_anthropic_endpoints(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .anthropic_mut()
+            .set_enabled(enabled);
+        self
+    }
+
+    pub fn strip_anthropic_preamble(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .anthropic_mut()
+            .set_strip_preamble(enabled);
+        self
+    }
+
+    pub fn enable_streaming_tool_dispatch(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .streaming_dispatch_mut()
+            .set_tool_dispatch(enabled);
+        self
+    }
+
+    pub fn enable_streaming_reasoning_dispatch(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .streaming_dispatch_mut()
+            .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn reasoning_field(mut self, reasoning_field: ReasoningField) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
-    ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
+        enable_anthropic_endpoints: bool,
+        vllm_generate_enabled: bool,
+        sglang_generate_enabled: bool,
+    ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
@@ -1062,6 +1359,10 @@ impl HttpServiceConfigBuilder {
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (classify_docs, classify_route) =
+            super::openai::classify_router(state.clone(), var(HTTP_SVC_CLASSIFY_PATH_ENV).ok());
+        let (pooling_docs, pooling_route) =
+            super::openai::pooling_router(state.clone(), var(HTTP_SVC_POOLING_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
@@ -1071,17 +1372,25 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
+        let (batch_docs, batch_route) = super::openai::batch_router(
+            state.clone(),
+            var(HTTP_SVC_FILES_PATH_ENV).ok(),
+            var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+        );
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Classify, (classify_docs, classify_route));
+        endpoint_routes.insert(EndpointType::Pooling, (pooling_docs, pooling_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+        endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
 
-        if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+        if enable_anthropic_endpoints {
             tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
             let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
                 state.clone(),
@@ -1092,6 +1401,31 @@ impl HttpServiceConfigBuilder {
                 EndpointType::AnthropicMessages,
                 (anthropic_docs, anthropic_route),
             );
+        }
+
+        if vllm_generate_enabled || sglang_generate_enabled {
+            tracing::warn!("The engine-native Generate APIs are experimental.");
+            let mut generate_docs = Vec::new();
+            let mut generate_route = axum::Router::new();
+            if vllm_generate_enabled {
+                let generate_path = var(HTTP_SVC_VLLM_GENERATE_PATH_ENV).ok();
+                if let Some(path) = generate_path.as_deref() {
+                    validate_generate_route_path(path)?;
+                }
+                let (docs, route) = super::generate::generate_router(state.clone(), generate_path);
+                generate_docs.extend(docs);
+                generate_route = generate_route.merge(route);
+            }
+            if sglang_generate_enabled {
+                let generate_path = var(HTTP_SVC_SGLANG_GENERATE_PATH_ENV).ok();
+                if let Some(path) = generate_path.as_deref() {
+                    validate_generate_route_path(path)?;
+                }
+                let (docs, route) = super::sglang_generate::router(state.clone(), generate_path);
+                generate_docs.extend(docs);
+                generate_route = generate_route.merge(route);
+            }
+            endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 
         for endpoint_type in EndpointType::all() {
@@ -1118,7 +1452,7 @@ impl HttpServiceConfigBuilder {
             ));
             routes.push((docs, route));
         }
-        routes
+        Ok(routes)
     }
 }
 
@@ -1305,18 +1639,251 @@ mod tests {
         handle.abort();
     }
 
+    fn make_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
+    }
+
+    // Test extensions read live state via the narrowed context captured in the
+    // handler closure (the Python bridge's shape), not Router::with_state.
+    fn readiness_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
+            .get("/test/frontend-route", move || {
+                let context = context.clone();
+                async move {
+                    if context.has_any_ready_model() {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            })?
+            .build())
+    }
+
+    fn first_test_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/test/frontend-route/one")
+    }
+
+    fn second_test_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/test/frontend-route/two")
+    }
+
+    fn duplicate_health_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/health")
+    }
+
+    fn duplicate_test_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        test_status_extension(context, "/test/frontend-route/duplicate")
+    }
+
+    fn draining_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
+            .get("/test/frontend-route/draining", move || {
+                let context = context.clone();
+                async move {
+                    if context.is_ready() {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::ACCEPTED
+                    }
+                }
+            })?
+            .build())
+    }
+
+    fn test_status_extension(
+        _context: FrontendExtensionContext,
+        path: &str,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
+            .get(path.to_string(), || async {
+                axum::http::StatusCode::NO_CONTENT
+            })?
+            .build())
+    }
+
+    async fn get_status(port: u16, path: &str) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .get(format!("http://localhost:{}{}", port, path))
+            .send()
+            .await
+            .expect("request failed")
+            .status()
+    }
+
+    fn build_error_message(builder: HttpServiceConfigBuilder) -> String {
+        match builder.build() {
+            Ok(_) => panic!("service build unexpectedly succeeded"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_frontend_route_extension_uses_live_frontend_state() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .add_frontend_route_extension(readiness_extension)
+            .build()
+            .unwrap();
+
+        assert!(
+            service
+                .route_docs()
+                .iter()
+                .any(|doc| doc.to_string() == "GET /test/frontend-route")
+        );
+
+        let running_service = service.clone();
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            running_service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert_eq!(
+            get_status(port, "/test/frontend-route").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.display_name = "pending-llama".to_string();
+        service
+            .model_manager()
+            .save_model_card("instance-pending", card)
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/test/frontend-route").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "card-only model registration must not make the extension report ready"
+        );
+
+        service
+            .model_manager()
+            .add_chat_completions_model("ready-llama", "abc", make_chat_engine())
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/test/frontend-route").await,
+            reqwest::StatusCode::OK
+        );
+
+        let openapi = reqwest::Client::new()
+            .get(format!("http://localhost:{}/openapi.json", port))
+            .send()
+            .await
+            .expect("openapi request failed")
+            .text()
+            .await
+            .expect("openapi body failed");
+        assert!(openapi.contains("/test/frontend-route"));
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    #[test]
+    fn test_multiple_frontend_route_extensions_are_registered() {
+        let service = HttpService::builder()
+            .add_frontend_route_extension(first_test_extension)
+            .add_frontend_route_extension(second_test_extension)
+            .build()
+            .unwrap();
+        let route_doc_strings = service
+            .route_docs()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(route_doc_strings.contains(&"GET /test/frontend-route/one".to_string()));
+        assert!(route_doc_strings.contains(&"GET /test/frontend-route/two".to_string()));
+    }
+
+    #[test]
+    fn test_frontend_route_extension_rejects_builtin_route_conflict() {
+        let error = build_error_message(
+            HttpService::builder().add_frontend_route_extension(duplicate_health_extension),
+        );
+
+        assert!(
+            error.contains("duplicate HTTP route registered: GET /health"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_frontend_route_extension_rejects_extension_route_conflict() {
+        let error = build_error_message(
+            HttpService::builder()
+                .add_frontend_route_extension(duplicate_test_extension)
+                .add_frontend_route_extension(duplicate_test_extension),
+        );
+
+        assert!(
+            error.contains("duplicate HTTP route registered: GET /test/frontend-route/duplicate"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_frontend_route_extension_stays_available_while_draining() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .add_frontend_route_extension(draining_extension)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let inflight = state.acquire_inflight();
+
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        cancel_token.cancel();
+        wait_for_service_stage(&state, ServiceStage::Draining).await;
+
+        assert_eq!(
+            get_status(port, "/test/frontend-route/draining").await,
+            reqwest::StatusCode::ACCEPTED
+        );
+
+        drop(inflight);
+        handle.abort();
+    }
+
     /// `enable_nvext` is wired from the builder onto `State.nvext_enabled` and
     /// exposed via the accessor used by the openai handlers.
     #[test]
     #[serial_test::serial]
     fn test_enable_nvext_propagates_through_builder_to_state() {
-        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+        use dynamo_runtime::config::environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT;
 
         // `build()` ANDs the builder flag with the env var, so this test must
         // pin the env to unset. Going through `temp_env` also serializes it
-        // against `test_dyn_enable_frontend_nvext_env_var_mirror`, which mutates
+        // against `test_dyn_disable_frontend_nvext_env_var_mirror`, which mutates
         // the same process-global var in parallel.
-        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
             let on = HttpService::builder().enable_nvext(true).build().unwrap();
             assert!(on.state.nvext_enabled());
 
@@ -1331,17 +1898,17 @@ mod tests {
         });
     }
 
-    /// `DYN_ENABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
-    /// flag. Unset -> builder default wins (on). Truthy strings -> on.
-    /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) ->
+    /// `DYN_DISABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
+    /// flag. Unset -> builder default wins (on). Falsey strings -> on.
+    /// Truthy strings (`1` / `true` / `yes` / `on`, case-insensitive) ->
     /// off, regardless of what the builder asked for.
     #[test]
     #[serial_test::serial]
-    fn test_dyn_enable_frontend_nvext_env_var_mirror() {
-        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+    fn test_dyn_disable_frontend_nvext_env_var_mirror() {
+        use dynamo_runtime::config::environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT;
 
         // Unset -> builder default (true) wins.
-        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
             let svc = HttpService::builder().build().unwrap();
             assert!(
                 svc.state.nvext_enabled(),
@@ -1349,30 +1916,140 @@ mod tests {
             );
         });
 
-        // Explicit truthy -> on (builder default also on; env doesn't flip it off).
-        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+        // Explicit falsey -> still on (disable not requested).
+        temp_env::with_var(DYN_DISABLE_FRONTEND_NVEXT, Some("false"), || {
             let svc = HttpService::builder().build().unwrap();
-            assert!(svc.state.nvext_enabled(), "env=true + default builder = on");
+            assert!(
+                svc.state.nvext_enabled(),
+                "disable=false + default builder = on"
+            );
         });
 
-        // Explicit falsey -> off, even though the builder default is on.
-        for falsey in ["false", "0", "no", "off", "FALSE"] {
-            temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some(falsey), || {
+        // Explicit truthy -> off, even though the builder default is on.
+        for truthy in ["true", "1", "yes", "on", "TRUE"] {
+            temp_env::with_var(DYN_DISABLE_FRONTEND_NVEXT, Some(truthy), || {
                 let svc = HttpService::builder().build().unwrap();
                 assert!(
                     !svc.state.nvext_enabled(),
-                    "env={falsey:?} should override builder default to off"
+                    "disable={truthy:?} should override builder default to off"
                 );
             });
         }
 
         // Builder=false short-circuits regardless of env.
-        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
             let svc = HttpService::builder().enable_nvext(false).build().unwrap();
             assert!(
                 !svc.state.nvext_enabled(),
-                "builder=false wins even if env=true"
+                "builder=false wins even if disable is unset"
             );
         });
+    }
+
+    #[test]
+    fn test_sse_keep_alive_env_var() {
+        assert_eq!(
+            parse_sse_keep_alive(Err(std::env::VarError::NotPresent)),
+            None
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("0".to_string())), None);
+        assert_eq!(
+            parse_sse_keep_alive(Ok("5000".to_string())),
+            Some(Duration::from_millis(5000))
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("invalid".to_string())), None);
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            assert_eq!(
+                parse_sse_keep_alive(Err(std::env::VarError::NotUnicode(OsString::from_vec(
+                    vec![0xff]
+                ),))),
+                None
+            );
+        }
+
+        let interval = Duration::from_millis(u64::MAX);
+        let expected = std::time::Instant::now()
+            .checked_add(interval)
+            .map(|_| interval);
+        assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_capabilities_follow_startup_gates() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+            ],
+            || {
+                let disabled = HttpService::builder().build().unwrap();
+                assert!(disabled.generate_engine_capabilities().is_empty());
+
+                let enabled = HttpService::builder()
+                    .enable_engine_apis(true)
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    enabled.generate_engine_capabilities(),
+                    vec![
+                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                        SGLANG_GENERATE_CAPABILITY
+                    ]
+                );
+
+                for (variable, capability) in [
+                    (
+                        VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
+                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                    ),
+                    (SGLANG_ENABLE_GENERATE_ENV, SGLANG_GENERATE_CAPABILITY),
+                ] {
+                    temp_env::with_var(variable, Some("1"), || {
+                        let enabled = HttpService::builder().build().unwrap();
+                        assert_eq!(enabled.generate_engine_capabilities(), vec![capability]);
+                    });
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_route_paths_follow_backend_env_overrides() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some("/native/vllm")),
+                (SGLANG_ENABLE_GENERATE_ENV, Some("1")),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, Some("/native/sglang")),
+            ],
+            || {
+                let service = HttpService::builder().build().unwrap();
+                let route_docs: Vec<_> = service
+                    .route_docs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+
+                assert!(route_docs.contains(&"POST /native/vllm".to_string()));
+                assert!(route_docs.contains(&"POST /native/sglang".to_string()));
+                assert!(route_docs.contains(&"PUT /native/sglang".to_string()));
+                assert!(!route_docs.contains(&"POST /generate".to_string()));
+                assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    fn generate_route_path_validation_rejects_invalid_paths() {
+        for path in ["", "native/vllm", "/:model", "/*path"] {
+            assert!(validate_generate_route_path(path).is_err());
+        }
     }
 }

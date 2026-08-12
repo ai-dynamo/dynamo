@@ -8,13 +8,21 @@ use std::any::Any;
 use std::path::{Path, PathBuf};
 
 use core::ffi::c_char;
+#[cfg(target_os = "linux")]
 use nix::fcntl::{FallocateFlags, fallocate};
+#[cfg(not(target_os = "linux"))]
+use nix::unistd::ftruncate;
 use nix::unistd::unlink;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 
 const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
 const DEFAULT_DISK_CACHE_DIR: &str = "/tmp/";
+
+#[cfg(target_os = "linux")]
+const DISK_OPEN_DIRECT_FLAG: i32 = nix::libc::O_DIRECT;
+#[cfg(not(target_os = "linux"))]
+const DISK_OPEN_DIRECT_FLAG: i32 = 0;
 
 /// Disk-backed storage using memory-mapped files with O_DIRECT support.
 #[derive(Debug)]
@@ -82,12 +90,7 @@ impl DiskStorage {
             let template = CString::new(path_str).unwrap();
             let mut template_bytes = template.into_bytes_with_nul();
 
-            let fd = unsafe {
-                nix::libc::mkostemp(
-                    template_bytes.as_mut_ptr() as *mut c_char,
-                    nix::libc::O_RDWR | nix::libc::O_DIRECT,
-                )
-            };
+            let fd = unsafe { create_temp_file(template_bytes.as_mut_ptr() as *mut c_char) };
 
             if fd == -1 {
                 return Err(StorageError::AllocationFailed(format!(
@@ -111,7 +114,7 @@ impl DiskStorage {
             let fd = unsafe {
                 nix::libc::open(
                     path_cstr.as_ptr(),
-                    nix::libc::O_CREAT | nix::libc::O_RDWR | nix::libc::O_DIRECT,
+                    nix::libc::O_CREAT | nix::libc::O_RDWR | DISK_OPEN_DIRECT_FLAG,
                     0o644,
                 )
             };
@@ -126,18 +129,7 @@ impl DiskStorage {
             (fd, file_path)
         };
 
-        // We need to use fallocate to actually allocate the storage and create the blocks on disk.
-        unsafe {
-            fallocate(
-                BorrowedFd::borrow_raw(raw_fd),
-                FallocateFlags::empty(),
-                0,
-                len as i64,
-            )
-            .map_err(|e| {
-                StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
-            })?
-        };
+        allocate_file(raw_fd, len)?;
 
         Ok(Self {
             fd: raw_fd as u64,
@@ -176,6 +168,35 @@ impl DiskStorage {
     pub fn unlinked(&self) -> bool {
         self.unlinked
     }
+}
+
+fn allocate_file(raw_fd: i32, len: usize) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        fallocate(
+            BorrowedFd::borrow_raw(raw_fd),
+            FallocateFlags::empty(),
+            0,
+            len as i64,
+        )
+        .map_err(|e| StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e)))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        ftruncate(BorrowedFd::borrow_raw(raw_fd), len as i64)
+            .map_err(|e| StorageError::AllocationFailed(format!("Failed to size temp file: {}", e)))
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn create_temp_file(template: *mut c_char) -> i32 {
+    unsafe { nix::libc::mkostemp(template, nix::libc::O_RDWR | DISK_OPEN_DIRECT_FLAG) }
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn create_temp_file(template: *mut c_char) -> i32 {
+    unsafe { nix::libc::mkstemp(template) }
 }
 
 impl Drop for DiskStorage {

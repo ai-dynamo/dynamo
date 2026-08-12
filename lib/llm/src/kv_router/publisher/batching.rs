@@ -4,10 +4,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, StorageTier,
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, ResidencyDomain,
+    RouterEvent, StorageTier,
 };
 
 use super::dedup::EventDedupFilter;
@@ -22,6 +22,7 @@ pub(super) struct BatchingState {
     pub(super) next_publish_id: u64,
     pub(super) last_dp_rank: u32,
     pub(super) last_storage_tier: StorageTier,
+    pub(super) last_residency_domain: ResidencyDomain,
     pub(super) last_flush_time: Instant,
 }
 
@@ -33,6 +34,7 @@ impl BatchingState {
             next_publish_id: 1,
             last_dp_rank: 0,
             last_storage_tier: StorageTier::Device,
+            last_residency_domain: ResidencyDomain::Worker,
             last_flush_time: Instant::now(),
         }
     }
@@ -71,12 +73,12 @@ impl BatchingState {
         self.remaining_timeout(timeout_ms) == Duration::ZERO
     }
 
-    pub(super) async fn flush<P: RouterEventSink + Send + Sync + 'static>(
+    pub(super) async fn flush(
         &mut self,
-        publisher: &P,
         local_indexer: &Option<Arc<LocalKvIndexer>>,
         worker_id: u64,
         dedup: &mut EventDedupFilter,
+        output: &mut Vec<RouterEvent>,
     ) {
         if !self.has_pending() {
             return;
@@ -84,34 +86,46 @@ impl BatchingState {
         let dp_rank = self.last_dp_rank;
         let mut emitted = false;
         if let Some(data) = self.pending_removed.take()
-            && let Some(filtered) = dedup.filter_remove(dp_rank, self.last_storage_tier, data)
+            && let Some(filtered) = dedup.filter_remove_in_domain(
+                dp_rank,
+                self.last_storage_tier,
+                self.last_residency_domain,
+                data,
+            )
         {
-            emit(
-                publisher,
+            let _ = emit(
                 local_indexer,
                 worker_id,
                 self.last_storage_tier,
+                self.last_residency_domain,
                 KvCacheEvent {
                     event_id: self.next_publish_id,
                     data: KvCacheEventData::Removed(filtered),
                     dp_rank,
                 },
+                output,
             )
             .await;
             emitted = true;
         }
         if let Some(data) = self.pending_stored.take() {
-            dedup.track_store(dp_rank, self.last_storage_tier, &data);
-            emit(
-                publisher,
+            dedup.track_store_in_domain(
+                dp_rank,
+                self.last_storage_tier,
+                self.last_residency_domain,
+                &data,
+            );
+            let _ = emit(
                 local_indexer,
                 worker_id,
                 self.last_storage_tier,
+                self.last_residency_domain,
                 KvCacheEvent {
                     event_id: self.next_publish_id,
                     data: KvCacheEventData::Stored(data),
                     dp_rank,
                 },
+                output,
             )
             .await;
             emitted = true;

@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
+
 use dynamo_kv_router::protocols::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+use super::trace::{synthesize_trace_tokens, validate_synthesizable_prompt};
 use super::*;
 
 fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
@@ -42,6 +45,18 @@ fn request_trace_row(
         row["agent_context"] = agent_context;
     }
     row
+}
+
+#[test]
+fn trace_synthesis_bounds_each_hash_block_to_remaining_input() {
+    let tokens = synthesize_trace_tokens(1, &[7], usize::MAX).unwrap();
+    assert_eq!(tokens, vec![7]);
+}
+
+#[test]
+fn trace_synthesis_rejects_capacity_overflow() {
+    let error = validate_synthesizable_prompt(1, &[7, 8], usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("capacity overflow"));
 }
 
 #[test]
@@ -118,7 +133,7 @@ fn dynamo_trace_input_validation_errors_are_clear() {
 }
 
 #[test]
-fn test_from_mooncake_single_turn_preserves_fields() {
+fn test_from_mooncake_single_turn_loads_fields_and_canonicalizes_hashes() {
     let file = write_trace(&[serde_json::json!({
         "timestamp": 123.0,
         "input_length": 8,
@@ -135,9 +150,172 @@ fn test_from_mooncake_single_turn_preserves_fields() {
     assert_eq!(session.turns.len(), 1);
     assert_eq!(session.turns[0].input_length, 8);
     assert_eq!(session.turns[0].max_output_tokens, 4);
-    assert_eq!(session.turns[0].hash_ids, vec![7, 8]);
+    assert_eq!(session.turns[0].hash_ids, vec![0, 1]);
     assert_eq!(session.turns[0].priority, -3);
     assert_eq!(session.turns[0].strict_priority, 7);
+}
+
+#[test]
+fn mooncake_hash_ids_preserve_identity_above_u32() {
+    let shared = 0xB300_0000_0000_0000_u64;
+    let distinct = 0xB300_0001_0000_0000_u64;
+    let file = write_trace(&[
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [shared],
+        }),
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [distinct],
+        }),
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [shared],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 1).unwrap();
+    let requests = trace.to_single_turn_requests().unwrap();
+
+    assert_ne!(requests[0].tokens, requests[1].tokens);
+    assert_eq!(requests[0].tokens, requests[2].tokens);
+}
+
+#[test]
+fn single_turn_requests_plan_missing_output_tokens_deterministically() {
+    let trace = Trace {
+        block_size: 1,
+        sessions: vec![
+            SessionTrace {
+                session_id: "missing".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 3,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            },
+            SessionTrace {
+                session_id: "authored".into(),
+                first_arrival_timestamp_ms: Some(1.0),
+                turns: vec![TurnTrace {
+                    input_length: 1,
+                    max_output_tokens: 2,
+                    output_token_ids: Some(vec![20, 21]),
+                    hash_ids: vec![12],
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let first = trace.to_single_turn_requests().unwrap();
+    let second = trace.to_single_turn_requests().unwrap();
+
+    assert_eq!(first[0].output_token_ids, second[0].output_token_ids);
+    assert_eq!(first[0].output_token_ids.as_ref().map(Vec::len), Some(3));
+    assert_eq!(first[1].output_token_ids.as_deref(), Some(&[20, 21][..]));
+}
+
+#[test]
+fn test_from_mooncake_preserves_output_token_replay_keys() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "explicit",
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 2,
+            "output_token_ids": [10, 11],
+            "hash_ids": [1],
+        }),
+        serde_json::json!({
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [12],
+            "hash_ids": [2],
+        }),
+        serde_json::json!({
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [13],
+            "hash_ids": [3],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    assert_eq!(
+        trace.sessions[0].turns[0].replay_key.as_deref(),
+        Some("explicit")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[0].output_token_ids.as_deref(),
+        Some(&[10, 11][..])
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].replay_key.as_deref(),
+        Some("s:1")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].output_token_ids.as_deref(),
+        Some(&[12][..])
+    );
+    assert_eq!(
+        trace.sessions[1].turns[0].replay_key.as_deref(),
+        Some("line:2")
+    );
+
+    let request = trace.sessions[0].turns[0]
+        .to_direct_request(4, Uuid::from_u128(1), None)
+        .unwrap();
+    assert_eq!(request.output_token_ids.as_deref(), Some(&[10, 11][..]));
+}
+
+#[test]
+fn test_from_mooncake_rejects_output_token_length_mismatch() {
+    let file = write_trace(&[serde_json::json!({
+        "input_length": 4,
+        "output_length": 2,
+        "output_token_ids": [10],
+        "hash_ids": [1],
+    })]);
+
+    let err = Trace::from_mooncake(file.path(), 4).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("output_length 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn test_trace_validate_rejects_programmatic_output_token_length_mismatch() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "s".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 4,
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![10]),
+                hash_ids: vec![1],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }],
+        }],
+    };
+
+    let err = trace.validate_for_trace_mode().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("max_output_tokens 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -291,9 +469,9 @@ fn test_from_applied_compute_agentic_prefix_extends_hashes_across_turns() {
 
     let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.0, 0).unwrap();
     let turns = &trace.sessions[0].turns;
-    assert_eq!(turns[0].hash_ids, vec![1, 2, 3]);
-    assert_eq!(turns[1].hash_ids, vec![1, 2, 3]);
-    assert_eq!(turns[2].hash_ids, vec![1, 2, 3, 4]);
+    assert_eq!(turns[0].hash_ids, vec![0, 1, 2]);
+    assert_eq!(turns[1].hash_ids, vec![0, 1, 2]);
+    assert_eq!(turns[2].hash_ids, vec![0, 1, 2, 3]);
 }
 
 #[test]
@@ -337,6 +515,8 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
     let turn = TurnTrace {
         input_length: 6,
         max_output_tokens: 3,
+        output_token_ids: None,
+        replay_key: None,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
         priority: -2,
@@ -422,6 +602,7 @@ fn test_partition_by_session_round_robin_keeps_sessions_intact() {
         first_turn_arrivals: ArrivalSpec::Burst,
         inter_turn_delays: DelaySpec::ConstantMs(5.0),
         seed: 7,
+        arrival_seed: 42,
     })
     .unwrap();
 
@@ -457,16 +638,68 @@ fn test_synthetic_prefix_groups_share_prefixes_within_group() {
         first_turn_arrivals: ArrivalSpec::Burst,
         inter_turn_delays: DelaySpec::None,
         seed: 42,
+        arrival_seed: 42,
     })
     .unwrap();
 
-    let prefix_len = 2;
     let prefixes = trace
         .sessions
         .iter()
-        .map(|session| session.turns[0].hash_ids[..prefix_len].to_vec())
-        .collect::<Vec<_>>();
-    assert!(prefixes.windows(2).any(|window| window[0] == window[1]));
+        .map(|session| session.turns[0].hash_ids[..2].to_vec())
+        .collect::<HashSet<_>>();
+    let suffixes = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns[0].hash_ids[2..].to_vec())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(prefixes.len(), 2);
+    assert_eq!(suffixes.len(), trace.sessions.len());
+}
+
+#[test]
+fn test_synthetic_arrival_mode_changes_timestamps_only() {
+    let build = |first_turn_arrivals, arrival_seed| {
+        Trace::synthetic(SyntheticTraceSpec {
+            block_size: 4,
+            num_sessions: 20,
+            turns_per_session: 3,
+            input_tokens: LengthSpec {
+                mean: 16,
+                stddev: 3.0,
+            },
+            output_tokens: LengthSpec {
+                mean: 4,
+                stddev: 1.0,
+            },
+            shared_prefix_ratio: 0.5,
+            num_prefix_groups: 5,
+            first_turn_arrivals,
+            inter_turn_delays: DelaySpec::ExponentialMs { mean_ms: 8.0 },
+            seed: 99,
+            arrival_seed,
+        })
+        .unwrap()
+    };
+
+    let strip_timestamps = |trace: &mut Trace| {
+        trace
+            .sessions
+            .iter_mut()
+            .map(|session| session.first_arrival_timestamp_ms.take())
+            .collect::<Vec<_>>()
+    };
+
+    let mut fixed = build(ArrivalSpec::ConstantQps { qps: 25.0 }, 42);
+    let mut poisson = build(ArrivalSpec::PoissonQps { qps: 25.0 }, 42);
+    let mut reseeded_poisson = build(ArrivalSpec::PoissonQps { qps: 25.0 }, 7);
+    let fixed_timestamps = strip_timestamps(&mut fixed);
+    let poisson_timestamps = strip_timestamps(&mut poisson);
+    let reseeded_timestamps = strip_timestamps(&mut reseeded_poisson);
+    assert_ne!(fixed_timestamps, poisson_timestamps);
+    assert_ne!(poisson_timestamps, reseeded_timestamps);
+    assert_eq!(fixed, poisson);
+    assert_eq!(poisson, reseeded_poisson);
 }
 
 #[test]
@@ -495,6 +728,25 @@ fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
         .to_direct_request(trace.block_size, Uuid::from_u128(2), Some(10.0))
         .unwrap();
     assert_eq!(request.tokens.len(), 18);
+}
+
+#[test]
+#[should_panic(expected = "hash prefix expansion overflow")]
+fn test_expand_hash_prefix_depth_rejects_offset_overflow() {
+    Trace {
+        block_size: 1,
+        sessions: vec![SessionTrace {
+            session_id: "session".to_string(),
+            first_arrival_timestamp_ms: None,
+            turns: vec![TurnTrace {
+                input_length: 1,
+                max_output_tokens: 1,
+                hash_ids: vec![u32::MAX / 3],
+                ..Default::default()
+            }],
+        }],
+    }
+    .expand_hash_prefix_depth(3);
 }
 
 #[test]

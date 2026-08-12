@@ -72,6 +72,14 @@ func (c *AgentConfig) Validate() error {
 			Message: "tcpClose and tcpEstablished cannot both be true",
 		}
 	}
+	switch strings.ToLower(strings.TrimSpace(c.CRIU.ImageIoMode)) {
+	case "", "writeback", "direct":
+	default:
+		return &ConfigError{
+			Field:   "criu.imageIoMode",
+			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
+		}
+	}
 	return c.Restore.Validate()
 }
 
@@ -84,8 +92,7 @@ type StorageSpec struct {
 
 // RestoreSpec holds settings for the CRIU restore process.
 type RestoreSpec struct {
-	NSRestorePath         string `yaml:"nsRestorePath"`
-	RestoreTimeoutSeconds int    `yaml:"restoreTimeoutSeconds"`
+	RestoreTimeoutSeconds int `yaml:"restoreTimeoutSeconds"`
 }
 
 func (c *RestoreSpec) RestoreTimeout() time.Duration {
@@ -96,9 +103,6 @@ func (c *RestoreSpec) RestoreTimeout() time.Duration {
 }
 
 func (c *RestoreSpec) Validate() error {
-	if c.NSRestorePath == "" {
-		return &ConfigError{Field: "nsRestorePath", Message: "nsRestorePath is required"}
-	}
 	if c.RestoreTimeoutSeconds <= 0 {
 		return &ConfigError{Field: "restoreTimeoutSeconds", Message: "restoreTimeoutSeconds must be greater than zero"}
 	}
@@ -122,6 +126,7 @@ type CRIUSettings struct {
 	LinkRemap         bool   `yaml:"linkRemap"`
 	ExtMasters        bool   `yaml:"extMasters"`
 	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
+	ImageIoMode       string `yaml:"imageIoMode"`
 	RstSibling        bool   `yaml:"rstSibling"`
 	MntnsCompatMode   bool   `yaml:"mntnsCompatMode"`
 	EvasiveDevices    bool   `yaml:"evasiveDevices"`

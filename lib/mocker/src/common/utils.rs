@@ -84,6 +84,14 @@ pub async fn sleep_precise(duration: Duration) {
 /// deadline's reference point, making it suitable for simulation loops where
 /// computation time should be subtracted from the sleep.
 pub async fn sleep_until_precise(deadline: Instant) {
+    // Scheduler work may consume the modeled delay, especially at high speedup ratios. Avoid
+    // allocating and registering a timerfd when there is no remaining time to sleep. Preserve
+    // the scheduler loop's cooperative yield so other tasks on the runtime can make progress.
+    if deadline <= Instant::now() {
+        tokio::task::yield_now().await;
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     {
         if let Ok(delay) = tokio_timerfd::Delay::new(deadline) {
@@ -101,6 +109,18 @@ pub async fn sleep_until_precise(deadline: Instant) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::Poll;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_expired_precise_sleep_yields_to_runtime() {
+        let sleep = sleep_until_precise(Instant::now());
+        tokio::pin!(sleep);
+
+        let first_poll = futures::poll!(sleep.as_mut());
+
+        assert!(matches!(first_poll, Poll::Pending));
+        sleep.await;
+    }
 
     #[test]
     fn test_prefill_handoff_delay_only_applies_to_completed_prefill() {

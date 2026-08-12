@@ -1,0 +1,286 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-disagg-b200-agentic
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            python3 -m dynamo.frontend \
+              --router-mode kv \
+              --router-kv-events \
+              --kv-cache-block-size 256 \
+              --router-reset-states \
+              --http-host 0.0.0.0 \
+              --http-port 8000
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+        schedulerName: default-scheduler
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+  - name: VllmPrefillWorker
+    type: prefill
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 200Gi
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        runtimeClassName: nvidia
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+          volumeMounts:
+          - name: shared-memory
+            mountPath: /dev/shm
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: NCCL_IB_DISABLE
+            value: "0"
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: "1"
+          # disagg GDR (per-rank NIC pinning): to enable GDR, set BOTH VLLM_GPU_NIC_PCIE_MAPPING and
+          # VLLM_NIC_SELECTION_VARS (a pair - vLLM #42083, setting only one fails EngineCore init);
+          # generate the node map per README "Per-rank NIC mapping". The recipe ships neither; without
+          # them, disagg KV transfer uses host-staging (slower) - see README "Per-rank NIC mapping".
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_IB_REG_METHODS
+            value: odp,rcache
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: "0"
+          - name: UCX_MEMTYPE_CACHE
+            value: "y"
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            set -Eeuo pipefail
+            ulimit -l unlimited
+            ulimit -n 1048576
+            python3 -m dynamo.vllm \
+              --model nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --served-model-name nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --trust-remote-code \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --gpu-memory-utilization 0.9348 \
+              --max-model-len 1048576 \
+              --max-num-batched-tokens 16384 \
+              --enable-expert-parallel \
+              --tensor-parallel-size 8 \
+              --no-scheduler-reserve-full-isl \
+              --attention-config '{
+                  "use_fp4_indexer_cache": true
+                }' \
+              --moe-backend flashinfer_trtllm \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4 \
+              --no-async-scheduling \
+              --enable-prefix-caching \
+              --kv-transfer-config '{
+                  "kv_connector": "NixlConnector",
+                  "kv_role": "kv_both",
+                  "kv_buffer_device": "cuda"
+                }' \
+              --disaggregation-mode prefill \
+              --kv-events-config '{
+                  "publisher": "zmq",
+                  "topic": "kv-events",
+                  "endpoint": "tcp://*:5571",
+                  "enable_kv_cache_events": true
+                }'
+          name: main
+          resources:
+            requests:
+              nvidia.com/gpu: "8"
+              rdma/shared_ib: "1"
+            limits:
+              nvidia.com/gpu: "8"
+              rdma/shared_ib: "1"
+        schedulerName: default-scheduler
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+  - name: VllmDecodeWorker
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 200Gi
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        runtimeClassName: nvidia
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+          volumeMounts:
+          - name: shared-memory
+            mountPath: /dev/shm
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: NCCL_IB_DISABLE
+            value: "0"
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: "1"
+          # disagg GDR (per-rank NIC pinning): to enable GDR, set BOTH VLLM_GPU_NIC_PCIE_MAPPING and
+          # VLLM_NIC_SELECTION_VARS (a pair - vLLM #42083, setting only one fails EngineCore init);
+          # generate the node map per README "Per-rank NIC mapping". The recipe ships neither; without
+          # them, disagg KV transfer uses host-staging (slower) - see README "Per-rank NIC mapping".
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_IB_REG_METHODS
+            value: odp,rcache
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: "0"
+          - name: UCX_MEMTYPE_CACHE
+            value: "y"
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            set -Eeuo pipefail
+            ulimit -l unlimited
+            ulimit -n 1048576
+            python3 -m dynamo.vllm \
+              --model nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --served-model-name nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --trust-remote-code \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --gpu-memory-utilization 0.9348 \
+              --max-model-len 1048576 \
+              --max-num-batched-tokens 16384 \
+              --enable-expert-parallel \
+              --tensor-parallel-size 8 \
+              --no-scheduler-reserve-full-isl \
+              --attention-config '{
+                  "use_fp4_indexer_cache": true
+                }' \
+              --moe-backend flashinfer_trtllm \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4 \
+              --max-num-seqs 128 \
+              --compilation-config '{
+                  "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  "custom_ops": [
+                    "all"
+                  ]
+                }' \
+              --speculative-config '{
+                  "method": "mtp",
+                  "num_speculative_tokens": 2
+                }' \
+              --kv-transfer-config '{
+                  "kv_connector": "NixlConnector",
+                  "kv_role": "kv_both",
+                  "kv_buffer_device": "cuda",
+                  "kv_connector_extra_config": {
+                    "num_threads": 8
+                  }
+                }' \
+              --disaggregation-mode decode
+          name: main
+          resources:
+            requests:
+              nvidia.com/gpu: "8"
+              rdma/shared_ib: "1"
+            limits:
+              nvidia.com/gpu: "8"
+              rdma/shared_ib: "1"
+        schedulerName: default-scheduler
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule

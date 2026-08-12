@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::local_model::{
+    LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
+};
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
+#[cfg(feature = "custom-policy")]
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
@@ -24,7 +28,6 @@ use tokio::sync::Mutex;
 use tracing::Instrument;
 
 use dynamo_runtime::config;
-use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
@@ -35,6 +38,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+#[cfg(feature = "custom-policy")]
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -81,14 +87,24 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod python_payload;
 
-type JsonServerStreamingIngress =
-    Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonServerStreamingIngress = Ingress<
+    SingleIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
-type JsonBidirectionalIngress =
-    Ingress<rs::pipeline::ManyIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonBidirectionalIngress = Ingress<
+    rs::pipeline::ManyIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
 static INIT: OnceCell<()> = OnceCell::new();
+
+#[cfg(feature = "custom-policy")]
+static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
@@ -119,9 +135,9 @@ fn get_span_for_direct_context(
 
 // Helper to create request context with proper linking and cancellation handling
 fn create_request_context(
-    request: serde_json::Value,
+    request: rmpv::Value,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<serde_json::Value> {
+) -> RsContext<rmpv::Value> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -144,17 +160,9 @@ fn create_request_context(
     }
 }
 
-/// A Python module implemented in Rust. The name of this function must match
-/// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
-/// import the module.
-#[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-        eprintln!(
-            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
-        );
-    } else if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
+fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // OTLP export no longer requires a pre-existing runtime, so initialize at import.
+    if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
     }
 
@@ -165,6 +173,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
+    m.add_function(wrap_pyfunction!(update_model_taints, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
@@ -176,14 +185,24 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
+    m.add(
+        "MOCKER_KVBM_OFFLOAD_ENABLED",
+        cfg!(feature = "mocker-kvbm-offload"),
+    )?;
 
     m.add_class::<DistributedRuntime>()?;
+    m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
+    m.add_class::<Instance>()?;
+    m.add_class::<TransportType>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
+    m.add_class::<llm::frontend_routes::PyFrontendRoute>()?;
+    m.add_class::<llm::frontend_routes::PyFrontendResponse>()?;
+    m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
     m.add_class::<llm::entrypoint::AicPerfConfig>()?;
@@ -193,19 +212,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::TrtllmArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
-    #[cfg(feature = "aic-forward-pass")]
-    {
-        m.add_class::<llm::engine_perf::AicEngineConfig>()?;
-        m.add_class::<llm::engine_perf::EngineCapacity>()?;
-        m.add_class::<llm::engine_perf::EngineCapacityRequest>()?;
-        m.add_class::<llm::engine_perf::EnginePerfLimits>()?;
-        m.add_class::<llm::engine_perf::OptimizationTarget>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
-    }
-    m.add_class::<llm::replay::PlannerReplayBridge>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SelectionCacheConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::kv::MultimodalEmbeddingCachePublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
@@ -229,6 +239,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
+    m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
@@ -245,6 +256,57 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
 
     Ok(())
+}
+
+pub(crate) fn worker_selection_policy_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| registry.resolve(config))
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "custom-policy")]
+fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    dynamo_worker_selection_policy_catalog::register(&mut registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+
+    WORKER_SELECTION_POLICY_REGISTRY
+        .set(registry)
+        .map_err(|_| {
+            PyRuntimeError::new_err("worker-selection policy registry already installed")
+        })?;
+    register_core(m)
+}
+
+/// The extension-module entrypoint for a custom policy image.
+#[cfg(feature = "custom-policy")]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core_with_custom_worker_selection_policy(m)
+}
+
+/// The stock extension-module entrypoint.
+#[cfg(not(feature = "custom-policy"))]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core(m)
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr
@@ -300,6 +362,21 @@ fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 
 #[pyfunction(name = "run_select_service")]
 #[pyo3(signature = (argv=None))]
+#[cfg(feature = "select-service")]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || {
+        llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
+            argv,
+            worker_selection_policy_factory,
+        )
+    })
+    .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+#[cfg(not(feature = "select-service"))]
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_select_service_cli(argv))
@@ -348,7 +425,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -371,6 +448,8 @@ fn register_model<'p>(
     self_host_metadata: Option<bool>,
     tensor_model_config: Option<&Bound<'p, PyDict>>,
     ignore_weights: bool,
+    max_gpu_lora_count: Option<u32>,
+    model_aliases: Option<Vec<String>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -475,6 +554,7 @@ fn register_model<'p>(
     // This preserves backward-compat: workers that don't specify router_config continue to
     // fall back to the frontend-level global router config via the watcher.
     let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
+    let model_aliases = model_aliases.unwrap_or_default();
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -529,26 +609,48 @@ fn register_model<'p>(
         if is_tensor_based || is_images || is_videos || is_realtime {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            // Preserve source_path for compatibility checks (LoRA vs base model).
+            // Only set if it differs from model_name to preserve legacy MDC checksums.
+            if source_path != model_name {
+                card.source_path = Some(source_path.clone());
+            }
+
+            // Populate lora_info if this is a LoRA registration.
+            if let Some(lora_name) = lora_identifier.clone() {
+                card.lora = Some(llm_rs::model_card::LoraInfo {
+                    name: lora_name,
+                    max_gpu_lora_count,
+                });
+            }
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
+            // Aliases are only honored on the LLM surfaces (their handlers
+            // canonicalize alias→primary); ignore them for these types.
+            if !model_aliases.is_empty() {
+                tracing::warn!(
+                    model_name = %model_name,
+                    "Ignoring served-model-name aliases: not supported for \
+                     tensor/images/videos/realtime models"
+                );
+            }
 
-            card.runtime_config = runtime_config.inner;
+            // For base model (no lora_identifier), propagate LoRA slot capacity so
+            // frontend allocator can see idle-but-LoRA-capable workers before first adapter load.
+            let mut rc = runtime_config.inner;
+            if lora_identifier.is_none() {
+                rc.max_gpu_lora_count = max_gpu_lora_count;
+            }
+            card.runtime_config = rc;
             card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
-            let discovery = endpoint.inner.drt().discovery();
-            let spec = rs::discovery::DiscoverySpec::from_model(
-                endpoint.inner.component().namespace().name().to_string(),
-                endpoint.inner.component().name().to_string(),
-                endpoint.inner.name().to_string(),
-                &card,
-            )
-            .map_err(to_pyerr)?;
-            discovery.register(spec).await.map_err(to_pyerr)?;
+            register_model_card(&endpoint.inner, &card)
+                .await
+                .map_err(|e| PyException::new_err(format!("{}", e)))?;
 
             return Ok(());
         }
@@ -573,9 +675,20 @@ fn register_model<'p>(
             .source_path(source_path.clone().into())
             // --served_model_name
             .model_name(model_name.clone())
+            // --served_model_name aliases (additional names this model responds to)
+            .model_aliases(model_aliases)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
-            .runtime_config(runtime_config.inner)
+            .runtime_config({
+                let mut rc = runtime_config.inner;
+                // The base worker registration carries the worker's LoRA slot capacity so the
+                // frontend allocator sees idle-but-LoRA-capable workers before any adapter is
+                // loaded. Adapter registrations (lora_name set) carry it via LoraInfo instead.
+                if lora_identifier.is_none() {
+                    rc.max_gpu_lora_count = max_gpu_lora_count;
+                }
+                rc
+            })
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
@@ -592,7 +705,7 @@ fn register_model<'p>(
             .as_ref()
             .map(|name| llm_rs::model_card::LoraInfo {
                 name: name.clone(),
-                max_gpu_lora_count: None,
+                max_gpu_lora_count,
             });
 
         local_model
@@ -651,6 +764,21 @@ fn unregister_model<'p>(
     })
 }
 
+/// Replace the caller-managed taints on this worker's registered model.
+#[pyfunction]
+#[pyo3(signature = (endpoint, taints))]
+fn update_model_taints<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    taints: std::collections::HashSet<String>,
+) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        update_model_taints_rs(&endpoint.inner, taints)
+            .await
+            .map_err(to_pyerr)
+    })
+}
+
 /// Download a model from Hugging Face, returning its local path
 /// Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 #[pyfunction]
@@ -704,8 +832,97 @@ struct ModelCardInstanceId {
 #[pyclass]
 #[derive(Clone)]
 struct Client {
-    router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
+    router: rs::pipeline::PushRouter<rmpv::Value, RsAnnotated<rmpv::Value>>,
     endpoint: rs::component::Endpoint,
+}
+
+/// A read-only view of an instance's transport, wrapping the runtime
+/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp") and its
+/// `address`; the address format is transport-specific and not a stable parse
+/// target.
+#[pyclass(eq, hash, frozen)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TransportType {
+    inner: rs::component::TransportType,
+}
+
+#[pymethods]
+impl TransportType {
+    #[getter]
+    fn kind(&self) -> &str {
+        match &self.inner {
+            rs::component::TransportType::Nats(_) => "nats_tcp",
+            rs::component::TransportType::Tcp(_) => "tcp",
+        }
+    }
+
+    #[getter]
+    fn address(&self) -> &str {
+        self.inner.address()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TransportType(kind={:?}, address={:?})",
+            self.kind(),
+            self.address()
+        )
+    }
+}
+
+/// A read-only view of a single registered instance of an endpoint, wrapping a
+/// snapshot of the runtime `Instance`.
+#[pyclass(eq, frozen)]
+#[derive(Clone, PartialEq, Eq)]
+struct Instance {
+    inner: rs::component::Instance,
+}
+
+#[pymethods]
+impl Instance {
+    #[getter]
+    fn instance_id(&self) -> u64 {
+        self.inner.instance_id
+    }
+
+    #[getter]
+    fn namespace(&self) -> &str {
+        &self.inner.namespace
+    }
+
+    #[getter]
+    fn component(&self) -> &str {
+        &self.inner.component
+    }
+
+    #[getter]
+    fn endpoint(&self) -> &str {
+        &self.inner.endpoint
+    }
+
+    #[getter]
+    fn transport(&self) -> TransportType {
+        TransportType {
+            inner: self.inner.transport.clone(),
+        }
+    }
+
+    /// Device type, e.g. "cpu" or "cuda", or None if unspecified.
+    #[getter]
+    fn device_type(&self) -> Option<&str> {
+        self.inner.device_type.as_ref().map(|d| match d {
+            rs::component::DeviceType::Cpu => "cpu",
+            rs::component::DeviceType::Cuda => "cuda",
+        })
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Instance({})", self.inner)
+    }
 }
 
 #[pyclass]
@@ -767,9 +984,29 @@ impl ModelType {
     const Realtime: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Realtime,
     };
+    #[classattr]
+    const Classify: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Classify,
+    };
+    #[classattr]
+    const Pooling: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Pooling,
+    };
 
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()
+    }
+
+    fn supports_embedding(&self) -> bool {
+        self.inner.supports_embedding()
+    }
+
+    fn supports_classify(&self) -> bool {
+        self.inner.supports_classify()
+    }
+
+    fn supports_pooling(&self) -> bool {
+        self.inner.supports_pooling()
     }
 
     fn __or__(&self, other: &Self) -> Self {
@@ -901,14 +1138,6 @@ impl DistributedRuntime {
                 Ok(worker.runtime().clone())
             })
             .map_err(to_pyerr)?;
-
-        // Initialize logging in context where tokio runtime is available
-        // otel exporter requires it
-        if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-            runtime.secondary().block_on(async {
-                rs::logging::init();
-            });
-        }
 
         let nats_enabled = request_plane.is_nats()
             || matches!(
@@ -1127,7 +1356,12 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
+        let network_engine = Arc::new(engine.network_engine());
+        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+            network_engine,
+            python_payload::PythonIngressPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1179,10 +1413,9 @@ impl Endpoint {
     /// `async def generate(request_stream, context)` coroutine that
     /// returns an async generator. `request_stream` is a
     /// [`PyAsyncRequestStream`] yielding inbound frames as plain Python
-    /// objects (dicts/lists/etc., the depythonization of
-    /// `serde_json::Value`). The generator yields response frames as
-    /// plain Python objects that are then pythonized back to JSON values
-    /// on the wire.
+    /// objects (dicts/lists/etc.) decoded directly from the configured
+    /// request-plane payload codec. The generator yields plain Python
+    /// response objects that are serialized directly to that codec.
     ///
     /// Request-stream end (when `__anext__` raises `StopAsyncIteration`)
     /// is *not* a cancellation signal: the caller has merely stopped
@@ -1200,8 +1433,9 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress: Arc<JsonBidirectionalIngress> =
-            Ingress::for_engine(engine).map_err(to_pyerr)?;
+        let ingress: Arc<PythonBidirectionalIngress> =
+            Ingress::for_engine_with_adapter(engine, python_payload::PythonIngressPayloadAdapter)
+                .map_err(to_pyerr)?;
 
         let builder = self
             .inner
@@ -1255,12 +1489,13 @@ impl Endpoint {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
-            let push_router = rs::pipeline::PushRouter::<
-                serde_json::Value,
-                RsAnnotated<serde_json::Value>,
-            >::from_client(client, router_mode.into())
-            .await
-            .map_err(to_pyerr)?;
+            let push_router =
+                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
+                    client,
+                    router_mode.into(),
+                )
+                .await
+                .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
                 endpoint: inner,
@@ -1328,6 +1563,18 @@ impl Client {
     /// Replaces endpoint_ids.
     fn instance_ids(&self) -> Vec<u64> {
         self.router.client.instance_ids()
+    }
+
+    /// Get a snapshot of the current instances with full transport details.
+    /// Like `instance_ids()`, the result is a snapshot of the watched instance
+    /// set; pair with `wait_for_instances()` to block until instances exist.
+    fn instances(&self) -> Vec<Instance> {
+        self.router
+            .client
+            .instances()
+            .into_iter()
+            .map(|inner| Instance { inner })
+            .collect()
     }
 
     /// Wait for an instance to be available for work.
@@ -1434,7 +1681,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1468,7 +1715,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1506,7 +1753,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1543,7 +1790,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1576,13 +1823,13 @@ impl Client {
 }
 
 async fn process_stream(
-    stream: EngineStream<RsAnnotated<serde_json::Value>>,
+    stream: EngineStream<RsAnnotated<rmpv::Value>>,
     tx: tokio::sync::mpsc::Sender<RsAnnotated<PyObject>>,
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
         // Convert the response to a PyObject using Python's GIL
-        let annotated: RsAnnotated<serde_json::Value> = response;
+        let annotated: RsAnnotated<rmpv::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
             Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
@@ -1667,11 +1914,10 @@ impl AsyncResponseStream {
 }
 
 /// Python-visible inbound iterator for bidirectional engines. Wraps an
-/// mpsc receiver of pre-pythonized request frames; `__anext__` is a thin
+/// mpsc receiver of Python-owned request frames; `__anext__` is a thin
 /// `.recv()` that returns the next `PyObject` directly, with no per-frame
-/// GIL acquisition on the consumer side. The producer (the forwarder
-/// spawned by `PythonBidirectionalEngine::generate`) acquires the GIL
-/// once per frame and pushes the converted `PyObject` onto the channel.
+/// GIL acquisition or value conversion on the consumer side. The producer
+/// moves the object decoded by the ingress adapter onto the channel.
 ///
 /// Termination follows the same shape as `AsyncResponseStream`: when the
 /// channel returns `None`, `__anext__` raises `PyStopAsyncIteration` and
@@ -1700,7 +1946,7 @@ impl PyAsyncRequestStream {
     }
 
     /// Required by the `AsyncIterator` protocol. Returns an awaitable
-    /// resolving to the next pre-pythonized frame, or raises
+    /// resolving to the next Python-owned frame, or raises
     /// `StopAsyncIteration` when the inbound channel is closed.
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {

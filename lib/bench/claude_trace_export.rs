@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 use clap::Parser;
 use dynamo_bench::coding::claude::discovery::discover_trace_files;
-use dynamo_bench::coding::claude::export::{ExportConfig, write_streamed_mooncake_rows};
+use dynamo_bench::coding::claude::export::{ExportConfig, write_streamed_request_trace_rows};
 use dynamo_bench::coding::claude::parser::load_trace_records;
 use dynamo_bench::coding::common::{
     DEFAULT_BLOCK_SIZE, DEFAULT_OUTPUT_NAME, DEFAULT_TOKENIZER, expand_user_path, sidecar_path_for,
@@ -14,7 +14,7 @@ use dynamo_bench::coding::tokenizer::HfTokenizerFactory;
 #[derive(Parser, Debug)]
 #[command(name = "claude_trace_export")]
 #[command(
-    about = "Export local Claude session traces into privacy-preserving Mooncake JSONL plus a sidecar"
+    about = "Export local Claude sessions into Dynamo request-trace JSONL plus a text-free sidecar"
 )]
 struct Args {
     #[arg(long, action = clap::ArgAction::Append)]
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
 
     let output_path = expand_user_path(&args.output_file);
     let sidecar_path = sidecar_path_for(&output_path);
-    let stats = write_streamed_mooncake_rows(
+    let stats = write_streamed_request_trace_rows(
         &output_path,
         &sidecar_path,
         sessions,
@@ -80,8 +80,9 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "Wrote {} Mooncake rows to {}",
+        "Wrote {} request and {} tool rows to {}",
         stats.row_count,
+        stats.tool_row_count,
         output_path.display()
     );
     println!(
@@ -90,6 +91,7 @@ fn main() -> Result<()> {
         sidecar_path.display()
     );
     println!("Discovered {} trace files", trace_files.len());
+    println!("{}", stats.fidelity.render());
     Ok(())
 }
 

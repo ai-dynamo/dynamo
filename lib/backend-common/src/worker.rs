@@ -8,20 +8,22 @@
 //! over the engine type so a PyO3-wrapped engine can feed in through the
 //! same `Arc<dyn LLMEngine>` path.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::local_model::LocalModel;
-use dynamo_llm::local_model::LocalModelBuilder;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
-    StructuralTagScope,
+    StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
 };
+use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
 use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
@@ -57,6 +59,10 @@ const CLEANUP_RESERVE_S: f64 = 5.0;
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
 const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
+
+/// Runtime-system route for replacing this worker's caller-managed model taints.
+const MODEL_TAINT_UPDATE_NAME: &str = "model_taints";
+const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
 
 /// Runtime / transport configuration applied to the process before the
 /// distributed runtime is constructed.
@@ -122,6 +128,8 @@ pub struct WorkerConfig {
     pub component: String,
     /// Endpoint name exposed by this worker (e.g. `"generate"`).
     pub endpoint: String,
+    /// Optional KV-state event endpoint. When unset, KV state uses the serving endpoint.
+    pub kv_state_endpoint: Option<EndpointId>,
     /// HF repo name or local model path. Empty means name-only registration
     /// (no tokenizer / chat-template on the card).
     pub model_name: String,
@@ -147,7 +155,7 @@ pub struct WorkerConfig {
     /// Whether this worker should keep an in-process KV indexer.
     pub enable_local_indexer: bool,
     /// Kill switch for KV-aware-routing publishers. When `false`, skip
-    /// `engine.kv_event_sources()` / `metrics_sources()` entirely.
+    /// `engine.kv_event_sources()` and `SnapshotPublisher` setup.
     pub enable_kv_routing: bool,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
@@ -160,7 +168,9 @@ pub struct WorkerConfig {
     /// and `WorkerType::Prefill`, so the frontend's prefill router targets it
     /// via `worker_type`. `Decode` keeps `endpoint_types` but force-disables the
     /// local KV indexer because decode workers do not host the indexer
-    /// endpoint.
+    /// endpoint. `Encode` registers as `WorkerType::Encode` with topology needs
+    /// `[[Prefill, Decode], [Aggregated]]`; it also force-disables the local KV
+    /// indexer.
     pub disaggregation_mode: DisaggregationMode,
     /// Operator override. `Worker` resolves precedence: this field >
     /// `DYN_HEALTH_CHECK_PAYLOAD` env > `engine.health_check_payload()`.
@@ -176,14 +186,27 @@ pub struct WorkerConfig {
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
+    /// When `true`, this worker declares an upstream `Encode` dependency in
+    /// its topology `needs`. Meaningful only for `Prefill` and `Aggregated`
+    /// roles -- setting it on `Decode` or `Encode` is rejected at
+    /// `Worker::run` validation time with `BackendError::InvalidArgument`.
+    pub route_to_encoder: bool,
+    /// Optional frontend media decoding and fetch policy advertised on the
+    /// model deployment card.
+    pub media_decoder: Option<MediaDecoder>,
+    pub media_fetcher: Option<MediaFetcher>,
+    /// Deployment-level default thinking mode written to runtime metadata.
+    pub default_thinking_mode: Option<String>,
 }
 
 impl WorkerConfig {
     /// Effective `enable_local_indexer`, accounting for disaggregation
-    /// mode. Decode workers force this off because they don't host the
-    /// in-process KV indexer endpoint and must not advertise it.
+    /// mode. Decode and Encode workers force this off because they don't
+    /// host the in-process KV indexer endpoint and must not advertise it.
     pub(crate) fn effective_enable_local_indexer(&self) -> bool {
-        self.enable_local_indexer && !self.disaggregation_mode.is_decode()
+        self.enable_local_indexer
+            && !self.disaggregation_mode.is_decode()
+            && !self.disaggregation_mode.is_encode()
     }
 }
 
@@ -193,6 +216,7 @@ impl Default for WorkerConfig {
             namespace: "dynamo".to_string(),
             component: "backend".to_string(),
             endpoint: "generate".to_string(),
+            kv_state_endpoint: None,
             model_name: String::new(),
             served_model_name: None,
             model_input: ModelInput::Tokens,
@@ -210,6 +234,10 @@ impl Default for WorkerConfig {
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
+            route_to_encoder: false,
+            media_decoder: None,
+            media_fetcher: None,
+            default_thinking_mode: None,
         }
     }
 }
@@ -426,6 +454,7 @@ impl Worker {
         // doesn't pay the cost of installing signal handlers and spawning
         // a listener task just to get an InvalidArgument error.
         validate_model_input(self.config.model_input, &self.engine)?;
+        validate_route_to_encoder(&self.config)?;
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -577,7 +606,7 @@ impl Worker {
             crate::metrics::LifecycleGauges::new(&engine_metrics, model_load_time_seconds)?;
 
         self.setup_publishing(
-            &component,
+            &endpoint,
             &engine_config,
             &engine_metrics,
             model_load_time_seconds,
@@ -608,7 +637,7 @@ impl Worker {
     /// KV events.
     async fn setup_publishing(
         &mut self,
-        component: &dynamo_runtime::component::Component,
+        endpoint: &dynamo_runtime::component::Endpoint,
         engine_config: &EngineConfig,
         engine_metrics: &crate::metrics::EngineMetrics,
         model_load_time_seconds: f64,
@@ -646,8 +675,20 @@ impl Worker {
             kv_cache_block_size = ?kv_cache_block_size,
             "Starting KV-aware-routing publishers"
         );
+        let kv_state_endpoint = match &self.config.kv_state_endpoint {
+            Some(endpoint) => endpoint.clone(),
+            None => {
+                let endpoint = endpoint.id();
+                tracing::debug!(
+                    %endpoint,
+                    "No KV-state endpoint configured; using the serving endpoint"
+                );
+                endpoint
+            }
+        };
         let handles = setup_publishers(
-            component,
+            endpoint,
+            &kv_state_endpoint,
             engine_metrics,
             kv_sources,
             bindings.dp_ranks,
@@ -697,7 +738,7 @@ impl Worker {
     /// Register advertised engine updates on the runtime system server.
     ///
     /// Updates are a sibling surface to controls for operations that mutate
-    /// engine-managed assets (e.g. vLLM dynamic LoRA). They register under
+    /// engine-managed assets. They register under
     /// `/engine/update/<name>` and, unlike controls, never toggle discovery
     /// registration — so no quiesce/resume policy wrapper or serialization lock.
     async fn register_engine_updates(
@@ -712,6 +753,14 @@ impl Worker {
 
         let registry = endpoint.drt().engine_routes();
         let update_count = updates.len();
+        if updates.iter().any(|name| name == MODEL_TAINT_UPDATE_NAME) {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                format!(
+                    "engine update '{MODEL_TAINT_UPDATE_NAME}' conflicts with reserved Dynamo route /engine/{MODEL_TAINT_UPDATE_ROUTE}"
+                ),
+            ));
+        }
         for update_name in updates {
             let callback = engine_update_callback(update_name.clone(), self.engine.clone());
             // Namespace update routes under `/engine/update/<name>`.
@@ -719,6 +768,17 @@ impl Worker {
         }
         tracing::info!(update_count, "registered engine management updates");
         Ok(())
+    }
+
+    /// Register the Dynamo-owned model taint update on the runtime system server.
+    ///
+    /// Unlike engine-advertised updates, this mutates the worker's discovery
+    /// metadata and therefore applies uniformly to every engine implementation.
+    fn register_model_taint_update_route(&self, endpoint: &dynamo_runtime::component::Endpoint) {
+        endpoint.drt().engine_routes().register(
+            MODEL_TAINT_UPDATE_ROUTE,
+            model_taint_update_callback(endpoint.clone()),
+        );
     }
 
     /// Full graceful-shutdown orchestrator: discovery unregister →
@@ -790,9 +850,8 @@ impl Worker {
         // join — snapshot writes are event-driven (engine pushes
         // synchronously); KV-event publishers own their own threads.
         self.publishers = None;
-        // Mark stopped even on failure so a follow-up call no-ops; engines
-        // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
-        // attempt can hang or raise.
+        // Mark stopped even on failure so a follow-up call no-ops. Cleanup may
+        // tear down process groups that cannot safely be destroyed twice.
         self.state = LifecycleState::Stopped;
     }
 
@@ -815,7 +874,7 @@ impl Worker {
         // with discovery. on_endpoint_ready is a fatal handoff: doing it first
         // means a failure leaves nothing published, so there is no stale
         // discovery entry to reclaim. Engines that publish their own discovery
-        // records (e.g. vLLM dynamic LoRA) stash the endpoint here, and this
+        // records stash the endpoint here, and this
         // still runs before `register_engine_controls`, so `/engine/*` cannot
         // fire before the engine has the endpoint.
         self.engine.on_endpoint_ready(endpoint.clone()).await?;
@@ -840,6 +899,7 @@ impl Worker {
 
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
+        self.register_model_taint_update_route(&endpoint);
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -1241,11 +1301,8 @@ enum EngineControlPolicy {
 fn engine_control_policy(control: &str) -> EngineControlPolicy {
     // This policy only governs discovery (un)registration ordering. Draining
     // in-flight work before memory is freed is delegated to each backend's
-    // pause controller: vLLM calls pause_generation() before native sleep(),
-    // SGLang calls pause_generation() before release_memory_occupation(), and
-    // TRT-LLM rejects new requests and waits for inflight requests to finish. The
-    // UnregisterBefore step here is an additional guard (stop new routing), not
-    // the drain itself.
+    // pause controller. The UnregisterBefore step here is an additional guard
+    // that stops new routing, not the drain itself.
     match control {
         // Pause controls make the engine unsafe for new requests, so remove
         // the endpoint before they mutate engine state. Resume controls make
@@ -1289,6 +1346,48 @@ fn update_request_body_error(body: &serde_json::Value) -> Option<serde_json::Val
             "engine update request body must be a JSON object",
         ))
     }
+}
+
+#[derive(serde::Deserialize)]
+struct ModelTaintUpdateRequest {
+    taints: Vec<String>,
+}
+
+fn parse_model_taint_update_request(body: serde_json::Value) -> anyhow::Result<HashSet<String>> {
+    if !body.is_object() {
+        anyhow::bail!("request body must be a JSON object");
+    }
+
+    let request: ModelTaintUpdateRequest = serde_json::from_value(body)
+        .map_err(|_| anyhow::anyhow!("'taints' must be a JSON array of strings"))?;
+    if let Some(reserved) = request
+        .taints
+        .iter()
+        .find(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
+    {
+        anyhow::bail!("taint '{reserved}' uses reserved prefix '{TOPOLOGY_TAINT_PREFIX}'");
+    }
+
+    Ok(request.taints.into_iter().collect())
+}
+
+fn model_taint_update_callback(
+    endpoint: dynamo_runtime::component::Endpoint,
+) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let endpoint = endpoint.clone();
+        Box::pin(async move {
+            let taints = parse_model_taint_update_request(body)?;
+            update_model_taints(&endpoint, taints.clone()).await?;
+
+            let mut response_taints: Vec<_> = taints.into_iter().collect();
+            response_taints.sort();
+            Ok(serde_json::json!({
+                "status": "ok",
+                "taints": response_taints,
+            }))
+        })
+    })
 }
 
 fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRouteCallback {
@@ -1421,23 +1520,87 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 /// no OpenAI surface. They register the legacy `ModelType::Prefill` *marker*
 /// bit (not a surface) so an OLD frontend, which detects prefill via that bit,
 /// still routes disaggregated traffic during the cross-version rollout. A new
-/// frontend ignores it and dispatches off `worker_type`. Everything else falls
-/// back to the parsed `endpoint_types`.
+/// frontend ignores it and dispatches off `worker_type`.
+///
+/// Encode workers also expose no public OpenAI surface — they are reached
+/// through encoder routing, not the frontend's public serving surface. They
+/// register surface-less
+/// (`ModelType::empty()`) so the discovery watcher registers them for
+/// serving-readiness only and hides them from `/v1/models`; the role is
+/// carried by `WorkerType::Encode`.
+///
+/// Everything else falls back to the parsed `endpoint_types`.
 fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
         return Ok(ModelType::Prefill);
     }
+    if config.disaggregation_mode.is_encode() {
+        return Ok(ModelType::empty());
+    }
     parse_endpoint_types(&config.endpoint_types)
 }
 
-/// Derive the model-serving-readiness fields (`worker_type`, `needs`) for
-/// the worker's disaggregation role. Prefill workers need a Decode peer,
-/// Decode workers need a Prefill peer, and Aggregated workers stand alone.
+/// Derive the topology-readiness fields (`worker_type`, `needs`) for the
+/// worker's disaggregation role. Prefill workers need a Decode peer, Decode
+/// workers need a Prefill peer, Aggregated workers stand alone, and Encode
+/// workers need either a Prefill+Decode pair or a single Aggregated peer.
+///
+/// `route_to_encoder` extends the `needs` of `Prefill`/`Aggregated` to
+/// also require an `Encode` peer. Invalid combinations (`Decode` or
+/// `Encode` with `route_to_encoder=true`) are rejected upstream in
+/// `validate_route_to_encoder`; this function trusts that gate and only
+/// applies the flag when it is meaningful.
 fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
     match config.disaggregation_mode {
-        DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
+        DisaggregationMode::Prefill => {
+            let inner = if config.route_to_encoder {
+                vec![WorkerType::Decode, WorkerType::Encode]
+            } else {
+                vec![WorkerType::Decode]
+            };
+            (WorkerType::Prefill, vec![inner])
+        }
         DisaggregationMode::Decode => (WorkerType::Decode, vec![vec![WorkerType::Prefill]]),
-        DisaggregationMode::Aggregated => (WorkerType::Aggregated, Vec::new()),
+        DisaggregationMode::Aggregated => {
+            let needs = if config.route_to_encoder {
+                vec![vec![WorkerType::Encode]]
+            } else {
+                Vec::new()
+            };
+            (WorkerType::Aggregated, needs)
+        }
+        DisaggregationMode::Encode => (
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        ),
+    }
+}
+
+/// Validate that `route_to_encoder` is meaningful for the worker's
+/// disaggregation role. Setting the flag on `Decode` or `Encode` is a
+/// configuration bug: Decode reads KV cache from a Prefill peer and never
+/// sees the encoder output (the dependency is transitive through Prefill),
+/// while Encode is the producer of the encoder result and has nothing
+/// upstream to route to.
+fn validate_route_to_encoder(config: &WorkerConfig) -> Result<(), DynamoError> {
+    if !config.route_to_encoder {
+        return Ok(());
+    }
+    match config.disaggregation_mode {
+        DisaggregationMode::Aggregated | DisaggregationMode::Prefill => Ok(()),
+        DisaggregationMode::Decode | DisaggregationMode::Encode => Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!(
+                "--route-to-encoder is meaningful only for --disaggregation-mode \
+                 agg|prefill; got '{}'. Decode workers consume KV cache from a \
+                 Prefill peer (encoder dependency propagates transitively through \
+                 Prefill); Encode workers are the producer of the encoder result.",
+                config.disaggregation_mode
+            ),
+        )),
     }
 }
 
@@ -1524,7 +1687,7 @@ async fn build_local_model(
 
     // Decode workers don't host the WorkerKvQuery endpoint, so they must not
     // advertise the local indexer regardless of the operator-supplied flag.
-    // Mirrors the legacy non-unified vLLM path (worker_factory.py).
+    // Mirrors the vLLM worker-factory path.
     let enable_local_indexer = config.effective_enable_local_indexer();
 
     // None for raw engines → all-`None` fields → no KV/DP/bootstrap hints.
@@ -1551,6 +1714,14 @@ async fn build_local_model(
         _ => None,
     };
 
+    let mut runtime_data = engine_config.runtime_data.clone();
+    if let Some(default_thinking_mode) = config.default_thinking_mode.as_deref() {
+        runtime_data.insert(
+            "default_thinking_mode".to_string(),
+            serde_json::json!(default_thinking_mode),
+        );
+    }
+
     let rt_cfg = ModelRuntimeConfig {
         context_length: llm.context_length,
         total_kv_blocks: llm.total_kv_blocks,
@@ -1565,16 +1736,20 @@ async fn build_local_model(
         structural_tag_scope: config.structural_tag_scope,
         structural_tag_schema: config.structural_tag_schema,
         enable_local_indexer,
+        kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,
-        runtime_data: engine_config.runtime_data.clone(),
+        runtime_data,
         ..ModelRuntimeConfig::default()
     };
 
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
+        .model_aliases(engine_config.model_aliases.clone())
         .kv_cache_block_size(llm.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
+        .media_decoder(config.media_decoder.clone())
+        .media_fetcher(config.media_fetcher.clone())
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine
@@ -1613,6 +1788,56 @@ async fn build_local_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_taint_update_request_deserializes_and_deduplicates() {
+        let taints = parse_model_taint_update_request(serde_json::json!({
+            "taints": ["capacity/fast", "capacity/fast", "region/west"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            taints,
+            HashSet::from(["capacity/fast".to_string(), "region/west".to_string(),])
+        );
+    }
+
+    #[test]
+    fn model_taint_update_request_rejects_invalid_payloads() {
+        let cases = [
+            (serde_json::json!([]), "request body must be a JSON object"),
+            (
+                serde_json::json!({}),
+                "'taints' must be a JSON array of strings",
+            ),
+            (
+                serde_json::json!({"taints": "fast"}),
+                "'taints' must be a JSON array of strings",
+            ),
+            (
+                serde_json::json!({"taints": [1]}),
+                "'taints' must be a JSON array of strings",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let error = parse_model_taint_update_request(body).unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn model_taint_update_request_rejects_reserved_topology_taints() {
+        let error = parse_model_taint_update_request(serde_json::json!({
+            "taints": ["dynamo.topology/zone=west"]
+        }))
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "taint 'dynamo.topology/zone=west' uses reserved prefix 'dynamo.topology/'"
+        );
+    }
 
     fn error_type_of(result: Result<ModelType, DynamoError>) -> ErrorType {
         result.unwrap_err().error_type()
@@ -1703,6 +1928,10 @@ mod tests {
         );
         assert_eq!(
             engine_control_policy("update_weights_from_disk"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("clear_kv_blocks"),
             EngineControlPolicy::Direct
         );
         assert_eq!(
@@ -1827,8 +2056,10 @@ mod tests {
         let config = WorkerConfig {
             tool_call_parser: Some("kimi_k2".to_string()),
             reasoning_parser: Some("kimi_k25".to_string()),
+            default_thinking_mode: Some("disabled".to_string()),
             exclude_tools_when_tool_choice_none: false,
             enable_local_indexer: false,
+            kv_state_endpoint: Some(EndpointId::from("dynamo/kv-state/events")),
             ..WorkerConfig::default()
         };
         let engine_config = EngineConfig {
@@ -1859,8 +2090,19 @@ mod tests {
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
+        assert_eq!(
+            runtime_config
+                .runtime_data
+                .get("default_thinking_mode")
+                .and_then(|value| value.as_str()),
+            Some("disabled")
+        );
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
+        assert_eq!(
+            runtime_config.kv_state_endpoint,
+            Some(EndpointId::from("dynamo/kv-state/events"))
+        );
         assert_eq!(
             runtime_config
                 .runtime_data
@@ -1890,6 +2132,28 @@ mod tests {
         build_local_model(&config, &engine_config, true)
             .await
             .expect("name-only build must not fetch");
+    }
+
+    #[tokio::test]
+    async fn build_local_model_carries_media_configuration() {
+        let config = WorkerConfig {
+            media_decoder: Some(MediaDecoder::default()),
+            media_fetcher: Some(MediaFetcher::default()),
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "media-config-test".to_string(),
+            model_aliases: vec!["media-alias".to_string()],
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config, true)
+            .await
+            .expect("name-only model with media config must build");
+
+        assert!(local_model.card().media_decoder.is_some());
+        assert!(local_model.card().media_fetcher.is_some());
+        assert_eq!(local_model.card().aliases, ["media-alias"]);
     }
 
     #[test]
@@ -1936,6 +2200,196 @@ mod tests {
         assert!(mt.supports_prefill());
         assert!(!mt.supports_chat());
         assert!(!mt.supports_completions());
+    }
+
+    #[test]
+    fn resolve_model_type_encode_is_surface_less() {
+        // Encode workers expose no public OpenAI surface: they are reached
+        // through encoder routing, not the frontend. --disaggregation-mode encode
+        // forces ModelType::empty() (even when endpoint_types is left at the
+        // "chat,completions" default) so the discovery watcher registers them
+        // for serving-readiness only and hides them from /v1/models. The role
+        // is carried by WorkerType::Encode + topology needs at the discovery
+        // layer.
+        let config = WorkerConfig {
+            endpoint_types: "chat,completions".to_string(),
+            disaggregation_mode: DisaggregationMode::Encode,
+            ..WorkerConfig::default()
+        };
+        let mt = resolve_model_type(&config).unwrap();
+        assert_eq!(mt, ModelType::empty());
+        assert!(mt.is_empty());
+        assert!(!mt.supports_chat());
+        assert!(!mt.supports_completions());
+    }
+
+    // -------------------------------------------------------------------
+    // resolve_worker_type_and_needs: one test per row of the topology table
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn topology_aggregated_no_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Aggregated);
+        assert!(needs.is_empty());
+    }
+
+    #[test]
+    fn topology_aggregated_with_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Aggregated);
+        assert_eq!(needs, vec![vec![WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn topology_prefill_no_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Prefill);
+        assert_eq!(needs, vec![vec![WorkerType::Decode]]);
+    }
+
+    #[test]
+    fn topology_prefill_with_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Prefill);
+        assert_eq!(needs, vec![vec![WorkerType::Decode, WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn topology_decode_ignores_route_to_encoder_flag_in_needs() {
+        // route_to_encoder=true on Decode is rejected by
+        // validate_route_to_encoder; resolve_worker_type_and_needs only
+        // sees the flag false case in production. But sanity-check that
+        // even if it leaks through (e.g. internal callers bypassing the
+        // validator), Decode's needs don't grow an encoder leg.
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Decode);
+        assert_eq!(needs, vec![vec![WorkerType::Prefill]]);
+    }
+
+    #[test]
+    fn topology_encode_has_two_alternative_needs() {
+        // Encode: needs `[[Prefill, Decode], [Aggregated]]` (DNF).
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Encode,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Encode);
+        assert_eq!(
+            needs,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // validate_route_to_encoder: one test per row of the rejection table
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn validate_route_to_encoder_accepts_aggregated_and_prefill_when_true() {
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+            let cfg = WorkerConfig {
+                disaggregation_mode: mode,
+                route_to_encoder: true,
+                ..WorkerConfig::default()
+            };
+            validate_route_to_encoder(&cfg).unwrap_or_else(|e| {
+                panic!("route_to_encoder=true should be accepted for {mode}; got {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_route_to_encoder_rejects_decode_when_true() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let e = validate_route_to_encoder(&cfg).unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(e.to_string().contains("decode"), "msg = {e}");
+    }
+
+    #[test]
+    fn validate_route_to_encoder_rejects_encode_when_true() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Encode,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let e = validate_route_to_encoder(&cfg).unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(e.to_string().contains("encode"), "msg = {e}");
+    }
+
+    #[test]
+    fn validate_route_to_encoder_accepts_any_mode_when_false() {
+        for mode in [
+            DisaggregationMode::Aggregated,
+            DisaggregationMode::Prefill,
+            DisaggregationMode::Decode,
+            DisaggregationMode::Encode,
+        ] {
+            let cfg = WorkerConfig {
+                disaggregation_mode: mode,
+                route_to_encoder: false,
+                ..WorkerConfig::default()
+            };
+            validate_route_to_encoder(&cfg).unwrap_or_else(|e| {
+                panic!("route_to_encoder=false should be accepted for {mode}; got {e}")
+            });
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // effective_enable_local_indexer: Encode must force off
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn effective_enable_local_indexer_encode_force_disabled() {
+        let cfg = WorkerConfig {
+            enable_local_indexer: true,
+            disaggregation_mode: DisaggregationMode::Encode,
+            ..WorkerConfig::default()
+        };
+        assert!(!cfg.effective_enable_local_indexer());
     }
 
     #[tokio::test]
@@ -2163,8 +2617,7 @@ mod tests {
         worker.cleanup_once().await;
 
         // engine.cleanup() runs at most once even though cleanup_once was
-        // called three times — guards against the vLLM/TRT-LLM NCCL
-        // double-teardown hang.
+        // called three times — guards against native double-teardown hangs.
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
         assert_eq!(worker.state, LifecycleState::Stopped);
     }
@@ -2590,6 +3043,7 @@ mod handoff_integration_tests {
     use super::*;
     use crate::engine::PreprocessedRequest;
     use async_trait::async_trait;
+    use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use futures::stream::BoxStream;
     use std::sync::Mutex as StdMutex;
@@ -2752,6 +3206,7 @@ mod handoff_integration_tests {
             .register_engine_updates(&endpoint)
             .await
             .expect("update registration should succeed");
+        worker.register_model_taint_update_route(&endpoint);
 
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
@@ -2772,6 +3227,10 @@ mod handoff_integration_tests {
             routes.get("update/load_lora").is_some(),
             "advertised update must be registered under update/<name>"
         );
+        assert!(
+            routes.get(MODEL_TAINT_UPDATE_ROUTE).is_some(),
+            "model taint updates must be registered for every common worker"
+        );
         // Bare (unprefixed) keys must NOT be registered by the unified Worker.
         assert!(
             routes.get("start_profile").is_none(),
@@ -2781,6 +3240,91 @@ mod handoff_integration_tests {
             routes.get("load_lora").is_none(),
             "update must not be registered under its bare name"
         );
+    }
+
+    #[tokio::test]
+    async fn engine_update_cannot_replace_model_taint_route() {
+        let endpoint = test_endpoint().await;
+        let (engine, _) = HandoffMockEngine::new(
+            false,
+            Vec::new(),
+            vec!["load_lora".to_string(), "model_taints".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+
+        let error = worker.register_engine_updates(&endpoint).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with reserved Dynamo route")
+        );
+        let routes = endpoint.drt().engine_routes();
+        assert!(
+            routes.get("update/load_lora").is_none(),
+            "validation must happen before any engine update is registered"
+        );
+        assert!(routes.get(MODEL_TAINT_UPDATE_ROUTE).is_none());
+    }
+
+    #[tokio::test]
+    async fn model_taint_update_route_updates_registered_base_model() {
+        let endpoint = test_endpoint().await;
+        let endpoint_id = endpoint.id();
+        endpoint
+            .drt()
+            .discovery()
+            .register(DiscoverySpec::Model {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                card_json: serde_json::json!({
+                    "display_name": "mock",
+                    "runtime_config": {
+                        "taints": ["old", "dynamo.topology/zone=west"],
+                        "topology_domains": {"zone": "west"},
+                    },
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        let worker = Worker::new(Arc::new(DefaultsEngine), WorkerConfig::default());
+        worker.register_model_taint_update_route(&endpoint);
+        let callback = endpoint
+            .drt()
+            .engine_routes()
+            .get(MODEL_TAINT_UPDATE_ROUTE)
+            .unwrap();
+
+        let response = callback(serde_json::json!({
+            "taints": ["capacity/fast", "capacity/fast"]
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"status": "ok", "taints": ["capacity/fast"]})
+        );
+
+        let models = endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+            })
+            .await
+            .unwrap();
+        let [DiscoveryInstance::Model { card_json, .. }] = models.as_slice() else {
+            panic!("expected one registered model");
+        };
+        let taints = card_json["runtime_config"]["taints"].as_array().unwrap();
+        assert!(taints.contains(&serde_json::json!("capacity/fast")));
+        assert!(taints.contains(&serde_json::json!("dynamo.topology/zone=west")));
+        assert!(!taints.contains(&serde_json::json!("old")));
     }
 
     /// A failing `on_endpoint_ready` aborts startup: the `?` in
@@ -2813,6 +3357,10 @@ mod handoff_integration_tests {
         assert!(
             routes.get("update/load_lora").is_none(),
             "no updates should be registered after a fatal handoff"
+        );
+        assert!(
+            routes.get(MODEL_TAINT_UPDATE_ROUTE).is_none(),
+            "model taint updates must not be registered after a fatal handoff"
         );
     }
 }

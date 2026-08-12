@@ -3,7 +3,7 @@
 
 """Unit tests for _extract_pod_uid_from_cgroup.
 
-Covers all QoS × driver × runtime combinations documented in §6.5:
+Covers all QoS × driver × runtime combinations:
   - cgroup v1 multi-line, cgroup v2 single-line
   - systemd / cgroupfs drivers
   - Guaranteed / Burstable / BestEffort QoS

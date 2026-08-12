@@ -23,6 +23,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -42,20 +43,22 @@ func NewPodCheckpointRestoreMutator(client ctrlclient.Client, config *configv1al
 	return &PodCheckpointRestoreMutator{client: client, config: config}
 }
 
-func (h *PodCheckpointRestoreMutator) RegisterWithManager(mgr manager.Manager) error {
+func (h *PodCheckpointRestoreMutator) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
 	h.scheme = mgr.GetScheme()
-	mgr.GetWebhookServer().Register(podCheckpointRestoreWebhookPath, (&admission.Webhook{
-		Handler: h,
-	}).WithRecoverPanic(true))
+	webhook := internalwebhook.WithGate((&admission.Webhook{Handler: h}).WithRecoverPanic(true), gate)
+	mgr.GetWebhookServer().Register(podCheckpointRestoreWebhookPath, webhook)
 	return nil
 }
 
 func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx).WithName(podCheckpointRestoreWebhookName)
+
+	// Restore injection changes pod spec fields that are only meaningful before
+	// the pod is created; UPDATE requests are admitted unchanged.
 	if req.Operation != admissionv1.Create {
 		return admission.Allowed("not a pod create")
 	}
-	if h.config == nil || !h.config.Checkpoint.Enabled {
+	if !features.MustGateFrom(ctx).Enabled(features.Checkpoint) {
 		return admission.Allowed("checkpoint disabled")
 	}
 	if excluded := internalwebhook.GetExcludedNamespaces(); excluded != nil && excluded.Contains(req.Namespace) {

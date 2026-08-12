@@ -25,7 +25,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Process-wide guard: once-per-process WARN when telemetry calls hit a
 /// parent `engine.generate` span that has no OTel context (i.e., the
-/// `tracing-opentelemetry` layer isn't installed — non-JSONL deployments).
+/// `tracing-opentelemetry` layer isn't installed).
 /// One log line is enough to surface the configuration issue; rate-limiting
 /// to once avoids flooding logs in high-QPS workers.
 ///
@@ -40,7 +40,8 @@ fn warn_bridge_missing_once(method: &str) {
         tracing::warn!(
             method,
             "telemetry call is a no-op: OTel bridge layer not installed \
-             (needs DYN_LOGGING_JSONL=1 + OTEL_EXPORT_ENABLED=1). \
+             (enable OTEL_EXPORT_ENABLED=1, DYN_LOGGING_CONSOLE_FORMAT=jsonl, \
+             or the legacy DYN_LOGGING_JSONL=1 switch). \
              Engine telemetry attributes / events / child spans are NOT \
              being recorded. Further no-ops in this process are silent."
         );
@@ -239,8 +240,7 @@ impl Context {
         if tc.trace_id.is_empty() || tc.span_id.is_empty() {
             return None;
         }
-        // Assumes sampled — inbound `DistributedTraceContext` doesn't carry flags.
-        Some(format!("00-{}-{}-01", tc.trace_id, tc.span_id))
+        Some(tc.create_traceparent())
     }
 }
 
@@ -259,6 +259,23 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             span: None,
+        }
+    }
+
+    /// Create a context with a fresh cancellation controller and request id.
+    ///
+    /// The detached context keeps the trace context, captured span, and a
+    /// snapshot of metadata so disaggregated handoffs keep observability
+    /// parentage without sharing cancellation ownership. The first-token
+    /// signal is intentionally dropped.
+    #[pyo3(signature = (id))]
+    fn detached(&self, id: String) -> Self {
+        Self {
+            inner: Arc::new(Controller::new(id)),
+            trace_context: self.trace_context.clone(),
+            first_token: None,
+            metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
+            span: self.span.clone(),
         }
     }
 
@@ -409,8 +426,8 @@ impl Context {
     /// bridge is installed, so downstream engine internals (vLLM scheduler,
     /// TRT-LLM forward, SGLang KV transfer) nest UNDER `engine.generate`.
     /// Falls back to the inbound `DistributedTraceContext` for legacy
-    /// callers, Python-instantiated test contexts, and non-JSONL deployments
-    /// without the bridge.
+    /// callers, Python-instantiated test contexts, and deployments without
+    /// the bridge.
     ///
     /// Always emits `traceparent`. Also emits `tracestate`, `x-request-id`,
     /// and `request-id` when the upstream propagated them.

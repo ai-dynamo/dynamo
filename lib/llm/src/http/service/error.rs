@@ -1,11 +1,31 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::LazyLock;
+
 use axum::http::StatusCode;
+use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 use thiserror::Error;
 
+fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
+    let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
+    value
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .and_then(|n| StatusCode::from_u16(n).ok())
+        .filter(|status| !status.is_informational())
+        .unwrap_or(default)
+}
+
+/// Overload / admission-control rejection status. Reads
+/// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529) on first use; cached since the
+/// environment is fixed at runtime and this is on the rejection path.
 pub(crate) fn overload_status_code() -> StatusCode {
-    StatusCode::from_u16(529).expect("529 is a valid HTTP status code")
+    static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
+        let value = std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
+        parse_overload_status_code(value.as_deref())
+    });
+    *CODE
 }
 
 /// Implementation of the Completion Engines served by the HTTP service should
@@ -16,6 +36,15 @@ pub(crate) fn overload_status_code() -> StatusCode {
 pub struct HttpError {
     pub code: u16,
     pub message: String,
+}
+
+/// Construct a typed invalid-argument error for validation performed at an
+/// HTTP protocol adapter boundary.
+pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(DynamoErrorType::InvalidArgument)
+        .message(message)
+        .build()
 }
 
 /// Canonical sanitized error responses returned at the HTTP boundary.
@@ -141,6 +170,34 @@ impl std::fmt::Display for SanitizedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_configured_overload_status_code() {
+        for value in [
+            None,
+            Some(""),
+            Some("not-a-code"),
+            Some("99"),
+            Some("100"),
+            Some("199"),
+            Some("1000"),
+        ] {
+            assert_eq!(
+                parse_overload_status_code(value).as_u16(),
+                529,
+                "expected {value:?} to fall back to 529"
+            );
+        }
+
+        for value in [200_u16, 503, 529, 600, 999] {
+            let configured = value.to_string();
+            assert_eq!(
+                parse_overload_status_code(Some(&configured)).as_u16(),
+                value,
+                "expected {value} to be preserved"
+            );
+        }
+    }
 
     #[test]
     fn local_statuses_distinguish_overload_from_unavailable() {

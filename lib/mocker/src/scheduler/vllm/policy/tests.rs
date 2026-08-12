@@ -6,22 +6,203 @@
 //! These drive the vLLM [`VllmCore`] directly (TRT-LLM routes to it) and read
 //! its scheduler state through the test-only [`VllmCore::state`] accessor.
 
+use dynamo_kv_router::protocols::KvCacheEventData;
+use rstest::rstest;
 use uuid::Uuid;
 
 use crate::common::protocols::{
-    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, SchedulingPolicy,
+    DirectRequest, EngineType, G1Backend, KvEventPublishers, MockEngineArgs, PrefillCost,
+    SchedulingPolicy,
 };
 use crate::common::sequence::ActiveSequence;
-use crate::kv_manager::KvManager;
+use crate::kv_manager::G1Acquire;
+use crate::kv_manager::G1Manager;
+use crate::scheduler::vllm::request::RequestKvState;
 use crate::scheduler::vllm::{RequestStatus, VllmCore};
 
-use super::{AdmissionDecision, decide_waiting_admission};
+use super::{
+    AdmissionDecision, WaitingAdmissionConfig, apply_mtp_prefix_recompute, apply_prefix_recompute,
+    decide_waiting_admission, should_reject_for_model_len,
+};
 
 mod vllm {
     use super::*;
 
-    fn kv_manager(capacity: usize) -> KvManager {
-        KvManager::new_with_event_sink(capacity, 4, KvEventPublishers::default(), 0)
+    fn kv_manager(capacity: usize) -> G1Manager {
+        G1Manager::new_with_event_sink(capacity, 4, KvEventPublishers::default(), 0)
+    }
+
+    #[test]
+    fn mtp_recomputes_exactly_one_cached_prefix_block() {
+        let adjusted = apply_mtp_prefix_recompute(
+            SchedulingPolicy::Vllm,
+            4,
+            true,
+            PrefillCost {
+                new_blocks: 1,
+                new_tokens: 4,
+                cached_tokens: 8,
+                active_cached_tokens: 8,
+            },
+        );
+
+        assert_eq!(adjusted.cached_tokens, 4);
+        assert_eq!(adjusted.active_cached_tokens, 4);
+        assert_eq!(adjusted.new_tokens, 8);
+        assert_eq!(adjusted.new_blocks, 2);
+    }
+
+    #[test]
+    fn mtp_recompute_does_not_change_trtllm_accounting() {
+        let original = PrefillCost {
+            new_blocks: 1,
+            new_tokens: 4,
+            cached_tokens: 8,
+            active_cached_tokens: 8,
+        };
+        let adjusted = apply_mtp_prefix_recompute(
+            SchedulingPolicy::TrtllmGuaranteedNoEvict,
+            4,
+            true,
+            original.clone(),
+        );
+
+        assert_eq!(adjusted.new_blocks, original.new_blocks);
+        assert_eq!(adjusted.new_tokens, original.new_tokens);
+        assert_eq!(adjusted.cached_tokens, original.cached_tokens);
+        assert_eq!(adjusted.active_cached_tokens, original.active_cached_tokens);
+    }
+
+    #[test]
+    fn exact_block_aligned_full_prompt_hit_recomputes_last_block() {
+        let adjusted = apply_prefix_recompute(
+            SchedulingPolicy::Vllm,
+            8,
+            4,
+            false,
+            true,
+            PrefillCost {
+                new_blocks: 0,
+                new_tokens: 0,
+                cached_tokens: 8,
+                active_cached_tokens: 8,
+            },
+        );
+
+        assert_eq!(adjusted.cached_tokens, 4);
+        assert_eq!(adjusted.active_cached_tokens, 4);
+        assert_eq!(adjusted.new_tokens, 4);
+        assert_eq!(adjusted.new_blocks, 1);
+    }
+
+    #[test]
+    fn ordinary_vllm_prefix_recompute_does_not_change_trtllm_accounting() {
+        let original = PrefillCost {
+            new_blocks: 0,
+            new_tokens: 0,
+            cached_tokens: 8,
+            active_cached_tokens: 8,
+        };
+        let adjusted = apply_prefix_recompute(
+            SchedulingPolicy::TrtllmGuaranteedNoEvict,
+            8,
+            4,
+            false,
+            true,
+            original.clone(),
+        );
+
+        assert_eq!(adjusted.new_blocks, original.new_blocks);
+        assert_eq!(adjusted.new_tokens, original.new_tokens);
+        assert_eq!(adjusted.cached_tokens, original.cached_tokens);
+        assert_eq!(adjusted.active_cached_tokens, original.active_cached_tokens);
+    }
+
+    #[test]
+    fn preempted_non_aligned_prompt_uses_complete_known_context() {
+        let assert_cost = |raw: PrefillCost| {
+            assert_eq!(raw.cached_tokens, 8);
+            assert_eq!(raw.new_tokens, 1);
+            assert_eq!(raw.active_cached_tokens, 0);
+
+            let adjusted = apply_prefix_recompute(SchedulingPolicy::Vllm, 9, 4, false, true, raw);
+            assert_eq!(adjusted.cached_tokens, 8);
+            assert_eq!(adjusted.new_tokens, 1);
+        };
+
+        let owner = Uuid::from_u128(700);
+        let mut manager =
+            G1Manager::new_with_backend(8, 4, KvEventPublishers::default(), 0, G1Backend::Native);
+        let mut request =
+            RequestKvState::native(owner, (0..6).collect(), 8, 8, 4, true, false, false, None);
+        let RequestKvState::Native { sequence: _, lease } = &mut request else {
+            unreachable!()
+        };
+        assert!(matches!(
+            manager.allocate_native(owner, lease, 6, 0),
+            G1Acquire::Ready(_)
+        ));
+        for _ in 0..2 {
+            request.generate_token();
+        }
+        let RequestKvState::Native { sequence, lease } = &mut request else {
+            unreachable!()
+        };
+        manager.finalize_native_computed_prefix(owner, 0, 8, sequence, lease);
+        request.generate_token();
+        let RequestKvState::Native { sequence, lease } = &mut request else {
+            unreachable!()
+        };
+        assert!(matches!(
+            manager.allocate_native(owner, lease, 9, 0),
+            G1Acquire::Ready(_)
+        ));
+        manager.finalize_native_computed_prefix(owner, 8, 9, sequence, lease);
+        manager.preempt_native(owner, lease);
+
+        let raw = manager.get_native_prefill_cost(sequence, lease);
+        assert_cost(raw);
+
+        let owner = Uuid::from_u128(701);
+        let mut manager =
+            G1Manager::new_with_backend(8, 4, KvEventPublishers::default(), 0, G1Backend::Kvbm);
+        let mut request = RequestKvState::kvbm(ActiveSequence::new(
+            (0..6).collect(),
+            8,
+            Some(4),
+            true,
+            false,
+        ));
+        let RequestKvState::Kvbm(sequence) = &mut request else {
+            unreachable!()
+        };
+        let creation = sequence.take_creation_signal().unwrap();
+        assert!(matches!(
+            manager.process_for_request(owner, &creation, 0),
+            G1Acquire::Ready(_)
+        ));
+        for _ in 0..3 {
+            let (_, signals) = request.generate_token();
+            for signal in signals {
+                assert!(matches!(
+                    manager.process_for_request(owner, &signal, 0),
+                    G1Acquire::Ready(_)
+                ));
+            }
+        }
+        let RequestKvState::Kvbm(sequence) = &mut request else {
+            unreachable!()
+        };
+        let sequence_len = sequence.len();
+        sequence.commit_allocation(sequence_len);
+        manager.finalize_computed_prefix(owner, 0, sequence_len, sequence);
+        for signal in sequence.reset_with_signal() {
+            assert!(matches!(
+                manager.process_for_request(owner, &signal, 0),
+                G1Acquire::Ready(_)
+            ));
+        }
+        assert_cost(manager.get_prefill_cost(sequence));
     }
 
     #[test]
@@ -30,12 +211,15 @@ mod vllm {
         let sequence = ActiveSequence::new((0..8).collect(), 32, Some(4), false, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 4,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            4,
-            4,
             &manager,
         );
 
@@ -47,16 +231,19 @@ mod vllm {
         let mut manager = kv_manager(4);
         let mut holder = ActiveSequence::new((100..112).collect(), 1, Some(4), false, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 3);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(3)));
         let sequence = ActiveSequence::new((0..8).collect(), 32, Some(4), false, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 4,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            4,
-            4,
             &manager,
         );
 
@@ -69,12 +256,15 @@ mod vllm {
         let sequence = ActiveSequence::new((0..20).collect(), 1, Some(4), false, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 4,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            4,
-            4,
             &manager,
         );
 
@@ -82,20 +272,640 @@ mod vllm {
     }
 
     #[test]
+    fn rejects_prompt_at_max_model_len() {
+        let sequence = ActiveSequence::new((0..8).collect(), 1, Some(4), false, false);
+
+        assert!(should_reject_for_model_len(
+            SchedulingPolicy::Vllm,
+            &sequence,
+            Some(8)
+        ));
+    }
+
+    #[test]
+    fn rejects_prompt_above_max_model_len() {
+        let sequence = ActiveSequence::new((0..9).collect(), 1, Some(4), false, false);
+
+        assert!(should_reject_for_model_len(
+            SchedulingPolicy::Vllm,
+            &sequence,
+            Some(8)
+        ));
+    }
+
+    #[test]
+    fn aligned_repeat_physical_occupancy_matches_vllm_and_exposes_kvbm_gap() {
+        let run = |backend| {
+            let args = MockEngineArgs::builder()
+                .engine_type(EngineType::Vllm)
+                .g1_backend(backend)
+                .block_size(4)
+                .num_gpu_blocks(8)
+                .max_num_batched_tokens(Some(64))
+                .max_num_seqs(Some(4))
+                .enable_chunked_prefill(true)
+                .enable_prefix_caching(true)
+                .speedup_ratio(0.0)
+                .build()
+                .unwrap();
+            let mut core = VllmCore::new(args);
+            let seed = Uuid::from_u128(101);
+            core.receive(DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 1,
+                uuid: Some(seed),
+                ..Default::default()
+            });
+
+            let mut collector = crate::replay::TraceCollector::default();
+            let first = core.execute_pass(&mut collector, 0.0);
+            assert_eq!(first.admissions[0].reused_input_tokens, 0);
+
+            let mut now_ms = first.end_ms.max(1.0);
+            for _ in 0..16 {
+                if !core.state().requests.contains_key(&seed) {
+                    break;
+                }
+                let pass = core.execute_pass(&mut collector, now_ms);
+                now_ms = pass.end_ms.max(now_ms + 1.0);
+            }
+            assert!(!core.state().requests.contains_key(&seed));
+
+            let repeated = Uuid::from_u128(102);
+            core.receive(DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 1,
+                uuid: Some(repeated),
+                ..Default::default()
+            });
+            let pass = core.execute_pass(&mut collector, now_ms);
+            let reused_tokens = pass
+                .admissions
+                .iter()
+                .find(|admission| admission.uuid == repeated)
+                .expect("repeated request must be admitted")
+                .reused_input_tokens;
+            (
+                reused_tokens,
+                core.kv_manager.num_active_blocks(),
+                core.kv_manager.num_inactive_blocks(),
+            )
+        };
+
+        // The saved vLLM 0.25.1/B200 oracle has the same shape at block size
+        // 16: cold [H0,H1,H2], then repeat reuses H0/H1 and creates another H2.
+        let native = run(G1Backend::Native);
+        assert_eq!(native, (4, 0, 3));
+
+        // KVBM has the same request-visible cache hit, but canonicalizes the
+        // recomputed tail and therefore undercounts physical occupancy by one.
+        let kvbm = run(G1Backend::Kvbm);
+        assert_eq!(kvbm, (4, 0, 2));
+    }
+
+    #[test]
+    fn native_g1_exposes_chunked_prefill_block_only_after_it_is_computed() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(G1Backend::Native)
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(2))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new_with_kv_capture(args, 1);
+        let uuid = Uuid::from_u128(103);
+        core.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 1,
+            uuid: Some(uuid),
+            ..Default::default()
+        });
+
+        let probe = RequestKvState::native(
+            Uuid::from_u128(104),
+            (0..8).collect(),
+            1,
+            1,
+            4,
+            true,
+            false,
+            false,
+            None,
+        );
+        let mut collector = crate::replay::TraceCollector::default();
+
+        let first = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(core.state().requests[&uuid].num_computed_tokens, 2);
+        let (probe_sequence, probe_lease) = probe.native_parts().unwrap();
+        assert_eq!(
+            core.kv_manager
+                .get_native_prefill_cost(probe_sequence, probe_lease)
+                .cached_tokens,
+            0
+        );
+        assert!(
+            first
+                .kv_events
+                .iter()
+                .all(|event| !matches!(&event.event.data, KvCacheEventData::Stored(_))),
+            "an allocated but only half-computed block must not be router-visible"
+        );
+
+        let second = core.execute_pass(&mut collector, first.end_ms);
+        assert_eq!(core.state().requests[&uuid].num_computed_tokens, 4);
+        assert_eq!(
+            core.kv_manager
+                .get_native_prefill_cost(probe_sequence, probe_lease)
+                .cached_tokens,
+            4
+        );
+        let stored = second
+            .kv_events
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(data) => Some(data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 1, "the completed block must emit one Stored");
+        assert_eq!(
+            stored[0].blocks.len(),
+            1,
+            "the Stored event must contain exactly the completed first block"
+        );
+    }
+
+    #[test]
+    fn native_g1_finalizes_in_scheduler_order_for_same_pass_reuse() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(G1Backend::Native)
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new_with_kv_capture(args, 1);
+        let first_uuid = Uuid::from_u128(104);
+        let second_uuid = Uuid::from_u128(105);
+        for uuid in [first_uuid, second_uuid] {
+            core.receive(DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 2,
+                uuid: Some(uuid),
+                ..Default::default()
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(pass.admissions.len(), 2);
+        assert_eq!(pass.admissions[0].uuid, first_uuid);
+        assert_eq!(pass.admissions[0].reused_input_tokens, 0);
+        assert_eq!(pass.admissions[1].uuid, second_uuid);
+        assert_eq!(
+            pass.admissions[1].reused_input_tokens, 4,
+            "vLLM exposes the first request's completed block before scheduling the next request"
+        );
+
+        assert_eq!(core.request_block_count(first_uuid), 2);
+        assert_eq!(core.request_block_count(second_uuid), 2);
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            3,
+            "the requests share one prefix copy but own distinct equal-hash tails"
+        );
+
+        let stored = pass
+            .kv_events
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(data) => Some(data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stored.len(),
+            1,
+            "Minimal Physical publishes router hash-presence, not raw per-copy events"
+        );
+        assert_eq!(stored[0].blocks.len(), 2);
+    }
+
+    #[test]
+    fn same_pass_admission_recomputes_prefix_after_earlier_eviction() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(G1Backend::Native)
+            .block_size(4)
+            .num_gpu_blocks(3)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let seed = Uuid::from_u128(105_001);
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 0,
+            uuid: Some(seed),
+            ..Default::default()
+        });
+        let mut collector = crate::replay::TraceCollector::default();
+        let seed_pass = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(seed_pass.completed_requests, 1);
+        assert!(!core.state().requests.contains_key(&seed));
+
+        let evictor = Uuid::from_u128(105_002);
+        let former_hit = Uuid::from_u128(105_003);
+        core.receive(DirectRequest {
+            tokens: (0..12).collect(),
+            max_output_tokens: 0,
+            uuid: Some(evictor),
+            ..Default::default()
+        });
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 0,
+            uuid: Some(former_hit),
+            ..Default::default()
+        });
+
+        let pass = core.execute_pass(&mut collector, seed_pass.end_ms);
+        assert_eq!(pass.admissions.len(), 1);
+        assert_eq!(pass.admissions[0].uuid, evictor);
+        assert_eq!(
+            core.state().requests[&former_hit].status,
+            RequestStatus::Waiting
+        );
+        let (sequence, lease) = core.state().requests[&former_hit]
+            .sequence
+            .native_parts()
+            .unwrap();
+        assert_eq!(
+            core.kv_manager
+                .get_native_prefill_cost(sequence, lease)
+                .cached_tokens,
+            0,
+            "the later waiting decision must observe the earlier allocation's eviction"
+        );
+    }
+
+    #[test]
+    fn native_g1_exposes_generated_block_at_computed_boundary_in_same_pass() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(G1Backend::Native)
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new_with_kv_capture(args, 1);
+        let running = Uuid::from_u128(106);
+        core.receive(DirectRequest {
+            tokens: vec![0, 1, 2],
+            max_output_tokens: 2,
+            output_token_ids: Some(vec![3, 9]),
+            uuid: Some(running),
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let first = core.execute_pass(&mut collector, 0.0);
+        let running_request = &core.state().requests[&running];
+        assert_eq!(running_request.num_computed_tokens, 3);
+        assert_eq!(running_request.sequence.len(), 4);
+
+        let waiting = Uuid::from_u128(107);
+        core.receive(DirectRequest {
+            tokens: vec![0, 1, 2, 3, 4],
+            max_output_tokens: 1,
+            uuid: Some(waiting),
+            ..Default::default()
+        });
+        let second = core.execute_pass(&mut collector, first.end_ms);
+        let admission = second
+            .admissions
+            .iter()
+            .find(|admission| admission.uuid == waiting)
+            .expect("waiting request must be admitted in the boundary pass");
+        assert_eq!(
+            admission.reused_input_tokens, 4,
+            "vLLM caches a newly computed generated block before later admissions"
+        );
+
+        let stored = second
+            .kv_events
+            .iter()
+            .filter(|event| matches!(&event.event.data, KvCacheEventData::Stored(_)))
+            .count();
+        assert_eq!(stored, 1, "the completed generated block emits one Stored");
+    }
+
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
+    fn sampled_boundary_allocation_is_delayed_until_the_next_pass(#[case] g1_backend: G1Backend) {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(g1_backend)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let first = Uuid::from_u128(108);
+        let second = Uuid::from_u128(109);
+        for (uuid, base) in [(first, 0), (second, 100)] {
+            core.receive(DirectRequest {
+                tokens: (base..base + 4).collect(),
+                max_output_tokens: 3,
+                output_token_ids: Some(vec![base + 4, base + 5, base + 6]),
+                uuid: Some(uuid),
+                ..Default::default()
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        for (uuid, expected_token) in [(first, 4), (second, 104)] {
+            assert!(pass.output_signals.iter().any(|signal| {
+                signal.uuid == uuid
+                    && signal.token_id == Some(expected_token)
+                    && !signal.completed
+                    && !signal.rejected
+            }));
+            let request = &core.state().requests[&uuid];
+            assert_eq!(request.num_computed_tokens, 4);
+            assert_eq!(request.sequence.num_allocated_tokens(), 4);
+            assert_eq!(request.sequence.len(), 5);
+            assert_eq!(core.request_block_count(uuid), 1);
+        }
+        assert_eq!(core.state().preemptions_total, 0);
+        assert_eq!(core.kv_manager.num_active_blocks(), 2);
+
+        let next_pass = core.execute_pass(&mut collector, pass.end_ms);
+        for (uuid, expected_token) in [(first, 5), (second, 105)] {
+            assert!(next_pass.output_signals.iter().any(|signal| {
+                signal.uuid == uuid
+                    && signal.token_id == Some(expected_token)
+                    && !signal.completed
+                    && !signal.rejected
+            }));
+            let request = &core.state().requests[&uuid];
+            assert_eq!(request.num_computed_tokens, 5);
+            assert_eq!(request.sequence.num_allocated_tokens(), 5);
+            assert_eq!(request.sequence.len(), 6);
+            assert_eq!(core.request_block_count(uuid), 2);
+        }
+        assert_eq!(core.state().preemptions_total, 0);
+        assert_eq!(core.kv_manager.num_active_blocks(), 4);
+    }
+
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
+    fn terminal_sample_does_not_allocate_a_dangling_slot(#[case] g1_backend: G1Backend) {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(g1_backend)
+            .block_size(4)
+            .num_gpu_blocks(2)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let mut collector = crate::replay::TraceCollector::default();
+
+        let seed = Uuid::from_u128(110);
+        core.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![8]),
+            uuid: Some(seed),
+            ..Default::default()
+        });
+        let seed_pass = core.execute_pass(&mut collector, 0.0);
+        assert!(
+            seed_pass.output_signals.iter().any(|signal| {
+                signal.uuid == seed
+                    && signal.token_id == Some(8)
+                    && signal.completed
+                    && !signal.rejected
+            }),
+            "an exact-capacity request must not livelock trying to allocate KV for its terminal sample"
+        );
+        assert!(!core.state().requests.contains_key(&seed));
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        assert_eq!(core.kv_manager.num_inactive_blocks(), 2);
+
+        // Allocating one unrelated prompt block should evict only the older
+        // seed tail. If the terminal sample above acquired a dangling partial
+        // slot, it would also evict the reusable seed head.
+        let unrelated = Uuid::from_u128(111);
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![104]),
+            uuid: Some(unrelated),
+            ..Default::default()
+        });
+        let unrelated_pass = core.execute_pass(&mut collector, seed_pass.end_ms + 1.0);
+        assert!(
+            unrelated_pass
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == unrelated && signal.completed)
+        );
+
+        let probe = Uuid::from_u128(112);
+        core.receive(DirectRequest {
+            tokens: (0..5).collect(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![5]),
+            uuid: Some(probe),
+            ..Default::default()
+        });
+        let probe_pass = core.execute_pass(&mut collector, unrelated_pass.end_ms + 1.0);
+        let admission = probe_pass
+            .admissions
+            .iter()
+            .find(|admission| admission.uuid == probe)
+            .expect("probe request must be admitted");
+        assert_eq!(
+            admission.reused_input_tokens, 4,
+            "the seed's first block must survive the unrelated one-block allocation"
+        );
+    }
+
+    #[test]
+    fn trtllm_does_not_apply_vllm_max_model_len() {
+        let sequence = ActiveSequence::new((0..9).collect(), 1, Some(4), false, false);
+
+        assert!(!should_reject_for_model_len(
+            SchedulingPolicy::TrtllmGuaranteedNoEvict,
+            &sequence,
+            Some(8)
+        ));
+    }
+
+    #[test]
+    fn core_rejects_prompt_above_max_model_len() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(1);
+        core.receive(DirectRequest {
+            tokens: (0..9).collect(),
+            max_output_tokens: 1,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert!(
+            pass.output_signals
+                .iter()
+                .any(|signal| signal.uuid == uuid && signal.completed && signal.rejected)
+        );
+        assert!(!core.state().requests.contains_key(&uuid));
+    }
+
+    #[test]
+    fn core_completes_at_max_model_len_without_rejecting() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(2);
+        core.receive(DirectRequest {
+            tokens: (0..7).collect(),
+            max_output_tokens: 4,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(pass.output_signals.len(), 1);
+        let terminal = &pass.output_signals[0];
+        assert_eq!(terminal.uuid, uuid);
+        assert!(terminal.token_id.is_some());
+        assert!(terminal.completed);
+        assert!(!terminal.rejected);
+        assert!(!core.state().requests.contains_key(&uuid));
+    }
+
+    #[test]
+    fn speculative_decode_does_not_burst_past_max_model_len() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("1,1".to_string()))
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(3);
+        core.receive(DirectRequest {
+            tokens: (0..5).collect(),
+            max_output_tokens: 8,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(pass.output_signals.len(), 3);
+        assert!(
+            pass.output_signals
+                .iter()
+                .take(2)
+                .all(|signal| !signal.completed)
+        );
+        let terminal = pass.output_signals.last().unwrap();
+        assert!(terminal.completed);
+        assert!(!terminal.rejected);
+        assert!(!core.state().requests.contains_key(&uuid));
+    }
+
+    #[test]
     fn discounts_active_cached_prefix() {
         let mut manager = kv_manager(3);
         let mut holder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 2);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 3,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            3,
-            4,
             &manager,
         );
 
@@ -103,26 +913,53 @@ mod vllm {
     }
 
     #[test]
+    fn mtp_recompute_requires_one_additional_available_block() {
+        let mut manager = kv_manager(3);
+        let mut holder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
+        let signal = holder.take_creation_signal().unwrap();
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
+        let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
+
+        let decision = decide_waiting_admission(
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 3,
+                block_size: 4,
+                mtp_enabled: true,
+            },
+            &sequence,
+            true,
+            std::iter::empty(),
+            &manager,
+        );
+
+        assert!(matches!(decision, AdmissionDecision::Wait));
+    }
+
+    #[test]
     fn does_not_discount_inactive_cached_prefix() {
         let mut manager = kv_manager(3);
         let mut seeder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
         let signal = seeder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 2);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
         for signal in seeder.free_signal() {
             manager.process(&signal);
         }
         let mut holder = ActiveSequence::new((100..104).collect(), 1, Some(4), true, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 1);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(1)));
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 3,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            3,
-            4,
             &manager,
         );
 
@@ -155,6 +992,7 @@ mod trtllm {
         core.receive(DirectRequest {
             tokens: tokens.collect(),
             max_output_tokens: max_output,
+            output_token_ids: None,
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -271,6 +1109,23 @@ mod trtllm {
         );
         assert_eq!(completed, 2, "both requests should finish");
         assert_eq!(max_preemptions, 0, "GUARANTEED_NO_EVICT must never preempt");
+    }
+
+    #[test]
+    fn native_g1_runs_under_trtllm_no_evict_policy() {
+        let mut args = capacity_args();
+        args.g1_backend = Some(G1Backend::Native);
+        let mut core = VllmCore::new(args);
+        receive(&mut core, Uuid::from_u128(201), 0..4, 4);
+        receive(&mut core, Uuid::from_u128(202), 100..104, 4);
+
+        assert_eq!(drain(&mut core), 2);
+        assert!(core.state().requests.is_empty());
+        assert_eq!(
+            core.state().preemptions_total,
+            0,
+            "TRT-LLM GUARANTEED_NO_EVICT must remain in force with native G1"
+        );
     }
 
     /// Hardware-parity test: reproduces a real `trtllm-serve` no-evict saturation

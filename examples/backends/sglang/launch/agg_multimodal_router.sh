@@ -62,6 +62,14 @@ EOF
     esac
 done
 
+# Hybrid GDN families (Qwen3.5/Qwen3.6) need extra_buffer scheduling for
+# MambaRadixCache to engage; default no_buffer silently disables prefix
+# cache. Evaluated after CLI parsing so --model overrides take effect.
+MAMBA_ARGS=()
+case "${MODEL}" in
+    *Qwen3.5*|*Qwen3.6*) MAMBA_ARGS=(--mamba-scheduler-strategy extra_buffer) ;;
+esac
+
 print_launch_banner --multimodal --no-curl \
     "MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
     "NUM_WORKERS:  ${NUM_WORKERS}" \
@@ -126,6 +134,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         --enable-metrics \
         --disable-piecewise-cuda-graph \
+        "${MAMBA_ARGS[@]}" \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
 done
 

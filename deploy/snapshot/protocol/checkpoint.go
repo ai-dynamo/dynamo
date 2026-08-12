@@ -15,6 +15,7 @@ import (
 
 type CheckpointJobOptions struct {
 	Namespace             string
+	TargetContainer       string
 	CheckpointID          string
 	ArtifactVersion       string
 	SeccompProfile        string
@@ -22,21 +23,6 @@ type CheckpointJobOptions struct {
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
 	WrapLaunchJob         bool
-}
-
-type CheckpointObservationPhase string
-
-const (
-	CheckpointObservationPhaseRunning                CheckpointObservationPhase = "running"
-	CheckpointObservationPhaseWaitingForConfirmation CheckpointObservationPhase = "waiting_for_confirmation"
-	CheckpointObservationPhaseReady                  CheckpointObservationPhase = "ready"
-	CheckpointObservationPhaseFailed                 CheckpointObservationPhase = "failed"
-)
-
-type CheckpointObservation struct {
-	Phase   CheckpointObservationPhase
-	Reason  string
-	Message string
 }
 
 func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
@@ -51,6 +37,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = map[string]string{}
 	}
+	podTemplate.Annotations = DisableCheckpointJobSidecarInjection(podTemplate.Annotations)
 	applyCheckpointSourceMetadata(podTemplate.Labels, podTemplate.Annotations, opts.CheckpointID, opts.ArtifactVersion)
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if opts.SeccompProfile != "" {
@@ -60,15 +47,13 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
 
-	// Checkpoint contract: exactly one target container per Job. The
-	// annotation is required — callers (the operator, snapshotctl) stamp
-	// nvidia.com/snapshot-target-containers before handing the template
-	// to us so there is no Containers[0]-vs-"main" ambiguity.
-	targets, err := TargetContainersFromAnnotations(podTemplate.Annotations, 1, 1)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	// Checkpoint contract: exactly one target container per Job. The caller (the operator,
+	// snapshotctl) resolves the single target and passes it in opts so there is no
+	// Containers[0]-vs-"main" ambiguity.
+	targetName := opts.TargetContainer
+	if targetName == "" {
+		return nil, fmt.Errorf("checkpoint job pod template: opts.TargetContainer is required")
 	}
-	targetName := targets[0]
 	var targetContainer *corev1.Container
 	for i := range podTemplate.Spec.Containers {
 		if podTemplate.Spec.Containers[i].Name == targetName {
@@ -77,7 +62,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		}
 	}
 	if targetContainer == nil {
-		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from %s annotation)", targetName, TargetContainersAnnotation)
+		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from opts.TargetContainer)", targetName)
 	}
 
 	// Snapshot contract: control volume + ready-file readiness probe. The
@@ -126,65 +111,6 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	}, nil
 }
 
-func ObserveCheckpointJob(job *batchv1.Job, checkpointWorkerActive bool) CheckpointObservation {
-	jobComplete := false
-	jobFailed := false
-	for _, condition := range job.Status.Conditions {
-		if condition.Status != corev1.ConditionTrue {
-			continue
-		}
-		if condition.Type == batchv1.JobComplete {
-			jobComplete = true
-			continue
-		}
-		if condition.Type == batchv1.JobFailed {
-			jobFailed = true
-		}
-	}
-
-	status := job.Annotations[CheckpointStatusAnnotation]
-	if status == CheckpointStatusFailed {
-		observation := CheckpointObservation{
-			Phase:   CheckpointObservationPhaseFailed,
-			Reason:  "JobFailed",
-			Message: "Checkpoint job failed",
-		}
-		if jobComplete {
-			observation.Reason = "CheckpointVerificationFailed"
-			observation.Message = "Checkpoint job completed but snapshot-agent reported checkpoint failure"
-		}
-		return observation
-	}
-
-	if jobComplete {
-		if status == CheckpointStatusCompleted {
-			return CheckpointObservation{
-				Phase:   CheckpointObservationPhaseReady,
-				Reason:  "JobSucceeded",
-				Message: "Checkpoint job completed successfully",
-			}
-		}
-		if checkpointWorkerActive {
-			return CheckpointObservation{Phase: CheckpointObservationPhaseWaitingForConfirmation}
-		}
-		return CheckpointObservation{
-			Phase:   CheckpointObservationPhaseFailed,
-			Reason:  "CheckpointVerificationFailed",
-			Message: "Checkpoint job completed without snapshot-agent completion confirmation",
-		}
-	}
-
-	if jobFailed {
-		return CheckpointObservation{
-			Phase:   CheckpointObservationPhaseFailed,
-			Reason:  "JobFailed",
-			Message: "Checkpoint job failed",
-		}
-	}
-
-	return CheckpointObservation{Phase: CheckpointObservationPhaseRunning}
-}
-
 // EnsureLocalhostSeccompProfile sets the pod-level localhost seccomp profile
 // to the given path, allocating PodSecurityContext if needed. An empty profile
 // is a no-op so callers can disable injection entirely without conditional
@@ -201,6 +127,22 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 		Type:             corev1.SeccompProfileTypeLocalhost,
 		LocalhostProfile: &profile,
 	}
+}
+
+// DisableCheckpointJobSidecarInjection stamps sidecar opt-out annotations on a
+// pod annotation map. Checkpoint Jobs must complete when the target container
+// exits; an injected sidecar that outlives the checkpoint keeps the pod alive,
+// preventing Kubernetes from marking the Job complete.
+//
+// Mutates and returns the passed-in map. Allocates a new map when annotations
+// is nil; callers must use the returned value.
+func DisableCheckpointJobSidecarInjection(annotations map[string]string) map[string]string {
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[linkerdInjectAnnotation] = linkerdInjectDisabled
+	annotations[istioSidecarInjectAnnotation] = istioSidecarInjectDisabled
+	return annotations
 }
 
 // wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the

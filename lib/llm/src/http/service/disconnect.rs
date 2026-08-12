@@ -183,6 +183,21 @@ async fn connection_monitor(
     }
 }
 
+type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
+
+fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
+    let error = SanitizedError::Internal;
+    let body = serde_json::json!({
+        "error": {
+            "message": error.to_string(),
+            "type": error.openai_type_slug(),
+            "code": error.status().as_u16(),
+        }
+    })
+    .to_string();
+    (ErrorType::Internal, body)
+}
+
 /// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
 ///
 /// Uses `tokio::select!` to choose between receiving events from the source stream or detecting when
@@ -199,21 +214,58 @@ pub fn monitor_for_disconnects(
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout(
+    monitor_for_disconnects_with_timeout_and_error(
         stream,
         context,
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
+        openai_stream_error,
     )
 }
 
+pub(crate) fn monitor_for_disconnects_with_error(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_formatter: StreamErrorFormatter,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_and_error(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        error_formatter,
+    )
+}
+
+#[cfg(test)]
 fn monitor_for_disconnects_with_timeout(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    inactivity_timeout: Option<Duration>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_and_error(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        inactivity_timeout,
+        openai_stream_error,
+    )
+}
+
+fn monitor_for_disconnects_with_timeout_and_error(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
+    error_formatter: StreamErrorFormatter,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -224,35 +276,33 @@ fn monitor_for_disconnects_with_timeout(
 
     async_stream::try_stream! {
         tokio::pin!(stream);
+        // Keep the context's watch-backed cancellation future alive across body frames.
+        // Recreating it for every token repeatedly clones a receiver and churns Notify state.
+        let stopped = context.stopped();
+        tokio::pin!(stopped);
         loop {
             tokio::select! {
+                // Drain any ready SSE event before honoring a cancel or the
+                // inactivity timeout. This preserves already-buffered output on
+                // disconnect and lets a source stream that emits its own
+                // finalizer-on-cancel (e.g. the Anthropic converter) flush those
+                // terminal events before this monitor records the cancellation.
+                biased;
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
                             yield event;
                         }
                         Some(Err(err)) => {
-                            // Mark error as internal since it's a streaming error
-                            inflight_guard.mark_error(ErrorType::Internal);
+                            let (error_type, error_body) = error_formatter(&err);
+                            inflight_guard.mark_error(error_type);
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
                             tracing::error!("Streaming error: {err}");
-                            // Emit a structured OpenAI-style error frame + `data: [DONE]`
-                            // so naive `data:`-line parsers see both the error and a
-                            // stream terminator. Body derived from SanitizedError so
-                            // the sanitized message + status live in one place.
-                            let sanitized = SanitizedError::Internal;
-                            let err_json = serde_json::json!({
-                                "error": {
-                                    "message": sanitized.to_string(),
-                                    "type": sanitized.openai_type_slug(),
-                                    "code": sanitized.status().as_u16(),
-                                }
-                            });
-                            yield Event::default().data(err_json.to_string());
+                            yield Event::default().data(error_body);
                             yield Event::default().data("[DONE]");
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
@@ -269,7 +319,7 @@ fn monitor_for_disconnects_with_timeout(
                         }
                     }
                 }
-                _ = context.stopped() => {
+                _ = &mut stopped => {
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
@@ -322,14 +372,28 @@ mod tests {
     use super::*;
     use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
     use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Debug)]
-    struct MockContext;
+    #[derive(Debug, Default)]
+    struct MockContext {
+        stopped_polls: AtomicUsize,
+        killed: std::sync::atomic::AtomicBool,
+        track_kill: bool,
+    }
+
     impl MockContext {
         fn new() -> Self {
-            Self
+            Self::default()
+        }
+
+        fn with_kill_tracking() -> Self {
+            Self {
+                track_kill: true,
+                ..Default::default()
+            }
         }
     }
+
     #[async_trait::async_trait]
     impl dynamo_runtime::engine::AsyncEngineContext for MockContext {
         fn id(&self) -> &str {
@@ -337,14 +401,19 @@ mod tests {
         }
         fn stop(&self) {}
         fn stop_generating(&self) {}
-        fn kill(&self) {}
+        fn kill(&self) {
+            if self.track_kill {
+                self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         fn is_stopped(&self) -> bool {
             false
         }
         fn is_killed(&self) -> bool {
-            false
+            self.track_kill && self.killed.load(std::sync::atomic::Ordering::SeqCst)
         }
         async fn stopped(&self) {
+            self.stopped_polls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
         }
         async fn killed(&self) {
@@ -391,6 +460,90 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
+    }
+
+    #[tokio::test]
+    async fn test_monitor_reuses_stopped_future_across_events() {
+        let model = "reuse-stopped-future";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-reuse",
+        );
+        let context = Arc::new(MockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let stream = futures::stream::unfold(0, |index| async move {
+            tokio::task::yield_now().await;
+            (index < 4).then(|| {
+                (
+                    Ok(Event::default().data(format!("token-{index}"))),
+                    index + 1,
+                )
+            })
+        });
+
+        let monitored =
+            monitor_for_disconnects_with_timeout(stream, engine_context, guard, handle, None);
+        tokio::pin!(monitored);
+        while monitored.next().await.is_some() {}
+
+        assert_eq!(
+            context.stopped_polls.load(Ordering::Relaxed),
+            1,
+            "the same stopped future should remain pending across all response events"
+        );
+    }
+
+    fn generate_cancellation_labels() -> CancellationLabels {
+        CancellationLabels {
+            model: "test-model".to_string(),
+            endpoint: Endpoint::Generate.to_string(),
+            request_type: "unary".to_string(),
+        }
+    }
+
+    async fn wait_for_kill(context: &Arc<MockContext>) {
+        for _ in 0..100 {
+            if context.is_killed() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn armed_handle_drop_kills_generate_context() {
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (connection_handle, stream_handle) =
+            create_connection_monitor(engine_context, None, generate_cancellation_labels()).await;
+
+        drop(connection_handle);
+        drop(stream_handle);
+
+        wait_for_kill(&context).await;
+        assert!(context.is_killed());
+    }
+
+    #[tokio::test]
+    async fn disarmed_handle_does_not_kill_generate_context() {
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (mut connection_handle, stream_handle) =
+            create_connection_monitor(engine_context, None, generate_cancellation_labels()).await;
+
+        connection_handle.disarm();
+        drop(connection_handle);
+        drop(stream_handle);
+
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!context.is_killed());
     }
 
     /// Zombie backend with hanging stream is terminated by inactivity timeout.

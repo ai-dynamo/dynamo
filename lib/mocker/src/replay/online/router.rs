@@ -3,10 +3,11 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_kv_router::ConcurrentRadixTree;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
@@ -15,6 +16,9 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
 };
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
+use dynamo_kv_router::{
+    ConcurrentRadixTree, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -53,11 +57,11 @@ impl ReplayIndexer {
     ) -> Result<OverlapScores> {
         match self {
             Self::Single(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name, None)
+                .find_matches_for_request(tokens, lora_name, None, None)
                 .await
                 .map_err(Into::into),
             Self::Concurrent(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name, None)
+                .find_matches_for_request(tokens, lora_name, None, None)
                 .await
                 .map_err(Into::into),
         }
@@ -135,6 +139,11 @@ pub(crate) struct KvReplayRouter {
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
+    tracking_hash: TrackingHashContext,
+    #[cfg(test)]
+    fail_mark_prefill: AtomicBool,
+    #[cfg(test)]
+    fail_free: AtomicBool,
 }
 
 impl KvReplayRouter {
@@ -145,6 +154,7 @@ impl KvReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let tracking_hash = TrackingHashContext::from_config(&config)?;
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -165,12 +175,13 @@ impl KvReplayRouter {
             prefill_load_estimator,
             None,
             None,
+            None,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
             scheduler_cancel.clone(),
             "replay",
             false,
-        ));
+        )?);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {
@@ -188,6 +199,11 @@ impl KvReplayRouter {
             event_tx: Mutex::new(Some(event_tx)),
             event_task: Mutex::new(Some(event_task)),
             indexer,
+            tracking_hash,
+            #[cfg(test)]
+            fail_mark_prefill: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_free: AtomicBool::new(false),
         })
     }
 
@@ -228,9 +244,13 @@ impl KvReplayRouter {
                 )
             })
             .collect();
-        let token_seq = self.config.compute_seq_hashes_for_tracking(
+        let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
+            &self.tracking_hash,
+            TrackingHashScope {
+                partition: RoutingPartitionRef::new("replay", "default"),
+                block_size: self.block_size,
+            },
             &request.tokens,
-            self.block_size,
             None,
             BlockHashOptions::default(),
             None,
@@ -267,6 +287,10 @@ impl KvReplayRouter {
     }
 
     async fn mark_prefill_completed(&self, uuid: Uuid) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_mark_prefill.load(Ordering::Acquire) {
+            return Err(anyhow!("injected mark-prefill failure"));
+        }
         self.scheduler
             .mark_prefill_completed(&uuid.to_string())
             .await
@@ -274,6 +298,10 @@ impl KvReplayRouter {
     }
 
     async fn free(&self, uuid: Uuid) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_free.load(Ordering::Acquire) {
+            return Err(anyhow!("injected free failure"));
+        }
         self.scheduler
             .free(&uuid.to_string())
             .await
@@ -304,6 +332,16 @@ impl KvReplayRouter {
             std::collections::HashMap::new(),
             track_prefill_tokens,
         )
+    }
+
+    #[cfg(test)]
+    fn fail_mark_prefill(&self) {
+        self.fail_mark_prefill.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn fail_free(&self) {
+        self.fail_free.store(true, Ordering::Release);
     }
 }
 
@@ -391,6 +429,20 @@ impl ReplayRouter {
             Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn fail_mark_prefill(&self) {
+        if let Self::Kv(router) = self {
+            router.fail_mark_prefill();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_free(&self) {
+        if let Self::Kv(router) = self {
+            router.fail_free();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +463,7 @@ mod tests {
         DirectRequest {
             tokens: vec![uuid as u32; 64],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
@@ -477,6 +530,44 @@ mod tests {
 
         low_task.await.unwrap();
         high_task.await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn free_clears_prefill_load_without_first_token() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap();
+        let router = ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &args,
+            Some(KvRouterConfig {
+                router_track_prefill_tokens: true,
+                ..KvRouterConfig::default()
+            }),
+            None,
+            1,
+        )
+        .unwrap();
+        let uuid = Uuid::from_u128(4);
+
+        router
+            .select_worker(&priority_request(4, 0, 0), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            64
+        );
+
+        router.on_complete(uuid).await.unwrap();
+
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            0
+        );
         router.shutdown().await.unwrap();
     }
 

@@ -4,11 +4,12 @@
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     indexer::{
-        KvIndexer, KvRouterError, LowerTierIndexers, MatchDetails, ThreadPoolIndexer,
-        query_lower_tiers,
+        KvIndexer, KvRouterError, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
+        ThreadPoolIndexer, TieredMatchProvider, query_lower_tiers_with_options,
     },
     protocols::{LocalBlockHash, OverlapScores},
 };
+use dynamo_runtime::pipeline::async_trait;
 
 use super::{Indexer, SideIndexer, TieredMatchDetails, remote::RemoteIndexer};
 
@@ -113,8 +114,17 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_by_tier_with_options(sequence, LowerTierQueryOptions::default())
+            .await
+    }
+
+    pub(crate) async fn find_matches_by_tier_with_options(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        lower_tier_options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         self.lookup_pipeline()
-            .find_matches_by_tier(HashInput::Owned(sequence))
+            .find_matches_by_tier(HashInput::Owned(sequence), lower_tier_options)
             .await
     }
 
@@ -122,8 +132,17 @@ impl Indexer {
         &self,
         sequence: &[LocalBlockHash],
     ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_by_tier_ref_with_options(sequence, LowerTierQueryOptions::default())
+            .await
+    }
+
+    pub(crate) async fn find_matches_by_tier_ref_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        lower_tier_options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         self.lookup_pipeline()
-            .find_matches_by_tier(HashInput::Borrowed(sequence))
+            .find_matches_by_tier(HashInput::Borrowed(sequence), lower_tier_options)
             .await
     }
 
@@ -133,6 +152,25 @@ impl Indexer {
     ) -> Result<TieredMatchDetails, KvRouterError> {
         self.lookup_pipeline()
             .find_primary_matches_by_tier(HashInput::Owned(sequence))
+            .await
+    }
+}
+
+#[async_trait]
+impl TieredMatchProvider for Indexer {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_by_tier_ref(sequence).await
+    }
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_by_tier_ref_with_options(sequence, options)
             .await
     }
 }
@@ -161,6 +199,7 @@ impl<'a> LookupPipeline<'a> {
     async fn find_matches_by_tier(
         &self,
         sequence: HashInput<'_>,
+        lower_tier_options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
@@ -172,8 +211,19 @@ impl<'a> LookupPipeline<'a> {
                 // them as lower-tier anchors would over-credit host/disk cache
                 // hits and break the score/hash lockstep `query_lower_tiers`
                 // expects.
-                let primary_device = self.primary.find_match_details_retained(&sequence).await?;
-                let lt = query_lower_tiers(lower_tier, sequence.as_slice(), &primary_device);
+                let primary_device = self
+                    .primary
+                    .find_match_details_retained_with_options(
+                        &sequence,
+                        lower_tier_options.retain_router_hint_chain,
+                    )
+                    .await?;
+                let lt = query_lower_tiers_with_options(
+                    lower_tier,
+                    sequence.as_slice(),
+                    &primary_device,
+                    lower_tier_options,
+                );
                 let device = merge_side_or_warn(self.side, primary_device, sequence).await;
 
                 Ok(TieredMatchDetails {
@@ -182,6 +232,11 @@ impl<'a> LookupPipeline<'a> {
                 })
             }
             PrimaryLookup::Remote(primary) => {
+                if lower_tier_options.retain_router_hint_chain {
+                    tracing::warn!(
+                        "router_hint chain retention is not supported with remote primary indexer; proceeding without router hints"
+                    );
+                }
                 let Some(side) = self.side else {
                     return primary
                         .find_matches_by_tier(sequence.into_owned_at_boundary(), false)
@@ -215,7 +270,12 @@ impl<'a> LookupPipeline<'a> {
                     return Ok(TieredMatchDetails::default());
                 };
                 let device = self.primary.find_match_details_retained(&sequence).await?;
-                let lt = query_lower_tiers(lower_tier, sequence.as_slice(), &device);
+                let lt = query_lower_tiers_with_options(
+                    lower_tier,
+                    sequence.as_slice(),
+                    &device,
+                    LowerTierQueryOptions::default(),
+                );
                 Ok(TieredMatchDetails {
                     device,
                     lower_tier: lt,
@@ -267,15 +327,29 @@ impl<'a> PrimaryLookup<'a> {
         &self,
         sequence: &HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
+        self.find_match_details_retained_with_options(sequence, false)
+            .await
+    }
+
+    async fn find_match_details_retained_with_options(
+        &self,
+        sequence: &HashInput<'_>,
+        retain_router_hint_chain: bool,
+    ) -> Result<MatchDetails, KvRouterError> {
         let primary_details = match self {
             Self::KvIndexer(primary) => {
                 primary
-                    .find_match_details(sequence.clone_for_boundary())
+                    .find_match_details_with_options(
+                        sequence.clone_for_boundary(),
+                        retain_router_hint_chain,
+                    )
                     .await?
             }
-            Self::Concurrent(primary) => primary
-                .backend()
-                .find_match_details_impl(sequence.as_slice(), false),
+            Self::Concurrent(primary) => primary.backend().find_match_details_impl_with_options(
+                sequence.as_slice(),
+                false,
+                retain_router_hint_chain,
+            ),
             Self::Remote(primary) => {
                 let tiered = primary
                     .find_matches_by_tier(sequence.clone_for_boundary(), true)

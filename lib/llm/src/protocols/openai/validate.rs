@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Display;
+use std::{fmt::Display, sync::LazyLock};
+
+use dynamo_runtime::config::{
+    env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+};
 
 //
 // Hyperparameter Contraints
@@ -86,8 +90,8 @@ pub const MAX_STOP_SEQUENCES: usize = 32;
 /// Maximum allowed number of tools.
 pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
-/// Maximum allowed length for function names
-pub const MAX_FUNCTION_NAME_LENGTH: usize = 96;
+/// Both `/v1/messages` and `/v1/responses` define a 128-character tool-name limit.
+pub const MAX_FUNCTION_NAME_LENGTH: usize = 128;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -106,18 +110,33 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "bad_words_token_ids",
 ];
 
+static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS));
+
 /// Validates that no unsupported fields are present in the request.
 ///
 /// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
+/// Other fields may be ignored and dropped when
+/// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    validate_no_unsupported_fields_with_ignore(
+        unsupported_fields,
+        *IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+    )
+}
+
+fn validate_no_unsupported_fields_with_ignore(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+    ignore_unsupported_fields: bool,
 ) -> Result<(), anyhow::Error> {
     let unknown: Vec<_> = unsupported_fields
         .keys()
         .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
         .map(|s| format!("`{}`", s))
         .collect();
-    if !unknown.is_empty() {
+    if !unknown.is_empty() && !ignore_unsupported_fields {
         anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     if let Some(value) = unsupported_fields.get("cache_salt")
@@ -171,8 +190,10 @@ pub fn validate_response_format(
                 anyhow::bail!("`response_format.json_schema.name` cannot be empty");
             }
 
-            // Validate schema presence
-            if json_schema.schema.is_none() {
+            // Validate schema presence. `schema` is a non-optional
+            // `serde_json::Value`, so an explicit `null` is the only way it
+            // can still arrive empty.
+            if json_schema.schema.is_null() {
                 anyhow::bail!(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
@@ -216,8 +237,8 @@ pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
 pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
     match top_k {
         None => Ok(()),
-        Some(k) if k == -1 || k >= 1 => Ok(()),
-        _ => anyhow::bail!("Top_k must be null, -1, or greater than or equal to 1"),
+        Some(k) if k >= -1 => Ok(()),
+        _ => anyhow::bail!("Top_k must be null or greater than or equal to -1"),
     }
 }
 
@@ -443,6 +464,35 @@ pub fn validate_messages(
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
     }
+    // Prior assistant tool-call messages in the request must carry arguments
+    // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
+    // This was caught in MiniMax-M3 multi-turn tool-call tests
+    for (message_index, message) in messages.iter().enumerate() {
+        if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
+            && let Some(tool_calls) = &assistant.tool_calls
+        {
+            for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
+                validate_json_object_string(
+                    &tool_call.function.arguments,
+                    format!(
+                        "`messages[{message_index}].tool_calls[{tool_call_index}].function.arguments`"
+                    ),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow::Error> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(value)
+        .map_err(|error| anyhow::anyhow!("{field} must be a valid JSON object string: {error}"))?;
+    if !parsed.is_object() {
+        anyhow::bail!("{field} must be a valid JSON object string");
+    }
     Ok(())
 }
 
@@ -498,6 +548,15 @@ pub fn validate_tools(
             anyhow::bail!(
                 "Function at index {} has an invalid name: \"{}\". \
                  Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                i,
+                tool.function.name,
+            );
+        }
+        if let Some(parameters) = &tool.function.parameters
+            && !parameters.is_object()
+        {
+            anyhow::bail!(
+                "Function parameters at index {} for \"{}\" must be a JSON Schema object",
                 i,
                 tool.function.name,
             );
@@ -713,12 +772,23 @@ pub fn validate_suffix(suffix: Option<&str>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+const MAX_OUTPUT_TOKENS: u32 = 1_048_576;
+
 /// Validates max_tokens parameter
 pub fn validate_max_tokens(max_tokens: Option<u32>) -> Result<(), anyhow::Error> {
     if let Some(tokens) = max_tokens
         && tokens == 0
     {
         anyhow::bail!("Max tokens must be greater than 0, got {}", tokens);
+    }
+    if let Some(tokens) = max_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
+            tokens
+        );
     }
     Ok(())
 }
@@ -732,6 +802,15 @@ pub fn validate_max_completion_tokens(
     {
         anyhow::bail!(
             "Max completion tokens must be greater than 0, got {}",
+            tokens
+        );
+    }
+    if let Some(tokens) = max_completion_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max completion tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
             tokens
         );
     }
@@ -754,4 +833,85 @@ where
         anyhow::bail!("Value {} is out of range [{}, {}]", value, range.0, range.1);
     }
     Ok(Some(value))
+}
+
+/// A nested `chat_template` bypasses Dynamo's top-level rejection and is
+/// promoted into the rendered template, so block it for every chat processor.
+pub fn validate_chat_template_args(
+    chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+) -> Result<(), anyhow::Error> {
+    if let Some(args) = chat_template_args
+        && args.contains_key("chat_template")
+    {
+        anyhow::bail!("`chat_template` is not supported inside `chat_template_args`");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn unknown_fields() -> HashMap<String, serde_json::Value> {
+        HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    #[test]
+    fn validate_chat_template_args_rejects_nested_chat_template() {
+        let args = HashMap::from([(
+            "chat_template".to_string(),
+            json!("{% for _ in range(10**9) %}x{% endfor %}"),
+        )]);
+        let err = validate_chat_template_args(Some(&args)).unwrap_err();
+        assert!(err.to_string().contains("chat_template"));
+    }
+
+    #[test]
+    fn validate_chat_template_args_accepts_other_keys() {
+        let args = HashMap::from([("enable_thinking".to_string(), json!(false))]);
+        validate_chat_template_args(Some(&args)).unwrap();
+        validate_chat_template_args(None).unwrap();
+    }
+
+    #[test]
+    fn validate_response_format_rejects_null_json_schema() {
+        let response_format = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test_schema",
+                "schema": null
+            }
+        }))
+        .unwrap();
+
+        let err = validate_response_format(&Some(response_format)).unwrap_err();
+        assert!(err.to_string().contains("schema` is required"));
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
+        let err = validate_no_unsupported_fields_with_ignore(&unknown_fields(), false).unwrap_err();
+        assert!(err.to_string().contains("Unsupported parameter(s)"));
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
+        validate_no_unsupported_fields_with_ignore(&unknown_fields(), true).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_still_validates_passthrough_fields_when_ignoring_unknowns() {
+        let unsupported_fields = HashMap::from([
+            ("experimental_field".to_string(), json!("value")),
+            ("stop_token_ids".to_string(), json!("bad")),
+        ]);
+
+        let err =
+            validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
+        assert!(err.to_string().contains("stop_token_ids"));
+    }
 }

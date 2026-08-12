@@ -3,7 +3,10 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-aiconfigurator[webapp]>=0.9.0
+# Keep both layers on the same published AIC dev release.
+aiconfigurator==0.11.0.dev20260728
+
+aiconfigurator-core==0.11.0.dev20260728
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
 filterpy==1.4.5

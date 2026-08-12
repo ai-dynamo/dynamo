@@ -7,14 +7,18 @@ Benchmarks and trace-export entrypoints for Dynamo. Hosts:
 - `offline_replay_bench` — Rust-native replay loop using the mocker's perf
   model, for profiling replay overhead.
 - `kv_router/{mooncake,active_sequences}_bench` — kv-router microbenchmarks.
-- `claude_trace_export` — converts Claude traces into Mooncake JSONL for replay.
+- `claude_trace_export` — converts local Claude sessions into canonical Dynamo
+  request traces for direct replay.
+- `request_trace_to_mooncake` — opt-in export of Dynamo request traces to
+  Mooncake replay JSONL.
+- `request_trace_to_satf` — opt-in export of Dynamo request traces to SATF 2.0.
 
 ## Guardrails
 
-- The Mooncake JSONL row schema, rolling block-hash-to-id mapper, and
-  JSONL writer live in `dynamo-data-gen`, not here. Producers in this crate
-  must serialize `dynamo_data_gen::MooncakeRow` directly — do not redefine
-  the row type locally.
+- Dynamo request traces replay directly through `--trace-format dynamo`; do not
+  insert an intermediate Mooncake file into that replay path.
+  `request_trace_to_mooncake` is an opt-in export for Mooncake-compatible
+  consumers.
 - Benchmarks here are CI-checked via clippy (`--all-targets -- -D warnings`)
   and the dedicated `mooncake_trace` test under
   `--features mocker-kvbm-offload`. Keep both green.

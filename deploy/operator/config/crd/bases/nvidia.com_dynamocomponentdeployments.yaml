@@ -6,7 +6,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.4
+    controller-gen.kubebuilder.io/version: v0.17.3
     helm.sh/resource-policy: keep
   name: dynamocomponentdeployments.nvidia.com
 spec:
@@ -146,8 +146,8 @@ spec:
                                 and scale-down and scale-up tolerances of 5% and 1% respectively, scaling will be
                                 triggered when the actual consumption falls below 95Mi or exceeds 101Mi.
 
-                                This is an alpha field and requires enabling the HPAConfigurableTolerance
-                                feature gate.
+                                This is an beta field and requires the HPAConfigurableTolerance feature
+                                gate to be enabled.
                               pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                               x-kubernetes-int-or-string: true
                           type: object
@@ -219,8 +219,8 @@ spec:
                                 and scale-down and scale-up tolerances of 5% and 1% respectively, scaling will be
                                 triggered when the actual consumption falls below 95Mi or exceeds 101Mi.
 
-                                This is an alpha field and requires enabling the HPAConfigurableTolerance
-                                feature gate.
+                                This is an beta field and requires the HPAConfigurableTolerance feature
+                                gate to be enabled.
                               pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                               x-kubernetes-int-or-string: true
                           type: object
@@ -1146,7 +1146,9 @@ spec:
                   description: |-
                     ExtraPodSpec allows to override the main pod spec configuration.
                     It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
-                    that allows overriding the main container configuration.
+                    that allows overriding the main container configuration. New components must set
+                    extraPodSpec and provide a non-empty mainContainer image. Existing components created
+                    without extraPodSpec may remain unchanged.
                   properties:
                     activeDeadlineSeconds:
                       description: |-
@@ -2865,7 +2867,9 @@ spec:
                                 type: integer
                             type: object
                           resizePolicy:
-                            description: Resources resize policy for the container.
+                            description: |-
+                              Resources resize policy for the container.
+                              This field cannot be set on ephemeral containers.
                             items:
                               description: ContainerResizePolicy represents resource resize policy for the container.
                               properties:
@@ -3089,7 +3093,6 @@ spec:
                                   procMount denotes the type of proc mount to use for the containers.
                                   The default value is Default which uses the container runtime defaults for
                                   readonly paths and masked paths.
-                                  This requires the ProcMountType feature flag to be enabled.
                                   Note that this field cannot be set when spec.os.name is windows.
                                 type: string
                               readOnlyRootFilesystem:
@@ -4584,7 +4587,6 @@ spec:
                                   procMount denotes the type of proc mount to use for the containers.
                                   The default value is Default which uses the container runtime defaults for
                                   readonly paths and masked paths.
-                                  This requires the ProcMountType feature flag to be enabled.
                                   Note that this field cannot be set when spec.os.name is windows.
                                 type: string
                               readOnlyRootFilesystem:
@@ -5050,7 +5052,6 @@ spec:
                         When set to false, a new userns is created for the pod. Setting false is useful for
                         mitigating container breakout vulnerabilities even allowing users to run their
                         containers as root without actually having root privileges on the host.
-                        This field is alpha-level and is only honored by servers that enable the UserNamespacesSupport feature.
                       type: boolean
                     hostname:
                       description: |-
@@ -5938,7 +5939,9 @@ spec:
                                 type: integer
                             type: object
                           resizePolicy:
-                            description: Resources resize policy for the container.
+                            description: |-
+                              Resources resize policy for the container.
+                              This field cannot be set on ephemeral containers.
                             items:
                               description: ContainerResizePolicy represents resource resize policy for the container.
                               properties:
@@ -6162,7 +6165,6 @@ spec:
                                   procMount denotes the type of proc mount to use for the containers.
                                   The default value is Default which uses the container runtime defaults for
                                   readonly paths and masked paths.
-                                  This requires the ProcMountType feature flag to be enabled.
                                   Note that this field cannot be set when spec.os.name is windows.
                                 type: string
                               readOnlyRootFilesystem:
@@ -7401,7 +7403,9 @@ spec:
                               type: integer
                           type: object
                         resizePolicy:
-                          description: Resources resize policy for the container.
+                          description: |-
+                            Resources resize policy for the container.
+                            This field cannot be set on ephemeral containers.
                           items:
                             description: ContainerResizePolicy represents resource resize policy for the container.
                             properties:
@@ -7625,7 +7629,6 @@ spec:
                                 procMount denotes the type of proc mount to use for the containers.
                                 The default value is Default which uses the container runtime defaults for
                                 readonly paths and masked paths.
-                                This requires the ProcMountType feature flag to be enabled.
                                 Note that this field cannot be set when spec.os.name is windows.
                               type: string
                             readOnlyRootFilesystem:
@@ -8157,8 +8160,8 @@ spec:
                         will be made available to those containers which consume them
                         by name.
 
-                        This is an alpha field and requires enabling the
-                        DynamicResourceAllocation feature gate.
+                        This is a stable field but requires that the
+                        DynamicResourceAllocation feature gate is enabled.
 
                         This field is immutable.
                       items:
@@ -8169,6 +8172,14 @@ spec:
 
                           It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
                           Containers that need access to the ResourceClaim reference it with this name.
+
+                          When the DRAWorkloadResourceClaims feature gate is enabled and this Pod
+                          belongs to a PodGroup, a PodResourceClaim is matched to a
+                          PodGroupResourceClaim if all of their fields are equal (Name,
+                          ResourceClaimName, and ResourceClaimTemplateName). A matched claim references
+                          a single ResourceClaim shared across all Pods in the PodGroup, reserved for
+                          the PodGroup in ResourceClaimStatus.ReservedFor rather than for individual
+                          Pods.
                         properties:
                           name:
                             description: |-
@@ -8193,6 +8204,16 @@ spec:
                               will also be deleted. The pod name and resource name, along with a
                               generated component, will be used to form a unique name for the
                               ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
+
+                              When the DRAWorkloadResourceClaims feature gate is enabled and the pod
+                              belongs to a PodGroup that defines a PodGroupResourceClaim with the same
+                              Name and ResourceClaimTemplateName, this PodResourceClaim resolves to the
+                              ResourceClaim generated for the PodGroup. All pods in the group that
+                              define an equivalent PodResourceClaim matching the
+                              PodGroupResourceClaim's Name and ResourceClaimTemplateName share the same
+                              generated ResourceClaim. ResourceClaims generated for a PodGroup are
+                              owned by the PodGroup and their lifecycles are tied to the PodGroup
+                              instead of any individual pod.
 
                               This field is immutable and no changes will be made to the
                               corresponding ResourceClaim by the control plane after creating the
@@ -8318,6 +8339,28 @@ spec:
                       x-kubernetes-list-map-keys:
                         - name
                       x-kubernetes-list-type: map
+                    schedulingGroup:
+                      description: |-
+                        SchedulingGroup provides a reference to the immediate scheduling runtime
+                        grouping object that this Pod belongs to.
+                        This field is used by the scheduler to identify the group and apply the
+                        correct group scheduling policies. The association with a group also
+                        impacts other lifecycle aspects of a Pod that are relevant in a wider context
+                        of scheduling like preemption, resource attachment, etc. If not specified,
+                        the Pod is treated as a single unit in all of these aspects.
+                        The group object referenced by this field may not exist at the time the
+                        Pod is created.
+                        This field is immutable, but a group object with the same name may be
+                        recreated with different policies. Doing this during pod scheduling
+                        may result in the placement not conforming to the expected policies.
+                      properties:
+                        podGroupName:
+                          description: |-
+                            PodGroupName specifies the name of the standalone PodGroup object
+                            that represents the runtime instance of this group.
+                            Must be a DNS subdomain.
+                          type: string
+                      type: object
                     securityContext:
                       description: |-
                         SecurityContext holds pod-level security attributes and common container settings.
@@ -8610,9 +8653,10 @@ spec:
                           operator:
                             description: |-
                               Operator represents a key's relationship to the value.
-                              Valid operators are Exists and Equal. Defaults to Equal.
+                              Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
                               Exists is equivalent to wildcard for value, so that a pod can
                               tolerate all taints of a particular category.
+                              Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
                             type: string
                           tolerationSeconds:
                             description: |-
@@ -9384,7 +9428,7 @@ spec:
                                       resources:
                                         description: |-
                                           resources represents the minimum resources the volume should have.
-                                          If RecoverVolumeExpansionFailure feature is enabled users are allowed to specify resource requirements
+                                          Users are allowed to specify resource requirements
                                           that are lower than previous value but must still be higher than capacity recorded in the
                                           status field of the claim.
                                           More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
@@ -9703,7 +9747,7 @@ spec:
                               A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
                               The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
                               The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
-                              The volume will be mounted read-only (ro) and non-executable files (noexec).
+                              The volume will be mounted read-only (ro).
                               Sub path mounts for containers are not supported (spec.containers[*].volumeMounts.subpath) before 1.33.
                               The field spec.securityContext.fsGroupChangePolicy has no effect on this volume type.
                             properties:
@@ -9871,8 +9915,7 @@ spec:
                             description: |-
                               portworxVolume represents a portworx volume attached and mounted on kubelets host machine.
                               Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type
-                              are redirected to the pxd.portworx.com CSI driver when the CSIMigrationPortworx feature-gate
-                              is on.
+                              are redirected to the pxd.portworx.com CSI driver.
                             properties:
                               fsType:
                                 description: |-
@@ -10219,6 +10262,24 @@ spec:
                                         signerName:
                                           description: Kubelet's generated CSRs will be addressed to this signer.
                                           type: string
+                                        userAnnotations:
+                                          additionalProperties:
+                                            type: string
+                                          description: |-
+                                            userAnnotations allow pod authors to pass additional information to
+                                            the signer implementation.  Kubernetes does not restrict or validate this
+                                            metadata in any way.
+
+                                            These values are copied verbatim into the `spec.unverifiedUserAnnotations` field of
+                                            the PodCertificateRequest objects that Kubelet creates.
+
+                                            Entries are subject to the same validation as object metadata annotations,
+                                            with the addition that all keys must be domain-prefixed. No restrictions
+                                            are placed on values, except an overall size limitation on the entire field.
+
+                                            Signers should document the keys and values they support. Signers should
+                                            deny requests that contain keys they do not recognize.
+                                          type: object
                                       required:
                                         - keyType
                                         - signerName
@@ -10864,8 +10925,7 @@ spec:
                         DGD/DCD services apply this to service pods. Auto-created checkpoints
                         apply checkpoint job clients before creating the DynamoCheckpoint; manual
                         DynamoCheckpoint users must provide an already-prepared pod template.
-                        In each rendered pod, only matching container names are wired; absent
-                        names are ignored.
+                        Every name must match a user-declared container in the enclosing pod spec.
                       items:
                         maxLength: 63
                         minLength: 1
@@ -11388,18 +11448,30 @@ spec:
                           type: string
                       type: object
                   type: object
+                runtimeVersionOverride:
+                  description: |-
+                    RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+                    main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
+                    semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
+                    not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+                    It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+                  pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                  type: string
                 scalingAdapter:
                   description: |-
                     ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-                    When enabled, replicas are managed via DGDSA and external autoscalers can scale
-                    the service using the Scale subresource. When disabled, replicas can be modified directly.
+                    When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
+                    via the Scale subresource; when disabled, replicas are set directly. Opt in with
+                    `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled because
+                    `enabled` defaults to false.
                   properties:
                     enabled:
                       default: false
                       description: |-
-                        Enabled indicates whether the ScalingAdapter should be enabled for this service.
-                        When true, a DGDSA is created and owns the replicas field.
-                        When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+                        Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and
+                        owns the replicas field. When false (the default), no DGDSA is created and replicas are
+                        set directly on the DGD -- so a bare `scalingAdapter: {}` is disabled; set
+                        `enabled: true` to opt in.
                       type: boolean
                   type: object
                 serviceName:
@@ -11596,6 +11668,22 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    runtimeNamespace:
+                      description: |-
+                        RuntimeNamespace is the effective Dynamo runtime namespace for this
+                        component. Worker components may include a generation suffix; non-workers and
+                        Grove-backed workers use the base namespace. During rolling updates, worker
+                        status keeps the old active revision namespace until cutover completes.
+                      type: string
+                    scheduledReplicas:
+                      description: |-
+                        ScheduledReplicas is the number of replicas the backend scheduler has
+                        scheduled, in Dynamo component-replica units. Optional; omitted (nil)
+                        when the backend cannot derive it reliably. A nil value means "not
+                        reported", never "zero scheduled".
+                      format: int32
+                      minimum: 0
+                      type: integer
                     updatedReplicas:
                       description: |-
                         UpdatedReplicas is the number of replicas at the current/desired revision.
@@ -11614,7 +11702,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: true
+      storage: false
       subresources:
         status: {}
     - additionalPrinterColumns:
@@ -11635,9 +11723,8 @@ spec:
           description: |-
             DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-            v1beta1 is a served version: the API server accepts reads and writes
-            against it, and transparently converts to/from v1alpha1 (still the
-            storage version until a later MR flips it). Conversion goes through the
+            v1beta1 is the storage version. The API server transparently converts
+            to and from the served v1alpha1 version through
             operator's conversion webhook; see api/v1alpha1/*_conversion.go.
           properties:
             apiVersion:
@@ -12052,8 +12139,8 @@ spec:
                           description: |-
                             extraClientContainers lists additional user-declared containers that should
                             be wired as GMS clients in service pods. Checkpoint Job clients are declared
-                            under checkpoint.job.gmsClientContainers. In each rendered pod, only
-                            matching container names are wired; absent names are ignored.
+                            under checkpoint.job.gmsClientContainers. Every name must match a container
+                            in the enclosing component's podTemplate.spec.containers.
                           items:
                             maxLength: 63
                             minLength: 1
@@ -12101,6 +12188,23 @@ spec:
                           rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''InterPod'''
                         - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
                           rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
+                    grove:
+                      description: grove groups Grove-specific rendering options.
+                      properties:
+                        forceScalingGroup:
+                          description: |-
+                            forceScalingGroup opts a single-node component into rendering as a
+                            PodCliqueScalingGroup with one single-pod PodClique per replica.
+                            Scaling changes the scaling-group replica count. The first
+                            `minAvailable` replicas join the deployment's base PodGang together
+                            with its other base workloads; each replica beyond `minAvailable`
+                            gets its own PodGang, gang-scheduled separately from the rest of the
+                            deployment. `false` or omitted means automatic selection (multi-node
+                            and inter-pod GMS components use a scaling group, other single-node
+                            components a standalone PodClique), not "force PodClique".
+                            Immutable after creation.
+                          type: boolean
+                      type: object
                   type: object
                 frontendSidecar:
                   description: |-
@@ -12123,8 +12227,10 @@ spec:
                   type: boolean
                 minAvailable:
                   description: |-
-                    minAvailable maps to Grove PodClique minAvailable for single-node and
-                    Grove PodCliqueScalingGroup minAvailable for multi-node components.
+                    minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
+                    components rendered as a scaling group (multi-node, inter-pod GMS, or
+                    `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove
+                    PodClique minAvailable for all other single-node components.
                     This field determines 1) the minimum number of replicas guaranteed to be
                     gang-scheduled, and 2) when violating minAvailable replicas triggers gang
                     termination.
@@ -12187,16 +12293,15 @@ spec:
                   type: string
                 podTemplate:
                   description: |-
-                    podTemplate is the pod template used to create the component's pods.
-                    The operator injects its defaults (image, command, env, ports, probes,
-                    resources, volume mounts) into the container named `"main"` inside
-                    `podTemplate.spec.containers`, merging user overrides by name. If no
-                    container named `"main"` is present, the operator auto-generates it
-                    with standard defaults. All other containers in `podTemplate.spec.containers`
-                    are treated as user-managed sidecars: the operator does not inject
-                    defaults into them, so sidecars must specify required fields (e.g. `image`)
-                    themselves. The validation webhook rejects pod templates where a
-                    non-`"main"` container is missing a required field such as `image`.
+                    podTemplate defines the component's Pod configuration. New components must
+                    include a container named "main" with a non-empty image. Existing components
+                    created without a podTemplate may remain unchanged. The operator merges
+                    defaults into the main container.
+                    For DGD components whose main image tag is not a Dynamo semantic version,
+                    set runtimeVersionOverride explicitly.
+
+                    All other containers are user-managed sidecars and must specify their
+                    required fields, including image.
                   properties:
                     metadata:
                       description: |-
@@ -12206,7 +12311,11 @@ spec:
                         annotations:
                           additionalProperties:
                             type: string
+                            maxLength: 262144
                           type: object
+                          x-kubernetes-validations:
+                            - rule: '!("nvidia.com/vllm-distributed-executor-backend" in self) || self["nvidia.com/vllm-distributed-executor-backend"].lowerAscii() in ["mp", "ray"]'
+                              message: podTemplate backend annotation must be mp or ray, case-insensitively
                         finalizers:
                           items:
                             type: string
@@ -13942,7 +14051,9 @@ spec:
                                     type: integer
                                 type: object
                               resizePolicy:
-                                description: Resources resize policy for the container.
+                                description: |-
+                                  Resources resize policy for the container.
+                                  This field cannot be set on ephemeral containers.
                                 items:
                                   description: ContainerResizePolicy represents resource resize policy for the container.
                                   properties:
@@ -14166,7 +14277,6 @@ spec:
                                       procMount denotes the type of proc mount to use for the containers.
                                       The default value is Default which uses the container runtime defaults for
                                       readonly paths and masked paths.
-                                      This requires the ProcMountType feature flag to be enabled.
                                       Note that this field cannot be set when spec.os.name is windows.
                                     type: string
                                   readOnlyRootFilesystem:
@@ -14573,6 +14683,9 @@ spec:
                             required:
                               - name
                             type: object
+                            x-kubernetes-validations:
+                              - rule: self.name == "main" || (has(self.image) && self.image != "")
+                                message: sidecar containers must specify a non-empty image
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -15661,7 +15774,6 @@ spec:
                                       procMount denotes the type of proc mount to use for the containers.
                                       The default value is Default which uses the container runtime defaults for
                                       readonly paths and masked paths.
-                                      This requires the ProcMountType feature flag to be enabled.
                                       Note that this field cannot be set when spec.os.name is windows.
                                     type: string
                                   readOnlyRootFilesystem:
@@ -16127,7 +16239,6 @@ spec:
                             When set to false, a new userns is created for the pod. Setting false is useful for
                             mitigating container breakout vulnerabilities even allowing users to run their
                             containers as root without actually having root privileges on the host.
-                            This field is alpha-level and is only honored by servers that enable the UserNamespacesSupport feature.
                           type: boolean
                         hostname:
                           description: |-
@@ -17015,7 +17126,9 @@ spec:
                                     type: integer
                                 type: object
                               resizePolicy:
-                                description: Resources resize policy for the container.
+                                description: |-
+                                  Resources resize policy for the container.
+                                  This field cannot be set on ephemeral containers.
                                 items:
                                   description: ContainerResizePolicy represents resource resize policy for the container.
                                   properties:
@@ -17239,7 +17352,6 @@ spec:
                                       procMount denotes the type of proc mount to use for the containers.
                                       The default value is Default which uses the container runtime defaults for
                                       readonly paths and masked paths.
-                                      This requires the ProcMountType feature flag to be enabled.
                                       Note that this field cannot be set when spec.os.name is windows.
                                     type: string
                                   readOnlyRootFilesystem:
@@ -17646,6 +17758,9 @@ spec:
                             required:
                               - name
                             type: object
+                            x-kubernetes-validations:
+                              - rule: has(self.image) && self.image != ""
+                                message: init containers must specify a non-empty image
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -17776,8 +17891,8 @@ spec:
                             will be made available to those containers which consume them
                             by name.
 
-                            This is an alpha field and requires enabling the
-                            DynamicResourceAllocation feature gate.
+                            This is a stable field but requires that the
+                            DynamicResourceAllocation feature gate is enabled.
 
                             This field is immutable.
                           items:
@@ -17788,6 +17903,14 @@ spec:
 
                               It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
                               Containers that need access to the ResourceClaim reference it with this name.
+
+                              When the DRAWorkloadResourceClaims feature gate is enabled and this Pod
+                              belongs to a PodGroup, a PodResourceClaim is matched to a
+                              PodGroupResourceClaim if all of their fields are equal (Name,
+                              ResourceClaimName, and ResourceClaimTemplateName). A matched claim references
+                              a single ResourceClaim shared across all Pods in the PodGroup, reserved for
+                              the PodGroup in ResourceClaimStatus.ReservedFor rather than for individual
+                              Pods.
                             properties:
                               name:
                                 description: |-
@@ -17812,6 +17935,16 @@ spec:
                                   will also be deleted. The pod name and resource name, along with a
                                   generated component, will be used to form a unique name for the
                                   ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
+
+                                  When the DRAWorkloadResourceClaims feature gate is enabled and the pod
+                                  belongs to a PodGroup that defines a PodGroupResourceClaim with the same
+                                  Name and ResourceClaimTemplateName, this PodResourceClaim resolves to the
+                                  ResourceClaim generated for the PodGroup. All pods in the group that
+                                  define an equivalent PodResourceClaim matching the
+                                  PodGroupResourceClaim's Name and ResourceClaimTemplateName share the same
+                                  generated ResourceClaim. ResourceClaims generated for a PodGroup are
+                                  owned by the PodGroup and their lifecycles are tied to the PodGroup
+                                  instead of any individual pod.
 
                                   This field is immutable and no changes will be made to the
                                   corresponding ResourceClaim by the control plane after creating the
@@ -17937,6 +18070,28 @@ spec:
                           x-kubernetes-list-map-keys:
                             - name
                           x-kubernetes-list-type: map
+                        schedulingGroup:
+                          description: |-
+                            SchedulingGroup provides a reference to the immediate scheduling runtime
+                            grouping object that this Pod belongs to.
+                            This field is used by the scheduler to identify the group and apply the
+                            correct group scheduling policies. The association with a group also
+                            impacts other lifecycle aspects of a Pod that are relevant in a wider context
+                            of scheduling like preemption, resource attachment, etc. If not specified,
+                            the Pod is treated as a single unit in all of these aspects.
+                            The group object referenced by this field may not exist at the time the
+                            Pod is created.
+                            This field is immutable, but a group object with the same name may be
+                            recreated with different policies. Doing this during pod scheduling
+                            may result in the placement not conforming to the expected policies.
+                          properties:
+                            podGroupName:
+                              description: |-
+                                PodGroupName specifies the name of the standalone PodGroup object
+                                that represents the runtime instance of this group.
+                                Must be a DNS subdomain.
+                              type: string
+                          type: object
                         securityContext:
                           description: |-
                             SecurityContext holds pod-level security attributes and common container settings.
@@ -18229,9 +18384,10 @@ spec:
                               operator:
                                 description: |-
                                   Operator represents a key's relationship to the value.
-                                  Valid operators are Exists and Equal. Defaults to Equal.
+                                  Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
                                   Exists is equivalent to wildcard for value, so that a pod can
                                   tolerate all taints of a particular category.
+                                  Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
                                 type: string
                               tolerationSeconds:
                                 description: |-
@@ -19003,7 +19159,7 @@ spec:
                                           resources:
                                             description: |-
                                               resources represents the minimum resources the volume should have.
-                                              If RecoverVolumeExpansionFailure feature is enabled users are allowed to specify resource requirements
+                                              Users are allowed to specify resource requirements
                                               that are lower than previous value but must still be higher than capacity recorded in the
                                               status field of the claim.
                                               More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
@@ -19322,7 +19478,7 @@ spec:
                                   A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
                                   The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
                                   The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
-                                  The volume will be mounted read-only (ro) and non-executable files (noexec).
+                                  The volume will be mounted read-only (ro).
                                   Sub path mounts for containers are not supported (spec.containers[*].volumeMounts.subpath) before 1.33.
                                   The field spec.securityContext.fsGroupChangePolicy has no effect on this volume type.
                                 properties:
@@ -19490,8 +19646,7 @@ spec:
                                 description: |-
                                   portworxVolume represents a portworx volume attached and mounted on kubelets host machine.
                                   Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type
-                                  are redirected to the pxd.portworx.com CSI driver when the CSIMigrationPortworx feature-gate
-                                  is on.
+                                  are redirected to the pxd.portworx.com CSI driver.
                                 properties:
                                   fsType:
                                     description: |-
@@ -19838,6 +19993,24 @@ spec:
                                             signerName:
                                               description: Kubelet's generated CSRs will be addressed to this signer.
                                               type: string
+                                            userAnnotations:
+                                              additionalProperties:
+                                                type: string
+                                              description: |-
+                                                userAnnotations allow pod authors to pass additional information to
+                                                the signer implementation.  Kubernetes does not restrict or validate this
+                                                metadata in any way.
+
+                                                These values are copied verbatim into the `spec.unverifiedUserAnnotations` field of
+                                                the PodCertificateRequest objects that Kubelet creates.
+
+                                                Entries are subject to the same validation as object metadata annotations,
+                                                with the addition that all keys must be domain-prefixed. No restrictions
+                                                are placed on values, except an overall size limitation on the entire field.
+
+                                                Signers should document the keys and values they support. Signers should
+                                                deny requests that contain keys they do not recognize.
+                                              type: object
                                           required:
                                             - keyType
                                             - signerName
@@ -20260,13 +20433,22 @@ spec:
                   format: int32
                   minimum: 0
                   type: integer
+                runtimeVersionOverride:
+                  description: |-
+                    RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+                    main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
+                    no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
+                    parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
+                    example "1.4.0". It does not change the image or rendered Pod, and changing only this field does
+                    not trigger a rollout.
+                  pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                  type: string
                 scalingAdapter:
                   description: |-
-                    scalingAdapter opts this component into using the
-                    DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
-                    `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
-                    so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-                    the Scale subresource. Omit the field to opt out.
+                    scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.
+                    Setting it (even as an empty object, `scalingAdapter: {}`) creates a DGDSA that owns the
+                    `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the
+                    Scale subresource; omit the field to opt out.
                   type: object
                 sharedMemorySize:
                   anyOf:
@@ -20364,6 +20546,29 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    runtimeNamespace:
+                      description: |-
+                        runtimeNamespace is the effective Dynamo runtime namespace for this
+                        component. Worker components may include a generation suffix; non-workers and
+                        Grove-backed workers use the base namespace. During rolling updates, worker
+                        status keeps the old active revision namespace until cutover completes.
+                      type: string
+                    scheduledReplicas:
+                      description: |-
+                        scheduledReplicas is the number of replicas the backend scheduler has
+                        scheduled, expressed strictly in Dynamo component-replica units (not
+                        raw backend pod counts). It is a diagnostic aid for distinguishing
+                        capacity/scheduling shortfalls from runtime readiness.
+
+                        It is optional and omitted (nil) when the active backend cannot derive
+                        it reliably in component-replica units — for example before the backing
+                        resource's status has been observed, or for backends that do not report
+                        a scheduling count. A nil value therefore means "not reported", never
+                        "zero scheduled"; consumers must not treat absence as a scheduling
+                        failure.
+                      format: int32
+                      minimum: 0
+                      type: integer
                     updatedReplicas:
                       description: updatedReplicas is the number of replicas at the current/desired revision.
                       format: int32
@@ -20443,7 +20648,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: false
+      storage: true
       subresources:
         status: {}
   conversion:

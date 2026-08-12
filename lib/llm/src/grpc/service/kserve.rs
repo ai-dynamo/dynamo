@@ -16,6 +16,7 @@ use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::config::environment_names::llm::metrics as env_metrics;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
@@ -177,6 +178,9 @@ pub struct KserveServiceConfig {
     #[builder(default = "8788")]
     http_metrics_port: u16,
 
+    #[builder(default = "std::env::var(env_metrics::DYN_METRICS_PREFIX).ok()")]
+    metrics_prefix: Option<String>,
+
     #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
     http_metrics_host: String,
 
@@ -263,6 +267,7 @@ impl KserveServiceConfigBuilder {
         let http_service = http_service::HttpService::builder()
             .port(config.http_metrics_port)
             .host(config.http_metrics_host.clone())
+            .metrics_prefix(config.metrics_prefix)
             .cancel_token(config.http_cancel_token)
             // Disable all inference endpoints - only use for metrics/health
             .enable_chat_endpoints(false)

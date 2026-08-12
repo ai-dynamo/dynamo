@@ -78,6 +78,7 @@ const (
 	tokenSXM       = "SXM"
 	tokenHGX       = "HGX"
 	tokenDGX       = "DGX"
+	tokenHBM3      = "HBM3"
 	tokenPCIE      = "PCIE"
 	formFactorSXM  = "sxm"
 	formFactorPCIe = "pcie"
@@ -1022,7 +1023,8 @@ func detectFormFactor(normalized string) string {
 	switch {
 	case strings.Contains(normalized, tokenSXM),
 		strings.Contains(normalized, tokenHGX),
-		strings.Contains(normalized, tokenDGX):
+		strings.Contains(normalized, tokenDGX),
+		strings.Contains(normalized, tokenHBM3):
 		return formFactorSXM
 	case strings.Contains(normalized, tokenPCIE):
 		return formFactorPCIe

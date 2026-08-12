@@ -27,7 +27,6 @@ data:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
     restore:
-      nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
 
     criu:
@@ -45,6 +44,7 @@ data:
       linkRemap: {{ .Values.config.criu.linkRemap }}
       extMasters: {{ .Values.config.criu.extMasters }}
       manageCgroupsMode: {{ .Values.config.criu.manageCgroupsMode | quote }}
+      imageIoMode: {{ .Values.config.criu.imageIoMode | quote }}
       rstSibling: {{ .Values.config.criu.rstSibling }}
       mntnsCompatMode: {{ .Values.config.criu.mntnsCompatMode }}
       evasiveDevices: {{ .Values.config.criu.evasiveDevices }}

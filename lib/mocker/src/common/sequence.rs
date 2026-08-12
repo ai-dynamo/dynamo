@@ -4,9 +4,357 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, PositionalLineageHash, TokenBlockSequence, Tokens};
+use dynamo_tokens::{
+    BlockHash, PositionalLineageHash, SaltHash, SequenceHash, TokenBlockSequence, Tokens,
+    compute_block_hash_for_tokens, compute_next_sequence_hash,
+};
 use rand::random;
 use validator::Validate;
+
+const MOCKER_SALT_HASH: SaltHash = 1337;
+
+#[derive(Debug)]
+struct FlatTokens {
+    retained: Vec<u32>,
+    retained_start: usize,
+}
+
+impl FlatTokens {
+    fn new(
+        mut tokens: Vec<u32>,
+        output_capacity_hint: usize,
+        block_size: usize,
+        retain_history: bool,
+    ) -> Self {
+        if retain_history {
+            tokens.reserve_exact(output_capacity_hint);
+            return Self {
+                retained: tokens,
+                retained_start: 0,
+            };
+        }
+
+        let retained_start = tokens.len() - (tokens.len() % block_size);
+        // Lazy promotion runs after the next block's first token is pushed, so
+        // the retained window must hold one complete block plus that token.
+        let mut retained = Vec::with_capacity(
+            block_size
+                .checked_add(1)
+                .expect("flat token tail capacity overflow"),
+        );
+        retained.extend_from_slice(&tokens[retained_start..]);
+        Self {
+            retained,
+            retained_start,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.retained_start
+            .checked_add(self.retained.len())
+            .expect("flat token length overflow")
+    }
+
+    fn push(&mut self, token: u32) {
+        self.retained.push(token);
+    }
+
+    fn complete_block(&self, position: usize, block_size: usize) -> Option<&[u32]> {
+        let start = position.checked_mul(block_size)?;
+        debug_assert!(
+            start >= self.retained_start,
+            "promoted block precedes retained flat-token window"
+        );
+        let end = start.checked_add(block_size)?;
+        let local_start = start.checked_sub(self.retained_start)?;
+        let local_end = end.checked_sub(self.retained_start)?;
+        self.retained.get(local_start..local_end)
+    }
+
+    fn discard_through(&mut self, absolute_end: usize) {
+        let local_end = absolute_end
+            .checked_sub(self.retained_start)
+            .expect("promoted block precedes retained flat-token window");
+        assert!(
+            local_end <= self.retained.len(),
+            "promoted block extends beyond retained flat-token window"
+        );
+        self.retained.drain(..local_end);
+        self.retained_start = absolute_end;
+    }
+}
+
+/// Logical identity for one native-G1 request block.
+///
+/// A missing sequence hash denotes the request's mutable partial tail. Native
+/// G1 never needs a positional-lineage hash; KVBM continues to use
+/// [`ActiveSequence`] and its legacy metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeBlockIdentity {
+    pub(crate) sequence_hash: Option<SequenceHash>,
+    pub(crate) local_hash: Option<BlockHash>,
+}
+
+impl NativeBlockIdentity {
+    pub(crate) fn partial() -> Self {
+        Self {
+            sequence_hash: None,
+            local_hash: None,
+        }
+    }
+}
+
+/// Lightweight request-owned token and generation progress for native G1.
+///
+/// Physical block ownership and cache visibility live in the attached
+/// `BlockRequestLease`; this type deliberately contains no physical IDs,
+/// positional lineage, or allocation bookkeeping.
+#[derive(Debug)]
+pub(crate) struct RequestSequence {
+    tokens: FlatTokens,
+    block_size: usize,
+    max_output_tokens: usize,
+    generated_tokens: usize,
+    planned_output_ids: Option<Vec<u32>>,
+    num_input_tokens: usize,
+    enable_prefix_caching: bool,
+    emit_token_ids: bool,
+    retain_local_hashes: bool,
+}
+
+impl RequestSequence {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        tokens: Vec<u32>,
+        max_output_tokens: usize,
+        output_capacity_hint: usize,
+        block_size: usize,
+        enable_prefix_caching: bool,
+        retain_local_hashes: bool,
+        emit_token_ids: bool,
+        planned_output_ids: Option<Vec<u32>>,
+    ) -> (Self, Vec<NativeBlockIdentity>) {
+        assert!(block_size >= 2, "block_size must be at least two");
+        let num_input_tokens = tokens.len();
+        let output_capacity_hint = output_capacity_hint.min(max_output_tokens);
+        let completion_blocks = num_input_tokens
+            .checked_add(output_capacity_hint)
+            .expect("native request completion length overflow")
+            .div_ceil(block_size);
+        let emit_token_ids = emit_token_ids && enable_prefix_caching;
+        let retain_local_hashes = retain_local_hashes && enable_prefix_caching;
+
+        let mut identities = Vec::with_capacity(completion_blocks);
+        let mut parent_hash = None;
+        for block in tokens.chunks_exact(block_size) {
+            let (sequence_hash, local_hash) = if enable_prefix_caching {
+                let local_hash = compute_block_hash_for_tokens(block, MOCKER_SALT_HASH);
+                let sequence_hash = parent_hash
+                    .map(|parent| compute_next_sequence_hash(parent, local_hash))
+                    .unwrap_or(local_hash);
+                (sequence_hash, retain_local_hashes.then_some(local_hash))
+            } else {
+                (random::<u64>(), None)
+            };
+            identities.push(NativeBlockIdentity {
+                sequence_hash: Some(sequence_hash),
+                local_hash,
+            });
+            parent_hash = Some(sequence_hash);
+        }
+        if !tokens.len().is_multiple_of(block_size) {
+            identities.push(NativeBlockIdentity::partial());
+        }
+
+        let sequence = Self {
+            tokens: FlatTokens::new(tokens, output_capacity_hint, block_size, emit_token_ids),
+            block_size,
+            max_output_tokens,
+            generated_tokens: 0,
+            planned_output_ids,
+            num_input_tokens,
+            enable_prefix_caching,
+            emit_token_ids,
+            retain_local_hashes,
+        };
+        sequence.debug_assert_invariants(identities.iter().copied());
+        (sequence, identities)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    pub(crate) fn max_output_tokens(&self) -> usize {
+        self.max_output_tokens
+    }
+
+    pub(crate) fn generated_tokens(&self) -> usize {
+        self.generated_tokens
+    }
+
+    pub(crate) fn num_input_tokens(&self) -> usize {
+        self.num_input_tokens
+    }
+
+    pub(crate) fn enable_prefix_caching(&self) -> bool {
+        self.enable_prefix_caching
+    }
+
+    pub(crate) fn current_known_blocks(&self) -> usize {
+        self.len().div_ceil(self.block_size)
+    }
+
+    pub(crate) fn to_completion_blocks(&self) -> usize {
+        (self.num_input_tokens + self.max_output_tokens).div_ceil(self.block_size)
+    }
+
+    /// Append the next planned or synthetic token.
+    ///
+    /// Returns the token and whether this append opened a new partial block.
+    pub(crate) fn generate_token(&mut self) -> (u32, bool) {
+        assert!(
+            self.generated_tokens < self.max_output_tokens,
+            "Cannot generate more tokens: reached max_output_tokens limit"
+        );
+        let token = self
+            .planned_output_ids
+            .as_ref()
+            .and_then(|ids| ids.get(self.generated_tokens).copied())
+            .unwrap_or_else(random::<u32>);
+        let opened_partial = self.len().is_multiple_of(self.block_size);
+        self.tokens.push(token);
+        self.generated_tokens += 1;
+        (token, opened_partial)
+    }
+
+    pub(crate) fn complete_block_identity(
+        &self,
+        position: usize,
+        parent_hash: Option<SequenceHash>,
+    ) -> NativeBlockIdentity {
+        // Validate that the retained tail still contains the complete block
+        // even when prefix caching is disabled. Finalization discards that
+        // tail immediately afterward, so skipping this lookup would hide
+        // request/lease progress drift.
+        let tokens = self
+            .tokens
+            .complete_block(position, self.block_size)
+            .unwrap_or_else(|| {
+                panic!("native partial tail cannot be promoted without a complete token block")
+            });
+        if !self.enable_prefix_caching {
+            return NativeBlockIdentity {
+                sequence_hash: Some(random::<u64>()),
+                local_hash: None,
+            };
+        }
+        let local_hash = compute_block_hash_for_tokens(tokens, MOCKER_SALT_HASH);
+        let sequence_hash = parent_hash
+            .map(|parent| compute_next_sequence_hash(parent, local_hash))
+            .unwrap_or(local_hash);
+        NativeBlockIdentity {
+            sequence_hash: Some(sequence_hash),
+            local_hash: self.retain_local_hashes.then_some(local_hash),
+        }
+    }
+
+    /// Materialize one complete block's token IDs when event emission requires it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if token-ID event mode did not retain the full request history.
+    pub(crate) fn block_token_ids(&self, position: usize) -> Option<Vec<u32>> {
+        if !self.emit_token_ids {
+            return None;
+        }
+        assert_eq!(
+            self.tokens.retained_start, 0,
+            "token-ID event mode must retain full request history"
+        );
+        self.tokens
+            .complete_block(position, self.block_size)
+            .map(<[u32]>::to_vec)
+    }
+
+    /// Compact the bounded native tail after its completed block is published.
+    pub(crate) fn discard_completed_block(&mut self, position: usize) {
+        if self.emit_token_ids {
+            return;
+        }
+        let promoted_end = position
+            .checked_add(1)
+            .and_then(|blocks| blocks.checked_mul(self.block_size))
+            .expect("native promoted-block boundary overflow");
+        if promoted_end <= self.tokens.retained_start {
+            return;
+        }
+        self.tokens.discard_through(promoted_end);
+    }
+
+    pub(crate) fn debug_assert_invariants(
+        &self,
+        _identities: impl ExactSizeIterator<Item = NativeBlockIdentity>,
+    ) {
+        // The underscore keeps release builds warning-free; debug builds use
+        // the iterator for the full logical-identity consistency check.
+        #[cfg(debug_assertions)]
+        {
+            let identity_count = _identities.len();
+            let aligned = self.len().is_multiple_of(self.block_size);
+            debug_assert_eq!(identity_count, self.current_known_blocks());
+            debug_assert!(
+                _identities.enumerate().all(|(position, identity)| {
+                    identity.sequence_hash.is_some() || (position + 1 == identity_count && !aligned)
+                }),
+                "only the final native block may be partial"
+            );
+            self.debug_assert_storage_invariants();
+        }
+    }
+
+    /// Check only identities changed by one finalization plus the final tail.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_finalized_range(
+        &self,
+        identity_count: usize,
+        finalized: impl IntoIterator<Item = NativeBlockIdentity>,
+        final_identity: Option<NativeBlockIdentity>,
+    ) {
+        debug_assert_eq!(identity_count, self.current_known_blocks());
+        debug_assert!(
+            finalized
+                .into_iter()
+                .all(|identity| identity.sequence_hash.is_some()),
+            "finalized native blocks must have sequence hashes"
+        );
+        let aligned = self.len().is_multiple_of(self.block_size);
+        debug_assert!(
+            final_identity.is_none_or(|identity| identity.sequence_hash.is_some() || !aligned),
+            "only an unaligned final native block may be partial"
+        );
+        self.debug_assert_storage_invariants();
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_storage_invariants(&self) {
+        if self.emit_token_ids {
+            debug_assert_eq!(self.tokens.retained_start, 0);
+        } else {
+            debug_assert!(self.tokens.retained.len() <= self.block_size + 1);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn token_capacity(&self) -> usize {
+        self.tokens.retained.capacity()
+    }
+}
 
 /// Create unique blocks, block hashes, and positional-lineage hashes from a
 /// [`TokenBlockSequence`].
@@ -52,6 +400,7 @@ pub struct ActiveSequence {
     block_hashes: Vec<BlockHash>,
     plhs: Vec<PositionalLineageHash>,
 
+    #[getter(skip)]
     tokens: TokenBlockSequence,
 
     #[getter(copy)]
@@ -63,6 +412,8 @@ pub struct ActiveSequence {
 
     #[getter(copy)]
     generated_tokens: usize,
+
+    planned_output_ids: Option<Vec<u32>>,
 
     #[getter(copy)]
     num_input_tokens: usize,
@@ -78,6 +429,59 @@ pub struct ActiveSequence {
 }
 
 impl ActiveSequence {
+    fn promote_last_partial(&mut self) -> Option<MoveBlock> {
+        let UniqueBlock::PartialBlock(uuid) = self.unique_blocks.last().cloned()? else {
+            return None;
+        };
+
+        let parent_hash = self.unique_blocks[..self.unique_blocks.len() - 1]
+            .last()
+            .map(|block| match block {
+                UniqueBlock::FullBlock(hash) => *hash,
+                UniqueBlock::PartialBlock(_) => panic!("partial block cannot be a parent"),
+            });
+        let position = self.plhs.len();
+        debug_assert_eq!(position + 1, self.len() / self.block_size);
+        let last_complete = self.tokens.last_complete_block().unwrap_or_else(|| {
+            panic!("partial sequence tail cannot be promoted without a complete token block")
+        });
+        let last_seq_hash = if self.enable_prefix_caching {
+            last_complete.sequence_hash()
+        } else {
+            random::<u64>()
+        };
+        let last_block_hash = self
+            .enable_prefix_caching
+            .then(|| last_complete.block_hash());
+        let last_plh = if self.enable_prefix_caching {
+            last_complete.positional_lineage_hash()
+        } else {
+            PositionalLineageHash::new(random::<u64>(), None, position as u64)
+        };
+        let promote_token_ids = if self.emit_token_ids {
+            Some(last_complete.tokens().to_vec())
+        } else {
+            None
+        };
+        if let Some(last_block_hash) = last_block_hash {
+            self.block_hashes.push(last_block_hash);
+        }
+        self.plhs.push(last_plh);
+        self.unique_blocks.pop();
+
+        self.unique_blocks
+            .push(UniqueBlock::FullBlock(last_seq_hash));
+
+        Some(MoveBlock::Promote(
+            uuid,
+            last_seq_hash,
+            parent_hash,
+            last_block_hash,
+            last_plh,
+            promote_token_ids,
+        ))
+    }
+
     /// Create a new ActiveSequence instance with the provided tokens
     pub fn new(
         tokens: Vec<u32>,
@@ -86,10 +490,28 @@ impl ActiveSequence {
         enable_prefix_caching: bool,
         emit_token_ids: bool,
     ) -> Self {
+        Self::new_with_planned_output_ids(
+            tokens,
+            max_output_tokens,
+            block_size,
+            enable_prefix_caching,
+            emit_token_ids,
+            None,
+        )
+    }
+
+    pub fn new_with_planned_output_ids(
+        tokens: Vec<u32>,
+        max_output_tokens: usize,
+        block_size: Option<usize>,
+        enable_prefix_caching: bool,
+        emit_token_ids: bool,
+        planned_output_ids: Option<Vec<u32>>,
+    ) -> Self {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
 
-        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
+        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(MOCKER_SALT_HASH));
         let (unique_blocks, block_hashes, plhs) =
             create_sequence_cache(&tokens, block_size, enable_prefix_caching);
 
@@ -101,6 +523,7 @@ impl ActiveSequence {
             block_size,
             max_output_tokens,
             generated_tokens: 0,
+            planned_output_ids,
             num_input_tokens,
             num_allocated_tokens: 0,
             enable_prefix_caching,
@@ -119,7 +542,7 @@ impl ActiveSequence {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tokens.total_tokens() == 0
+        self.len() == 0
     }
 
     /// Current known sequence footprint in blocks: prompt plus generated tokens.
@@ -163,12 +586,7 @@ impl ActiveSequence {
         let plhs = self.plhs[plh_start..plh_end].to_vec();
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
-            Some(
-                self.tokens.blocks()[hash_start..hash_end]
-                    .iter()
-                    .map(|b| b.tokens().to_vec())
-                    .collect(),
-            )
+            Some(self.block_token_ids_in(hash_start, hash_end))
         } else {
             None
         };
@@ -187,12 +605,16 @@ impl ActiveSequence {
         &self.plhs
     }
 
-    pub fn block_token_ids(&self) -> Vec<Vec<u32>> {
-        self.tokens
-            .blocks()
+    fn block_token_ids_in(&self, start: usize, end: usize) -> Vec<Vec<u32>> {
+        self.tokens.blocks()[start..end]
             .iter()
             .map(|block| block.tokens().to_vec())
             .collect()
+    }
+
+    /// Materialize every complete block's token IDs.
+    pub fn block_token_ids(&self) -> Vec<Vec<u32>> {
+        self.block_token_ids_in(0, self.len() / self.block_size)
     }
 
     /// Commit a successful allocation by advancing `num_allocated_tokens`.
@@ -244,53 +666,10 @@ impl ActiveSequence {
         // Send Use signal (to allocate space for this new generation block)
         let mut signals = Vec::new();
 
-        // Replace last partial block with full block if it exists
-        if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
-            let last_complete = self.tokens.last_complete_block().unwrap();
-            let last_seq_hash = if self.enable_prefix_caching {
-                last_complete.sequence_hash()
-            } else {
-                random::<u64>()
-            };
-            let last_block_hash = self
-                .enable_prefix_caching
-                .then(|| last_complete.block_hash());
-            // Same randomization story as `last_seq_hash`: with prefix caching off,
-            // two identical prompts must not share blocks, so the PLH we promote
-            // with must also be unique — otherwise `process_promote`'s
-            // `match_blocks(&[plh])` lookup would reuse another request's block.
-            let last_plh = if self.enable_prefix_caching {
-                last_complete.positional_lineage_hash()
-            } else {
-                PositionalLineageHash::new(random::<u64>(), None, self.plhs.len() as u64)
-            };
-            let promote_token_ids = if self.emit_token_ids {
-                Some(last_complete.tokens().to_vec())
-            } else {
-                None
-            };
-            if let Some(last_block_hash) = last_block_hash {
-                self.block_hashes.push(last_block_hash);
-            }
-            self.plhs.push(last_plh);
-            self.unique_blocks.pop();
-
-            // After pop, the last element is the parent block
-            let second_to_last_hash = self.unique_blocks.last().map(|block| match block {
-                UniqueBlock::FullBlock(hash) => *hash,
-                UniqueBlock::PartialBlock(_) => panic!("Cannot have a partial block as parent"),
-            });
-
-            self.unique_blocks
-                .push(UniqueBlock::FullBlock(last_seq_hash));
-            signals.push(MoveBlock::Promote(
-                uuid,
-                last_seq_hash,
-                second_to_last_hash,
-                last_block_hash,
-                last_plh,
-                promote_token_ids,
-            ));
+        // The scheduler may already have promoted this block at its computed
+        // boundary. Retain this fallback for callers that have not.
+        if let Some(promote) = self.promote_last_partial() {
+            signals.push(promote);
         }
 
         let new_partial_block = UniqueBlock::default();
@@ -310,7 +689,7 @@ impl ActiveSequence {
     /// This function:
     /// - Generates a random token and adds it to the current sequence
     /// - Acquires a new partial block if needed or promotes an existing partial block to a full block
-    /// - Returns appropriate signals for the KvManager to process
+    /// - Returns appropriate signals for the G1 manager to process
     ///
     /// # Panics
     ///
@@ -318,14 +697,24 @@ impl ActiveSequence {
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
     #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
+        self.generate_token().1
+    }
+
+    /// Generate the next output token, push it to the sequence, and return the
+    /// token alongside any KV movement signals.
+    #[cfg_attr(feature = "profile", inline(never))]
+    pub fn generate_token(&mut self) -> (u32, Vec<MoveBlock>) {
         // Assert that we haven't reached the maximum output tokens
         assert!(
             self.generated_tokens < self.max_output_tokens,
             "Cannot generate more tokens: reached max_output_tokens limit"
         );
 
-        // Generate a random token
-        let token = random::<u32>();
+        let token = self
+            .planned_output_ids
+            .as_ref()
+            .and_then(|ids| ids.get(self.generated_tokens).copied())
+            .unwrap_or_else(random::<u32>);
 
         // Collect signals
         let mut signals = Vec::new();
@@ -337,30 +726,34 @@ impl ActiveSequence {
 
         // Check if we've reached the limit after pushing
         if self.generated_tokens != self.max_output_tokens {
-            return signals;
+            return (token, signals);
         }
 
         // Free all blocks when we reach max tokens
-        signals.extend(self.free_signal_for_tokens(self.len()));
-        signals
+        signals.extend(self.terminal_signals());
+        (token, signals)
+    }
+
+    /// Release the full sequence footprint after an independent terminal
+    /// condition, such as the model context-length limit, is reached.
+    pub(crate) fn terminal_signals(&self) -> Vec<MoveBlock> {
+        self.free_signal_for_tokens(self.len())
     }
 
     fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
         let active_blocks = active_tokens
             .div_ceil(self.block_size)
             .min(self.unique_blocks.len());
-        self.unique_blocks[..active_blocks]
+        if active_blocks == 0 {
+            return Vec::new();
+        }
+
+        let blocks = self.unique_blocks[..active_blocks]
             .iter()
             .rev()
-            .map(|block| match block {
-                UniqueBlock::PartialBlock(uuid) => {
-                    MoveBlock::Deref(vec![UniqueBlock::PartialBlock(*uuid)])
-                }
-                UniqueBlock::FullBlock(hash) => {
-                    MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
-                }
-            })
-            .collect()
+            .cloned()
+            .collect();
+        vec![MoveBlock::Deref(blocks)]
     }
 
     /// Free the currently active allocation footprint.
@@ -384,12 +777,19 @@ impl ActiveSequence {
     /// must be in the current partial block, so we only need to drop the trailing
     /// partial `UniqueBlock` when the sequence length returns to an exact block
     /// boundary. Using this to unwind arbitrary prompt history would be incorrect.
+    ///
+    /// If this contract is violated in release builds, legacy token storage
+    /// preserves its historical no-op on an empty buffer.
     pub fn pop(&mut self) {
+        debug_assert!(
+            self.generated_tokens > 0,
+            "sequence rollback requires a freshly generated token"
+        );
         self.tokens.pop();
         self.generated_tokens = self.generated_tokens.saturating_sub(1);
 
         // Reverts to the last full block
-        if self.tokens.total_tokens().is_multiple_of(self.block_size) {
+        if self.len().is_multiple_of(self.block_size) {
             self.unique_blocks.pop();
         }
     }
@@ -454,23 +854,12 @@ mod tests {
         }
     }
 
-    fn assert_deref_partial(signal: &MoveBlock) {
+    fn assert_deref_blocks(signal: &MoveBlock, expected: &[UniqueBlock]) {
         match signal {
             MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
+                assert_eq!(blocks, expected);
             }
-            _ => panic!("Expected MoveBlock::Deref for partial block"),
-        }
-    }
-
-    fn assert_deref_full(signal: &MoveBlock) {
-        match signal {
-            MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::FullBlock(_)));
-            }
-            _ => panic!("Expected MoveBlock::Deref for full block"),
+            _ => panic!("Expected MoveBlock::Deref"),
         }
     }
 
@@ -583,9 +972,40 @@ mod tests {
 
         let free_signals = seq.reset_with_signal();
 
-        assert!(!free_signals.is_empty());
+        assert_eq!(free_signals.len(), 1);
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_deref_blocks(&free_signals[0], &expected);
         assert_eq!(seq.num_allocated_tokens(), 0);
         assert_eq!(seq.generated_tokens(), 2);
+    }
+
+    #[test]
+    fn test_free_signal_is_empty_without_an_active_allocation() {
+        let seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+
+        assert!(seq.free_signal().is_empty());
+    }
+
+    #[test]
+    fn test_free_signal_batches_allocated_blocks_in_reverse_order() {
+        let mut seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+        seq.commit_allocation(seq.len());
+
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        let signals = seq.free_signal();
+
+        assert_eq!(signals.len(), 1);
+        assert_deref_blocks(&signals[0], &expected);
     }
 
     #[test]
@@ -616,15 +1036,17 @@ mod tests {
         let signals_third = seq.generate();
         assert_eq!(signals_third.len(), 0);
 
-        // Generate last token - we reach max_output_tokens, should trigger Deref signals
+        // Generate last token - we reach max_output_tokens, so all blocks should
+        // be dereferenced in one reverse-ordered batch.
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
         let signals_last = seq.generate();
-        assert_eq!(signals_last.len(), 2);
-
-        // First signal should be Deref for the partial block
-        assert_deref_partial(&signals_last[0]);
-
-        // Second signal should be Deref for the full block
-        assert_deref_full(&signals_last[1]);
+        assert_eq!(signals_last.len(), 1);
+        assert_deref_blocks(&signals_last[0], &expected);
     }
 
     #[test]

@@ -338,34 +338,6 @@ def validate_response(
     )
 
 
-def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
-    """
-    Verify that migration occurred by checking frontend logs for stream disconnection message.
-
-    Args:
-        frontend_process: The frontend process to check logs for
-    """
-    log_path = frontend_process.log_path
-    log_content = ""
-    for i in range(10):
-        try:
-            with open(log_path, "r") as f:
-                log_content = f.read()
-        except Exception as e:
-            pytest.fail(f"Could not read frontend log file {log_path}: {e}")
-        # Make sure this message is captured if any with the polling
-        if "Cannot recreate stream: " in log_content:
-            break
-        time.sleep(0.005)
-
-    assert (
-        "Stream disconnected... recreating stream..." in log_content
-    ), "'Stream disconnected... recreating stream...' message not found in logs"
-    assert (
-        "Cannot recreate stream: " not in log_content
-    ), "'Cannot recreate stream: ...' error found in logs"
-
-
 def _parse_migration_metric(
     metrics_text: str, model_name: str, migration_type: str
 ) -> int:
@@ -532,31 +504,25 @@ def run_migration_test(
         )
         terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
 
-    # Step 5: Validate response and verify migration occurred.
-    # migration_enabled and not max_seq_len_exceeded -> migration should succeed
+    # Step 5: Validate the request outcome via its response (the user-facing
+    # contract). Migration is expected to succeed only when it is enabled and the
+    # request does not exceed the migration seq-len cap; otherwise the in-flight
+    # request must fail.
     if migration_limit > 0 and migration_max_seq_len != 1:
         validate_response(request_thread, response_list, validate_delay=stream)
-        verify_migration_occurred(frontend)
     else:
-        try:
+        # openai.APIError covers both mid-stream structured error frames and
+        # HTTP non-200 responses.
+        with pytest.raises(APIError):
             validate_response(request_thread, response_list, validate_delay=stream)
-            pytest.fail(
-                "Request succeeded unexpectedly when migration should have failed"
-            )
-        except APIError as e:
-            # Expected: openai.APIError covers mid-stream structured error
-            # frames (DIS-1768 contract) and HTTP non-200 responses. A typed
-            # check is more robust than matching the exception's stringified
-            # message against a specific wire-format prefix.
-            logger.info(f"Got expected APIError: {e}")
 
-        try:
-            verify_migration_occurred(frontend)
-            pytest.fail("Migration unexpectedly succeeded")
-        except AssertionError as e:
-            assert "'Cannot recreate stream: ...' error found in logs" in str(e)
-
-    # Step 6: Verify migration metrics
+    # Step 6: Verify that migration behaved as expected via the frontend's
+    # Prometheus metrics (a stable structured surface) instead of asserting on
+    # log strings. `ongoing_request` is incremented at the same point the
+    # migration layer detects a disconnect and recreates the stream, so it is
+    # the structured equivalent of the old "Stream disconnected, recreating
+    # stream" log assertion; `max_seq_len_exceeded` records hitting the
+    # migration seq-len cap.
     verify_migration_metrics(
         frontend.frontend_port,
         expected_ongoing_request_count=1 if migration_limit > 0 else 0,

@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 from typing_extensions import Required
@@ -43,6 +42,14 @@ class GenerateRequest(TypedDict, total=False):
     are set by the frontend's PrefillRouter on decode requests; engines
     read them via ``dynamo.common.backend.disagg`` helpers.
 
+    Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
+    ``mm_routing_info``) are populated by the frontend preprocessor when
+    the request carries media. ``encoder_result`` is set by the
+    frontend when forwarding a request from an Encode worker
+    to a downstream Prefill/Aggregated peer; engines read it via
+    :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
+    four are object-shaped (``dict``) by contract.
+
     ``model`` carries the requested model name (set by the Rust
     preprocessor). Engines that support dynamic LoRA read it to route a
     request to a loaded adapter.
@@ -53,9 +60,15 @@ class GenerateRequest(TypedDict, total=False):
     sampling_options: dict[str, Any]
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
+    require_reasoning: bool
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    multi_modal_data: dict[str, Any]
+    mm_processor_kwargs: dict[str, Any]
+    mm_routing_info: dict[str, Any]
+    encoder_result: dict[str, Any]
     extra_args: dict[str, Any]
+    routing: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -63,19 +76,29 @@ class GenerateChunk(TypedDict, total=False):
 
     Every chunk must include ``token_ids`` and ``index``.
     Use ``index=0`` for single-choice responses. The final chunk must
-    additionally include ``finish_reason`` and ``completion_usage``.
+    additionally include ``finish_reason``; ``completion_usage`` is
+    optional (the OpenAI frontend aggregates it when present, and
+    matches the Rust ``Option<CompletionUsage>`` /
+    ``skip_serializing_if = "Option::is_none"`` semantics).
+
     Prefill terminals carry ``disaggregated_params`` for the
     PrefillRouter to forward to the decode peer. When the caller
     requested logprobs, chunks may also carry ``log_probs`` and
     ``top_logprobs`` aligned to ``token_ids`` — see
     :mod:`dynamo.common.backend.logprobs`.
+
+    Encode terminals carry ``encoder_result`` (an opaque object the
+    frontend forwards onto the downstream
+    ``PreprocessedRequest.encoder_result``). Construct with
+    :func:`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
     """
 
     token_ids: Required[list[int]]
     index: Required[int]
     finish_reason: str
-    completion_usage: dict[str, int]
+    completion_usage: dict[str, Any]
     disaggregated_params: dict[str, Any]
+    encoder_result: dict[str, Any]
     log_probs: list[float]
     top_logprobs: list[list[dict[str, Any]]]
     # Forwarded verbatim to Rust `LLMEngineOutput.engine_data` as a
@@ -96,16 +119,15 @@ class LlmRegistration:
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     # DP ranks this worker hosts (default 1); attention-DP engines set it from
-    # the engine count (e.g. TRT-LLM's get_attention_dp_size()).
+    # the engine count.
     data_parallel_size: Optional[int] = None
     # First DP rank this worker hosts (default 0). Non-zero only when a worker
-    # owns a sub-range (vLLM hybrid/external LB, multi-node SGLang DP-attention);
+    # owns a sub-range in a hybrid or externally load-balanced deployment;
     # the router enumerates [start, start + data_parallel_size).
     data_parallel_start_rank: Optional[int] = None
-    # Bootstrap address advertised to decode peers. Only for backends with a
-    # Dynamo-level handshake (SGLang); internal-KV-transport backends (TRT-LLM,
-    # vLLM NixlConnector) leave it None. When both are set, Worker publishes
-    # them so the frontend's PrefillRouter can take its Bootstrap path.
+    # Bootstrap address advertised to decode peers. Backends with an internal
+    # KV-transport handshake leave it None. When both are set, Worker publishes
+    # them so the frontend's PrefillRouter can take its bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
 
@@ -114,9 +136,9 @@ class LlmRegistration:
 class EngineConfig:
     """Registration metadata returned by an engine's :meth:`start`.
 
-    The neutral fields (``model``, ``served_model_name``, ``runtime_data``)
-    apply to every modality; token-pipeline metadata lives in the optional
-    :attr:`llm` sub-record, which raw media engines leave ``None``.
+    The neutral fields (``model``, ``served_model_name``, ``model_aliases``,
+    ``runtime_data``) apply to every modality; token-pipeline metadata lives in
+    the optional :attr:`llm` sub-record, which raw media engines leave ``None``.
     """
 
     model: str
@@ -125,6 +147,8 @@ class EngineConfig:
     # Token-pipeline registration metadata (KV cache, DP, bootstrap).
     # ``Some`` for LLMEngines; ``None`` for RawEngines.
     llm: Optional[LlmRegistration] = None
+    # Kept after existing fields to preserve positional-constructor compatibility.
+    model_aliases: list[str] = field(default_factory=list)
 
 
 class BaseEngine(ABC):
@@ -173,10 +197,9 @@ class BaseEngine(ABC):
         ``worker_id`` is an opaque, runtime-allocated unique identifier for
         this worker. It is stable from ``start()`` onward for the worker's
         lifetime and unique across replicas in the cluster. Engines that
-        need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
-        ``disagg_machine_id`` snowflake field) should derive it from this
-        value rather than hashing host/pid or asking operators for a CLI
-        override. The internal mechanism (discovery instance ID) is not
+        need a per-worker key for cluster-wide bookkeeping should derive it
+        from this value rather than hashing host/pid or asking operators for a
+        CLI override. The internal mechanism (discovery instance ID) is not
         part of the contract — engines should treat it as opaque.
         """
         ...
@@ -322,7 +345,7 @@ class BaseEngine(ABC):
 
 
 class LLMEngine(BaseEngine):
-    """Abstract base for token-based inference engines (vLLM, SGLang, TRT-LLM).
+    """Abstract base for token-based inference engines.
 
     The token pipeline: the Rust preprocessor tokenizes the prompt and sets
     ``token_ids`` on the request; :meth:`generate` yields token chunks that
@@ -351,22 +374,14 @@ class LLMEngine(BaseEngine):
         return []
 
     async def logits_processor_spec(self) -> "LogitsProcessorSpec | None":
-        """Engine-declared logits-processor activation. Default returns
-        ``None`` (no engine-level processors).
+        """Return backend-neutral logits-processor activation data.
 
-        Subclasses override to return a :class:`LogitsProcessorSpec` whose
-        ``entries`` are backend-neutral activation data. Unlike
-        framework-consumed hooks (:meth:`kv_event_sources`,
-        :meth:`health_check_payload`), the result is consumed by the
-        engine's own :meth:`generate`: resolve it once after engine init
-        (typically in ``start()``), cache it, and pass it per request to
-        :func:`logits_processors_for_request`, which applies the shared
-        generation-stage gating.
-
-        Overrides typically delegate to
-        :func:`resolve_test_logits_processor_spec` to honour
-        ``DYN_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
-        CLI/config loader will resolve from that source instead."""
+        The default opts out. An engine that overrides this method resolves
+        and caches the specification during startup, then passes it to
+        :func:`logits_processors_for_request` from :meth:`generate`. The
+        engine integration remains responsible for realizing each entry into
+        its inference library's processor type.
+        """
         return None
 
 
@@ -418,30 +433,13 @@ class DiffusionEngine(RawEngine):
 
 
 # ---------------------------------------------------------------------------
-# Custom logits processors: backend-neutral spec + per-backend realization
-#
-# An engine declares a `LogitsProcessorSpec` of entries; each backend realizes
-# them through its own attach function (entry shapes and tokenizer-init forcing
-# are backend-shaped, so this layer mandates neither). `logits_processors_for_request`
-# owns the two backend-agnostic policies: build fresh per-request state (stateful
-# processors can't be shared across concurrent requests), and skip non-generation
-# workers (PREFILL/ENCODE don't emit the visible stream; a processor there would
-# corrupt or waste leading state).
+# Backend-neutral custom logits-processor contract
 # ---------------------------------------------------------------------------
-
-
-#: Env var that activates the built-in smoke hook on any unified backend.
-DYN_ENABLE_TEST_LOGITS_PROCESSOR = "DYN_ENABLE_TEST_LOGITS_PROCESSOR"
 
 
 @dataclass(frozen=True)
 class ForcedTokenSequenceSpec:
-    """Force the next ``len(token_ids)`` outputs, then EOS thereafter.
-
-    Token IDs are pre-resolved at startup (no per-request tokenizer access)
-    and JSON-serializable, so the entry survives any worker boundary. A
-    tuple, so the cached spec stays immutable.
-    """
+    """Force the configured token IDs in order, then force EOS."""
 
     token_ids: tuple[int, ...]
     eos_token_id: int
@@ -449,10 +447,11 @@ class ForcedTokenSequenceSpec:
 
 @dataclass(frozen=True)
 class PythonProcessorSpec:
-    """Escape hatch for live, in-process `BaseLogitsProcessor` instances.
+    """Factory for an in-process Python logits processor.
 
-    Only TRT-LLM consumes it; vLLM/SGLang adapters reject it (not
-    serializable). Not used by the env-hook smoke.
+    No built-in backend currently realizes this entry. It is reserved for
+    custom or future in-process integrations that invoke the factory directly.
+    Serialization helpers reject it.
     """
 
     factory: Callable[[], "BaseLogitsProcessor"]
@@ -463,43 +462,31 @@ LogitsProcessorEntry = ForcedTokenSequenceSpec | PythonProcessorSpec
 
 @dataclass(frozen=True)
 class LogitsProcessorSpec:
-    """Engine-declared, backend-neutral logits-processor activation.
+    """Engine-declared logits-processor activation.
 
-    ``generation_only`` defaults True because every entry shipping today is
-    stateful and only meaningful on the worker that emits the visible
-    stream; a future stateless entry can set it False to run everywhere.
-    ``entries`` is a tuple so the cached spec stays immutable.
+    ``generation_only`` skips roles that do not emit the visible token stream.
+    Entries are immutable activation data; an engine integration must create
+    fresh stateful processor instances for each request.
     """
 
     entries: tuple[LogitsProcessorEntry, ...]
     generation_only: bool = True
 
 
-# Disaggregation modes that produce the visible output token stream.
 _GENERATION_STAGES = frozenset(
     {DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE}
 )
 
 
 def is_generation_stage(disaggregation_mode: DisaggregationMode) -> bool:
-    """True for worker roles that emit the visible output stream
-    (AGGREGATED, DECODE). PREFILL/ENCODE return False — a ``generation_only``
-    spec never runs there, so a backend can also skip the engine-level setup
-    (tokenizer init, spec resolution) for those roles."""
+    """Return whether a worker role emits the visible token stream."""
     return disaggregation_mode in _GENERATION_STAGES
 
 
 def logits_processors_for_request(
     spec: LogitsProcessorSpec | None, *, disaggregation_mode: DisaggregationMode
 ) -> list[LogitsProcessorEntry]:
-    """Return the entries a backend should activate for one request.
-
-    Applies the shared generation-stage gating: empty when ``spec`` is None
-    or a ``generation_only`` spec runs on a non-generation worker
-    (PREFILL/ENCODE); otherwise ``spec.entries``. Realization is each
-    backend adapter's job, and since the same entries flow through every
-    request, realizers MUST build fresh per-request state.
-    """
+    """Return the logits-processor entries to realize for one request."""
     if spec is None:
         return []
     if spec.generation_only and not is_generation_stage(disaggregation_mode):
@@ -507,66 +494,13 @@ def logits_processors_for_request(
     return list(spec.entries)
 
 
-def resolve_test_logits_processor_spec(
-    get_tokenizer: Callable[[], Any],
-) -> LogitsProcessorSpec | None:
-    """Resolve the `DYN_ENABLE_TEST_LOGITS_PROCESSOR=1` smoke hook into a
-    `LogitsProcessorSpec`, or ``None`` when the env var is unset.
-
-    ``get_tokenizer`` is called lazily, only after the env check passes, so
-    an engine started with ``skip_tokenizer_init=True`` and the hook off
-    does not crash. The fixed ``"Hello world!"`` token IDs are resolved here
-    once (not per request) into a single :class:`ForcedTokenSequenceSpec`.
-    """
-    if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) != "1":
-        return None
-    tokenizer = get_tokenizer()
-    eos = tokenizer.eos_token_id
-    if eos is None:
-        raise ValueError(
-            "DYN_ENABLE_TEST_LOGITS_PROCESSOR requires a tokenizer with eos_token_id"
-        )
-    token_ids = tuple(tokenizer.encode("Hello world!", add_special_tokens=False))
-    return LogitsProcessorSpec(
-        entries=(ForcedTokenSequenceSpec(token_ids=token_ids, eos_token_id=eos),),
-        generation_only=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Wire format for backends that activate processors across a serialization
-# boundary.
-#
-# TRT-LLM attaches live Python callables in-process, so it never serializes.
-# vLLM and SGLang both load a batch-level adapter class at engine init and
-# carry per-request activation through a JSON-ish side channel
-# (`SamplingParams.extra_args` for vLLM, `sampling_params["custom_params"]`
-# for SGLang). Both cross that boundary with the SAME entry shape, so the
-# format lives here once rather than in each backend adapter.
-#
-# Only JSON-safe entries are serializable: `ForcedTokenSequenceSpec` carries
-# plain ints. `PythonProcessorSpec` wraps a live callable and is rejected —
-# it is a TRT-LLM-only in-process escape hatch (the docstring on the class
-# says as much), so a backend that needs serialization cannot realize it.
-# ---------------------------------------------------------------------------
-
-
-#: Discriminator stored on each serialized entry so the reader can pick the
-#: right `LogitsProcessorEntry` subtype back out.
 _FORCED_SEQUENCE_KIND = "forced_sequence"
 
 
 def serialize_logits_processor_entries(
     entries: Sequence[LogitsProcessorEntry],
 ) -> list[dict[str, Any]]:
-    """Encode spec entries into JSON-safe dicts for a per-request side channel.
-
-    Used by backends (vLLM, SGLang) whose engine-loaded adapter runs in a
-    process that only sees the serialized request, not the engine's cached
-    spec. Raises ``TypeError`` on `PythonProcessorSpec` (a live callable is
-    not serializable), which is how vLLM/SGLang reject the TRT-LLM-only
-    escape hatch.
-    """
+    """Encode supported logits-processor entries as JSON-safe dictionaries."""
     payload: list[dict[str, Any]] = []
     for entry in entries:
         if isinstance(entry, ForcedTokenSequenceSpec):
@@ -580,9 +514,8 @@ def serialize_logits_processor_entries(
         else:
             raise TypeError(
                 f"logits-processor entry of type {type(entry).__name__} is not "
-                "serializable; only ForcedTokenSequenceSpec crosses the "
-                "vLLM/SGLang request boundary (PythonProcessorSpec is "
-                "TRT-LLM-only, in-process)"
+                "serializable; only ForcedTokenSequenceSpec can cross a "
+                "serialized request boundary"
             )
     return payload
 
@@ -590,13 +523,7 @@ def serialize_logits_processor_entries(
 def deserialize_logits_processor_entries(
     payload: Sequence[dict[str, Any]],
 ) -> list[LogitsProcessorEntry]:
-    """Inverse of :func:`serialize_logits_processor_entries`.
-
-    Runs inside the backend's engine-loaded adapter to rebuild spec entries
-    from the per-request payload. Unknown ``kind`` values raise ``ValueError``
-    so a forward-incompatible request fails loudly instead of silently
-    skipping a processor.
-    """
+    """Decode logits-processor entries from their JSON-safe representation."""
     entries: list[LogitsProcessorEntry] = []
     for item in payload:
         kind = item.get("kind")

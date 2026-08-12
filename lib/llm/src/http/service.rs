@@ -25,17 +25,24 @@ mod openai;
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
+pub mod frontend_extension;
+pub mod generate;
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod service_v2;
+pub mod sglang_generate;
 
 pub use axum;
+pub use frontend_extension::{
+    FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
+    validate_extension_route_path,
+};
 pub use metrics::Metrics;
 
 /// Documentation for a route
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
@@ -53,5 +60,13 @@ impl RouteDoc {
             method,
             path: path.into(),
         }
+    }
+
+    pub fn method(&self) -> &axum::http::Method {
+        &self.method
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }

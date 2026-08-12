@@ -1,0 +1,75 @@
+# Golden Manifest Design
+
+`golden` compares controller output stored in a Kubernetes API server with a
+small, reviewable YAML contract. It operates on unstructured objects and can be
+used with either `operatorenv`, `clusterenv`, or an explicitly selected real
+cluster.
+
+## API
+
+```go
+golden.ApplyManifests(t, "testdata/dcd/deployment/input.yaml", env.Client(), env.Namespace())
+golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd/deployment/output.yaml")
+```
+
+Controller tests keep one directory per scenario. `input.yaml` contains the
+resource that triggers the controller flow, while `output.yaml` contains the
+complete expected manifest set for that scenario. The mismatch artifact is
+therefore written next to both as `output.yaml.new`. Controller test runners
+discover every scenario directory below the `dcd` and `dgd` groups. DGDR keeps
+its larger profiling flow in one dedicated test.
+
+`ApplyManifests` decodes every input document as unstructured data and creates
+it through the Kubernetes client, exercising native admission. The namespace
+argument is intentionally explicit because the cluster test client remains
+capable of cluster-wide access; namespaced inputs cannot escape their per-test
+namespace. Cluster-scoped documents remain cluster-scoped.
+
+Every YAML document contributes one expected object. Documents may have
+different kinds. For each GroupVersionKind in the file, the actual namespaced
+objects must be exactly the expected set, and every expected document must
+match exactly one actual object. Cluster-scoped selection and more elaborate
+search strategies are deferred until a test requires them.
+
+## Match Directives
+
+Mappings are strict by default. A strict mapping rejects unspecified actual
+fields. `$strict: false` makes only that mapping non-strict; when matching a
+specified child field, its mapping is strict again unless it has its own
+`$strict: false`. `$$strict` escapes a real field named `$strict`.
+
+Scalar string directives are:
+
+| Value | Meaning |
+|---|---|
+| `$ignore` | The scalar field must exist; its value is ignored. |
+| `$exists` | The scalar field must exist; its value is ignored. |
+| `$notexists` | The containing mapping must not have the field. |
+| `$glob:<glob>` | The scalar string must match the glob. |
+| `$pattern:<regexp>` | The scalar string must match the regular expression. |
+
+For mapping values, the existence directives use a one-key mapping such as
+`{$ignore: true}` or `{$notexists: true}`. Directives do not apply to sequence
+values. Sequences match exactly and in order.
+
+## Mismatch Output
+
+`EventuallyMatchManifests` uses the shared `testing.Eventually` polling helper.
+While waiting, it identifies a missing object as `Kind namespace/name`. Once a
+name-matching object exists, the reason includes a unified diff between the
+expected contract and the minimally adapted contract for that object.
+
+After the retry timeout, a mismatch writes `<expected>.new`. Existing YAML
+comments and unchanged directives are preserved throughout the document tree.
+The generated file is changed only as far as needed to match the observed
+objects:
+
+- strict mappings gain missing actual fields, drop fields absent from the
+  actual object, and update mismatching values;
+- non-strict mappings keep their selected fields, and a selected field absent
+  from the actual object becomes `$notexists`;
+- unmatched actual objects are appended and expected objects with no actual
+  counterpart are removed.
+
+The `.new` file is diagnostic output. A reviewer still decides whether its
+changes describe the intended controller contract.

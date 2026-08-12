@@ -96,7 +96,13 @@ impl BlockPoolMetrics {
 
     #[inline(always)]
     pub fn inc_registrations(&self) {
-        self.registrations.fetch_add(1, Ordering::Relaxed);
+        self.inc_registrations_by(1);
+    }
+
+    /// Increment registrations after a completed batch becomes visible.
+    #[inline(always)]
+    pub fn inc_registrations_by(&self, n: u64) {
+        self.registrations.fetch_add(n, Ordering::Relaxed);
     }
 
     #[inline(always)]

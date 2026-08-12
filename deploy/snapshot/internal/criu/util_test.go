@@ -124,6 +124,47 @@ func TestApplyCommonSettings(t *testing.T) {
 		}
 	})
 
+	t.Run("imageIoMode direct sets IMAGE_IO_DIRECT", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "direct"}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_DIRECT {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_DIRECT", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("imageIoMode empty defaults to IMAGE_IO_DIRECT", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_DIRECT {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_DIRECT", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("imageIoMode writeback sets IMAGE_IO_WRITEBACK", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "writeback"}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_WRITEBACK", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("invalid imageIoMode returns error", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "bogus"}
+		if err := applyCommonSettings(opts, settings); err == nil {
+			t.Error("expected error for invalid ImageIoMode")
+		}
+	})
+
 	t.Run("invalid mode returns error", func(t *testing.T) {
 		opts := &criurpc.CriuOpts{}
 		settings := &types.CRIUSettings{ManageCgroupsMode: "invalid"}
@@ -140,6 +181,34 @@ func TestApplyCommonSettings(t *testing.T) {
 		}
 		if err := applyCommonSettings(opts, settings); err == nil {
 			t.Error("expected error for conflicting tcp settings")
+		}
+	})
+}
+
+func TestOverrideLibDir(t *testing.T) {
+	t.Run("replaces existing libdir line", func(t *testing.T) {
+		conf := "log-level 4\nlibdir /usr/local/lib/snapshot/criu-plugins\nshell-job\n"
+		got := overrideLibDir(conf, "/tmp/snapshot-binaries/criu-plugins")
+		if strings.Contains(got, "/usr/local/lib/snapshot/criu-plugins") {
+			t.Error("old libdir should have been replaced")
+		}
+		if !strings.Contains(got, "libdir /tmp/snapshot-binaries/criu-plugins") {
+			t.Errorf("new libdir not found in output: %q", got)
+		}
+	})
+
+	t.Run("appends libdir when absent", func(t *testing.T) {
+		conf := "log-level 4\nshell-job\n"
+		got := overrideLibDir(conf, "/tmp/snapshot-binaries/criu-plugins")
+		if !strings.Contains(got, "libdir /tmp/snapshot-binaries/criu-plugins") {
+			t.Errorf("libdir not appended: %q", got)
+		}
+	})
+
+	t.Run("handles empty config", func(t *testing.T) {
+		got := overrideLibDir("", "/tmp/snapshot-binaries/criu-plugins")
+		if !strings.Contains(got, "libdir /tmp/snapshot-binaries/criu-plugins") {
+			t.Errorf("libdir not appended to empty config: %q", got)
 		}
 	})
 }

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Request Trace Utilities
 
 Utilities for working with Dynamo `dynamo.request.trace.v1` files emitted by
@@ -53,6 +58,8 @@ python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
   --num-workers 4 \
   --report-json /tmp/dynamo-request-trace.replay-report.json
 ```
+
+No format conversion or intermediate Mooncake file is required.
 
 Replay derives the trace block size from the request records and rejects mixed
 block sizes across shards. If you pass `--trace-block-size`, its value must

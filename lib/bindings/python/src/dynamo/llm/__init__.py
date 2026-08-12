@@ -13,9 +13,13 @@ from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
 from dynamo._core import FpmEventRelay as FpmEventRelay
 from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
+from dynamo._core import FrontendExtensionContext as FrontendExtensionContext
+from dynamo._core import FrontendResponse as FrontendResponse
+from dynamo._core import FrontendRoute as FrontendRoute
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService
+from dynamo._core import KvDcRelay as KvDcRelay
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import KvRouterConfig as KvRouterConfig
@@ -47,6 +51,7 @@ from dynamo._core import run_kv_indexer as run_kv_indexer
 from dynamo._core import run_select_service as run_select_service
 from dynamo._core import run_slot_tracker as run_slot_tracker
 from dynamo._core import unregister_model as unregister_model
+from dynamo._core import update_model_taints as update_model_taints
 
 try:
     from dynamo._core import SelectionService as SelectionService

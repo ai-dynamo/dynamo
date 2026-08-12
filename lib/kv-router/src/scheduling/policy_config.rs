@@ -9,8 +9,9 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
+use super::worker_selection_config::RawWorkerSelectionConfig;
+pub use super::worker_selection_config::{WorkerSelectionConfig, WorkerSelectionInstance};
 
-const DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC: f64 = 16.0;
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
 #[derive(Debug, Error)]
@@ -165,6 +166,7 @@ impl PolicyProfile {
 pub struct RouterPolicyConfig {
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
+    worker_selection: Option<WorkerSelectionConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -207,6 +209,16 @@ impl RouterPolicyConfig {
             .cloned()
             .unwrap_or_else(|| PolicyProfile::synthetic(fallback_threshold, fallback_policy))
     }
+
+    /// Returns the process-wide worker-selection policy configuration, if present.
+    pub fn worker_selection(&self) -> Option<&WorkerSelectionConfig> {
+        self.worker_selection.as_ref()
+    }
+
+    /// Whether this document configures queue policy profiles.
+    pub fn has_routing_profiles(&self) -> bool {
+        self.root.is_some() || !self.models.is_empty()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +232,8 @@ struct RawRouterPolicyConfig {
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
+    #[serde(default)]
+    worker_selection: Option<RawWorkerSelectionConfig>,
 }
 
 impl RawRouterPolicyConfig {
@@ -258,14 +272,22 @@ impl RawRouterPolicyConfig {
             models.insert(model_name, resolved);
         }
 
-        if root.is_none() && models.is_empty() {
+        let worker_selection = match self.worker_selection {
+            Some(config) => Some(config.resolve()?),
+            None => None,
+        };
+
+        if root.is_none() && models.is_empty() && worker_selection.is_none() {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define a root profile or at least one model profile"
-                    .to_string(),
+                "router policy config must define a root profile, at least one model profile, or worker_selection".to_string(),
             ));
         }
 
-        Ok(RouterPolicyConfig { root, models })
+        Ok(RouterPolicyConfig {
+            root,
+            models,
+            worker_selection,
+        })
     }
 }
 
@@ -483,20 +505,13 @@ fn resolve_policy_class(
             )));
         }
     };
-
-    let (prefill_busy_threshold, prefill_busy_threshold_frac) =
-        match (raw.prefill_busy_threshold, raw.prefill_busy_threshold_frac) {
-            (None, None) => (None, Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)),
-            thresholds => thresholds,
-        };
-
     Ok(ResolvedPolicyClass {
         config: PolicyClassConfig {
             name: raw.name,
             queue_policy: raw.queue_policy,
             quantum: raw.quantum,
-            prefill_busy_threshold,
-            prefill_busy_threshold_frac,
+            prefill_busy_threshold: raw.prefill_busy_threshold,
+            prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
             request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
             raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
             cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -561,7 +576,7 @@ fn resolve_uncached_isl_buckets(
     })
 }
 
-fn validate_identifier(
+pub(super) fn validate_identifier(
     name: &str,
     kind: &str,
     location: &str,
@@ -582,6 +597,72 @@ fn validate_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_selection_only_config_preserves_parameter_mapping() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  default: example
+  instances:
+    - name: example
+      type: example-policy
+      parameters:
+        score_weight: 1.0
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.default_instance(), Some("example"));
+        let instance = selection.instance("example").unwrap();
+        assert_eq!(instance.policy_type(), "example-policy");
+        assert!(matches!(
+            instance.parameters(),
+            serde_yaml::Value::Mapping(_)
+        ));
+        assert_eq!(
+            config
+                .resolve_profile(None, Some(2.0), RouterQueuePolicy::Wspt)
+                .default_class()
+                .queue_policy,
+            RouterQueuePolicy::Wspt
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_worker_selection_config() {
+        for yaml in [
+            r#"
+worker_selection: {}
+"#,
+            r#"
+worker_selection:
+  default: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  instances:
+    - name: default
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  instances:
+    - name: alpha
+      type: alpha
+      parameters: 1
+"#,
+        ] {
+            assert!(
+                RouterPolicyConfig::from_yaml(yaml).is_err(),
+                "unexpectedly accepted {yaml}"
+            );
+        }
+    }
 
     #[test]
     fn model_profile_replaces_root_and_unmatched_model_uses_root() {
@@ -616,6 +697,7 @@ models:
         policy_family: latency
         cache_bucket: uncached
         quantum: 4
+        prefill_busy_threshold_frac: 0.0
 "#,
         )
         .unwrap();
@@ -623,9 +705,12 @@ models:
         let exact = config.resolve_profile(Some("exact-model"), Some(3.0), RouterQueuePolicy::Wspt);
         assert_eq!(exact.classes().len(), 2);
         assert_eq!(exact.default_class().name, "model-cached");
-        assert_eq!(
-            exact.default_class().prefill_busy_threshold_frac,
-            Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)
+        assert_eq!(exact.default_class().prefill_busy_threshold_frac, None);
+        assert!(!exact.default_class().queueing_enabled());
+        assert!(
+            exact
+                .class(exact.resolve_class_index(None, usize::MAX))
+                .queueing_enabled()
         );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
         assert_eq!(
@@ -879,10 +964,7 @@ policy_classes:
             "custom_priority",
             "explicit classes intentionally bypass cache classification"
         );
-        assert_eq!(
-            root.default_class().prefill_busy_threshold_frac,
-            Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)
-        );
+        assert_eq!(root.default_class().prefill_busy_threshold_frac, Some(16.0));
 
         let model = config.resolve_profile(
             Some("example/large-model"),

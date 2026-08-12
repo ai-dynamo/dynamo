@@ -900,6 +900,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::result_large_err)]
     fn test_client_options_builder() {
         Jail::expect_with(|_jail| {
             let opts = ClientOptions::builder().build();

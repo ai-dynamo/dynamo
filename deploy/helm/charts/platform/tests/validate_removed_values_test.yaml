@@ -35,6 +35,30 @@ tests:
       - failedTemplate:
           errorPattern: "'kai-scheduler.enabled' has been removed"
 
+  # --- Scheduler integration conflicts ---
+
+  - it: should reject kai-scheduler enabled with volcano scheduler enabled
+    set:
+      global.kai-scheduler.enabled: true
+      global.volcano-scheduler.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "KAI-Scheduler and Volcano scheduler integrations are mutually exclusive"
+
+  - it: should reject kai-scheduler install with volcano scheduler enabled
+    set:
+      global.kai-scheduler.install: true
+      global.volcano-scheduler.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "KAI-Scheduler and Volcano scheduler integrations are mutually exclusive"
+
+  - it: should allow volcano scheduler enabled without kai-scheduler integration
+    set:
+      global.volcano-scheduler.enabled: true
+    asserts:
+      - notFailedTemplate: {}
+
   # --- Default values should render cleanly ---
 
   - it: should render successfully with default values

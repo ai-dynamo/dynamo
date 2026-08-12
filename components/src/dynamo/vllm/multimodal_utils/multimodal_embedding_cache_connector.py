@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -22,7 +23,27 @@ if TYPE_CHECKING:
 
 MINIMUM_VLLM_VERSION = "0.17.0"
 
-logger = logging.getLogger(__name__)
+# This connector runs inside vLLM's spawned EngineCore process, where Dynamo's
+# logging bridge is unavailable. Use a vLLM child logger so
+# VLLM_LOGGING_LEVEL controls these diagnostics.
+logger = logging.getLogger("vllm.dynamo.multimodal_embedding_cache_connector")
+EMBEDDING_CACHE_HIT_LOG = "Dynamo multimodal embedding cache hit: identifier=%r"
+
+
+def _get_device(vllm_config: "VllmConfig") -> str:
+    device_config = getattr(vllm_config, "device_config", None)
+    for field_name in ("device", "device_type"):
+        device = getattr(device_config, field_name, None)
+        if isinstance(device, torch.device):
+            device = device.type
+        if isinstance(device, str) and device in ("cuda", "xpu"):
+            return device
+
+    target_device = os.environ.get("VLLM_TARGET_DEVICE")
+    if target_device in ("cuda", "xpu"):
+        return target_device
+
+    return "cuda"
 
 
 @dataclass
@@ -32,6 +53,105 @@ class MultimodalEmbeddingCacheConnectorMetadata(ECConnectorMetadata):
     loads: list[str] = field(default_factory=list)
     saves: list[str] = field(default_factory=list)
     evicts: list[str] = field(default_factory=list)
+
+
+class _SchedulerCacheMetrics:
+    """Prometheus metrics for the scheduler-side logical CPU cache.
+
+    Emits the same EmbeddingCacheMetrics family as
+    register_embedding_cache_metrics (the worker-layer
+    MultimodalEmbeddingCacheManager used by encode-routing deployments), so
+    dashboards see one embedding-cache family regardless of which
+    implementation serves the model.
+
+    The scheduler-side connector runs in vLLM's EngineCore process, not the
+    process serving /metrics. Values reach the frontend through Dynamo's
+    multiprocess Prometheus setup: PROMETHEUS_MULTIPROC_DIR is set before the
+    engine starts (see setup_vllm_engine), so prometheus_client mmap-persists
+    values that setup_metrics_collection's MultiProcessCollector exposes. The
+    private CollectorRegistry keeps these metrics out of this process's global
+    REGISTRY so they are never exported twice when the engine core runs
+    in-process.
+
+    This filesystem transport only covers EngineCore processes that inherit
+    PROMETHEUS_MULTIPROC_DIR and share a filesystem with the metrics-serving
+    process — the default local-subprocess topology. Remote EngineCore actors
+    (Ray data-parallel placement) don't inherit the env var and write to their
+    own node's filesystem, so their cache metrics are never exported; covering
+    them would need EC-connector stats plumbed through EngineCoreOutputs, as
+    KV connectors do. The connector logs a warning for these topologies at
+    init instead of failing.
+    """
+
+    def __init__(
+        self, model_name: str, component_name: str, capacity_bytes: int, dp_rank: int
+    ) -> None:
+        # Deferred imports: prometheus_client must be imported after
+        # PROMETHEUS_MULTIPROC_DIR is set (inherited from the parent process).
+        from prometheus_client import CollectorRegistry, Counter, Gauge
+
+        from dynamo.common.utils.prometheus import EmbeddingCacheMetrics as ECM
+        from dynamo.prometheus_names import labels
+
+        self._capacity_bytes = capacity_bytes
+        self.registry = CollectorRegistry()
+        # dp_rank partitions series per data-parallel EngineCore (each rank has
+        # its own scheduler-side cache), so gauges never collide across ranks
+        # and "mostrecent" only arbitrates between a dead pre-restart pid and
+        # its live replacement within one rank. Same pattern as the kvstats
+        # gauges in LLMBackendMetrics.
+        labelnames = [labels.MODEL, labels.COMPONENT, labels.DP_RANK]
+        labelvalues = {
+            labels.MODEL: model_name,
+            labels.COMPONENT: component_name,
+            labels.DP_RANK: str(dp_rank),
+        }
+
+        def _counter(name: str, doc: str):
+            return Counter(name, doc, labelnames, registry=self.registry).labels(
+                **labelvalues
+            )
+
+        def _gauge(name: str, doc: str):
+            # "mostrecent" so MultiProcessCollector reports this process's
+            # latest snapshot instead of aggregating across dead pids.
+            return Gauge(
+                name,
+                doc,
+                labelnames,
+                registry=self.registry,
+                multiprocess_mode="mostrecent",
+            ).labels(**labelvalues)
+
+        self._hits = _counter(ECM.HITS_TOTAL, "Total embedding cache hits.")
+        self._misses = _counter(ECM.MISSES_TOTAL, "Total embedding cache misses.")
+        self._evictions = _counter(
+            ECM.EVICTIONS_TOTAL, "Total embedding cache evictions."
+        )
+        self._utilization = _gauge(
+            ECM.UTILIZATION, "Cache memory utilization ratio (0.0-1.0)."
+        )
+        self._current_bytes = _gauge(
+            ECM.CURRENT_BYTES, "Current cache memory usage in bytes."
+        )
+        self._entries = _gauge(ECM.ENTRIES, "Number of entries in the cache.")
+        self.update_usage(0, 0)
+
+    def record_hit(self) -> None:
+        self._hits.inc()
+
+    def record_miss(self) -> None:
+        self._misses.inc()
+
+    def record_evictions(self, count: int) -> None:
+        self._evictions.inc(count)
+
+    def update_usage(self, used_bytes: int, entries: int) -> None:
+        self._current_bytes.set(used_bytes)
+        self._entries.set(entries)
+        self._utilization.set(
+            used_bytes / self._capacity_bytes if self._capacity_bytes else 0.0
+        )
 
 
 class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
@@ -55,6 +175,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 _vllm_version,
             )
         super().__init__(vllm_config=vllm_config, role=role)
+        self._device = _get_device(vllm_config)
 
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is None:
@@ -88,6 +209,37 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._loads_this_step: set[str] = set()
         self._saves_this_step: set[str] = set()
         self._evicts_this_step: set[str] = set()
+
+        # Only the scheduler role does cache accounting, so only it emits
+        # metrics; worker-role instances would just publish idle zeros.
+        self._metrics: _SchedulerCacheMetrics | None = None
+        if role == ECConnectorRole.SCHEDULER:
+            extra_config = transfer_config.ec_connector_extra_config
+            self._metrics = _SchedulerCacheMetrics(
+                model_name=extra_config.get("model_name", ""),
+                component_name=extra_config.get("component", ""),
+                capacity_bytes=self._capacity_bytes,
+                dp_rank=getattr(vllm_config.parallel_config, "data_parallel_rank", 0),
+            )
+            # The mmap transport (see _SchedulerCacheMetrics) needs the env
+            # var inherited from the metrics-serving process; without it the
+            # values stay in this process's memory.
+            if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+                logger.warning(
+                    "Embedding cache metrics: PROMETHEUS_MULTIPROC_DIR is not "
+                    "set; cache metrics stay local to this process and will "
+                    "not be exported (expected under offline LLM() usage or "
+                    "remote Ray DP actors)."
+                )
+            if (
+                getattr(vllm_config.parallel_config, "data_parallel_backend", "")
+                == "ray"
+            ):
+                logger.warning(
+                    "Embedding cache metrics: data_parallel_backend=ray — "
+                    "remote DP ranks do not share the multiprocess Prometheus "
+                    "directory and will not contribute cache metrics."
+                )
 
         # --- Worker-side: dumb CPU tensor store ---
         self._cpu_store: dict[str, torch.Tensor] = {}
@@ -127,6 +279,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         """
         if identifier in self._cache_order:
             self._cache_order.move_to_end(identifier)
+            # The UUID-specific E2E assertion relies on this diagnostic.
+            logger.debug(EMBEDDING_CACHE_HIT_LOG, identifier)
             return True
         return False
 
@@ -148,13 +302,19 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         if mm_hash in self._cache_order:
             self._cache_order.move_to_end(mm_hash)
             self._loads_this_step.add(mm_hash)
+            if self._metrics is not None:
+                self._metrics.record_hit()
             return
+
+        if self._metrics is not None:
+            self._metrics.record_miss()
 
         if size_bytes > self._capacity_bytes:
             return
 
         self._saves_this_step.add(mm_hash)
 
+        num_evicted = 0
         while (
             self._num_used_bytes + size_bytes > self._capacity_bytes
             and self._cache_order
@@ -162,9 +322,15 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
             self._num_used_bytes -= evicted_bytes
             self._evicts_this_step.add(evicted_hash)
+            num_evicted += 1
 
         self._cache_order[mm_hash] = size_bytes
         self._num_used_bytes += size_bytes
+
+        if self._metrics is not None:
+            if num_evicted:
+                self._metrics.record_evictions(num_evicted)
+            self._metrics.update_usage(self._num_used_bytes, len(self._cache_order))
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -203,7 +369,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 continue
             if mm_hash in self._cpu_store:
                 encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
-                    "cuda", non_blocking=True
+                    self._device, non_blocking=True
                 )
             else:
                 logger.warning(

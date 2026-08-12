@@ -24,9 +24,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::source::EventSource;
-use crate::tracker::Tracker;
+use crate::tracker::{StoreInput, Tracker};
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
 use crate::zmq_util::{connect_sub_socket, multipart_message};
+use dynamo_kv_router::protocols::StorageTier;
+use dynamo_kv_router::zmq_wire::Locality;
 
 /// Spawn the ZMQ listener. Returns immediately with a [`JoinHandle`] for the task.
 pub async fn spawn(
@@ -89,6 +91,19 @@ pub async fn spawn(
 }
 
 fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventSource) {
+    // G1-only ingress: this source is the engine's local device (G1) cache.
+    // Non-local events (REMOTE / unknown locality), native lower-tier media
+    // (CPU offload, vLLM STORAGE), and unrecognized media (fail-closed) belong
+    // to other systems — KVBM offload arrives via its own source — so they must
+    // not be tracked as G1 here.
+    if matches!(event.locality(), Some(Locality::Remote | Locality::Unknown))
+        || event
+            .medium()
+            .is_some_and(|m| StorageTier::from_kv_medium(m) != Some(StorageTier::Device))
+    {
+        return;
+    }
+
     match event {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -96,6 +111,7 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             is_eagle,
             block_mm_infos,
             ..
@@ -149,17 +165,21 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             }
 
             let mut current_parent = parent_block_hash.map(|h| h.into_u64().to_string());
+            let cache_namespace = cache_namespace
+                .filter(|namespace| !namespace.is_empty())
+                .map(Arc::<str>::from);
 
             for (i, block_hash) in block_hashes.into_iter().enumerate() {
                 let hash_str = block_hash.into_u64().to_string();
-                tracker.handle_store(
+                tracker.handle_store_input(StoreInput::new(
                     engine_source,
                     hash_str.clone(),
                     current_parent.clone(),
                     token_chunks[i].clone(),
                     block_size,
                     lora_name.clone(),
-                );
+                    cache_namespace.clone(),
+                ));
                 current_parent = Some(hash_str);
             }
         }
@@ -175,5 +195,72 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
         }
 
         RawKvEvent::Ignored => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tracker::ConsolidatedEvent;
+    use crate::wire::vllm_in::BlockHashValue;
+
+    fn stored_event(medium: Option<&str>, locality: Option<Locality>) -> RawKvEvent {
+        RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(1)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            medium: medium.map(str::to_owned),
+            lora_name: None,
+            cache_namespace: None,
+            block_mm_infos: None,
+            is_eagle: Some(false),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality,
+        }
+    }
+
+    /// G1-only ingress contract: only local device (G1) events reach the
+    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload), unrecognized
+    /// media (FS), and non-local (REMOTE / unknown locality) events are dropped.
+    #[test]
+    fn process_event_tracks_only_g1_device_events() {
+        let mut tracker = Tracker::new(None);
+
+        process_event(
+            &mut tracker,
+            stored_event(Some("STORAGE"), None),
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("CPU"), None),
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("FS"), None),
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("GPU"), Some(Locality::Remote)),
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(None, Some(Locality::Unknown)),
+            EventSource::Vllm,
+        );
+        assert_eq!(tracker.num_blocks(), 0);
+
+        process_event(&mut tracker, stored_event(None, None), EventSource::Vllm);
+        assert_eq!(tracker.num_blocks(), 1);
+        assert!(matches!(
+            tracker.drain_events().as_slice(),
+            [ConsolidatedEvent::Store { .. }]
+        ));
     }
 }

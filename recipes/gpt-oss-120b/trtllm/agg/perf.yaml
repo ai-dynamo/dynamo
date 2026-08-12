@@ -28,8 +28,10 @@ spec:
         - /bin/sh
         - -c
         - |
-          apt-get update && apt-get install -y curl jq procps git && apt-get clean
-          pip install git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75;
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
+          pip install "aiperf==0.10.0";
           echo "aiperf installation completed";
           sysctl -w net.ipv4.ip_local_port_range="1024 65000"
           cat /proc/sys/net/ipv4/ip_local_port_range

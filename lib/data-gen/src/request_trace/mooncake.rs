@@ -6,7 +6,9 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::load::RequestEntry;
 
-/// Emits each request as an independent Mooncake row in replay order.
+/// Streams each request through a Mooncake-compatible row into the replay builder.
+///
+/// This is an in-memory compatibility layer; it does not write a Mooncake trace.
 pub fn lower_mooncake_rows<F>(mut requests: Vec<RequestEntry>, mut emit: F) -> Result<usize>
 where
     F: FnMut(usize, MooncakeRow) -> Result<()>,
@@ -86,7 +88,7 @@ mod tests {
                 output_tokens: Some(5),
                 request_received_ms: Some(start_ms as u64),
                 total_time_ms: Some((end_ms - start_ms) as f64),
-                replay: None,
+                ..Default::default()
             },
             replay: RequestTraceReplayMetrics {
                 trace_block_size: 2,

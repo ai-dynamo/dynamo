@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::core::ReplayWorkerCore;
+use super::components::ReplayWorkerCore;
+use super::evidence::{WorkerPool, attach_pressure_references, with_engine_evidence_context};
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::{ReplayTerminalStatus, TraceCollector};
-use anyhow::bail;
+use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
+use anyhow::{Context, bail};
 use std::collections::VecDeque;
 use uuid::Uuid;
 
@@ -114,25 +115,24 @@ impl SingleRuntime {
     fn enqueue_trace_arrivals(&mut self) {
         let mut ready_requests = Vec::new();
         match &mut self.admission {
-            AdmissionSource::Requests(pending) => loop {
-                let Some(next_arrival_ms) = pending
+            AdmissionSource::Requests(pending) => {
+                while let Some(next_arrival_ms) = pending
                     .front()
                     .and_then(|request| request.arrival_timestamp_ms)
-                else {
-                    break;
-                };
-                if next_arrival_ms > self.current_time_ms {
-                    break;
-                }
+                {
+                    if next_arrival_ms > self.current_time_ms {
+                        break;
+                    }
 
-                let request = pending
-                    .pop_front()
-                    .expect("front request must exist when arrival is available");
-                let arrival_ms = request
-                    .arrival_timestamp_ms
-                    .expect("trace replay requests must have an arrival timestamp");
-                ready_requests.push((request, arrival_ms));
-            },
+                    let request = pending
+                        .pop_front()
+                        .expect("front request must exist when arrival is available");
+                    let arrival_ms = request
+                        .arrival_timestamp_ms
+                        .expect("trace replay requests must have an arrival timestamp");
+                    ready_requests.push((request, arrival_ms));
+                }
+            }
             AdmissionSource::Workload(driver) => {
                 ready_requests.extend(
                     driver
@@ -179,10 +179,13 @@ impl SingleRuntime {
 
     fn record_arrival(&mut self, request: DirectRequest, arrival_ms: f64) -> Uuid {
         let input_length = request.tokens.len();
-        let output_length = request.max_output_tokens;
+        let output_length = request.effective_max_output_tokens();
         let uuid = self.worker.receive(request);
         self.collector
             .on_arrival(uuid, arrival_ms, input_length, output_length);
+        self.collector.on_decode_assigned(uuid, 0);
+        self.collector
+            .on_route_immediate(uuid, ReplayRequestPool::Agg, 0, 0, 0, 0);
         uuid
     }
 
@@ -211,9 +214,20 @@ impl SingleRuntime {
     fn drive_worker(&mut self, admit_arrivals_between_steps: bool) -> anyhow::Result<()> {
         let pass_start_ms = self.current_time_ms;
         let requests_before = self.worker.num_requests();
-        let pass = self
-            .worker
-            .execute_pass(&mut self.collector, self.current_time_ms);
+        let pass =
+            with_engine_evidence_context(self.current_time_ms, WorkerPool::Agg, 0, 0, || {
+                self.worker
+                    .execute_pass(&mut self.collector, self.current_time_ms)
+            })?;
+        attach_pressure_references(&mut self.collector);
+        for admission in &pass.admissions {
+            self.collector.on_pool_admission(
+                admission.uuid,
+                ReplayRequestPool::Agg,
+                self.current_time_ms,
+                admission.reused_input_tokens,
+            );
+        }
         self.current_time_ms = pass.end_ms;
         let made_progress = self.current_time_ms > pass_start_ms
             || self.worker.num_requests() < requests_before
@@ -222,10 +236,27 @@ impl SingleRuntime {
             || !pass.output_signals.is_empty()
             || !pass.kv_events.is_empty();
         if let AdmissionSource::Workload(driver) = &mut self.admission {
-            for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
-                driver
-                    .on_complete(signal.uuid, self.current_time_ms)
-                    .expect("completed workload request must belong to a session");
+            for signal in &pass.output_signals {
+                if let Some(token_id) = signal.token_id {
+                    driver
+                        .on_output_token(signal.uuid, token_id)
+                        .with_context(|| {
+                            format!(
+                                "failed to record output token for workload request {}",
+                                signal.uuid
+                            )
+                        })?;
+                }
+                if signal.completed {
+                    driver
+                        .on_terminal(signal.uuid, self.current_time_ms, signal.rejected)
+                        .with_context(|| {
+                            format!(
+                                "failed to process terminal signal for workload request {}",
+                                signal.uuid
+                            )
+                        })?;
+                }
             }
         }
         let completed_requests = pass
@@ -239,7 +270,8 @@ impl SingleRuntime {
             } else {
                 ReplayTerminalStatus::Completed
             };
-            self.collector.on_terminal(signal.uuid, status);
+            self.collector
+                .on_terminal(signal.uuid, self.current_time_ms, status);
         }
         for _ in 0..completed_requests {
             self.progress.inc_completed();
@@ -314,7 +346,8 @@ mod tests {
     use super::*;
     use crate::common::protocols::EngineType;
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
-    use crate::replay::{TraceRequestStatsSnapshot, TraceSimulationReport};
+    use crate::replay::{ReplayTerminalStatus, TraceRequestStatsSnapshot, TraceSimulationReport};
+    use crate::scheduler::EnginePassResult;
     use rstest::rstest;
     use std::collections::{HashMap, VecDeque};
     use uuid::Uuid;
@@ -333,19 +366,27 @@ mod tests {
         snapshots: HashMap<Uuid, TraceRequestStatsSnapshot>,
     }
 
+    fn record_manual_terminals(collector: &mut TraceCollector, pass: &EnginePassResult) {
+        for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+            let status = if signal.rejected {
+                ReplayTerminalStatus::Rejected
+            } else {
+                ReplayTerminalStatus::Completed
+            };
+            collector.on_terminal(signal.uuid, pass.end_ms, status);
+        }
+    }
+
     fn enqueue_trace_arrivals_manual(
         pending: &mut VecDeque<DirectRequest>,
         worker: &mut ReplayWorkerCore,
         collector: &mut TraceCollector,
         current_time_ms: f64,
     ) {
-        loop {
-            let Some(next_arrival_ms) = pending
-                .front()
-                .and_then(|request| request.arrival_timestamp_ms)
-            else {
-                break;
-            };
+        while let Some(next_arrival_ms) = pending
+            .front()
+            .and_then(|request| request.arrival_timestamp_ms)
+        {
             if next_arrival_ms > current_time_ms {
                 break;
             }
@@ -357,7 +398,7 @@ mod tests {
                 .arrival_timestamp_ms
                 .expect("trace replay requests must have an arrival timestamp");
             let input_length = request.tokens.len();
-            let output_length = request.max_output_tokens;
+            let output_length = request.effective_max_output_tokens();
             let uuid = worker.receive(request);
             collector.on_arrival(uuid, arrival_ms, input_length, output_length);
         }
@@ -377,7 +418,7 @@ mod tests {
 
             request.arrival_timestamp_ms = Some(current_time_ms);
             let input_length = request.tokens.len();
-            let output_length = request.max_output_tokens;
+            let output_length = request.effective_max_output_tokens();
             let uuid = worker.receive(request);
             collector.on_arrival(uuid, current_time_ms, input_length, output_length);
         }
@@ -401,6 +442,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
@@ -409,6 +451,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(101.0),
@@ -417,6 +460,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
@@ -516,7 +560,10 @@ mod tests {
                 continue;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
+            record_manual_terminals(&mut collector, &pass);
             if first_decode_end_ms == 0.0 && !pass.output_signals.is_empty() {
                 first_decode_end_ms = pass.end_ms;
             }
@@ -569,7 +616,10 @@ mod tests {
                 break;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
+            record_manual_terminals(&mut collector, &pass);
             current_time_ms = pass.end_ms;
         }
 
@@ -859,6 +909,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(900.0),
@@ -867,6 +918,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 2, 3, 4, 5, 9, 10, 11],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(1000.0),
@@ -875,6 +927,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![12, 13, 14, 15, 16, 17, 18, 19],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
@@ -984,10 +1037,52 @@ mod tests {
         assert_eq!(report.request_counts.total_output_tokens, 4);
     }
 
+    #[test]
+    fn max_model_len_reports_actual_output_and_preserves_requested_output() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let uuid = Uuid::from_u128(3);
+        let report = simulate_concurrency_single(
+            args,
+            vec![DirectRequest {
+                tokens: vec![1; 7],
+                max_output_tokens: 4,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            }],
+            1,
+            true,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.request_counts.total_output_tokens, 1);
+        assert_eq!(report.per_request.len(), 1);
+        let record = &report.per_request[0];
+        assert_eq!(record.uuid, uuid.to_string());
+        assert_eq!(record.requested_output_length, 4);
+        assert_eq!(record.output_length, 1);
+        assert_eq!(record.terminal_status, ReplayTerminalStatus::Completed);
+    }
+
     fn cap_request(uuid: u128, arrival_ms: f64) -> DirectRequest {
         DirectRequest {
             tokens: vec![1; 4],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(arrival_ms),

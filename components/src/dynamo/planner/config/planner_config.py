@@ -72,12 +72,13 @@ class PlannerPreDeploymentSweepMode(str, Enum):
 
 
 class AICPerfModelSpec(BaseModel):
-    """Native AIC model identity used by the Rust engine perf shim.
+    """Native AIC model identity used by Planner performance modeling.
 
     Unlike ``AICInterpolationSpec``, this does not describe an AIC sweep.
     It is the forward-pass model/backend/parallelism identity used for
-    real-time shim queries. Unsupported native AIC configs are allowed: the
-    shim falls back to FPM regression and can still tune from observations.
+    real-time queries through the aiconfigurator-core wheel. Unsupported
+    native AIC configs are allowed: the AIC model falls back to FPM regression
+    and can still tune from observations.
     """
 
     hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
@@ -375,7 +376,7 @@ class PlannerConfig(BaseModel):
             "depth and KV cache utilization — no SLA targets or profiling needed. "
             "'load' uses user-defined prefill queue token and decode KV "
             "utilization thresholds. "
-            "'sla' uses the Rust engine perf model to target specific "
+            "'sla' uses the AIC core performance model to target specific "
             "ttft_ms/itl_ms values."
         ),
     )
@@ -424,10 +425,10 @@ class PlannerConfig(BaseModel):
     aic_perf_model: Optional[AICPerfModelSpec] = Field(
         default=None,
         description=(
-            "Native AIC forward-pass perf model identity for the Rust engine "
-            "perf shim. This enables real-time AIC estimates plus online "
+            "Native AIC forward-pass perf model identity for the Planner "
+            "engine-query layer. This enables real-time AIC estimates plus online "
             "correction; unsupported native configs automatically fall back to "
-            "FPM regression in the shim. This field does not trigger AIC "
+            "FPM regression in the AIC core wheel. This field does not trigger AIC "
             "interpolation sweeps."
         ),
     )
@@ -514,7 +515,8 @@ class PlannerConfig(BaseModel):
         validate_default=True,
         description=(
             "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
-            "No-op unless ssl_verify is enabled."
+            "Setting this field enables TLS verification against the given bundle, "
+            "regardless of ssl_verify."
         ),
     )
 
@@ -613,6 +615,42 @@ class PlannerConfig(BaseModel):
     # Advisory mode: compute and log decisions without executing scaling
     advisory: bool = SLAPlannerDefaults.advisory
 
+    # --- Power-aware budget (read-only caps; DGD-owned) ---
+    #
+    # Per-GPU caps are NOT configured here. They are authored on each worker
+    # component's ``podTemplate.metadata.annotations``
+    # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
+    # and enforced by the Power Agent. The planner reads those caps from the DGD
+    # and combines them with ``total_gpu_power_limit`` to project and clamp a
+    # power budget. It never writes per-GPU caps. These inputs are
+    # process-static; changing the total budget requires a Planner restart.
+    enable_power_awareness: bool = Field(
+        default=False,
+        description=(
+            "Enable power-aware budget projection and budget-gated replica "
+            "scaling. Per-GPU caps are read from DGD worker podTemplate "
+            "annotations; this planner combines them with total_gpu_power_limit "
+            "to publish power-budget gauges and clamp scale-up. Requires "
+            "total_gpu_power_limit, environment='kubernetes', and "
+            "mode in ('disagg', 'prefill', 'decode'). Not supported for "
+            "mode='agg'."
+        ),
+    )
+    total_gpu_power_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total GPU power budget in watts for this DGD. Required when "
+            "enable_power_awareness=True; changing it requires a Planner "
+            "restart. Recommended formula: "
+            "(rack_capacity_W × headroom_factor) − non_gpu_overhead with "
+            "headroom_factor ≈ 0.85–0.9. Used for the power-budget gauges and "
+            "as the projected ceiling the final budget clamp holds scaling to — "
+            "a bound on projected draw from the requested caps, not a proven "
+            "hardware limit (see the Power Agent for effective enforcement)."
+        ),
+    )
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
         default=24.0,
@@ -644,15 +682,16 @@ class PlannerConfig(BaseModel):
         default=8080,
         description=(
             "Port for the live diagnostics dashboard HTTP server. "
-            "Set to 0 to disable. When enabled, visit http://host:port/ "
-            "to view a real-time Plotly report of accumulated snapshots."
+            "Set to 0 to disable. When enabled, visit "
+            "http://<host>:<port>/ to view a real-time Plotly report of "
+            "accumulated snapshots."
         ),
     )
 
     scheduling: SchedulingConfig = Field(
         default_factory=SchedulingConfig,
         description=(
-            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` " "docstring."
+            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` docstring."
         ),
     )
 
@@ -751,6 +790,33 @@ class PlannerConfig(BaseModel):
                 f"got {self.fpm_sample_bucket_size}"
             )
 
+        # Power-awareness validation. Per-GPU caps come from DGD worker
+        # podTemplate annotations, not this config, so the only required knob
+        # is the total budget — and a Kubernetes connector to read the DGD.
+        if self.enable_power_awareness:
+            if self.total_gpu_power_limit is None:
+                raise ValueError(
+                    "total_gpu_power_limit is required when enable_power_awareness=True. "
+                    "Recommended: (rack_capacity_W × headroom_factor) − non_gpu_overhead "
+                    "with headroom_factor ≈ 0.85–0.9. Setting this incorrectly "
+                    "could silently cap your cluster — there is no safe default."
+                )
+            if self.environment != "kubernetes":
+                raise ValueError(
+                    "enable_power_awareness=True requires environment='kubernetes'. "
+                    "Per-GPU caps are read from DGD worker podTemplate annotations, "
+                    "which only the Kubernetes connector resolves; virtual/replay and "
+                    "global-planner modes have no DGD with authoritative caps."
+                )
+            if self.mode == "agg":
+                raise ValueError(
+                    "enable_power_awareness=True is not supported with mode='agg'. "
+                    "The Kubernetes deployment-validation and GPU-count paths use the "
+                    "typed decode role resolver, which does not follow the generic "
+                    "type:worker fallback used by the power parser. Power awareness "
+                    "is supported for mode='disagg', 'prefill', and 'decode'."
+                )
+
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(
                 "global_planner_namespace is required when environment='global-planner'. "
@@ -826,7 +892,7 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode is 'none' or unset while "
-                    "throughput scaling is enabled; the Rust engine perf model "
+                    "throughput scaling is enabled; the AIC core performance model "
                     "will start from native AIC estimates when available or "
                     "from live FPM regression after enough observations."
                 )

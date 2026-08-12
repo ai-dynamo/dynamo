@@ -330,10 +330,25 @@ def subtract_baseline(
     """
     if not baseline_keys:
         return components
+
+    # Some SBOM producers normalize Python names as hyphenated PEP 503 names
+    # (e.g. vllm-test-utils) while dist-info METADATA can surface underscores
+    # (e.g. vllm_test_utils). Keep exact matching as primary behavior, and add
+    # a normalized fallback for separator-only differences.
+    def _norm_name(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    normalized_baseline_keys = {
+        (_norm_name(name), version) for (name, version) in baseline_keys
+    }
+
     kept: list[Component] = []
     dropped = 0
     for c in components:
-        if (c.name, c.version) in baseline_keys:
+        if (c.name, c.version) in baseline_keys or (
+            _norm_name(c.name),
+            c.version,
+        ) in normalized_baseline_keys:
             dropped += 1
             continue
         kept.append(c)

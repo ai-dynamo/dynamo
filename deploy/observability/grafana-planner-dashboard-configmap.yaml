@@ -470,6 +470,74 @@ data:
                     "value": "ITL (ms)"
                   }
                 ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "SLA TTFT"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF6B6B",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "left"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "TTFT (ms)"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [10, 10],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "SLA ITL"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#4ECDC4",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "ITL (ms)"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [10, 10],
+                      "fill": "dash"
+                    }
+                  }
+                ]
               }
             ]
           },
@@ -508,6 +576,20 @@ data:
               "legendFormat": "ITL",
               "range": true,
               "refId": "B"
+            },
+            {
+              "editorMode": "code",
+              "expr": "dynamo_planner_sla_target_ttft_ms{namespace=~\"$namespace\"}",
+              "legendFormat": "SLA TTFT",
+              "range": true,
+              "refId": "C"
+            },
+            {
+              "editorMode": "code",
+              "expr": "dynamo_planner_sla_target_itl_ms{namespace=~\"$namespace\"}",
+              "legendFormat": "SLA ITL",
+              "range": true,
+              "refId": "D"
             }
           ],
           "title": "Observed Latency (TTFT & ITL)",

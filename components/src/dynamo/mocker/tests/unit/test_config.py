@@ -35,19 +35,21 @@ def make_args(**overrides):
         "engine_type": "vllm",
         "num_gpu_blocks": None,
         "block_size": None,
+        "max_model_len": None,
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
+        "g1_backend": None,
         "enable_chunked_prefill": True,
         "preemption_mode": "lifo",
         "speedup_ratio": 1.0,
         "decode_speedup_ratio": 1.0,
         "dp_size": 1,
         "startup_time": None,
-        "durable_kv_events": False,
         "kv_transfer_bandwidth": 64.0,
         "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
+        "response_replay_trace_path": None,
         "sglang_schedule_policy": None,
         "sglang_page_size": None,
         "sglang_max_prefill_tokens": None,
@@ -89,6 +91,7 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.total_kv_blocks == 16384
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
+    assert runtime_config.runtime_data["output_replay_consumer"] == "true"
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
@@ -130,6 +133,80 @@ def test_build_mocker_engine_args_trtllm_accepts_guaranteed_no_evict():
     )
 
     assert engine_args.block_size == 32
+
+
+def test_build_mocker_engine_args_trtllm_accepts_native_g1():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(engine_type="trtllm", g1_backend="native")
+    )
+
+    assert engine_args.g1_backend == "native"
+    assert engine_args.block_size == 32
+
+
+def test_mocker_defaults_to_native_g1_across_python_entrypoints():
+    cli_args = parse_args([])
+    assert cli_args.g1_backend is None
+    assert CONFIG.build_mocker_engine_args(cli_args).g1_backend == "native"
+    assert MockEngineArgs().g1_backend == "native"
+    assert MockEngineArgs.from_json("{}").g1_backend == "native"
+
+
+@pytest.mark.parametrize(
+    "offload",
+    [
+        {"num_g2_blocks": 8},
+        {"num_g2_blocks": 8, "num_g3_blocks": 16},
+        {"num_g2_blocks": 8, "enable_g4_storage": True},
+    ],
+)
+def test_mocker_offload_automatically_selects_kvbm_g1(offload):
+    engine_args = MockEngineArgs(**offload)
+
+    assert engine_args.g1_backend == "kvbm"
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_mocker_explicit_native_with_offload_is_rejected(engine_type):
+    with pytest.raises(Exception, match="omit g1_backend"):
+        MockEngineArgs(
+            engine_type=engine_type,
+            g1_backend="native",
+            num_g2_blocks=8,
+        )
+
+
+def test_mocker_explicit_native_accepts_disabled_offload():
+    engine_args = MockEngineArgs(
+        g1_backend="native",
+        num_g2_blocks=0,
+        num_g3_blocks=0,
+    )
+
+    assert engine_args.g1_backend == "native"
+
+
+@pytest.mark.parametrize("engine_type", ["VLLM", "TRTLLM"])
+def test_mocker_uppercase_json_offload_selects_kvbm_g1(engine_type):
+    engine_args = MockEngineArgs.from_json(
+        json.dumps({"engine_type": engine_type, "num_g2_blocks": 8})
+    )
+
+    assert engine_args.g1_backend == "kvbm"
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_build_mocker_engine_args_accepts_native_g1_with_mtp(engine_type):
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type=engine_type,
+            g1_backend="native",
+            aic_nextn=1,
+        )
+    )
+
+    assert engine_args.g1_backend == "native"
+    assert engine_args.aic_nextn == 1
 
 
 def test_build_mocker_engine_args_trtllm_rejects_unsupported_policy():
@@ -222,9 +299,7 @@ def test_g4_args_allow_kv_bytes_per_token_worker_override():
 
 
 def test_runtime_config_disables_local_indexer_for_decode_worker():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(is_decode_worker=True, durable_kv_events=False)
-    )
+    engine_args = CONFIG.build_mocker_engine_args(make_args(is_decode_worker=True))
 
     _, runtime_config = CONFIG.build_runtime_config(engine_args)
 
@@ -271,10 +346,10 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         planner_profile_data=planner_profile_data,
         is_prefill_worker=True,
         is_decode_worker=False,
-        durable_kv_events=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
         kv_transfer_timing_mode="destination_missing",
+        response_replay_trace_path=None,
         num_g2_blocks=8192,
         num_g3_blocks=16384,
         offload_batch_size=32,
@@ -394,6 +469,156 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.aic_mtp_seed == 99
 
 
+def test_mocker_cli_accepts_native_g1_for_trtllm():
+    args = parse_args(["--engine-type", "trtllm", "--g1-backend", "native"])
+
+    assert args.engine_type == "trtllm"
+    assert args.g1_backend == "native"
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_mocker_cli_rejects_explicit_native_g1_with_offload(engine_type, capsys):
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--engine-type",
+                engine_type,
+                "--g1-backend",
+                "native",
+                "--num-g2-blocks",
+                "8",
+            ]
+        )
+
+    assert "omit --g1-backend" in capsys.readouterr().err
+
+
+def test_mocker_cli_ignores_explicit_g1_backend_for_sglang():
+    args = parse_args(
+        [
+            "--engine-type",
+            "sglang",
+            "--g1-backend",
+            "native",
+        ]
+    )
+
+    assert args.g1_backend == "native"
+
+
+def test_mocker_cli_accepts_max_model_len():
+    args = parse_args(["--max-model-len", "32768"])
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+    _, runtime_config = CONFIG.build_runtime_config(engine_args)
+
+    assert engine_args.max_model_len == 32768
+    assert runtime_config.context_length == 32768
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_mocker_cli_rejects_non_positive_max_model_len(value):
+    with pytest.raises(SystemExit):
+        parse_args(["--max-model-len", value])
+
+
+def test_build_mocker_engine_args_keeps_max_model_len_explicit_only():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(model_path="/models/mock", num_gpu_blocks=4096)
+    )
+
+    assert engine_args.max_model_len is None
+
+
+def test_build_mocker_engine_args_preserves_explicit_max_model_len():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            model_path="/models/mock",
+            max_model_len=32768,
+            num_gpu_blocks=4096,
+        )
+    )
+
+    assert engine_args.max_model_len == 32768
+
+
+def test_replay_engine_args_keeps_max_model_len_explicit_only():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.max_model_len is None
+
+
+def test_replay_engine_args_preserves_explicit_max_model_len():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "max_model_len": 32768,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.max_model_len == 32768
+
+
+def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "aic_attention_dp_size": 4,
+            }
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 4096
+    assert engine_args.dp_size == 4
+
+
+def test_replay_rejects_mismatched_dp_topology():
+    import dynamo.replay.main as replay_main
+
+    with pytest.raises(ValueError, match="dp_size must match"):
+        replay_main._load_engine_args(
+            json.dumps(
+                {
+                    "num_gpu_blocks": 4096,
+                    "dp_size": 2,
+                    "aic_attention_dp_size": 4,
+                }
+            )
+        )
+
+
+def test_replay_rejects_dp_topology_without_aic_attention_dp():
+    import dynamo.replay.main as replay_main
+
+    with pytest.raises(ValueError, match="dp_size must match"):
+        replay_main._load_engine_args(
+            json.dumps(
+                {
+                    "num_gpu_blocks": 4096,
+                    "dp_size": 2,
+                    "aic_backend": "vllm",
+                }
+            )
+        )
+
+
 def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):
     import dynamo.replay.main as replay_main
 
@@ -464,6 +689,27 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "int8") == 1
     assert get_kv_cache_dtype_bytes(cfg, "fp8") == 1
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
+
+
+def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
+    """Use the language-model config when Transformers exposes a multimodal wrapper."""
+    from dynamo.mocker.utils import kv_cache
+
+    text_config = SimpleNamespace(
+        num_hidden_layers=2,
+        num_key_value_heads=4,
+        num_attention_heads=8,
+        hidden_size=64,
+        dtype="bfloat16",
+    )
+    config = SimpleNamespace(get_text_config=lambda: text_config)
+    monkeypatch.setattr(
+        kv_cache.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: config,
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token("model") == 256
 
 
 def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
@@ -537,6 +783,18 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             "attention_dp_size": None,
         }
     ]
+
+
+def test_build_mocker_engine_args_propagates_aic_estimator_error(monkeypatch):
+    def invalid_capacity(**_kwargs):
+        raise ValueError("invalid capacity request")
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", invalid_capacity)
+
+    with pytest.raises(ValueError, match="invalid capacity request"):
+        CONFIG.build_mocker_engine_args(
+            make_args(aic_perf_model=True, model_path="/models/mock")
+        )
 
 
 def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):

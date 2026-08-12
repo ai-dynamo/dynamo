@@ -146,6 +146,59 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 	}
 }
 
+func TestDockerSecretIndexer_RefreshIndexSkipsMalformedSecrets(t *testing.T) {
+	mockSecrets := []corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "good-secret",
+				Namespace: "default",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				".dockerconfigjson": []byte(`{"auths":{"docker.io":{}}}`),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "bad-secret",
+				Namespace: "default",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				".dockerconfigjson": []byte(`not-json`),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "invalid-registry-secret",
+				Namespace: "default",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				".dockerconfigjson": []byte(`{"auths":{"pip install torch --index-url https:":{}}}`),
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(&mockSecrets[0], &mockSecrets[1], &mockSecrets[2]).
+		Build()
+
+	i := NewDockerSecretIndexer(fakeClient, "")
+	if err := i.RefreshIndex(t.Context()); err == nil {
+		t.Fatal("DockerSecretIndexer.RefreshIndex() error = nil, want errors for malformed secrets")
+	}
+
+	secrets, err := i.GetSecrets("default", "docker.io")
+	if err != nil {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() error = %v", err)
+	}
+	if got, want := secrets, []string{"good-secret"}; !slices.Equal(got, want) {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() = %v, want %v", got, want)
+	}
+}
+
 func TestDockerSecretIndexer_RefreshIndexRespectsNamespaceScope(t *testing.T) {
 	mockSecrets := []corev1.Secret{
 		{

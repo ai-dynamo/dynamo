@@ -42,22 +42,45 @@ pub trait LoraAllocator: Send + Sync {
         self.compute_replica_set(lora_name, workers, replica_factor)
     }
 
+    /// Stability-preserving slot-aware variant: like [`compute_replica_set_with_slots`],
+    /// but retains workers from `prior` (the LoRA's current placement) when they are still
+    /// present and not at capacity, before filling remaining slots from the ranked list.
+    ///
+    /// This keeps per-worker capacity safety (the caller charges residual usage across
+    /// LoRAs within a tick) without letting transient sibling activity move a LoRA whose
+    /// own inputs are unchanged — preserving the HRW churn-minimization guarantee.
+    ///
+    /// Default implementation ignores `prior` and delegates to the non-sticky variant.
+    fn compute_replica_set_with_slots_sticky(
+        &self,
+        lora_name: &str,
+        workers: &[WorkerWithDpRank],
+        replica_factor: usize,
+        worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
+        _prior: &[WorkerWithDpRank],
+    ) -> Vec<WorkerWithDpRank> {
+        self.compute_replica_set_with_slots(lora_name, workers, replica_factor, worker_slot_usage)
+    }
+
     /// Name of this algorithm (for logging/metrics)
     fn name(&self) -> &str;
 }
 
 /// Per-LoRA allocation algorithm selectable via `DYN_LORA_ALLOCATION_ALGORITHM`.
 ///
-/// `MinCostFlow` is intentionally absent: `McfPlacementSolver` operates as a
-/// standalone global solver and has no `LoraAllocator` adapter yet. Accepting
-/// the config string while silently running HRW was misleading; it will be
-/// re-added here once the integration is complete.
+/// `MinCostFlow` selects the global `McfPlacementSolver` churn-aware placement
+/// path, which is driven by `LoraController` (see `controller.rs`). The per-LoRA
+/// `LoraAllocator` returned by [`create_lora_allocator`] for this variant is only
+/// used as a cold-start / fallback allocator; the actual global solve happens in
+/// the controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationAlgorithmType {
     /// Rendezvous (Highest Random Weight) hashing
     Hrw,
     /// Random selection (for testing)
     Random,
+    /// Min-Cost Flow global placement (churn-aware bipartite assignment)
+    MinCostFlow,
 }
 
 impl FromStr for AllocationAlgorithmType {
@@ -67,11 +90,7 @@ impl FromStr for AllocationAlgorithmType {
         match s.to_lowercase().as_str() {
             "hrw" => Ok(Self::Hrw),
             "random" => Ok(Self::Random),
-            "mcf" | "min_cost_flow" | "mincostflow" => Err(
-                "MCF placement is not yet available as a per-LoRA allocator config value; \
-                 use McfPlacementSolver directly for global MCF placement"
-                    .to_string(),
-            ),
+            "mcf" | "min_cost_flow" | "mincostflow" => Ok(Self::MinCostFlow),
             _ => Err(format!("Unknown allocation algorithm type: {s}")),
         }
     }
@@ -82,6 +101,9 @@ pub fn create_lora_allocator(algo_type: AllocationAlgorithmType) -> Box<dyn Lora
     match algo_type {
         AllocationAlgorithmType::Hrw => Box::new(RendezvousHasher),
         AllocationAlgorithmType::Random => Box::new(RandomAllocation),
+        // MCF uses its own global solver (McfPlacementSolver) in the controller;
+        // the per-LoRA allocator here is only a cold-start / fallback path.
+        AllocationAlgorithmType::MinCostFlow => Box::new(RendezvousHasher),
     }
 }
 
@@ -118,16 +140,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mcf_config_string_is_rejected() {
+    fn test_mcf_config_string_parses_to_min_cost_flow() {
+        // PR4 wires MCF into the controller (McfPlacementSolver), so the config
+        // string is now accepted and maps to the MinCostFlow variant.
         for s in &["mcf", "MCF", "min_cost_flow", "mincostflow"] {
             let result = AllocationAlgorithmType::from_str(s);
-            assert!(
-                result.is_err(),
-                "'{s}' should be rejected until MCF is wired into the allocator path"
-            );
-            assert!(
-                result.unwrap_err().contains("not yet available"),
-                "error message should explain why mcf is rejected"
+            assert_eq!(
+                result,
+                Ok(AllocationAlgorithmType::MinCostFlow),
+                "'{s}' should parse to MinCostFlow"
             );
         }
     }

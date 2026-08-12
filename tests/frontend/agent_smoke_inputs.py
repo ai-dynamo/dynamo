@@ -11,13 +11,32 @@ LIST_DIRECTORY_PROMPT = (
     "ls and report each filename verbatim from the output."
 )
 
+CODEX_LIST_DIRECTORY_PROMPT = (
+    'Call exec_command exactly once with the complete argument object {"cmd":"ls"}. '
+    "Do not add justification, sandbox_permissions, or any other field. Then report "
+    "each filename verbatim from the output."
+)
 
-def write_codex_config(codex_home: Path, frontend_port: int) -> None:
+
+def write_codex_config(
+    codex_home: Path, frontend_port: int, *, enable_multi_agent: bool = False
+) -> None:
     """Emit a minimal ~/.codex/config.toml pointing Codex at Dynamo."""
     codex_home.mkdir(parents=True, exist_ok=True)
+    multi_agent_config = (
+        """[features.multi_agent_v2]
+enabled = true
+max_concurrent_threads_per_session = 2
+non_code_mode_only = false
+"""
+        if enable_multi_agent
+        else ""
+    )
     (codex_home / "config.toml").write_text(
         f"""
 model_max_output_tokens = 4096
+
+{multi_agent_config}
 
 [model_providers.local]
 name = "local-dynamo"
@@ -28,30 +47,36 @@ env_key = "LOCAL_API_KEY"
     )
 
 
-def write_claude_subagent_config(cwd: Path, subagent_name: str) -> None:
-    """Register a project-local Claude Code subagent for best-effort CI signal."""
-    agents_dir = cwd / ".claude" / "agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    (agents_dir / f"{subagent_name}.md").write_text(
-        f"""
----
-name: {subagent_name}
-description: Dynamo CI smoke subagent that lists the current directory.
-tools: Bash
----
-
-Use Bash to run `ls -1` in the current working directory. Return only the exact
-filenames from the command output, one per line. Do not explain anything.
-        """.lstrip()
+def codex_subagent_prompt() -> str:
+    """Prompt Codex to invoke one full-history child agent."""
+    return (
+        "Make these two tool calls in order, with no text response between them: "
+        'first spawn_agent with exactly task_name="dynamo_subagent_smoke" and '
+        'message="Return exactly OK."; then wait_agent with timeout_ms=60000. '
+        "Do not set agent_type or fork_turns. Do not perform the task yourself. "
+        "Do not return a text response until wait_agent returns."
     )
 
 
-def claude_subagent_prompt(subagent_name: str, marker_filename: str) -> str:
+def claude_subagent_definition(subagent_name: str) -> str:
+    """Return a session-local Claude Code subagent definition."""
+    return json.dumps(
+        {
+            subagent_name: {
+                "description": "Returns a fixed smoke response.",
+                "prompt": "Return exactly OK immediately.",
+                "tools": [],
+            }
+        }
+    )
+
+
+def claude_subagent_prompt(subagent_name: str) -> str:
+    """Prompt Claude Code to invoke the named smoke subagent."""
     return (
-        f"@agent-{subagent_name}\n"
-        f"Invoke the {subagent_name} subagent exactly once. Do not use Bash yourself. "
-        "The subagent must use Bash to run `ls -1` in the current working directory "
-        f"and return the exact filenames. The output must include {marker_filename}."
+        f"Use the Agent tool exactly once with subagent_type={subagent_name}, "
+        'description="run smoke test", and prompt="Return exactly OK." '
+        "Do not treat the subagent as a skill. Use no other tool."
     )
 
 
