@@ -66,8 +66,7 @@ def test_preprocessed_cost_defaults_to_1():
 
 
 def test_preprocessed_has_no_bucket_key():
-    # Batching is one-dimensional (scalar cost only) — there is no bucket_key.
-    assert not hasattr(Preprocessed(item="x"), "bucket_key")
+    assert Preprocessed(item="x").bucket_key is None
 
 
 def test_abc_cannot_be_instantiated():
@@ -95,5 +94,6 @@ def test_default_attrs_and_close_noop():
     # preprocess pool.
     assert e.buckets is None
     assert e.max_batch_cost is None
+    assert e.max_batch_items is None
     assert e.preprocess_concurrency == 0
     assert e.close() is None
