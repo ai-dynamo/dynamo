@@ -118,7 +118,10 @@ impl std::fmt::Debug for PushFrame {
 impl PushFrame {
     /// Encode one Python response object. Called with the GIL held by the
     /// Python caller; [`python_payload::parse_python_response`] is the same
-    /// interpretation of the object the pull path uses.
+    /// interpretation of the object the pull path uses, and
+    /// [`python_payload::encode_annotated_response`] is the same wrapper
+    /// construction and codec invocation, so the bytes are structurally
+    /// identical to what the pull path would produce for the same object.
     fn encode(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
         let annotated =
             python_payload::parse_python_response(obj.clone().unbind(), py).map_err(|error| {
@@ -127,18 +130,14 @@ impl PushFrame {
                      application-logic-mismatch: {error}"
                 ))
             })?;
-        let is_error = annotated.is_error();
         let codec = RequestPlanePayloadCodec::configured();
-        let wrapper = NetworkStreamWrapper {
-            data: Some(annotated),
-            complete_final: false,
-        };
-        let bytes = codec.encode(&wrapper).map_err(|error| {
-            PyValueError::new_err(format!(
-                "critical error: failed serializing python response as {}: {error}",
-                codec.name()
-            ))
-        })?;
+        let (bytes, is_error) = python_payload::encode_annotated_response(codec, annotated)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "critical error: failed serializing python response as {}: {error}",
+                    codec.name()
+                ))
+            })?;
         Ok(Self {
             bytes: bytes.into(),
             is_error,
@@ -738,6 +737,65 @@ mod tests {
         assert!(
             rx.recv().await.is_none(),
             "stream must end immediately when sender is dropped with no data"
+        );
+    }
+
+    // ── stop_stream divergence ────────────────────────────────────────────
+    //
+    // INTENTIONAL BEHAVIORAL DIFFERENCE from the pull path:
+    //
+    // Pull path (encode_python_response): parse errors and Python exceptions
+    // produce `stop_stream: true`, telling the ingress to abort the engine
+    // stream immediately after this frame.
+    //
+    // Push path (PushFrame::into_encoded): ALL frames — including error frames
+    // from close_with_error / close_with_dynamo_error — have `stop_stream:
+    // false`. End-of-stream is signalled by dropping the mpsc sender, not by
+    // a flag. If downstream code keys on stop_stream to abort early it will
+    // behave differently here; it must handle the channel-close path too.
+    //
+    // These tests pin the push-path contract so a future change cannot
+    // accidentally match the pull path's stop_stream: true without someone
+    // noticing and auditing the downstream consumer.
+
+    /// Push-path error frames must have `stop_stream: false`, even though the
+    /// pull path sets `stop_stream: true` for the same conditions. End-of-stream
+    /// is signalled by dropping the sender, not by this flag.
+    #[test]
+    fn push_error_frame_stop_stream_is_always_false_matching_codec() {
+        let frame = PushFrame::error(Annotated::from_error("fatal"));
+        let codec = frame.codec;
+        let encoded = frame.into_encoded(codec).expect("forward must succeed");
+        assert!(encoded.is_error, "error frame must be flagged is_error");
+        assert!(
+            !encoded.stop_stream,
+            "push-path error frames must have stop_stream: false (stream ends when sender drops)"
+        );
+    }
+
+    /// The stop_stream: false contract must hold on the re-encode path too,
+    /// so a mismatch between the push worker's codec and the caller's codec
+    /// cannot accidentally flip the flag.
+    #[test]
+    fn push_error_frame_stop_stream_is_always_false_mismatched_codec() {
+        let frame = PushFrame {
+            bytes: RequestPlanePayloadCodec::Msgpack
+                .encode(&NetworkStreamWrapper {
+                    data: Some(Annotated::<serde_json::Value>::from_error("fatal")),
+                    complete_final: false,
+                })
+                .expect("encode")
+                .into(),
+            is_error: true,
+            codec: RequestPlanePayloadCodec::Msgpack,
+        };
+        let encoded = frame
+            .into_encoded(RequestPlanePayloadCodec::Json)
+            .expect("re-encode must succeed");
+        assert!(encoded.is_error, "is_error must survive re-encode");
+        assert!(
+            !encoded.stop_stream,
+            "stop_stream must remain false after re-encode"
         );
     }
 

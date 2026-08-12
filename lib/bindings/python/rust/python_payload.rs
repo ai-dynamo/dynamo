@@ -195,6 +195,27 @@ impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayl
     }
 }
 
+/// Convert an `Annotated` value into request-plane bytes and the `is_error` flag,
+/// using the canonical non-terminal wrapper shape (`complete_final: false`).
+///
+/// Both the pull path ([`encode_python_response`]) and the push path
+/// ([`crate::push_egress::PushFrame::encode`]) call this, so neither can silently
+/// change the wrapper shape, `is_error` logic, or codec invocation without also
+/// breaking this function — and the tests below that exercise it directly with
+/// concrete non-Python types.
+pub(crate) fn encode_annotated_response<T: Serialize>(
+    codec: RequestPlanePayloadCodec,
+    annotated: Annotated<T>,
+) -> Result<(Vec<u8>, bool), anyhow::Error> {
+    let is_error = annotated.is_error();
+    let wrapper = NetworkStreamWrapper {
+        data: Some(annotated),
+        complete_final: false,
+    };
+    let bytes = codec.encode(&wrapper)?;
+    Ok((bytes, is_error))
+}
+
 fn encode_python_response(
     payload_codec: RequestPlanePayloadCodec,
     response: PythonResponseItem,
@@ -212,14 +233,9 @@ fn encode_python_response(
         },
         Err(error) => (Annotated::from_err(map_python_exception(error)), true),
     };
-    let is_error = annotated.is_error();
-    let wrapper = NetworkStreamWrapper {
-        data: Some(annotated),
-        complete_final: false,
-    };
 
-    match payload_codec.encode(&wrapper) {
-        Ok(bytes) => Ok(EncodedResponseFrame {
+    match encode_annotated_response(payload_codec, annotated) {
+        Ok((bytes, is_error)) => Ok(EncodedResponseFrame {
             bytes: bytes.into(),
             is_error,
             stop_stream,
@@ -323,6 +339,109 @@ mod tests {
     // PyO3's `extension-module` feature, so standalone `cargo test` binaries
     // intentionally do not link libpython. Python behavior is covered by
     // tests/test_request_plane_python_payload.py against the built extension.
+
+    use super::{
+        Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, encode_annotated_response,
+    };
+
+    // ── encode_annotated_response contract ───────────────────────────────────
+    //
+    // Both egress paths (pull via encode_python_response, push via
+    // PushFrame::encode) call encode_annotated_response. These tests pin every
+    // field of the output so that a change to the wrapper shape, is_error
+    // logic, or complete_final flag in either path would be caught here.
+    //
+    // serde_json::Value is used as the concrete payload type because it is
+    // Serialize without touching the Python C API.
+
+    /// `is_error` must reflect `annotated.is_error()` — true when the envelope
+    /// carries `event: "error"`, false otherwise. A swap of the two would let
+    /// error frames be forwarded as healthy responses and vice versa.
+    #[test]
+    fn encode_annotated_response_is_error_true_for_error_annotated() {
+        let (_, is_error) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::<serde_json::Value>::from_error("oops"),
+        )
+        .unwrap();
+        assert!(is_error);
+    }
+
+    #[test]
+    fn encode_annotated_response_is_error_false_for_data_annotated() {
+        let (_, is_error) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::from_data(serde_json::json!({"ok": true})),
+        )
+        .unwrap();
+        assert!(!is_error);
+    }
+
+    /// Non-terminal frames must have `complete_final: false` on the wire.
+    /// A stray `true` would tell the caller the stream has ended even when
+    /// the Python generator is still running.
+    #[test]
+    fn encode_annotated_response_complete_final_is_always_false() {
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let (bytes, _) =
+                encode_annotated_response(codec, Annotated::from_data(serde_json::json!(null)))
+                    .unwrap();
+            let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
+                codec.decode(&bytes).unwrap();
+            assert!(!wrapper.complete_final, "codec={}", codec.name());
+        }
+    }
+
+    /// The payload must survive the encode → decode round-trip intact.
+    /// A `data: None` in the wrapper or a wrong serde path would drop it.
+    #[test]
+    fn encode_annotated_response_data_survives_roundtrip() {
+        let payload = serde_json::json!({"text": "hello", "n": 42});
+        let (bytes, is_error) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::from_data(payload.clone()),
+        )
+        .unwrap();
+        assert!(!is_error);
+        let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
+            RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
+        let data = wrapper.data.unwrap().data.unwrap();
+        assert_eq!(data, payload);
+    }
+
+    /// Encoding is deterministic: the same `Annotated` value with the same
+    /// codec must produce byte-identical frames from both egress paths.
+    /// Non-determinism would mean the pull and push paths could silently
+    /// diverge on map ordering or float representation.
+    #[test]
+    fn encode_annotated_response_same_input_same_bytes_both_codecs() {
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let (bytes_a, is_error_a) = encode_annotated_response(
+                codec,
+                Annotated::from_data(serde_json::json!({"x": 1, "y": "z"})),
+            )
+            .unwrap();
+            let (bytes_b, is_error_b) = encode_annotated_response(
+                codec,
+                Annotated::from_data(serde_json::json!({"x": 1, "y": "z"})),
+            )
+            .unwrap();
+            assert_eq!(
+                bytes_a,
+                bytes_b,
+                "codec={} must be deterministic",
+                codec.name()
+            );
+            assert_eq!(is_error_a, is_error_b);
+        }
+    }
+
     #[test]
     fn network_ingress_types_do_not_contain_serde_json_value() {
         let unary = std::any::type_name::<crate::PythonServerStreamingIngress>();
