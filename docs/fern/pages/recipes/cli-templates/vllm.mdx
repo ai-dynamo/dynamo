@@ -99,33 +99,6 @@ forwarded to both vLLM workers.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_embed_multiworker.sh)
 </Accordion>
-<Accordion title="Sequence Classification and Pooling">
-
-Starts a vLLM pooling worker that registers both pooling-family model types, so the frontend mounts
-the OpenAI-compatible `/v1/classify` and `/v1/pooling` endpoints. Use it for sequence
-classification, reranking, and raw pooled-tensor workloads.
-
-The default model is `cross-encoder/nli-MiniLM2-L6-H768`, a three-class NLI cross-encoder. The
-script declares a GPU requirement of 1.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-| `MAX_MODEL_LEN` | Model default | Maximum model context length. Left unset so each classification model keeps its own native context length. |
-| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
-
-**Command-line flags:** `--model` sets the model identifier or path.
-
-**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
-
-```bash
-./launch/agg_classify.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_classify.sh)
-</Accordion>
 <Accordion title="Image and Video Inputs">
 
 Serves a multimodal model with media preprocessing in the Dynamo frontend and one vLLM worker. Use
