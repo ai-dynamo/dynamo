@@ -59,7 +59,6 @@ class RemoteBinding:
                 f"unsupported remote routing policy {self.routing_policy!r}"
             )
 
-
 Binding = Union[InlineBinding, RemoteBinding]
 
 
