@@ -165,7 +165,7 @@ def test_dgd_serialization_omits_unset_optional_fields() -> None:
     ("backend", "worker_name"),
     [
         ("vllm", "worker"),
-        ("sglang", "decode"),
+        ("sglang", "worker"),
         ("trtllm", "TRTLLMWorker"),
     ],
 )
@@ -186,7 +186,7 @@ def test_aggregate_worker_lookup_resolves_generic_component(
     ("backend", "worker_name"),
     [
         ("vllm", "worker"),
-        ("sglang", "decode"),
+        ("sglang", "worker"),
         ("trtllm", "TRTLLMWorker"),
     ],
 )
