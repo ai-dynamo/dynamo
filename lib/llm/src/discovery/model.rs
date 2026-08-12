@@ -31,6 +31,13 @@ use crate::types::{
     },
 };
 
+/// Generate runtime state selected atomically from one worker set.
+pub(crate) struct GenerateWorkerRuntime {
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) parsing_options: ParsingOptions,
+    pub(crate) kv_cache_block_size: u32,
+}
+
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
 /// worker with no declared `worker_type`). Logged once per process to avoid
@@ -641,6 +648,24 @@ impl Model {
                         .runtime_config
                         .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
                 })
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    }
+
+    /// Get Generate runtime state from one capable worker set.
+    pub(crate) fn get_generate_worker_runtime_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<GenerateWorkerRuntime, ModelManagerError> {
+        self.select_worker_set_with(|worker_set| {
+            if !worker_set.supports_runtime_capability(capability) {
+                return None;
+            }
+            Some(GenerateWorkerRuntime {
+                engine: worker_set.generate_engine.clone()?,
+                parsing_options: worker_set.parsing_options(),
+                kv_cache_block_size: worker_set.card().kv_cache_block_size,
+            })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }

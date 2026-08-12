@@ -39,6 +39,7 @@ use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::sglang::generate::SglangGenerateRequest;
 use crate::protocols::sglang::stream::SglangGenerateStream;
+use crate::request_trace::SglangRequestTrace;
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -279,11 +280,11 @@ async fn handler(
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return adapt_openai_error(response);
     }
-    let engine = match state
+    let generate_context = match state
         .manager()
-        .get_generate_engine_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
+        .get_generate_worker_runtime_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
     {
-        Ok(engine) => engine,
+        Ok(context) => context,
         Err(error) => {
             let status = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
@@ -294,6 +295,11 @@ async fn handler(
             return error_response(status, error.to_string());
         }
     };
+    let crate::discovery::GenerateWorkerRuntime {
+        engine,
+        parsing_options,
+        kv_cache_block_size,
+    } = generate_context;
 
     let request_context = resolve_request_context(&headers, request.rid.as_deref());
     let preprocessed = match preprocessed_request(
@@ -312,6 +318,14 @@ async fn handler(
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
+    let (mut preprocessed, context) = context.into_parts();
+    let request_trace = SglangRequestTrace::prepare(
+        &mut preprocessed,
+        &context,
+        kv_cache_block_size,
+        parsing_options,
+    );
+    let context = context.map(|_| preprocessed);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
@@ -338,6 +352,7 @@ async fn handler(
             model,
             state.clone(),
             stream_handle,
+            request_trace,
         )
         .instrument(dispatch_span),
     )
@@ -361,6 +376,7 @@ async fn dispatch(
     model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
+    request_trace: SglangRequestTrace,
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
@@ -423,6 +439,7 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
+    let stream = request_trace.wrap(stream, request_id.clone());
     let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
         result
             .map(|value| Event::default().data(value.to_string()))
