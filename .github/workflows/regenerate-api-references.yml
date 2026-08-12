@@ -97,10 +97,26 @@ jobs:
           if [ -z "$(git status --porcelain -- docs/fern)" ]; then
             echo "All generated references current; nothing to do."
             echo "drifted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Drift detected:"
+          git status --porcelain -- docs/fern
+          echo "drifted=true" >> "$GITHUB_OUTPUT"
+
+          # Blast-radius cap. A merge that moves a documented symbol touches a
+          # handful of pages; a BROKEN generator rewrites all of them. Since the
+          # happy path pushes to main unreviewed, an unbounded diff is the one
+          # way this job can do real damage. Past real regenerations for scale:
+          # #12985 was 4 files, #13035 was 6.
+          files=$(git status --porcelain -- docs/fern | wc -l | tr -d ' ')
+          lines=$(git diff --numstat -- docs/fern | awk '{a+=$1; d+=$2} END {print a+d+0}')
+          echo "  files=${files}  lines=${lines}"
+          if [ "$files" -gt 20 ] || [ "$lines" -gt 2000 ]; then
+            echo "::warning::Drift exceeds the cap (${files} files, ${lines} lines); refusing to push to main."
+            echo "capped=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Drift detected:"
-            git status --porcelain -- docs/fern
-            echo "drifted=true" >> "$GITHUB_OUTPUT"
+            echo "capped=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Commit, then push to main (falling back to a branch)
@@ -123,12 +139,20 @@ jobs:
 
           commit
 
+          if [ "${{ steps.regen.outputs.capped }}" = "true" ]; then
+            echo "Diff exceeds the cap; skipping the direct push and going to a branch."
+            PUSH_TO_MAIN=false
+          else
+            PUSH_TO_MAIN=true
+          fi
+
           # Preferred path: straight onto main, so the publish is unblocked
           # without waiting for a human. main moves under a post-merge job by
           # definition, so a rejected push is retried by regenerating against
           # whatever main now holds -- these files have no merge semantics, so
           # re-running the generators is always the right resolution.
           for attempt in 1 2 3; do
+            if [ "$PUSH_TO_MAIN" != "true" ]; then break; fi
             if git push origin HEAD:main 2>/tmp/push.err; then
               echo "Pushed regenerated references directly to main."
               echo "target=main" >> "$GITHUB_OUTPUT"
@@ -169,6 +193,13 @@ jobs:
           fi
           git push origin "HEAD:refs/heads/$BRANCH"
           echo "target=branch" >> "$GITHUB_OUTPUT"
+          # Fail deliberately. The freshness check still blocks the publish, so
+          # main now carries stale references and docs.nvidia.com will not
+          # update until someone opens a PR from this branch. A green run would
+          # hide that -- which is exactly how update-events.yml failed 100 times
+          # unnoticed.
+          echo "::error::Regenerated references could not be pushed to main; opened ${BRANCH}. The docs publish stays blocked until it merges."
+          exit 1
 
       - name: Report
         if: steps.regen.outputs.drifted == 'true'
@@ -193,3 +224,16 @@ jobs:
                 echo "main was already current by the time this ran." ;;
             esac
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The job above fails deliberately when it cannot self-heal. Route that
+  # through the same notifier nightly and post-merge use, so a blocked publish
+  # reaches a human instead of sitting red in the Actions tab -- the failure
+  # mode that let update-events.yml fail 100 times unnoticed.
+  notify:
+    needs: regenerate
+    if: always() && needs.regenerate.result == 'failure'
+    uses: ./.github/workflows/notify-slack.yml
+    with:
+      pipeline_name: Regenerate API references
+      runs_on: ubuntu-slim
+    secrets: inherit
