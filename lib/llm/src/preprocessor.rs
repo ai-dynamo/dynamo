@@ -6204,7 +6204,8 @@ mod tests {
         context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
         let mut request = preprocessed_budget_request(None);
 
-        attach_agent_context_from_context(&mut request, &context);
+        let context_agent = agent_context_from_context(&context);
+        attach_agent_context(&mut request, context_agent.as_deref());
 
         assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
         let wire = serde_json::to_value(&request).unwrap();
