@@ -166,6 +166,19 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// - Query-only: `query_instance_id` annotation present → returns worker IDs without execution
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
+///
+/// # Future SGLang input-token logprobs
+///
+/// In disaggregated SGLang serving, prompt-side logprob metadata is produced
+/// during the prefill/decode handoff rather than solely by the terminal decode
+/// stream. Supporting it requires retaining the prefill metadata while decode
+/// runs, then concatenating the peers' raw `input_token_logprobs` and
+/// `input_top_logprobs` arrays in prompt order and normalizing them once on the
+/// terminal decode output. Prefill and decode must still run concurrently:
+/// waiting for prefill before starting decode can deadlock the KV transfer.
+/// Client-visible logprobs should not be placed in `disaggregated_params`,
+/// which is an engine-owned KV handoff contract rather than a public response
+/// channel.
 pub struct PrefillRouter<Sel = DefaultWorkerSelector>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
