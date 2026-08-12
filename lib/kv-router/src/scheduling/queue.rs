@@ -220,7 +220,6 @@ struct SchedulerQueueActor<
 > {
     pending: PolicyQueue<QueuedRequest>,
     cleanup: Arc<AdmissionCleanup>,
-    queueing_enabled: bool,
     profile: PolicyProfile,
     pending_count: Arc<AtomicUsize>,
     pending_isl_tokens: Arc<AtomicUsize>,
@@ -388,7 +387,6 @@ impl<
         let actor = SchedulerQueueActor {
             pending,
             cleanup: Arc::clone(&cleanup),
-            queueing_enabled,
             profile,
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
