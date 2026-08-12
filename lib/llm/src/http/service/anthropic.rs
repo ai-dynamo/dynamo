@@ -674,7 +674,9 @@ async fn anthropic_messages(
             }
         };
 
-        let keep_alive = state.sse_keep_alive_for_response(move_reasoning_to_content_when_empty);
+        let keep_alive = state.sse_keep_alive_for_response(
+            move_reasoning_to_content_when_empty && parsing_options.reasoning_parser.is_some(),
+        );
         let stream = monitor_for_disconnects_with_keep_alive(
             full_stream,
             ctx,

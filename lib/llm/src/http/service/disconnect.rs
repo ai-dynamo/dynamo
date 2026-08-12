@@ -186,6 +186,11 @@ async fn connection_monitor(
 
 type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
 
+struct StreamActivity {
+    keep_alive: Option<Duration>,
+    receiver: mpsc::UnboundedReceiver<()>,
+}
+
 fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     let error = SanitizedError::Internal;
     let body = serde_json::json!({
@@ -259,7 +264,10 @@ pub fn monitor_for_disconnects_with_keep_alive(
         stream_handle,
         backend_stream_timeout(),
         openai_stream_error,
-        keep_alive.map(|interval| (interval, activity_rx)),
+        Some(StreamActivity {
+            keep_alive,
+            receiver: activity_rx,
+        }),
     )
 }
 
@@ -289,7 +297,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
     error_formatter: StreamErrorFormatter,
-    keep_alive: Option<(Duration, mpsc::UnboundedReceiver<()>)>,
+    activity: Option<StreamActivity>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -300,8 +308,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 
     async_stream::try_stream! {
         tokio::pin!(stream);
-        let (keep_alive, mut activity_rx) = match keep_alive {
-            Some((interval, rx)) => (Some(interval), Some(rx)),
+        let (keep_alive, mut activity_rx) = match activity {
+            Some(activity) => (activity.keep_alive, Some(activity.receiver)),
             None => (None, None),
         };
         // Keep the context's watch-backed cancellation future alive across body frames.
@@ -749,7 +757,10 @@ mod tests {
             handle,
             Some(Duration::from_secs(10)),
             openai_stream_error,
-            Some((Duration::from_secs(5), activity_rx)),
+            Some(StreamActivity {
+                keep_alive: Some(Duration::from_secs(5)),
+                receiver: activity_rx,
+            }),
         );
         tokio::pin!(monitored);
 
