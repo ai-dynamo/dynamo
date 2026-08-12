@@ -120,7 +120,7 @@ async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
     # LoRA registration builds a fresh ModelRuntimeConfig for the adapter card.
     # This checks that a parent worker owning global DP ranks 4 and 5 publishes
     # the same range on the LoRA card, with router-hint endpoints keyed as
-    # {"4": "tcp://...:23280", "5": "tcp://...:23281"}.
+    # {"4": "tcp://...:24000", "5": "tcp://...:24001"}.
     handler = _make_prefill_handler()
     handler.dp_range = (4, 2)
     handler.config.engine_args.kv_transfer_config = SimpleNamespace(
@@ -130,7 +130,14 @@ async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
                     "type": "custom",
                     "router_capabilities": ["router_hint"],
                     "control_advertise_host": "worker-a",
-                    "control_port": "23280",
+                    "control_ports": [
+                        "23280",
+                        "23281",
+                        "23282",
+                        "23283",
+                        "24000",
+                        "24001",
+                    ],
                 }
             ]
         }
