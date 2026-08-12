@@ -57,6 +57,7 @@ use crate::replay::{
 };
 use anyhow::bail;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::{BTreeSet, BinaryHeap, VecDeque};
@@ -1243,7 +1244,7 @@ where
 
     /// Consume one output lifecycle signal after every token carried by this
     /// timestamp's completion batch has been published in engine order.
-    fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<Vec<Placement>> {
+    fn process_output_signal(&mut self, signal: &OutputSignal) -> anyhow::Result<Vec<Placement>> {
         if signal.completed {
             let workload_status = if signal.rejected {
                 WorkloadTerminalStatus::Rejected
@@ -1396,11 +1397,11 @@ where
 
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
-        let mut payloads = Vec::new();
+        let mut payloads = SmallVec::<[WorkerCompletionPayload<Observation::Batch>; 2]>::new();
         while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
             match completions {
                 ReadyWorkerCompletions::Single(payload) => payloads.push(payload),
-                ReadyWorkerCompletions::Batch(batch) => payloads.extend(Vec::from(batch)),
+                ReadyWorkerCompletions::Batch(batch) => payloads.extend(batch),
             }
         }
         if payloads.is_empty() {
@@ -1415,9 +1416,9 @@ where
     /// router observations. No placement is dispatched from inside this phase.
     fn settle_worker_completion_batch(
         &mut self,
-        payloads: Vec<WorkerCompletionPayload<Observation::Batch>>,
+        payloads: impl IntoIterator<Item = WorkerCompletionPayload<Observation::Batch>>,
     ) -> anyhow::Result<()> {
-        let mut settled = Vec::with_capacity(payloads.len());
+        let mut settled = SmallVec::<[WorkerCompletionPayload<Observation::Batch>; 2]>::new();
         for payload in payloads {
             debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
             let mut payload = self.engine.on_scheduled_completion(payload)?;
@@ -1430,13 +1431,11 @@ where
         }
 
         let mut placements = Vec::new();
-        let mut output_signals = Vec::new();
-        for payload in &mut settled {
+        for payload in &settled {
             self.traffic.on_accept_length_sample(
                 payload.accept_length_output_tokens,
                 payload.accept_length_decode_forwards,
             );
-            output_signals.extend(std::mem::take(&mut payload.output_signals));
         }
         // Publish every token first. A speculative/MTP pass may contain both a
         // non-terminal progress signal and the terminal signal for one UUID,
@@ -1445,17 +1444,24 @@ where
         // event or dispatch is published until every terminal ownership/DAG
         // transition at t has completed. Order within each phase remains
         // worker/event stable.
-        for signal in &output_signals {
+        for signal in settled
+            .iter()
+            .flat_map(|payload| payload.output_signals.iter())
+        {
             self.process_output_token(signal)?;
         }
-        for progress in output_signals
+        for progress in settled
             .iter()
+            .flat_map(|payload| payload.output_signals.iter())
             .filter(|signal| !signal.completed)
-            .cloned()
         {
             placements.extend(self.process_output_signal(progress)?);
         }
-        for terminal in output_signals.into_iter().filter(|signal| signal.completed) {
+        for terminal in settled
+            .iter()
+            .flat_map(|payload| payload.output_signals.iter())
+            .filter(|signal| signal.completed)
+        {
             placements.extend(self.process_output_signal(terminal)?);
         }
         placements.extend(self.placement.settle_terminal_feedback(self.now_ms)?);
