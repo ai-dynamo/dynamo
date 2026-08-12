@@ -95,6 +95,11 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
+        # Always set an explicit per-test FPM port to avoid collisions with
+        # the backend default (20380) under parallel test execution.
+        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
+
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:
             command.extend(
@@ -103,8 +108,6 @@ class DynamoWorkerProcess(ManagedProcess):
                     json.dumps(build_nixl_kv_transfer_config()),
                 ]
             )
-            self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
-            env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # KV events config and NIXL side channel port only for prefill worker
         if mode == WorkerMode.PREFILL:

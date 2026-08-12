@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -8,6 +9,9 @@ import time
 from contextlib import ExitStack
 
 import pytest
+
+pytest.importorskip("msgspec")
+
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.v1 import cli

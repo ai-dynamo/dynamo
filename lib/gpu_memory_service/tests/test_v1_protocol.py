@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -7,8 +8,10 @@ import os
 import socket
 import struct
 
-import msgspec
 import pytest
+
+msgspec = pytest.importorskip("msgspec")
+
 from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import (
     Message,

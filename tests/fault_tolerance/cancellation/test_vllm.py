@@ -142,9 +142,10 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
-        if mode != WorkerMode.AGGREGATED:
-            self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
-            env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
+        # Always set an explicit per-test FPM port to avoid collisions with
+        # the backend default (20380) under parallel test execution.
+        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # Set KV events config and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker

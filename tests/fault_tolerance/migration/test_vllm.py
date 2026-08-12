@@ -152,6 +152,11 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
+        # Always set an explicit per-worker FPM port to avoid collisions with
+        # the backend default (20380) under parallel test execution.
+        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
+
         # Disable backend shutdown grace period for all migration tests
         env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
 
@@ -197,6 +202,12 @@ class DynamoWorkerProcess(ManagedProcess):
             deallocate_port(self.system_port)
         except Exception as e:
             logging.warning(f"Failed to release vLLM worker port: {e}")
+
+        try:
+            # fpm_port is always allocated in __init__
+            deallocate_port(self.fpm_port)
+        except Exception as e:
+            logging.warning(f"Failed to release vLLM worker FPM port: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
 
