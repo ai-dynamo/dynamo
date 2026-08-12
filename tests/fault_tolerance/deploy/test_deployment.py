@@ -26,6 +26,7 @@ from tests.fault_tolerance.deploy.scenarios import (
     Scenario,
     scenarios,
 )
+from tests.fault_tolerance.deploy.worker_names import get_worker_service_name
 from tests.utils.test_output import resolve_test_output_path
 
 
@@ -61,19 +62,10 @@ def get_model_from_deployment(
     if scenario:
         try:
             model: Optional[str] = None
-            if scenario.backend == "vllm":
-                model = deployment_spec["decode"].model
-            elif scenario.backend == "sglang":
-                model = deployment_spec["decode"].model
-            elif scenario.backend == "trtllm":
-                # Determine deployment type from scenario deployment name
-                if (
-                    "agg" in deployment_spec.name
-                    and "disagg" not in deployment_spec.name
-                ):
-                    model = deployment_spec["TRTLLMWorker"].model
-                else:
-                    model = deployment_spec["decode"].model
+            if scenario.backend in {"vllm", "sglang", "trtllm"}:
+                deploy_type = "disagg" if "disagg" in deployment_spec.name else "agg"
+                worker_service = get_worker_service_name(scenario.backend, deploy_type)
+                model = deployment_spec[worker_service].model
             if model:
                 return model
         except (KeyError, AttributeError) as e:

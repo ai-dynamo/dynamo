@@ -156,15 +156,25 @@ async def test_deployment(
     # gpu-memory-utilization so vLLM 0.23.0+ flashinfer sampler warmup fits
     # without triggering cudaMalloc -> NVML query, which is restricted on MIG.
     # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
-    if framework == "vllm":
-        deployment_spec.add_arg_to_service("decode", "--gpu-memory-utilization", "0.7")
-
-    model = next((s.model for s in deployment_spec.services if s.model), None)
-    if not model:
+    services = deployment_spec.services
+    model_service = next((service for service in services if service.model), None)
+    if model_service is None:
         pytest.fail(
             f"Could not determine model name from deployment spec for "
             f"{framework}/{profile}"
         )
+
+    if framework == "vllm":
+        worker_service = next(
+            (service for service in services if service.name in {"worker", "decode"}),
+            model_service,
+        )
+        deployment_spec.add_arg_to_service(
+            worker_service.name, "--gpu-memory-utilization", "0.7"
+        )
+
+    model = model_service.model
+    assert model is not None
 
     logger.info(
         f"Starting deployment test for {deployment_target.test_id} "

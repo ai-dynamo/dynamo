@@ -35,6 +35,7 @@ from tests.fault_tolerance.deploy.checkers import (
     SingleWorkerResultsChecker,
 )
 from tests.fault_tolerance.deploy.scenarios import Scenario
+from tests.fault_tolerance.deploy.worker_names import get_worker_service_name
 
 logger = logging.getLogger(__name__)
 
@@ -134,19 +135,9 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
     # Determine if deployment has redundancy (DP > 1)
     has_redundancy = False
 
-    # Determine worker service name based on backend and deployment type
-    if scenario.backend == "vllm":
-        worker_service_name = "decode"
-    elif scenario.backend == "sglang":
-        worker_service_name = "decode"
-    elif scenario.backend == "trtllm":
-        # TensorRT-LLM uses different names for agg vs disagg
-        # Check test name to determine deployment type
-        if "disagg" in test_name:
-            worker_service_name = "decode"
-        else:
-            # Agg deployment uses TRTLLMWorker
-            worker_service_name = "TRTLLMWorker"
+    if scenario.backend in {"vllm", "sglang", "trtllm"}:
+        deploy_type = "disagg" if "disagg" in test_name else "agg"
+        worker_service_name = get_worker_service_name(scenario.backend, deploy_type)
     else:
         logger.warning(
             f"Unsupported backend: {scenario.backend}, using default checker"
