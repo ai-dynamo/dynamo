@@ -1455,6 +1455,8 @@ class _FpmPublisherThread:
 
 
 class InstrumentedScheduler(AsyncScheduler):
+    _bench_decode_stage: _DecodePointStage
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
