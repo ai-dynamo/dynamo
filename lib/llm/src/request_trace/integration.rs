@@ -133,8 +133,7 @@ pub(crate) fn build_new_request_end_trace_state(
 
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(common_request.token_ids.len(), None);
-    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)
-        .expect("positive trace block size was validated");
+    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)?;
     let tracker_option = Some(tracker.clone());
     let agent = agent_context.map(|agent_context| {
         super::build_agent_context_trace_state_from_agent(
@@ -177,8 +176,7 @@ fn build_request_end_trace_state_for_policy(
         }
     };
 
-    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)
-        .expect("positive trace block size was validated");
+    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)?;
     let agent = has_agent_context
         .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
         .flatten();
