@@ -386,7 +386,7 @@ mod tests {
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        LocalBlockHash, OverlapScores, ResidencyDomain, RouterEvent, WorkerWithDpRank,
+        LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
     };
     use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
 
@@ -437,7 +437,7 @@ mod tests {
         let lower = indexers.get_or_create(StorageTier::HostPinned);
         let store =
             |worker_id: u64, event_id: u64, parent_hash: Option<u64>, local: u64, external: u64| {
-                RouterEvent::with_residency_domain(
+                RouterEvent::with_cache_owner(
                     worker_id,
                     KvCacheEvent {
                         event_id,
@@ -452,9 +452,8 @@ mod tests {
                         }),
                     },
                     StorageTier::HostPinned,
-                    ResidencyDomain::CacheOwner,
+                    owner,
                 )
-                .with_state_source(owner)
             };
 
         lower
@@ -476,19 +475,16 @@ mod tests {
         );
 
         lower
-            .apply_event_and_wait(
-                RouterEvent::with_residency_domain(
-                    replacement.worker_id,
-                    KvCacheEvent {
-                        event_id: 3,
-                        dp_rank: replacement.dp_rank,
-                        data: KvCacheEventData::Cleared,
-                    },
-                    StorageTier::HostPinned,
-                    ResidencyDomain::CacheOwner,
-                )
-                .with_state_source(owner),
-            )
+            .apply_event_and_wait(RouterEvent::with_cache_owner(
+                replacement.worker_id,
+                KvCacheEvent {
+                    event_id: 3,
+                    dp_rank: replacement.dp_rank,
+                    data: KvCacheEventData::Cleared,
+                },
+                StorageTier::HostPinned,
+                owner,
+            ))
             .await
             .unwrap();
         assert!(

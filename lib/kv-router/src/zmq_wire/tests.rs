@@ -559,6 +559,41 @@ fn test_deserialize_block_stored_sequence_preserves_block_mm_infos_and_metadata(
 }
 
 #[test]
+fn test_deserialize_sequence_tolerates_legacy_nil_slot_and_future_suffix() {
+    let stored = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Option::<String>::None,
+        Option::<u8>::None,
+        Option::<Vec<Option<BlockExtraInfo>>>::None,
+        3u32,
+        "full_attention",
+        true,
+    );
+    let event: RawKvEvent = from_slice(&to_vec(&stored).unwrap()).unwrap();
+    assert_event_metadata(&event, Some(3), Some(KvCacheSpecKind::FullAttention), None);
+
+    let removed = (
+        "BlockRemoved",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<String>::None,
+        3u32,
+        "full_attention",
+        Option::<u32>::None,
+        Option::<String>::None,
+        Option::<String>::None,
+        true,
+    );
+    let event: RawKvEvent = from_slice(&to_vec(&removed).unwrap()).unwrap();
+    assert_event_metadata(&event, Some(3), Some(KvCacheSpecKind::FullAttention), None);
+}
+
+#[test]
 fn test_deserialize_sequence_preserves_non_main_attention_kind_with_group_idx_zero() {
     for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
         let event: RawKvEvent =

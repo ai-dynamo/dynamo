@@ -537,10 +537,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// Apply one event on its worker lane and wait for the backend result.
     pub async fn apply_event_and_wait(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         let (thread_idx, second_idx) = self.event_thread_indices(&event);
-        let mut receivers = Vec::with_capacity(1 + usize::from(second_idx.is_some()));
-        for (idx, event) in
-            std::iter::once((thread_idx, event.clone())).chain(second_idx.map(|idx| (idx, event)))
-        {
+        let enqueue = |idx: usize, event: RouterEvent| {
             let (resp_tx, resp_rx) = oneshot::channel();
             self.worker_event_channels[idx]
                 .send(WorkerTask::EventWithAck {
@@ -549,8 +546,16 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 })
                 .map_err(|_| KvRouterError::IndexerOffline)?;
             self.maybe_enqueue_cleanup(idx);
-            receivers.push(resp_rx);
-        }
+            Ok::<_, KvRouterError>(resp_rx)
+        };
+        let receivers = if let Some(second_idx) = second_idx {
+            vec![
+                enqueue(thread_idx, event.clone())?,
+                enqueue(second_idx, event)?,
+            ]
+        } else {
+            vec![enqueue(thread_idx, event)?]
+        };
         for receiver in receivers {
             let applied = receiver
                 .await

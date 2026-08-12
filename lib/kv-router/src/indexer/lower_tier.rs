@@ -115,7 +115,8 @@ enum EdgeOwnersEntry {
     },
     Multi {
         child_hash: ExternalSequenceBlockHash,
-        owners: FxHashSet<IndexedResidencyOwner>,
+        workers: WorkerSet,
+        exact_owners: FxHashSet<ResidencyOwnerKey>,
     },
 }
 
@@ -164,23 +165,41 @@ impl EdgeOwnersEntry {
                 if owners.contains(&owner) {
                     return true;
                 }
-                let mut expanded = FxHashSet::default();
-                expanded.extend(*owners);
-                expanded.insert(owner);
+                let mut workers = WorkerSet::default();
+                let mut exact_owners = FxHashSet::default();
+                for owner in owners.iter().copied().chain(std::iter::once(owner)) {
+                    match owner {
+                        IndexedResidencyOwner::Worker(worker) => {
+                            workers.insert(worker);
+                        }
+                        IndexedResidencyOwner::Exact(owner) => {
+                            exact_owners.insert(owner);
+                        }
+                    }
+                }
                 *self = Self::Multi {
                     child_hash,
-                    owners: expanded,
+                    workers,
+                    exact_owners,
                 };
                 true
             }
             Self::Multi {
                 child_hash: existing_hash,
-                owners,
+                workers,
+                exact_owners,
             } => {
                 if *existing_hash != child_hash {
                     return false;
                 }
-                owners.insert(owner);
+                match owner {
+                    IndexedResidencyOwner::Worker(worker) => {
+                        workers.insert(worker);
+                    }
+                    IndexedResidencyOwner::Exact(owner) => {
+                        exact_owners.insert(owner);
+                    }
+                }
                 true
             }
         }
@@ -203,26 +222,47 @@ impl EdgeOwnersEntry {
                 };
                 false
             }
-            Self::Multi { child_hash, owners } => {
-                if !owners.remove(&owner) {
+            Self::Multi {
+                child_hash,
+                workers,
+                exact_owners,
+            } => {
+                let removed = match owner {
+                    IndexedResidencyOwner::Worker(worker) => workers.remove(&worker),
+                    IndexedResidencyOwner::Exact(owner) => exact_owners.remove(&owner),
+                };
+                if !removed {
                     return false;
                 }
 
-                if owners.is_empty() {
+                let remaining = workers.len() + exact_owners.len();
+                if remaining == 0 {
                     return true;
                 }
 
-                if owners.len() == 1 {
-                    let owner = *owners.iter().next().unwrap();
-                    *self = Self::Single {
-                        child_hash: *child_hash,
-                        owner,
-                    };
-                } else if owners.len() == 2 {
-                    let mut owners_iter = owners.iter().copied();
+                if remaining <= 2 {
+                    let mut owners = workers
+                        .iter()
+                        .copied()
+                        .map(IndexedResidencyOwner::Worker)
+                        .chain(
+                            exact_owners
+                                .iter()
+                                .copied()
+                                .map(IndexedResidencyOwner::Exact),
+                        );
+                    let first = owners.next().expect("at least one owner remains");
+                    if remaining == 1 {
+                        *self = Self::Single {
+                            child_hash: *child_hash,
+                            owner: first,
+                        };
+                        return false;
+                    }
+                    let second = owners.next().expect("two owners remain");
                     *self = Self::Pair {
                         child_hash: *child_hash,
-                        owners: [owners_iter.next().unwrap(), owners_iter.next().unwrap()],
+                        owners: [first, second],
                     };
                 }
 
@@ -238,9 +278,16 @@ impl EdgeOwnersEntry {
             Self::Pair { owners, .. } => owners
                 .iter()
                 .any(|owner| owner.project(projection).as_ref() == Some(worker)),
-            Self::Multi { owners, .. } => owners
-                .iter()
-                .any(|owner| owner.project(projection).as_ref() == Some(worker)),
+            Self::Multi {
+                workers,
+                exact_owners,
+                ..
+            } => {
+                workers.contains(worker)
+                    || exact_owners
+                        .iter()
+                        .any(|owner| projection.project_key(*owner).as_ref() == Some(worker))
+            }
         }
     }
 
@@ -256,22 +303,73 @@ impl EdgeOwnersEntry {
                     (None, None) => Vec::new(),
                 }
             }
-            Self::Multi { owners, .. } => {
-                let mut workers = WorkerSet::default();
-                workers.extend(owners.iter().filter_map(|owner| owner.project(projection)));
-                workers.into_iter().collect()
+            Self::Multi {
+                workers,
+                exact_owners,
+                ..
+            } => {
+                let mut projected = workers.clone();
+                projected.extend(
+                    exact_owners
+                        .iter()
+                        .filter_map(|owner| projection.project_key(*owner)),
+                );
+                projected.into_iter().collect()
             }
         }
     }
 
-    fn collect_projected_into(&self, projection: &ResidencyProjection, workers: &mut WorkerSet) {
+    fn collect_matching_workers(
+        &self,
+        projection: &ResidencyProjection,
+        active: &WorkerSet,
+        matched: &mut WorkerSet,
+    ) {
         match self {
-            Self::Single { owner, .. } => workers.extend(owner.project(projection)),
-            Self::Pair { owners, .. } => {
-                workers.extend(owners.iter().filter_map(|owner| owner.project(projection)));
+            Self::Single { owner, .. } => {
+                matched.extend(
+                    owner
+                        .project(projection)
+                        .filter(|worker| active.contains(worker)),
+                );
             }
-            Self::Multi { owners, .. } => {
-                workers.extend(owners.iter().filter_map(|owner| owner.project(projection)));
+            Self::Pair { owners, .. } => {
+                matched.extend(
+                    owners
+                        .iter()
+                        .filter_map(|owner| owner.project(projection))
+                        .filter(|worker| active.contains(worker)),
+                );
+            }
+            Self::Multi {
+                workers,
+                exact_owners,
+                ..
+            } => {
+                if workers.len() <= active.len() {
+                    matched.extend(
+                        workers
+                            .iter()
+                            .copied()
+                            .filter(|worker| active.contains(worker)),
+                    );
+                } else {
+                    matched.extend(
+                        active
+                            .iter()
+                            .copied()
+                            .filter(|worker| workers.contains(worker)),
+                    );
+                }
+                if projection.is_empty() {
+                    return;
+                }
+                matched.extend(
+                    exact_owners
+                        .iter()
+                        .filter_map(|owner| projection.project_key(*owner))
+                        .filter(|worker| active.contains(worker)),
+                );
             }
         }
     }
@@ -976,8 +1074,10 @@ fn advance_state_to_breakpoint(
                 // that project to the same routing worker. Project the edge once,
                 // then intersect the two sets in linear expected time.
                 scratch.clear();
-                edge.collect_projected_into(projection, &mut scratch);
-                scratch.retain(|worker| active.remove(worker));
+                edge.collect_matching_workers(projection, &active, &mut scratch);
+                for worker in &scratch {
+                    active.remove(worker);
+                }
                 finalize_workers(final_states, active.drain(), cur_pos, cur_hash);
                 std::mem::swap(&mut active, &mut scratch);
 
@@ -1153,26 +1253,31 @@ mod tests {
         external_hashes: &[u64],
         domain: ResidencyDomain,
     ) -> RouterEvent {
-        let event = RouterEvent::with_residency_domain(
-            worker_id,
-            crate::protocols::KvCacheEvent {
-                event_id,
-                dp_rank: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                    start_position: None,
-                    blocks: stored_blocks_with_sequence_hashes(
-                        &local_hashes(local_values),
-                        external_hashes,
-                    ),
-                }),
-            },
-            StorageTier::HostPinned,
-            domain,
-        );
+        let event = crate::protocols::KvCacheEvent {
+            event_id,
+            dp_rank: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(
+                    &local_hashes(local_values),
+                    external_hashes,
+                ),
+            }),
+        };
         match domain {
-            ResidencyDomain::Worker => event,
-            ResidencyDomain::CacheOwner => event.with_state_source(cache_owner_id()),
+            ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                ResidencyDomain::Worker,
+            ),
+            ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                cache_owner_id(),
+            ),
         }
     }
 
@@ -1348,19 +1453,16 @@ mod tests {
             .unwrap();
 
         index
-            .apply_event(
-                RouterEvent::with_residency_domain(
-                    7,
-                    crate::protocols::KvCacheEvent {
-                        event_id: 6,
-                        data: KvCacheEventData::Cleared,
-                        dp_rank: 0,
-                    },
-                    StorageTier::Device,
-                    ResidencyDomain::CacheOwner,
-                )
-                .with_state_source(cache_owner_id()),
-            )
+            .apply_event(RouterEvent::with_cache_owner(
+                7,
+                crate::protocols::KvCacheEvent {
+                    event_id: 6,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::Device,
+                cache_owner_id(),
+            ))
             .unwrap();
         assert_eq!(
             index

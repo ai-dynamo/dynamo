@@ -91,6 +91,9 @@ pub async fn spawn(
 }
 
 fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventSource) {
+    // Compatibility with v1.2 framework-only producers during v1.4 rolling upgrades.
+    // TODO(v1.5): Remove with the legacy consolidator subscription after v1.2
+    // leaves N-2 and residency-v2 producers use only the versioned source.
     if event.source_kind() != Ok(KvEventSourceKind::Framework) {
         tracing::warn!("Ignoring non-framework event on the legacy consolidator stream");
         return;

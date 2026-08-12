@@ -24,6 +24,9 @@ use dynamo_runtime::{
 use tokio::sync::Semaphore;
 
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
+// Compatibility with v1.2 Worker-only publishers during v1.4 rolling upgrades.
+// TODO(v1.5): Remove after v1.2 leaves N-2 and every caller supplies an
+// explicit state-agent status surface.
 pub(crate) async fn start_worker_kv_query_endpoint(
     component: Component,
     publisher_id: u64,
@@ -434,9 +437,10 @@ fn filter_state_agent_events(
         } => {
             events.retain(retain);
             let reset_scope = if worker_only {
-                // A missing recovery capability is the legacy Worker-only
-                // contract. Its consumer has no CacheOwner state and accepts
-                // only an all-rank replacement, so preserve that encoding.
+                // Compatibility with v1.2 Worker-only routers during v1.4 rolling
+                // upgrades. Such consumers have no CacheOwner state and accept
+                // only an all-rank replacement.
+                // TODO(v1.5): Remove when v1.2 leaves the N-2 compatibility window.
                 dynamo_kv_router::protocols::ResetScope::All
             } else if !include_worker {
                 dynamo_kv_router::protocols::ResetScope::Domain(

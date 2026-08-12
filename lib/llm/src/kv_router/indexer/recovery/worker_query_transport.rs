@@ -68,7 +68,10 @@ impl RuntimeWorkerQueryTransport {
             .context("KV state-agent status handshake timed out")??;
         match response {
             WorkerKvQueryResponse::Status(status) => Ok(status),
-            other => anyhow::bail!("unexpected KV state-agent status response: {other:?}"),
+            WorkerKvQueryResponse::Error(message) => {
+                anyhow::bail!("KV state-agent status query rejected: {message}")
+            }
+            _ => anyhow::bail!("unexpected non-status response to a KV state-agent status query"),
         }
     }
 

@@ -1799,27 +1799,32 @@ mod tests {
 
         client.reconcile_view(initial).await;
         let domain_store = |event_id, domain| {
-            let event = RouterEvent::with_residency_domain(
-                worker.worker_id,
-                KvCacheEvent {
-                    event_id,
-                    data: KvCacheEventData::Stored(KvCacheStoreData {
-                        parent_hash: None,
-                        start_position: None,
-                        blocks: vec![KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(event_id),
-                            tokens_hash: LocalBlockHash(event_id),
-                            mm_extra_info: None,
-                        }],
-                    }),
-                    dp_rank: worker.dp_rank,
-                },
-                StorageTier::HostPinned,
-                domain,
-            );
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(event_id),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            };
             match domain {
-                ResidencyDomain::Worker => event,
-                ResidencyDomain::CacheOwner => event.with_state_source(cache_owner_id()),
+                ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::Worker,
+                ),
+                ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    cache_owner_id(),
+                ),
             }
         };
         client

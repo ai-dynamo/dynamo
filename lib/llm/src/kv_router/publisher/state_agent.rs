@@ -412,13 +412,6 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     }
 
     async fn handle_ingress(&mut self, batch: IngressBatch) -> Result<()> {
-        if batch.events.len() > MAX_INGRESS_EVENTS
-            || event_block_count(&batch.events) > MAX_INGRESS_BLOCKS
-        {
-            self.fail_source(batch.generation, "oversized ingress envelope");
-            anyhow::bail!("oversized ingress envelope");
-        }
-
         let valid_generation = self.attachment.as_ref().is_some_and(|attachment| {
             attachment.ready
                 && attachment.generation == batch.generation
@@ -427,6 +420,13 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         });
         if !valid_generation {
             return Ok(());
+        }
+
+        if batch.events.len() > MAX_INGRESS_EVENTS
+            || event_block_count(&batch.events) > MAX_INGRESS_BLOCKS
+        {
+            self.fail_source(batch.generation, "oversized ingress envelope");
+            anyhow::bail!("oversized ingress envelope");
         }
 
         if !self.source_cursor.observe(&batch) {
@@ -448,6 +448,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             .collect();
         if let Err(error) = self.apply_and_publish_chunk(events).await {
             tracing::error!(%error, "KV state-agent transaction failed");
+            let reservation = self.reserve_locally_applied_event_ids();
             self.source_failed = true;
             self.worker_domain_failed = true;
             self.cache_owner_domain_failed = true;
@@ -457,6 +458,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 attachment.ready = false;
             }
             self.publish_status();
+            reservation.context("failed to reserve locally applied state-agent event IDs")?;
             return Err(error);
         }
         Ok(())
@@ -504,19 +506,15 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 // Successful local applications are already present in the recovery
                 // buffer. Reserve their IDs before the authoritative Worker barrier so
                 // recovery can close any publication gap without an ID collision.
-                let Some(next_local_id) = self.local_indexer.current_event_id().checked_add(1)
-                else {
+                if let Err(error) = self.reserve_locally_applied_event_ids() {
                     self.source_failed = true;
                     self.worker_domain_failed = true;
                     self.publish_status();
                     if let Some(response) = response {
-                        let _ = response.send(Err(anyhow::anyhow!(
-                            "state-agent outbound cursor exhausted"
-                        )));
+                        let _ = response.send(Err(error));
                     }
                     continue;
-                };
-                self.next_outbound_id = next_local_id.max(self.next_outbound_id);
+                }
                 self.publish_status();
             }
             if let Some(response) = response {
@@ -537,6 +535,16 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         self.cache_owner_domain_failed = true;
         tracing::error!(generation, reason, "Quarantining CacheOwner residency");
         self.publish_status();
+    }
+
+    fn reserve_locally_applied_event_ids(&mut self) -> Result<()> {
+        let next_local_id = self
+            .local_indexer
+            .current_event_id()
+            .checked_add(1)
+            .context("state-agent outbound cursor exhausted")?;
+        self.next_outbound_id = next_local_id.max(self.next_outbound_id);
+        Ok(())
     }
 
     async fn apply_and_publish_chunk(
@@ -588,9 +596,21 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 .checked_add(1)
                 .context("state-agent outbound cursor exhausted")?;
 
-            let router_event =
-                RouterEvent::with_residency_domain(event_worker_id, event, tier, domain)
-                    .with_state_source(self.identity.cache_owner_id);
+            let router_event = match domain {
+                ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                    event_worker_id,
+                    event,
+                    tier,
+                    ResidencyDomain::Worker,
+                )
+                .with_state_source(self.identity.cache_owner_id),
+                ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                    event_worker_id,
+                    event,
+                    tier,
+                    self.identity.cache_owner_id,
+                ),
+            };
             self.local_indexer
                 .apply_event_with_buffer_acknowledged(router_event.clone())
                 .await
@@ -2024,7 +2044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn locally_rejected_chunk_is_not_published_or_committed() {
+    async fn failed_chunk_reserves_locally_applied_event_ids() {
         let worker = WorkerWithDpRank::new(17, 3);
         let identity = KvStateAgentIdentity {
             cache_owner_id: cache_owner_id(),
@@ -2073,6 +2093,21 @@ mod tests {
             ready_at_outbound_cursor: 0,
         };
         coordinator.attach(&mut attachment).await.unwrap();
+        let stale_event = store(worker, ResidencyDomain::Worker, None, 99, 9);
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: attachment.generation + 1,
+                source_cursor: 1,
+                chunk_index: 0,
+                final_chunk: true,
+                events: vec![stale_event; MAX_INGRESS_EVENTS + 1],
+                cache_owner_fault: None,
+                response: None,
+            })
+            .await
+            .unwrap();
+        assert!(status.load().attachment.as_ref().unwrap().ready);
+
         let mut invalid = store(worker, ResidencyDomain::CacheOwner, None, 201, 21);
         invalid.placement.tier = StorageTier::Device;
         assert!(
@@ -2082,7 +2117,10 @@ mod tests {
                     source_cursor: 1,
                     chunk_index: 0,
                     final_chunk: true,
-                    events: vec![invalid],
+                    events: vec![
+                        store(worker, ResidencyDomain::Worker, None, 101, 11),
+                        invalid,
+                    ],
                     cache_owner_fault: None,
                     response: None,
                 })
@@ -2090,8 +2128,8 @@ mod tests {
                 .is_err()
         );
         assert_eq!(publications.load(Ordering::Relaxed), 1);
-        assert_eq!(local_indexer.current_event_id(), 1);
-        assert_eq!(status.load().outbound_cursor, 1);
+        assert_eq!(local_indexer.current_event_id(), 2);
+        assert_eq!(status.load().outbound_cursor, 2);
         assert!(!status.load().cache_owner_ready);
     }
 }

@@ -4,6 +4,7 @@
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
+use serde::de::IgnoredAny;
 
 use crate::protocols::BlockExtraInfo;
 
@@ -12,13 +13,14 @@ use crate::protocols::BlockExtraInfo;
 pub(super) enum KvCacheEventTrailingField {
     Unsigned(u32),
     Text(String),
+    Ignored(IgnoredAny),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(super) enum BlockStoredTrailingField {
-    Common(KvCacheEventTrailingField),
     BlockMmInfos(Vec<Option<BlockExtraInfo>>),
+    Common(KvCacheEventTrailingField),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +121,7 @@ impl KvCacheEventMetadata {
             KvCacheEventTrailingField::Text(kind) => {
                 self.kv_cache_spec_kind = Some(KvCacheSpecKind::from_wire(&kind));
             }
+            KvCacheEventTrailingField::Ignored(_) => {}
         }
     }
 }

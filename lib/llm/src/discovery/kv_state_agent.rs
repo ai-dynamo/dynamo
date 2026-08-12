@@ -142,6 +142,10 @@ impl KvStateProjectionReconciler {
         live_workers: &HashSet<WorkerWithDpRank>,
         recovery_receipt: Option<&KvStateRecoveryReceipt>,
     ) -> KvStateProjectionResolution {
+        if !discovery_known {
+            return KvStateProjectionResolution::Unknown(KvStateUnknownReason::WatchUncertain);
+        }
+
         let matching_sources: Vec<_> = sources
             .iter()
             .filter(|source| source.cache_owner_id == cache_owner_id)

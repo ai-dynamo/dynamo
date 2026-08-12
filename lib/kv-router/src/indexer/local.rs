@@ -967,27 +967,32 @@ mod tests {
         block_hash: u64,
         residency_domain: ResidencyDomain,
     ) -> RouterEvent {
-        let event = RouterEvent::with_residency_domain(
-            worker_id,
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: Some(ExternalSequenceBlockHash(parent_hash)),
-                    start_position: None,
-                    blocks: vec![KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(block_hash),
-                        tokens_hash: LocalBlockHash(tokens_hash),
-                        mm_extra_info: None,
-                    }],
-                }),
-                dp_rank: 0,
-            },
-            StorageTier::HostPinned,
-            residency_domain,
-        );
+        let event = KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(parent_hash)),
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(block_hash),
+                    tokens_hash: LocalBlockHash(tokens_hash),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        };
         match residency_domain {
-            ResidencyDomain::Worker => event,
-            ResidencyDomain::CacheOwner => event.with_state_source(cache_owner_id()),
+            ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                ResidencyDomain::Worker,
+            ),
+            ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                cache_owner_id(),
+            ),
         }
     }
 

@@ -202,9 +202,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
                 let mut trailing = Vec::new();
-                while let Some(field) = seq.next_element::<Option<BlockStoredTrailingField>>()? {
+                while trailing.len() < 5 {
+                    let Some(field) = seq.next_element::<Option<BlockStoredTrailingField>>()?
+                    else {
+                        break;
+                    };
                     trailing.push(field);
                 }
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
 
                 let parsed = parse_block_stored_trailing::<A::Error>(trailing)?;
 
@@ -238,9 +243,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
                 let mut trailing = Vec::new();
-                while let Some(field) = seq.next_element::<Option<KvCacheEventTrailingField>>()? {
+                while trailing.len() < 5 {
+                    let Some(field) = seq.next_element::<Option<KvCacheEventTrailingField>>()?
+                    else {
+                        break;
+                    };
                     trailing.push(field);
                 }
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
                 let parsed = parse_common_trailing::<A::Error>(trailing)?;
 
                 Ok(RawKvEvent::BlockRemoved {
@@ -294,7 +304,15 @@ where
         .flatten()
         .any(|field| matches!(field, BlockStoredTrailingField::BlockMmInfos(_)));
 
-    if trailing.len() >= 4 && !has_legacy_mm_infos {
+    if trailing.len() >= 4
+        && !has_legacy_mm_infos
+        && fixed_trailing_layout_matches(|index| {
+            trailing.get(index).and_then(|field| match field {
+                Some(BlockStoredTrailingField::Common(field)) => Some(field),
+                Some(BlockStoredTrailingField::BlockMmInfos(_)) | None => None,
+            })
+        })
+    {
         let common = trailing
             .into_iter()
             .map(|field| match field {
@@ -302,7 +320,7 @@ where
                 Some(BlockStoredTrailingField::BlockMmInfos(_)) => unreachable!(),
                 None => None,
             })
-            .collect();
+            .collect::<Vec<_>>();
         let parsed = parse_fixed_trailing::<E>(common)?;
         return Ok(ParsedBlockStoredTrailing {
             metadata: parsed.metadata,
@@ -312,8 +330,9 @@ where
         });
     }
 
-    // Compatibility shim for the older short tuple forms. They appended
-    // metadata opportunistically and could include block_mm_infos directly.
+    // Compatibility with v1.2 vLLM tuples during v1.4 rolling upgrades. These
+    // forms appended metadata opportunistically and could include block_mm_infos.
+    // TODO(v1.5): Remove when v1.2 falls outside the N-2 compatibility window.
     let mut metadata = KvCacheEventMetadata::default();
     let mut block_mm_infos = None;
     for field in trailing.into_iter().flatten() {
@@ -336,12 +355,15 @@ fn parse_common_trailing<E>(
 where
     E: de::Error,
 {
-    if trailing.len() >= 4 {
+    if trailing.len() >= 4
+        && fixed_trailing_layout_matches(|index| trailing.get(index).and_then(Option::as_ref))
+    {
         return parse_fixed_trailing::<E>(trailing);
     }
 
-    // Compatibility shim for legacy tuples that omitted unused positional
-    // slots and therefore did not have a fixed trailing-field layout.
+    // Compatibility with v1.2 vLLM tuples during v1.4 rolling upgrades. These
+    // forms omitted unused slots and therefore had no fixed trailing layout.
+    // TODO(v1.5): Remove when v1.2 falls outside the N-2 compatibility window.
     let mut metadata = KvCacheEventMetadata::default();
     for field in trailing.into_iter().flatten() {
         metadata.record_legacy_trailing(field);
@@ -351,6 +373,23 @@ where
         locality: None,
         source_kind: None,
     })
+}
+
+fn fixed_trailing_layout_matches<'a>(
+    field_at: impl Fn(usize) -> Option<&'a KvCacheEventTrailingField>,
+) -> bool {
+    let accepts_unsigned = |field: Option<&KvCacheEventTrailingField>| {
+        field.is_none_or(|field| matches!(field, KvCacheEventTrailingField::Unsigned(_)))
+    };
+    let accepts_text = |field: Option<&KvCacheEventTrailingField>| {
+        field.is_none_or(|field| matches!(field, KvCacheEventTrailingField::Text(_)))
+    };
+
+    accepts_unsigned(field_at(0))
+        && accepts_text(field_at(1))
+        && accepts_unsigned(field_at(2))
+        && accepts_text(field_at(3))
+        && accepts_text(field_at(4))
 }
 
 fn parse_fixed_trailing<E>(
@@ -397,9 +436,10 @@ where
 {
     match field {
         Some(KvCacheEventTrailingField::Unsigned(value)) => Ok(Some(value)),
-        Some(KvCacheEventTrailingField::Text(_)) => Err(E::custom(format_args!(
-            "expected unsigned integer or nil for {name}"
-        ))),
+        Some(KvCacheEventTrailingField::Text(_) | KvCacheEventTrailingField::Ignored(_)) => {
+            tracing::debug!(field = name, "Ignoring incompatible KV event tuple field");
+            Ok(None)
+        }
         None => Ok(None),
     }
 }
@@ -413,8 +453,9 @@ where
 {
     match field {
         Some(KvCacheEventTrailingField::Text(value)) => Ok(Some(value)),
-        Some(KvCacheEventTrailingField::Unsigned(_)) => {
-            Err(E::custom(format_args!("expected string or nil for {name}")))
+        Some(KvCacheEventTrailingField::Unsigned(_) | KvCacheEventTrailingField::Ignored(_)) => {
+            tracing::debug!(field = name, "Ignoring incompatible KV event tuple field");
+            Ok(None)
         }
         None => Ok(None),
     }

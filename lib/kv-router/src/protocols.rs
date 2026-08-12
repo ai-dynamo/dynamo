@@ -1409,6 +1409,17 @@ impl RouterEvent {
         }
     }
 
+    /// Create a CacheOwner event with its required stable state source.
+    pub fn with_cache_owner(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+        cache_owner: CacheOwnerId,
+    ) -> Self {
+        Self::with_residency_domain(worker_id, event, storage_tier, ResidencyDomain::CacheOwner)
+            .with_state_source(cache_owner)
+    }
+
     /// Attach an explicit stable source to a residency-aware event.
     pub fn with_state_source(mut self, state_source: CacheOwnerId) -> Self {
         self.state_source = Some(state_source);
