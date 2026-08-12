@@ -12,6 +12,7 @@ from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connec
 from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.output_modalities import (
     RequestType,
@@ -322,6 +323,7 @@ async def init_omni_stage_router(
         worker_type=WorkerType.Aggregated,
         needs=[],
     )
+    register_model_taint_route(runtime, generate_endpoint)
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
 
     try:

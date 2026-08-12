@@ -849,7 +849,7 @@ shared:
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/planner/connectors/kubernetes_api.py
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
   - planner
   - operator
@@ -1082,4 +1082,3 @@ classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops
-    advisory: false

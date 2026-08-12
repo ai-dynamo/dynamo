@@ -541,6 +541,10 @@ fn build_engine_config(
     bootstrap_port: Option<u16>,
 ) -> Result<EngineConfig, DynamoError> {
     let page_size = client::json_u32(&discovery.server_info, "page_size");
+    let dcp_size = client::json_u32(&discovery.server_info, "dcp_size")
+        .unwrap_or(1)
+        .max(1);
+    let kv_cache_block_size = page_size.map(|size| size.saturating_mul(dcp_size));
     let max_total_tokens = client::json_u64(&discovery.server_info, "max_total_num_tokens");
     let total_kv_blocks = match (max_total_tokens, page_size) {
         (Some(tokens), Some(page_size)) if page_size > 0 => {
@@ -594,7 +598,7 @@ fn build_engine_config(
         runtime_data,
         llm: Some(LlmRegistration {
             context_length: discovery.max_model_len,
-            kv_cache_block_size: page_size,
+            kv_cache_block_size,
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
@@ -709,5 +713,24 @@ mod tests {
 
         assert_eq!(registration.data_parallel_start_rank, Some(0));
         assert_eq!(registration.data_parallel_size, Some(16));
+    }
+
+    #[test]
+    fn dcp_registers_logical_kv_block_size() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "page_size": 64,
+                "dcp_size": 8,
+                "max_total_num_tokens": 1024,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+        let registration = config.llm.unwrap();
+
+        assert_eq!(registration.kv_cache_block_size, Some(512));
+        assert_eq!(registration.total_kv_blocks, Some(16));
     }
 }

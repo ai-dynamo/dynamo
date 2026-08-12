@@ -1807,22 +1807,20 @@ impl KvRouter {
                         inject_timing_from_tracker(data, tracker);
                     }
 
-                    let py_response = Python::with_gil(|py| {
-                        pythonize(py, &response.data)
-                            .map(|obj| obj.unbind())
-                            .map_err(|e| e.to_string())
+                    let response = response.map_data(|data| {
+                        Python::with_gil(|py| {
+                            pythonize(py, &data)
+                                .map(|obj| obj.unbind())
+                                .map_err(|error| error.to_string())
+                        })
                     });
+                    let is_error = response.is_error();
 
-                    match py_response {
-                        Ok(obj) => {
-                            if tx.send(RsAnnotated::from_data(obj)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to pythonize response: {}", e);
-                            break;
-                        }
+                    if tx.send(response).await.is_err() {
+                        break;
+                    }
+                    if is_error {
+                        break;
                     }
                 }
 
@@ -1867,6 +1865,7 @@ impl KvRouter {
     #[new]
     #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
+        py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
@@ -1913,41 +1912,45 @@ impl KvRouter {
             .transpose()
             .map_err(to_pyerr)?;
 
+        // The initial-worker wait can be unbounded. Releasing the GIL makes it
+        // supervisable from another thread, but not cancellable.
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async move {
-            let client = endpoint.inner.client().await.map_err(to_pyerr)?;
+        py.allow_threads(|| {
+            runtime.block_on(async move {
+                let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
-            // Create PushRouter with KV router mode
-            let push_router = rs::pipeline::PushRouter::<
-                llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                rs::protocols::annotated::Annotated<
-                    llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                >,
-            >::from_client(
-                client,
-                rs::pipeline::network::egress::push_router::RouterMode::KV,
-            )
-            .await
-            .map_err(to_pyerr)?;
+                // Create PushRouter with KV router mode
+                let push_router = rs::pipeline::PushRouter::<
+                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+                    rs::protocols::annotated::Annotated<
+                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+                    >,
+                >::from_client(
+                    client,
+                    rs::pipeline::network::egress::push_router::RouterMode::KV,
+                )
+                .await
+                .map_err(to_pyerr)?;
 
-            // Create KvRouter using helper function (ensures etcd registration)
-            let kv_router = create_kv_router_from_endpoint(
-                endpoint,
-                block_size,
-                Some(kv_router_config.inner()),
-                prefill_load_estimator,
-            )
-            .await?;
+                // Create KvRouter using helper function (ensures etcd registration)
+                let kv_router = create_kv_router_from_endpoint(
+                    endpoint,
+                    block_size,
+                    Some(kv_router_config.inner()),
+                    prefill_load_estimator,
+                )
+                .await?;
 
-            let kv_push_router = RsKvPushRouter::new(
-                push_router,
-                kv_router,
-                session_affinity_ttl_secs.map(Duration::from_secs),
-            )
-            .map_err(to_pyerr)?;
+                let kv_push_router = RsKvPushRouter::new(
+                    push_router,
+                    kv_router,
+                    session_affinity_ttl_secs.map(Duration::from_secs),
+                )
+                .map_err(to_pyerr)?;
 
-            Ok(Self {
-                inner: Arc::new(kv_push_router),
+                Ok(Self {
+                    inner: Arc::new(kv_push_router),
+                })
             })
         })
     }

@@ -95,6 +95,20 @@ copy. Client import consumes and closes the received copy. The wire protocol is
 a small typed `msgspec.Struct` MessagePack protocol; there is no JSON
 compatibility path.
 
+## Checkpoint control
+
+After the engine has slept and both GMS domains are quiescent, an external
+controller calls `prepare`. The sidecar atomically requires committed weights
+with retained allocations and an empty, uncommitted KV-cache domain, then
+fences new admission across both domain sockets. A handshake that races the
+fence is rejected under V1's fail-stop contract.
+
+The fence has no expiry. `abort` and `complete` require the active opaque token
+and are retry-safe for the same resolution. Because control calls are one-shot,
+a replacement controller can call `state` to recover the active token before
+explicitly aborting or completing the checkpoint. Access to the mode-`0600`
+rank-local socket is the control-plane trust boundary.
+
 ## Cold weight storage
 
 The checkpoint saver with `--use-v1` connects RO to the rank-local `weights`

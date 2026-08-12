@@ -130,7 +130,7 @@ from dynamo.frontend.prepost import PreprocessResult
 PreprocessResult(request_for_sampling: ChatCompletionRequest, tool_parser: ToolParser | None, chat_template_kwargs: dict[str, Any], engine_prompt: dict[str, Any], prompt_token_ids: list[int], guided_decoding: dict[str, Any] | None = None) -> None
 ```
 
-[`components/src/dynamo/frontend/prepost.py#L45`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L45)
+[`components/src/dynamo/frontend/prepost.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L46)
 
 **Public methods**
 
@@ -331,7 +331,7 @@ from dynamo.frontend.prepost import StreamingPostProcessor
 StreamingPostProcessor(*, tokenizer: TokenizerLike, request_for_sampling: ChatCompletionRequest, sampling_params: SamplingParams, prompt_token_ids: Sequence[int], tool_parser: ToolParser | None, reasoning_parser_class: type[ReasoningParser] | None, chat_template_kwargs: dict[str, Any], stream_response: bool = True) -> None
 ```
 
-[`components/src/dynamo/frontend/prepost.py#L597`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L597)
+[`components/src/dynamo/frontend/prepost.py#L628`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L628)
 
 **Public methods**
 
@@ -343,7 +343,7 @@ __init__(*, tokenizer: TokenizerLike, request_for_sampling: ChatCompletionReques
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L598)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L629)
 
 <h4 id="api-dynamo-frontend-prepost-streamingpostprocessor-process-output">process_output</h4>
 
@@ -353,7 +353,7 @@ process_output(output: Any) -> dict[str, Any] | None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L894)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L925)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-vllm-processor-vllmprocessor" title="VllmProcessor (class)">
@@ -437,6 +437,20 @@ build_response_format_guided_decoding(request: dict[str, Any]) -> dict[str, Any]
 [`components/src/dynamo/frontend/sglang_prepost.py#L639`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L639)
 </Accordion>
 
+<Accordion id="api-dynamo-frontend-prepost-build-tool-call-guided-decoding" title="build_tool_call_guided_decoding (function)">
+Build tool-call guidance through vLLM's configured tool parser.
+
+```python
+from dynamo.frontend.prepost import build_tool_call_guided_decoding
+```
+
+```python
+build_tool_call_guided_decoding(request: ChatCompletionRequest, tool_parser: ToolParser | None, *, parser_guided_decoding: dict[str, Any] | None = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto') -> dict[str, Any] | None
+```
+
+[`components/src/dynamo/frontend/prepost.py#L207`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L207)
+</Accordion>
+
 <Accordion id="api-dynamo-frontend-sglang-prepost-build-tool-call-guided-decoding" title="build_tool_call_guided_decoding (function)">
 Build native-SGLang-like tool call constraints for guided decoding.
 
@@ -449,20 +463,6 @@ build_tool_call_guided_decoding(request: dict[str, Any], *, tool_call_parser_nam
 ```
 
 [`components/src/dynamo/frontend/sglang_prepost.py#L562`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L562)
-</Accordion>
-
-<Accordion id="api-dynamo-frontend-prepost-build-tool-call-guided-decoding" title="build_tool_call_guided_decoding (function)">
-Build tool-call guidance through vLLM's configured tool parser.
-
-```python
-from dynamo.frontend.prepost import build_tool_call_guided_decoding
-```
-
-```python
-build_tool_call_guided_decoding(request: ChatCompletionRequest, tool_parser: ToolParser | None, *, parser_guided_decoding: dict[str, Any] | None = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto') -> dict[str, Any] | None
-```
-
-[`components/src/dynamo/frontend/prepost.py#L187`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L187)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-convert-tools" title="convert_tools (function)">
@@ -689,6 +689,20 @@ parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]
 [`components/src/dynamo/frontend/main.py#L245`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L245)
 </Accordion>
 
+<Accordion id="api-dynamo-frontend-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
+No summary available.
+
+```python
+from dynamo.frontend.prepost import preprocess_chat_request
+```
+
+```python
+preprocess_chat_request(request: dict[str, Any] | ChatCompletionRequest, *, tokenizer: TokenizerLike, renderer: _Renderer, tool_parser_class: type[ToolParser] | None, exclude_tools_when_tool_choice_none: bool = True, enable_auto_tool_choice: bool = False, default_chat_template_kwargs: dict[str, Any] | None = None, default_thinking_mode: str | None = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto') -> PreprocessResult
+```
+
+[`components/src/dynamo/frontend/prepost.py#L522`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L522)
+</Accordion>
+
 <Accordion id="api-dynamo-frontend-sglang-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
 Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -708,20 +722,6 @@ request-level thinking controls.
 Synchronous -- suitable for both main-process and worker-process execution.
 
 [`components/src/dynamo/frontend/sglang_prepost.py#L724`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L724)
-</Accordion>
-
-<Accordion id="api-dynamo-frontend-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
-No summary available.
-
-```python
-from dynamo.frontend.prepost import preprocess_chat_request
-```
-
-```python
-preprocess_chat_request(request: dict[str, Any] | ChatCompletionRequest, *, tokenizer: TokenizerLike, renderer: _Renderer, tool_parser_class: type[ToolParser] | None, exclude_tools_when_tool_choice_none: bool = True, enable_auto_tool_choice: bool = False, default_chat_template_kwargs: dict[str, Any] | None = None, default_thinking_mode: str | None = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto') -> PreprocessResult
-```
-
-[`components/src/dynamo/frontend/prepost.py#L491`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L491)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-random-call-id" title="random_call_id (function)">

@@ -29,7 +29,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -43,7 +43,7 @@ type groveStableResourcesReconciler struct {
 
 func newGroveStableResourcesReconciler(
 	kubeClient client.Client,
-	recorder record.EventRecorder,
+	recorder events.EventRecorder,
 	config *configv1alpha1.OperatorConfiguration,
 ) *groveStableResourcesReconciler {
 	return &groveStableResourcesReconciler{
@@ -170,8 +170,10 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 			if r.GetRecorder() != nil {
 				r.GetRecorder().Eventf(
 					dgd,
+					syncedService,
 					corev1.EventTypeWarning,
 					"UpdateService",
+					"Update",
 					"Failed to update Service %s: %s",
 					componentName,
 					err,
