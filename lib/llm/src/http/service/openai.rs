@@ -2047,11 +2047,32 @@ fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     changed.then_some(out)
 }
 
+/// A backend error extracted from an event, ready for `backend_error_response`.
+struct BackendErrorInfo {
+    message: String,
+    status: StatusCode,
+    /// Classification already established from the error chain, when the
+    /// status alone is not enough to recover it. `None` means "derive it from
+    /// `status`" — the ordinary case for a status the worker supplied.
+    sanitized: Option<SanitizedError>,
+}
+
+impl BackendErrorInfo {
+    /// The common case: nothing known beyond what the worker reported.
+    fn from_status(message: String, status: StatusCode) -> Self {
+        Self {
+            message,
+            status,
+            sanitized: None,
+        }
+    }
+}
+
 /// Checks if an Annotated event represents a backend error and extracts error information.
-/// Returns Some((message, status_code)) if it's an error, None otherwise.
+/// Returns Some(info) if it's an error, None otherwise.
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
-) -> Option<(String, StatusCode)> {
+) -> Option<BackendErrorInfo> {
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -2129,21 +2150,32 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
-            return Some((message, code));
+            return Some(BackendErrorInfo {
+                message,
+                status: code,
+                sanitized: overloaded.then_some(SanitizedError::Overloaded),
+            });
         }
 
         if let Some(invalid_argument) = invalid_argument {
-            return Some((
+            return Some(BackendErrorInfo::from_status(
                 invalid_argument.message().to_string(),
                 StatusCode::BAD_REQUEST,
             ));
         }
 
         if overloaded {
-            return Some((error_str, overload_status_code()));
+            return Some(BackendErrorInfo {
+                message: error_str,
+                status: overload_status_code(),
+                sanitized: Some(SanitizedError::Overloaded),
+            });
         }
 
-        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
+        return Some(BackendErrorInfo::from_status(
+            error_str,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -2157,7 +2189,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let message = error_payload
             .message
             .unwrap_or_else(|| json_value.to_string());
-        return Some((message, code));
+        return Some(BackendErrorInfo::from_status(message, code));
     }
 
     // Check if comment contains error information (without event: error)
@@ -2173,13 +2205,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         {
             let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let message = error_payload.message.unwrap_or(comment_str);
-            return Some((message, code));
+            return Some(BackendErrorInfo::from_status(message, code));
         }
 
         // Comments present with no data AND no event type indicates error
         // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
         if event.data.is_none() && event.event.is_none() {
-            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+            return Some(BackendErrorInfo::from_status(
+                comment_str,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
         }
     }
 
@@ -2256,8 +2291,8 @@ where
             continue;
         }
 
-        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            return Err(backend_error_response(error_msg, status_code));
+        if let Some(backend_error) = extract_backend_error_if_present(&event) {
+            return Err(backend_error_response(backend_error));
         }
 
         // First non-annotation, non-error event — hand back for downstream
@@ -2267,20 +2302,29 @@ where
     }
 }
 
-/// Convert an `(error_msg, status_code)` pair from `extract_backend_error_if_present`
-/// into the wire `ErrorResponse`. Shared between the non-streaming preflight
+/// Convert a `BackendErrorInfo` from `extract_backend_error_if_present` into the
+/// wire `ErrorResponse`. Shared between the non-streaming preflight
 /// (`check_for_backend_error`) and the streaming preflight so both paths speak
 /// the same sanitization + status contract to the client.
-fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorResponse {
-    match SanitizedError::for_backend_status(status_code) {
-        Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
+///
+/// A classification carried on the info wins over one derived from the status:
+/// the status alone cannot distinguish a capacity rejection from an outage once
+/// `DYN_HTTP_OVERLOAD_STATUS_CODE` is set outside the 5xx range.
+fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
+    let BackendErrorInfo {
+        message,
+        status,
+        sanitized,
+    } = backend_error;
+    match sanitized.or_else(|| SanitizedError::for_backend_status(status)) {
+        Some(variant) => ErrorMessage::sanitized_with_details(variant, message),
         // 4xx (non-499): protocol contract — forward backend message as-is.
         None => (
-            status_code,
+            status,
             Json(ErrorMessage {
-                message: error_msg,
-                error_type: map_error_code_to_error_type(status_code),
-                code: status_code.as_u16(),
+                message,
+                error_type: map_error_code_to_error_type(status),
+                code: status.as_u16(),
                 details: None,
                 metric_error_type: None,
             }),
@@ -4948,11 +4992,17 @@ mod tests {
             ),
         };
 
-        let (message, status) =
+        let backend_error =
             extract_backend_error_if_present(&event).expect("error event should be extracted");
-        assert_eq!(status, overload_status_code());
-        assert_eq!(status.as_u16(), 529);
-        assert!(message.contains("request limit reached"));
+        assert_eq!(backend_error.status, overload_status_code());
+        assert_eq!(backend_error.status.as_u16(), 529);
+        assert!(backend_error.message.contains("request limit reached"));
+        // Carried, not re-derived from the status — this is what keeps the
+        // rendering identical to the admission path at any configured status.
+        assert!(matches!(
+            backend_error.sanitized,
+            Some(SanitizedError::Overloaded)
+        ));
     }
 
     #[test]
@@ -4974,9 +5024,30 @@ mod tests {
             ),
         };
 
-        let (_, status) =
+        let backend_error =
             extract_backend_error_if_present(&event).expect("error event should be extracted");
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(backend_error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(backend_error.sanitized.is_none());
+    }
+
+    #[test]
+    fn backend_overload_is_sanitized_at_a_non_5xx_overload_status() {
+        // DYN_HTTP_OVERLOAD_STATUS_CODE accepts 200-999. Deriving the category
+        // from the status alone sends a 4xx overload down the forward-verbatim
+        // path, leaking the worker's internal text; a 2xx/3xx one down the
+        // coerce-to-500 path, dropping the configured status. The carried
+        // category avoids both, so the worker path renders exactly like the
+        // admission path at every configured value.
+        let response = backend_error_response(BackendErrorInfo {
+            message: "Worker local total request limit reached (32/32)".to_string(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+            sanitized: Some(SanitizedError::Overloaded),
+        });
+
+        assert_eq!(response.0, overload_status_code());
+        assert_eq!(response.1.code, overload_status_code().as_u16());
+        assert_eq!(response.1.message, SanitizedError::Overloaded.to_string());
+        assert!(!response.1.message.contains("32/32"));
     }
 
     #[test]
@@ -5008,9 +5079,9 @@ mod tests {
             event.error.as_ref().expect("error is set")
         ));
 
-        let (_, status) =
+        let backend_error =
             extract_backend_error_if_present(&event).expect("error event should be extracted");
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(backend_error.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
