@@ -26,8 +26,8 @@ pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
-    BootstrapInfo, KV_HINT_MIGRATE_CAPABILITY_KEY, KvHints, KvTransferPlan, MigrateHint,
-    MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest, RoutingHints,
+    BootstrapInfo, KV_HINT_TRANSFER_CAPABILITY_KEY, KvHints, MultimodalData, MultimodalDataMap,
+    PrefillResult, PreprocessedRequest, RoutingHints, TransferHint,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
