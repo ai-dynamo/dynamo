@@ -96,7 +96,7 @@ type PythonServerStreamingIngress = Ingress<
 /// response encoder never needs the GIL. See `push_egress.rs`.
 type PythonPushEgressIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
-    ManyOut<push_egress::PushResponse>,
+    ManyOut<push_egress::PushFrame>,
     python_payload::PythonIngressPayloadAdapter,
 >;
 
@@ -1288,33 +1288,44 @@ impl Endpoint {
         // rendering the pull path unreachable. Anything else stays on pull.
         let use_push_egress = push_egress::handler_supports_push(&generator);
 
-        // `register_local_engine` only applies to the pull path: the push
-        // engine hands responses to a per-request sender rather than returning
-        // them from the generator, which the in-process `SingleIn`/`ManyOut`
-        // local registry does not model.
-        let mut local_engine: Option<Arc<engine::PythonAsyncEngine>> = None;
-        let ingress: Arc<dyn rs::pipeline::network::PushWorkHandler> = if use_push_egress {
-            tracing::info!("serving endpoint with push egress");
-            PythonPushEgressIngress::for_engine_with_adapter(
+        // Both outcomes of the branch come out together: the ingress, and the
+        // engine to register in the local (in-process) registry. Only the pull
+        // path has one — the push engine hands responses to a per-request
+        // sender rather than returning them from the generator, which the
+        // in-process `SingleIn`/`ManyOut` registry does not model.
+        //
+        // Both outcomes are logged. Push mode is chosen by signature
+        // inspection, which can silently answer "no"; without the pull line the
+        // only symptom would be the absence of the push line, indistinguishable
+        // from a wrong log level.
+        let endpoint_name = self.inner.name().to_string();
+        let (ingress, local_engine): (
+            Arc<dyn rs::pipeline::network::PushWorkHandler>,
+            Option<Arc<engine::PythonAsyncEngine>>,
+        ) = if use_push_egress {
+            tracing::info!(endpoint = %endpoint_name, "serving endpoint with push egress");
+            let ingress = PythonPushEgressIngress::for_engine_with_adapter(
                 Arc::new(push_egress::PythonPushEngine::new(
                     generator,
                     self.event_loop.clone(),
                 )),
                 python_payload::PythonIngressPayloadAdapter,
             )
-            .map_err(to_pyerr)?
+            .map_err(to_pyerr)?;
+            (ingress, None)
         } else {
+            tracing::debug!(endpoint = %endpoint_name, "serving endpoint with pull egress");
             let engine = Arc::new(engine::PythonAsyncEngine::new(
                 generator,
                 self.event_loop.clone(),
             )?);
             let network_engine = Arc::new(engine.network_engine());
-            local_engine = Some(engine);
-            PythonServerStreamingIngress::for_engine_with_adapter(
+            let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
                 network_engine,
                 python_payload::PythonIngressPayloadAdapter,
             )
-            .map_err(to_pyerr)?
+            .map_err(to_pyerr)?;
+            (ingress, Some(engine))
         };
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
@@ -1349,6 +1360,7 @@ impl Endpoint {
         if use_push_egress {
             if health_payload_json.is_some() {
                 tracing::warn!(
+                    endpoint = %endpoint_name,
                     "health_check_payload ignored for push-egress endpoint: \
                      canary health checks require a local engine and are not \
                      supported on the push path"

@@ -5,10 +5,17 @@
 //!
 //! The pull path in [`crate::engine`] costs two GIL acquisitions on arbitrary
 //! tokio threads per response. Here the Python handler — already holding the
-//! GIL — calls [`ResponseSender::send`] instead: the conversion happens inline
-//! under that existing GIL and the value is enqueued on a bounded
-//! `tokio::sync::mpsc`, so the tokio side only ever does `rx.recv().await` and
-//! never touches Python. Rationale and measurements: DYN-3703.
+//! GIL — calls [`ResponseSender::send`] instead: the response is encoded to
+//! request-plane bytes inline under that existing GIL and the resulting
+//! [`PushFrame`] is enqueued on a bounded `tokio::sync::mpsc`, so the tokio
+//! side only ever does `rx.recv().await` and never touches Python. Rationale
+//! and measurements: #12845.
+//!
+//! Encoding all the way to bytes on the Python side is what keeps this a net
+//! removal of per-response work: the frame that comes off the queue is already
+//! finished, so the ingress just forwards it. Errors terminate the stream with
+//! the type `map_python_exception` assigned them, which is what request
+//! migration and worker inhibition key on downstream.
 //!
 //! Selected per handler by signature — [`handler_supports_push`] picks this
 //! path for a handler declaring a `response_sender` parameter, which in
@@ -24,30 +31,29 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Error;
+use bytes::Bytes;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
-use serde::Deserialize;
 use tokio_stream::{Stream, StreamExt};
 
 use tokio::sync::mpsc;
 
+use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
+use dynamo_runtime::pipeline::network::{
+    EncodedResponseFrame, NetworkStreamWrapper, RequestPlanePayloadCodec,
+};
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn,
+    AsyncEngine, AsyncEngineContextProvider, ManyOut, PipelineError, ResponseStream, SingleIn,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 use crate::context::{Context, callable_accepts_kwarg};
 use crate::engine::{self, map_python_exception};
-use crate::python_payload::PythonPayload;
-
-/// Depth of the Python -> Rust response channel. Matches
-/// `engine::RESPONSE_CHANNEL_DEPTH` so the push path buffers exactly as much
-/// as the pull path's forwarder does.
-pub(crate) const PUSH_CHANNEL_DEPTH: usize = 128;
+use crate::python_payload::{self, PythonPayload};
 
 /// Whether this Python callable can be driven in push mode. This is the ONLY
 /// switch between the two egress paths.
@@ -73,52 +79,250 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+// ── Wire frame ───────────────────────────────────────────────────────────────
+
+/// One response, already encoded for the request plane.
+///
+/// Getting a response from Python object to wire bytes is a single serde pass
+/// on the pull path: `Serialize for PythonPayload` transcodes the Python object
+/// straight into the codec. This path keeps that property. `send` already holds
+/// the GIL, so it encodes all the way here rather than parking an intermediate
+/// Rust value on the queue for a second pass to walk — and, because the payload
+/// is still a [`PythonPayload`] at the moment of encoding, nothing the codec can
+/// represent is narrowed on the way: binary values, non-finite floats and
+/// non-string mapping keys all survive exactly as they do on the pull path.
+///
+/// `codec` records which codec produced `bytes`. `send` has no request in hand,
+/// so it uses the process-global [`RequestPlanePayloadCodec::configured`] — the
+/// same value this worker advertises in its instance record, which is where
+/// callers read the codec they address it with. The two therefore agree except
+/// against a caller old enough to predict neither, which falls back to JSON;
+/// [`PushFrame::into_encoded`] re-encodes for that case rather than putting the
+/// wrong bytes on the wire.
+pub(crate) struct PushFrame {
+    bytes: Bytes,
+    is_error: bool,
+    codec: RequestPlanePayloadCodec,
+}
+
+impl std::fmt::Debug for PushFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushFrame")
+            .field("len", &self.bytes.len())
+            .field("is_error", &self.is_error)
+            .field("codec", &self.codec.name())
+            .finish()
+    }
+}
+
+impl PushFrame {
+    /// Encode one Python response object. Called with the GIL held by the
+    /// Python caller; [`python_payload::parse_python_response`] is the same
+    /// interpretation of the object the pull path uses.
+    fn encode(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let annotated =
+            python_payload::parse_python_response(obj.clone().unbind(), py).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "critical error: invalid response object from python handler; \
+                     application-logic-mismatch: {error}"
+                ))
+            })?;
+        let is_error = annotated.is_error();
+        let codec = RequestPlanePayloadCodec::configured();
+        let wrapper = NetworkStreamWrapper {
+            data: Some(annotated),
+            complete_final: false,
+        };
+        let bytes = codec.encode(&wrapper).map_err(|error| {
+            PyValueError::new_err(format!(
+                "critical error: failed serializing python response as {}: {error}",
+                codec.name()
+            ))
+        })?;
+        Ok(Self {
+            bytes: bytes.into(),
+            is_error,
+            codec,
+        })
+    }
+
+    /// Encode a terminal error frame. Pure Rust — no Python object involved —
+    /// so this is callable from either side of the bridge.
+    fn error(annotated: Annotated<serde_json::Value>) -> Self {
+        let codec = RequestPlanePayloadCodec::configured();
+        let wrapper = NetworkStreamWrapper {
+            data: Some(annotated),
+            complete_final: false,
+        };
+        // An error frame is a string and three `None`s; neither codec can fail
+        // to encode it. Degrade to an empty frame rather than panic if one
+        // somehow does.
+        let bytes = codec.encode(&wrapper).unwrap_or_else(|error| {
+            tracing::error!(%error, "push egress: failed to encode terminal error frame");
+            Vec::new()
+        });
+        Self {
+            bytes: bytes.into(),
+            is_error: true,
+            codec,
+        }
+    }
+
+    /// Hand the frame to the ingress for the codec this request is addressed
+    /// with. Normally a move; see the type docs for when it is not.
+    pub(crate) fn into_encoded(
+        self,
+        target: RequestPlanePayloadCodec,
+    ) -> Result<EncodedResponseFrame, PipelineError> {
+        if self.codec == target {
+            return Ok(EncodedResponseFrame {
+                bytes: self.bytes,
+                is_error: self.is_error,
+                stop_stream: false,
+            });
+        }
+
+        // Caller addressed us with a different codec than the one we advertise.
+        // `rmpv::Value` is the intermediate because it is the wider of the two
+        // wire models — it carries binary and non-finite floats, which
+        // `serde_json::Value` does not — so nothing is lost that the target
+        // codec could still have represented.
+        tracing::debug!(
+            from = self.codec.name(),
+            to = target.name(),
+            "push egress: re-encoding response for the caller's request-plane codec"
+        );
+        let wrapper: NetworkStreamWrapper<Annotated<rmpv::Value>> =
+            self.codec.decode(&self.bytes).map_err(|error| {
+                PipelineError::SerializationError(format!(
+                    "failed decoding push-egress response as {} for re-encoding: {error}",
+                    self.codec.name()
+                ))
+            })?;
+        let bytes = target.encode(&wrapper).map_err(|error| {
+            PipelineError::SerializationError(format!(
+                "Failed serializing {} push-egress response: {error}",
+                target.name()
+            ))
+        })?;
+        Ok(EncodedResponseFrame {
+            bytes: bytes.into(),
+            is_error: self.is_error,
+            stop_stream: false,
+        })
+    }
+}
+
 // ── GIL-side sink ────────────────────────────────────────────────────────────
 
-/// The GIL-side half of one request's push channel.
-///
-/// Type-erased because `#[pyclass]` cannot be generic: [`ResponseSender`] must
-/// be a single concrete Python type, while the channel's item type is chosen by
-/// the (generic) [`response_channel`] factory. Every method here is called with
-/// the GIL already held by the Python caller.
-trait ResponseSink: Send + Sync {
-    /// Convert `obj` to an owned Rust value and enqueue it.
-    fn send(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()>;
-
-    /// Normal end of stream.
-    fn close(&self);
-
-    /// Terminate the stream with an untyped error frame.
-    fn close_with_error(&self, message: String);
-
-    /// Terminate the stream with a typed backend error frame. Not exposed to
-    /// Python; used by the Rust-side safety net when the handler's generator
-    /// raises instead of closing the sender itself.
-    fn close_with_dynamo_error(&self, error: DynamoError);
-}
-
-struct TypedSink<Resp> {
+/// The GIL-side half of one request's push channel. Every method is called with
+/// the GIL already held by the Python caller, except the two the Rust driver
+/// task uses to terminate a stream its handler left open.
+struct ResponseSink {
     /// `None` once the stream has been closed. Dropping the last `Sender` is
     /// what ends the receiver stream, so closing is "take the sender".
-    tx: Mutex<Option<mpsc::Sender<Annotated<Resp>>>>,
+    tx: Mutex<Option<mpsc::Sender<PushFrame>>>,
+    /// Stopped when the consumer goes away, mirroring what the pull path's
+    /// forwarder does on a closed channel (`engine.rs`): without it a dropped
+    /// response stream would leave the handler generating into nothing until it
+    /// noticed the send error on its own.
+    ctx: Arc<dyn AsyncEngineContext>,
 }
 
-impl<Resp> TypedSink<Resp> {
+impl ResponseSink {
     /// Clone the sender out from under the lock rather than holding the lock
     /// across the enqueue: a blocking send while holding the mutex would let a
     /// concurrent `close()` deadlock against it.
-    fn sender(&self) -> Option<mpsc::Sender<Annotated<Resp>>> {
+    fn sender(&self) -> Option<mpsc::Sender<PushFrame>> {
         self.tx
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
-    fn take_sender(&self) -> Option<mpsc::Sender<Annotated<Resp>>> {
+    fn take_sender(&self) -> Option<mpsc::Sender<PushFrame>> {
         self.tx
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
+    }
+
+    /// The consumer dropped the response stream. Tell the request context so
+    /// the handler stops generating, then report it to the caller.
+    fn consumer_gone(&self) -> PyErr {
+        self.ctx.stop_generating();
+        PyRuntimeError::new_err(
+            "response stream is closed; the consumer dropped the response stream",
+        )
+    }
+
+    /// Convert `obj` to wire bytes and enqueue it.
+    fn send(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
+        // The whole Python->Rust crossing for one response: the encode plus the
+        // enqueue. Unlike the pull path neither step acquires the GIL — the
+        // Python handler already holds it.
+        let frame = PushFrame::encode(py, obj)?;
+
+        let Some(tx) = self.sender() else {
+            return Err(PyRuntimeError::new_err(
+                "response stream is closed; send() after close()",
+            ));
+        };
+
+        // Fast path. `try_send` never blocks, so there is no reason to drop the
+        // GIL for it, and dropping/reacquiring it would cost more than the send.
+        let frame = match tx.try_send(frame) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::error::TrySendError::Full(frame)) => frame,
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(self.consumer_gone()),
+        };
+
+        // Backpressure path.
+        //
+        // CRITICAL: the GIL MUST be released across this blocking wait.
+        // `allow_threads` here is not an optimization, it is a correctness
+        // requirement. This call runs on the asyncio loop thread; blocking it
+        // with the GIL held freezes the entire interpreter — the event loop
+        // that would run every other request's handler, and every tokio task
+        // that needs the GIL. Anything that has to run for the channel to
+        // drain then cannot run, and a merely-full channel becomes an
+        // interpreter-wide stall instead of local backpressure.
+        //
+        // `blocking_send` panics if called from inside an async task. The only
+        // caller is `ResponseSender::send`, reached from the Python event-loop
+        // thread, which has no tokio runtime context at all. It would panic only
+        // if a handler managed to call `send` from an async tokio task while
+        // holding the GIL.
+        py.allow_threads(|| tx.blocking_send(frame))
+            .map_err(|_| self.consumer_gone())
+    }
+
+    /// Normal end of stream.
+    fn close(&self) {
+        // Dropping the last sender is what ends the receiver stream. Idempotent
+        // so the Rust-side safety net can close a stream the handler already
+        // closed itself.
+        drop(self.take_sender());
+    }
+
+    /// Terminate the stream with an untyped error frame.
+    fn close_with_error(&self, message: String) {
+        let Some(tx) = self.take_sender() else {
+            return;
+        };
+        self.send_terminal(tx, PushFrame::error(Annotated::from_error(message)));
+    }
+
+    /// Terminate the stream with a typed backend error frame. Not exposed to
+    /// Python; used by the Rust-side safety net when the handler's generator
+    /// raises instead of closing the sender itself. Preserving the type matters
+    /// downstream — `BackendError::EngineShutdown` is what triggers request
+    /// migration and marks the worker inhibited.
+    fn close_with_dynamo_error(&self, error: DynamoError) {
+        let Some(tx) = self.take_sender() else {
+            return;
+        };
+        self.send_terminal(tx, PushFrame::error(Annotated::from_err(error)));
     }
 
     /// Enqueue a terminal frame after the sender has already been taken.
@@ -130,10 +334,7 @@ impl<Resp> TypedSink<Resp> {
     /// handle Python's event-loop thread does not have — so pick per caller.
     /// Holding `tx` until the frame lands is what keeps the stream open long
     /// enough to deliver it; the stream ends when the task below drops it.
-    fn send_terminal(&self, tx: mpsc::Sender<Annotated<Resp>>, frame: Annotated<Resp>)
-    where
-        Resp: Data,
-    {
+    fn send_terminal(&self, tx: mpsc::Sender<PushFrame>, frame: PushFrame) {
         let frame = match tx.try_send(frame) {
             Ok(()) => return,
             Err(mpsc::error::TrySendError::Full(frame)) => frame,
@@ -154,97 +355,6 @@ impl<Resp> TypedSink<Resp> {
     }
 }
 
-impl<Resp> ResponseSink for TypedSink<Resp>
-where
-    Resp: Data + for<'de> Deserialize<'de>,
-{
-    fn send(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
-        // The whole Python->Rust crossing for one response: the `depythonize`
-        // plus the enqueue. Unlike the pull path neither step acquires the GIL
-        // — the Python handler already holds it.
-        let frame = decode_response::<Resp>(obj)?;
-
-        let Some(tx) = self.sender() else {
-            return Err(PyRuntimeError::new_err(
-                "response stream is closed; send() after close()",
-            ));
-        };
-
-        // Fast path. `try_send` never blocks, so there is no reason to drop the
-        // GIL for it, and dropping/reacquiring it would cost more than the send.
-        let frame = match tx.try_send(frame) {
-            Ok(()) => return Ok(()),
-            Err(mpsc::error::TrySendError::Full(frame)) => frame,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Err(PyRuntimeError::new_err(
-                    "response stream is closed; the consumer dropped the response stream",
-                ));
-            }
-        };
-
-        // Backpressure path.
-        //
-        // CRITICAL: the GIL MUST be released across this blocking wait.
-        // `allow_threads` here is not an optimization, it is a correctness
-        // requirement. This call runs on the asyncio loop thread; blocking it
-        // with the GIL held freezes the entire interpreter — the event loop
-        // that would run every other request's handler, and every tokio task
-        // that needs the GIL. Anything that has to run for the channel to
-        // drain then cannot run, and a merely-full channel becomes an
-        // interpreter-wide stall instead of local backpressure.
-        //
-        // `blocking_send` panics if called from inside an async task. The only
-        // caller is `ResponseSender::send`, reached from the Python event-loop
-        // thread, which has no tokio runtime context at all. It would panic only
-        // if a handler managed to call `send` from an async tokio task while
-        // holding the GIL.
-        py.allow_threads(|| tx.blocking_send(frame)).map_err(|_| {
-            PyRuntimeError::new_err(
-                "response stream is closed; the consumer dropped the response stream",
-            )
-        })
-    }
-
-    fn close(&self) {
-        // Dropping the last sender is what ends the receiver stream. Idempotent
-        // so the Rust-side safety net can close a stream the handler already
-        // closed itself.
-        drop(self.take_sender());
-    }
-
-    fn close_with_error(&self, message: String) {
-        let Some(tx) = self.take_sender() else {
-            return;
-        };
-        self.send_terminal(tx, Annotated::from_error(message));
-    }
-
-    fn close_with_dynamo_error(&self, error: DynamoError) {
-        let Some(tx) = self.take_sender() else {
-            return;
-        };
-        self.send_terminal(tx, Annotated::from_err(error));
-    }
-}
-
-/// Python -> Rust conversion for one response object.
-///
-/// Shares [`engine::depythonize_annotated`] with the pull path, so both paths
-/// produce the same Rust value for the same Python object by construction.
-/// Only the error mapping differs: here it is raised back into the calling
-/// handler, which turns it into a `close_with_error` frame.
-fn decode_response<Resp>(obj: &Bound<'_, PyAny>) -> PyResult<Annotated<Resp>>
-where
-    Resp: for<'de> Deserialize<'de>,
-{
-    engine::depythonize_annotated(obj).map_err(|error| {
-        PyValueError::new_err(format!(
-            "critical error: invalid response object from python handler; \
-             application-logic-mismatch: {error}"
-        ))
-    })
-}
-
 // ── Python-facing handle ─────────────────────────────────────────────────────
 
 /// Rust response sink handed to a Python handler running in push mode.
@@ -258,28 +368,25 @@ where
 ///         async for chunk in engine.generate(request):
 ///             yield chunk
 ///         return
-///     try:                            # push path: yields nothing
-///         async for chunk in engine.generate(request):
-///             response_sender.send(chunk)
-///     except Exception as exc:
-///         response_sender.close_with_error(f"{type(exc).__name__}: {exc}")
-///     else:
-///         response_sender.close()
+///     async for chunk in engine.generate(request):   # push path: yields nothing
+///         response_sender.send(chunk)
+///     response_sender.close()
+///     # exceptions propagate: Rust classifies them and terminates the stream
 /// ```
 ///
 /// `send` blocks when the consumer is behind; it is safe to call from the
 /// asyncio loop thread because the GIL is released across that wait.
 #[pyclass]
 pub struct ResponseSender {
-    sink: Arc<dyn ResponseSink>,
+    sink: Arc<ResponseSink>,
 }
 
 #[pymethods]
 impl ResponseSender {
-    /// Convert one response object and enqueue it for the Rust egress path.
+    /// Encode one response object and enqueue it for the Rust egress path.
     ///
     /// Raises `RuntimeError` if the stream is already closed and `ValueError`
-    /// if the object cannot be converted.
+    /// if the object cannot be encoded.
     fn send(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
         self.sink.send(py, obj)
     }
@@ -290,8 +397,14 @@ impl ResponseSender {
         Ok(())
     }
 
-    /// Terminate the stream with an error frame. Idempotent; a later `close()`
-    /// is a no-op.
+    /// Terminate the stream with an untyped error frame. Idempotent; a later
+    /// `close()` is a no-op.
+    ///
+    /// Prefer letting the exception propagate out of the handler instead: Rust
+    /// then runs it through `map_python_exception` and terminates the stream
+    /// with a *typed* backend error, which is what drives request migration and
+    /// worker inhibition downstream. This exists for failures that are not
+    /// exceptions.
     fn close_with_error(&self, msg: String) -> PyResult<()> {
         self.sink.close_with_error(msg);
         Ok(())
@@ -301,7 +414,7 @@ impl ResponseSender {
 impl ResponseSender {
     /// Rust-side handle to the same sink, for the safety net that terminates
     /// the stream if the handler's generator raises.
-    fn sink(&self) -> Arc<dyn ResponseSink> {
+    fn sink(&self) -> Arc<ResponseSink> {
         self.sink.clone()
     }
 }
@@ -310,29 +423,27 @@ impl ResponseSender {
 
 /// Build one request's push channel.
 ///
-/// The returned stream yields `Annotated<Resp>` — the same item type
-/// `engine::buffered_typed_response_stream` produces on the pull path — so the
-/// ingress side (`lib/runtime/src/pipeline/network/ingress/push_handler.rs`)
-/// is unchanged.
-pub(crate) fn response_channel<Resp>(
+/// The returned stream yields already-encoded [`PushFrame`]s; the ingress side
+/// (`lib/runtime/src/pipeline/network/ingress/push_handler.rs`) is unchanged and
+/// its encoder just forwards them.
+pub(crate) fn response_channel(
     depth: usize,
+    ctx: Arc<dyn AsyncEngineContext>,
 ) -> (
     ResponseSender,
-    impl Stream<Item = Annotated<Resp>> + Send + 'static,
-)
-where
-    Resp: Data + for<'de> Deserialize<'de>,
-{
-    let (tx, rx) = mpsc::channel::<Annotated<Resp>>(depth);
+    impl Stream<Item = PushFrame> + Send + 'static,
+) {
+    let (tx, rx) = mpsc::channel::<PushFrame>(depth);
 
     let sender = ResponseSender {
-        sink: Arc::new(TypedSink {
+        sink: Arc::new(ResponseSink {
             tx: Mutex::new(Some(tx)),
+            ctx,
         }),
     };
 
-    // The consumer side is pure Rust: no Python work, no GIL, just the wait for
-    // whatever the handler pushes next.
+    // The consumer side is pure Rust: no Python work, no GIL, no encoding, just
+    // the wait for whatever the handler pushes next.
     let stream = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
     });
@@ -341,11 +452,6 @@ where
 }
 
 // ── Engine ───────────────────────────────────────────────────────────────────
-
-/// Response type carried by the push path. The GIL-side `depythonize` produces
-/// an owned Rust value, so — unlike the pull path's `PythonPayload` — nothing
-/// downstream of the channel can touch a Python object.
-pub(crate) type PushResponse = Annotated<serde_json::Value>;
 
 /// Push-mode counterpart of `engine::PythonNetworkEngine`.
 ///
@@ -377,18 +483,20 @@ impl PythonPushEngine {
 }
 
 #[async_trait::async_trait]
-impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushResponse>, Error> for PythonPushEngine {
+impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonPushEngine {
     async fn generate(
         &self,
         request: SingleIn<PythonPayload>,
-    ) -> Result<ManyOut<PushResponse>, Error> {
+    ) -> Result<ManyOut<PushFrame>, Error> {
         let (request, context) = request.transfer(());
         let ctx = context.context();
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
         let current_trace_context = get_distributed_tracing_context();
 
-        let (sender, stream) = response_channel::<serde_json::Value>(PUSH_CHANNEL_DEPTH);
+        // Same depth as the pull path's forwarder, so both paths buffer the
+        // same amount and backpressure behaves identically.
+        let (sender, stream) = response_channel(engine::RESPONSE_CHANNEL_DEPTH, ctx.clone());
         let sink = sender.sink();
 
         let python_input = request.into_inner();
@@ -467,105 +575,154 @@ mod tests {
     //! Confirmed: a trivial `prepare_freethreaded_python()` test produced
     //! "undefined symbol: Py_InitializeEx" from rust-lld.
     //!
-    //! **Root cause for push_egress.rs**: `TypedSink<Resp>` implements
-    //! `ResponseSink`, whose vtable includes `fn send(&self, py: Python<'_>,
-    //! obj: &Bound<'_, PyAny>)`.  Instantiating `TypedSink` (even in a test
-    //! that never calls `send`) forces the compiler to monomorphize ALL trait
-    //! impl methods, pulling in pyo3 and Python C-API symbols.  The same
-    //! applies to `ResponseSender` (`#[pyclass]`) and `response_channel`
-    //! (which creates a `TypedSink` internally).
+    //! **Root cause for push_egress.rs**: `ResponseSink::send` takes
+    //! `Python<'_>` / `Bound<'_, PyAny>`, and `ResponseSender` is a
+    //! `#[pyclass]`.  A test that instantiates either — `response_channel`
+    //! creates both — pulls pyo3 and the Python C API into the test binary's
+    //! object graph.
     //!
-    //! **What compiles**: tests that use only `mpsc` channels, `Annotated`,
-    //! `serde_json::Value`, and integer constants — nothing from this module.
-    //! Everything else requires Python and must be covered by pytest against
-    //! the built `.so`.  Coverage gaps are documented at the bottom.
+    //! **What compiles**: [`PushFrame`] and everything downstream of it. The
+    //! frame is a `Bytes` plus two scalars, and both the terminal-frame
+    //! constructor and the ingress hand-off are pure serde, so the encoding
+    //! contract — the part this module actually owns — is testable here.
+    //! `send`/`close` and `handler_supports_push` are not; they are covered by
+    //! pytest against the built `.so`.  Gaps are documented at the bottom.
 
-    use super::PUSH_CHANNEL_DEPTH;
+    use super::PushFrame;
+    use crate::engine::RESPONSE_CHANNEL_DEPTH;
+    use dynamo_runtime::pipeline::network::{NetworkStreamWrapper, RequestPlanePayloadCodec};
     use dynamo_runtime::protocols::annotated::Annotated;
     use tokio::sync::mpsc;
 
-    // ── PUSH_CHANNEL_DEPTH constant ───────────────────────────────────────
-
-    /// Push and pull channel depths must match.  `engine::RESPONSE_CHANNEL_DEPTH`
-    /// is 128; a mismatch makes the push path buffer differently from the pull
-    /// path, silently changing backpressure behavior.
-    #[test]
-    fn push_channel_depth_equals_pull_channel_depth() {
-        assert_eq!(
-            PUSH_CHANNEL_DEPTH, 128,
-            "PUSH_CHANNEL_DEPTH must equal engine::RESPONSE_CHANNEL_DEPTH (128)"
-        );
+    /// Decode a frame's bytes back to the wire envelope, as the caller does.
+    fn decode(
+        bytes: &[u8],
+        codec: RequestPlanePayloadCodec,
+    ) -> NetworkStreamWrapper<Annotated<rmpv::Value>> {
+        codec.decode(bytes).expect("frame must decode")
     }
 
     // ── channel backpressure contract ─────────────────────────────────────
     //
-    // TypedSink::send uses a channel of depth PUSH_CHANNEL_DEPTH.  The fast
-    // path uses try_send (no blocking); the slow path parks.  These tests
-    // verify the channel behaves as the comments describe, using mpsc directly
-    // because TypedSink instantiation requires Python symbols.
+    // ResponseSink::send uses a channel of RESPONSE_CHANNEL_DEPTH -- the pull
+    // path's constant, referenced rather than duplicated so the two cannot
+    // drift.  The fast path uses try_send (no blocking); the slow path parks.
+    // These tests use mpsc directly because instantiating the sink requires
+    // Python symbols.
 
-    /// A channel of PUSH_CHANNEL_DEPTH capacity must accept exactly that many
-    /// items without blocking, then report Full on the next one.
-    /// Catches drift between the constant and the actual channel constructor call.
+    /// The channel must accept exactly `RESPONSE_CHANNEL_DEPTH` items without
+    /// blocking, then report Full. Catches drift between the constant and the
+    /// actual channel constructor call.
     #[test]
-    fn channel_accepts_exactly_push_channel_depth_items_then_full() {
-        let (tx, _rx) = mpsc::channel::<Annotated<serde_json::Value>>(PUSH_CHANNEL_DEPTH);
+    fn channel_accepts_exactly_response_channel_depth_items_then_full() {
+        let (tx, _rx) = mpsc::channel::<PushFrame>(RESPONSE_CHANNEL_DEPTH);
 
         let mut sent = 0usize;
-        for i in 0..PUSH_CHANNEL_DEPTH {
-            match tx.try_send(Annotated::from_data(serde_json::Value::from(i as i64))) {
+        for i in 0..RESPONSE_CHANNEL_DEPTH {
+            match tx.try_send(PushFrame::error(Annotated::from_error(format!("{i}")))) {
                 Ok(()) => sent += 1,
                 Err(mpsc::error::TrySendError::Full(_)) => break,
                 Err(e) => panic!("unexpected channel error: {e}"),
             }
         }
         assert_eq!(
-            sent, PUSH_CHANNEL_DEPTH,
-            "channel must buffer exactly {PUSH_CHANNEL_DEPTH} items without blocking"
+            sent, RESPONSE_CHANNEL_DEPTH,
+            "channel must buffer exactly {RESPONSE_CHANNEL_DEPTH} items without blocking"
         );
 
         assert!(
             matches!(
-                tx.try_send(Annotated::from_data(serde_json::Value::Null)),
+                tx.try_send(PushFrame::error(Annotated::from_error("overflow"))),
                 Err(mpsc::error::TrySendError::Full(_))
             ),
-            "item {PUSH_CHANNEL_DEPTH}+1 must fail Full, not Closed"
+            "item {RESPONSE_CHANNEL_DEPTH}+1 must fail Full, not Closed"
         );
     }
 
-    // ── error frame contract ──────────────────────────────────────────────
+    // ── terminal frame contract ───────────────────────────────────────────
     //
-    // TypedSink::close_with_error and close_with_dynamo_error each:
+    // close_with_error and close_with_dynamo_error each:
     //   1. Call take_sender() to atomically claim the send side (idempotence)
-    //   2. Pass an Annotated error frame to send_terminal
+    //   2. Pass a PushFrame::error to send_terminal
     //   3. send_terminal delivers the frame and then drops the sender
     //
-    // Steps 1 and 3 (idempotence via take_sender; stream end via drop) are
-    // tested against mpsc directly.  Step 2 (frame structure) is pinned by
-    // the from_error shape test.  The full end-to-end path needs Python; see
-    // the note at the end of this module.
+    // Step 2 is tested here directly; steps 1 and 3 (idempotence via
+    // take_sender; stream end via drop) are pinned against mpsc below.
 
+    /// A terminal frame must reach the caller as a decodable error frame with
+    /// no data, and must be marked `is_error` so the ingress does not treat it
+    /// as evidence the engine is healthy.
     #[test]
-    fn annotated_from_error_sets_error_field_and_clears_data() {
-        // Pins the Annotated frame shape that close_with_error delivers.
-        let frame = Annotated::<serde_json::Value>::from_error("some-error");
-        assert!(frame.error.is_some(), "from_error must set the error field");
-        assert!(frame.data.is_none(), "from_error must not set a data field");
+    fn terminal_frame_encodes_an_error_with_no_data() {
+        let frame = PushFrame::error(Annotated::from_error("fatal"));
+        assert!(frame.is_error, "terminal frames must be flagged is_error");
+
+        let wrapper = decode(&frame.bytes, frame.codec);
+        assert!(!wrapper.complete_final, "not the end-of-stream marker");
+        let annotated = wrapper.data.expect("terminal frame carries data");
+        assert!(annotated.error.is_some(), "expected an error field");
+        assert!(annotated.data.is_none(), "error frames carry no data");
+    }
+
+    /// Matching codecs are the whole point: the bytes encoded under the GIL go
+    /// out untouched, with no second serde pass.
+    #[test]
+    fn matching_codec_forwards_the_bytes_unchanged() {
+        let frame = PushFrame::error(Annotated::from_error("fatal"));
+        let (codec, expected) = (frame.codec, frame.bytes.clone());
+
+        let encoded = frame.into_encoded(codec).expect("forward must succeed");
+        assert_eq!(encoded.bytes, expected, "bytes must not be re-encoded");
+        assert!(encoded.is_error);
+        assert!(!encoded.stop_stream);
+    }
+
+    /// A caller addressing this worker with a different codec than the one it
+    /// advertises must still get a frame it can decode. Sending the bytes
+    /// through unchanged would put msgpack on a JSON stream.
+    #[test]
+    fn mismatched_codec_re_encodes_for_the_caller() {
+        let frame = PushFrame {
+            bytes: RequestPlanePayloadCodec::Msgpack
+                .encode(&NetworkStreamWrapper {
+                    data: Some(Annotated::from_data(serde_json::json!({"text": "hi"}))),
+                    complete_final: false,
+                })
+                .expect("encode")
+                .into(),
+            is_error: false,
+            codec: RequestPlanePayloadCodec::Msgpack,
+        };
+
+        let encoded = frame
+            .into_encoded(RequestPlanePayloadCodec::Json)
+            .expect("re-encode must succeed");
+        let wrapper = decode(&encoded.bytes, RequestPlanePayloadCodec::Json);
+        let data = wrapper.data.expect("data").data.expect("annotated data");
+        assert_eq!(
+            data.as_map()
+                .expect("map")
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("text"))
+                .map(|(_, v)| v.as_str().unwrap_or_default()),
+            Some("hi"),
+            "payload must survive the re-encode"
+        );
+        assert!(!encoded.is_error, "the error flag must be preserved");
     }
 
     /// Pins the channel-level protocol: one error frame then end-of-stream.
-    /// This is what TypedSink::close_with_error (via send_terminal) is supposed
-    /// to produce.  If send_terminal fails to drop the sender after delivering
-    /// the error frame, the consumer would wait forever.
+    /// If send_terminal fails to drop the sender after delivering the error
+    /// frame, the consumer would wait forever.
     #[tokio::test]
     async fn one_error_frame_then_dropped_sender_ends_stream() {
-        let (tx, mut rx) = mpsc::channel::<Annotated<serde_json::Value>>(4);
-        tx.send(Annotated::from_error("fatal".to_string()))
+        let (tx, mut rx) = mpsc::channel::<PushFrame>(4);
+        tx.send(PushFrame::error(Annotated::from_error("fatal")))
             .await
             .unwrap();
         drop(tx); // simulates send_terminal dropping the sender after the frame
         let item = rx.recv().await.expect("one error frame must arrive");
-        assert!(item.error.is_some(), "expected an error frame");
+        assert!(item.is_error, "expected an error frame");
         assert!(
             rx.recv().await.is_none(),
             "stream must end after the error frame"
@@ -576,7 +733,7 @@ mod tests {
     /// This pins the close() (no error) contract.
     #[tokio::test]
     async fn dropped_sender_without_data_ends_stream_immediately() {
-        let (tx, mut rx) = mpsc::channel::<Annotated<serde_json::Value>>(4);
+        let (tx, mut rx) = mpsc::channel::<PushFrame>(4);
         drop(tx);
         assert!(
             rx.recv().await.is_none(),
@@ -584,10 +741,10 @@ mod tests {
         );
     }
 
-    // The rest of this module's surface -- TypedSink send/close semantics,
-    // send_terminal's spawn-vs-blocking_send branches, decode_response, and
+    // The rest of this module's surface -- ResponseSink send/close semantics,
+    // send_terminal's spawn-vs-blocking_send branches, PushFrame::encode, and
     // handler_supports_push -- cannot be unit-tested here: pyo3's
     // `extension-module` is hardcoded in Cargo.toml, so any test whose object
     // graph reaches the Python C API fails to link against libpython. Covering
-    // it needs pytest against a maturin-built extension. See DYN-3703.
+    // it needs pytest against a maturin-built extension. See #12845.
 }

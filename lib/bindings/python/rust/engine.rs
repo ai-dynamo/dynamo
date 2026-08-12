@@ -331,11 +331,13 @@ where
 /// Yields tagged with `_dynamo_annotated: True` are wire `Annotated<R>`
 /// envelopes; everything else is plain data.
 ///
-/// Shared by both egress paths — the pull path via [`process_item`] and the
-/// push path via `push_egress::decode_response` — so the two cannot drift and
-/// start disagreeing about what a given Python object means on the wire. The
-/// caller owns the error mapping; the GIL is already held either way.
-pub(crate) fn depythonize_annotated<Resp>(
+/// Used by the typed pull path via [`process_item`]. The direct request-plane
+/// paths — pull and push alike — instead go through
+/// `python_payload::parse_python_response`, which keeps the payload a
+/// `PythonPayload` so it transcodes straight into the wire codec.
+///
+/// The caller owns the error mapping; the GIL is already held.
+fn depythonize_annotated<Resp>(
     bound: &Bound<'_, PyAny>,
 ) -> Result<Annotated<Resp>, pythonize::PythonizeError>
 where
@@ -439,7 +441,7 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
 
 /// Channel depth between the response-forwarding task and the consumer of
 /// the engine's output stream.
-const RESPONSE_CHANNEL_DEPTH: usize = 128;
+pub(crate) const RESPONSE_CHANNEL_DEPTH: usize = 128;
 
 /// Drain the Python response stream on a spawned task, deserialize each item
 /// into `Resp` via [`process_item`], and forward it as an [`Annotated`] frame

@@ -31,6 +31,7 @@ import importlib.util
 import inspect
 import logging
 import pathlib
+from typing import ClassVar
 
 import pytest
 
@@ -222,12 +223,19 @@ class TestSignatureClaim:
             "Rust handler_supports_push() will return false"
         )
 
-    def test_outer_functools_wraps_hides_response_sender(self):
-        """Fragility: an outer functools.wraps wrapper breaks the signature.
+    def test_outer_functools_wraps_still_exposes_response_sender(self):
+        """Signature visibility is NOT what makes the ordering constraint real.
 
-        This documents the ordering constraint: push_egress_capable MUST be
-        outermost.  If another decorator wraps it with functools.wraps, the
-        __wrapped__ link is re-established and inspect.signature will follow it.
+        A wrapper applied on top with ``functools.wraps`` sets its
+        ``__wrapped__`` to ``dispatch`` — which declares ``response_sender`` —
+        so ``inspect.signature`` still finds the parameter and Rust still picks
+        push mode. Pinned here so nobody "fixes" this into a hiding assertion:
+        the reason ``push_egress_capable`` must be outermost is that any
+        decorator inspecting what it wraps has to see a real async-generator
+        function, not the plain ``def dispatch`` this returns. The visibility
+        failure that *is* real is the ``__wrapped__`` link on ``dispatch``
+        itself — see :meth:`test_no_wrapped_link` and the canary in
+        :class:`TestRustPathSelection`.
         """
         inner = push_egress_capable(_gen_one_token)
 
@@ -236,13 +244,12 @@ class TestSignatureClaim:
             return inner(self, request, context, **kwargs)
 
         params = inspect.signature(outer_wrapper).parameters
-        # Document the actual result — regardless of whether it hides the param
-        # the test probes whether the ordering constraint is fragile.
-        if "response_sender" not in params:
-            pytest.xfail(
-                "An outer functools.wraps hides response_sender — "
-                "ordering constraint is real and fragile"
-            )
+        assert "response_sender" in params
+        assert not inspect.isasyncgenfunction(inner), (
+            "push_egress_capable returned an async-generator function; a "
+            "decorator applied outside it would then see the wrong shape and "
+            "the OUTERMOST constraint would need restating"
+        )
 
 
 # ===========================================================================
@@ -336,17 +343,20 @@ class TestShapeClaim:
 
 
 class TestTermination:
-    """close() or close_with_error() must be issued exactly once per request."""
+    """Normal end closes the sender; every failure propagates to Rust instead.
+
+    The split matters downstream. Rust runs an escaping exception through
+    `map_python_exception`, which turns `EngineShutdown` into
+    `BackendError::EngineShutdown` (request migration + worker inhibition) and
+    `ValueError`/`TypeError` into `InvalidArgument`. Catching it here to report
+    a string through `close_with_error` would erase that type, so these tests
+    assert the exception gets OUT, not that a message was formatted.
+    """
 
     def test_normal_completion_closes_sender_exactly_once(self):
         sender = FakeSender()
         run(drive_push_egress(gen("a", "b", "c"), sender))
-        assert sender.close_count == 1, (
-            f"expected 1 close(), got {sender.close_count} "
-            f"(close_with_error: {sender.error_close_count}) — check whether "
-            "something inside _terminate() raised and was swallowed by its "
-            "except guard before the close call was reached"
-        )
+        assert sender.close_count == 1, f"expected 1 close(), got {sender.close_count}"
         assert sender.error_close_count == 0
 
     def test_zero_chunk_stream_closes_sender(self):
@@ -357,116 +367,107 @@ class TestTermination:
         ), f"empty stream: expected 1 close, got {sender.close_count}"
         assert sender.error_close_count == 0
 
-    def test_handler_exception_calls_close_with_error_not_close(self):
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ValueError("bad request"),  # -> BackendError::InvalidArgument
+            RuntimeError("engine shutting down"),  # stands in for EngineShutdown
+            TimeoutError("too slow"),  # -> BackendError::ConnectionTimeout
+        ],
+        ids=["value-error", "runtime-error", "timeout-error"],
+    )
+    def test_handler_exception_propagates_untouched(self, exc):
+        """The exact exception object must reach Rust, unwrapped and unlogged-over.
+
+        This is the whole typed-error contract: if this ever goes back to being
+        caught, every failure reaches the caller as a generic server error and
+        an interrupted request stops being migrated to another worker.
+        """
         sender = FakeSender()
-        run(drive_push_egress(raising_gen(["a"], ValueError("boom")), sender))
-        assert (
-            sender.error_close_count == 1
-        ), f"expected 1 close_with_error(), got {sender.error_close_count}"
-        assert sender.close_count == 0
+        with pytest.raises(type(exc)) as caught:
+            run(drive_push_egress(raising_gen(["a"], exc), sender))
+        assert caught.value is exc, "the original exception must not be re-wrapped"
 
-    def test_error_message_contains_exception_type(self):
+    def test_handler_exception_leaves_the_stream_to_rust(self):
+        """No close of any kind on the error path.
+
+        Closing here would win the race against the Rust driver's
+        `close_with_dynamo_error`, which is idempotent — the typed frame would
+        be silently dropped in favour of a plain end-of-stream.
+        """
         sender = FakeSender()
-        run(drive_push_egress(raising_gen([], ValueError("boom")), sender))
-        assert "ValueError" in (
-            sender.last_error or ""
-        ), f"error message missing exception type: {sender.last_error!r}"
+        with pytest.raises(ValueError):
+            run(drive_push_egress(raising_gen(["a"], ValueError("boom")), sender))
+        assert sender.total_closes == 0, (
+            "the error path must not terminate the stream; Rust does it with "
+            f"the mapped backend error (got {sender.total_closes} closes)"
+        )
 
-    def test_handler_exception_not_reraised(self):
-        """Exception in the handler must NOT propagate — it went to close_with_error."""
+    def test_cancelled_error_propagates(self):
+        """Cancellation is an exception like any other.
 
-        async def _test():
-            sender = FakeSender()
-            await drive_push_egress(raising_gen([], RuntimeError("oops")), sender)
-
-        run(_test())  # must not raise
-
-    def test_cancelled_error_closes_normally_and_reraises(self):
-        """CancelledError: close() called once (normal end), then re-raised."""
+        `map_python_exception` maps it to `BackendError::Cancelled`, matching
+        what the pull path reports for a cancelled generator.
+        """
         sender = FakeSender()
-        cancelled = False
 
         async def cancel_mid_stream():
             yield "first"
             raise asyncio.CancelledError()
 
-        async def _test():
-            nonlocal cancelled
-            try:
-                await drive_push_egress(cancel_mid_stream(), sender)
-            except asyncio.CancelledError:
-                cancelled = True
+        with pytest.raises(asyncio.CancelledError):
+            run(drive_push_egress(cancel_mid_stream(), sender))
+        assert sender.sent == ["first"], "chunks before the cancel must be delivered"
+        assert sender.total_closes == 0
 
-        run(_test())
-        assert cancelled, "CancelledError was not re-raised"
-        assert (
-            sender.close_count == 1
-        ), f"CancelledError path: expected 1 close(), got {sender.close_count}"
-        assert (
-            sender.error_close_count == 0
-        ), "CancelledError should call close(), not close_with_error()"
-
-    def test_keyboard_interrupt_closes_with_error_and_reraises(self):
-        """KeyboardInterrupt: close_with_error('worker interrupted'), then re-raised."""
+    def test_keyboard_interrupt_propagates(self):
         sender = FakeSender()
-        raised = False
 
         async def ki_stream():
             yield "x"
             raise KeyboardInterrupt()
 
-        async def _test():
-            nonlocal raised
-            try:
-                await drive_push_egress(ki_stream(), sender)
-            except KeyboardInterrupt:
-                raised = True
-
-        run(_test())
-        assert raised, "KeyboardInterrupt was not re-raised"
-        assert sender.error_close_count == 1, (
-            f"KeyboardInterrupt path: expected 1 close_with_error(), "
-            f"got {sender.error_close_count}"
-        )
-        assert "interrupted" in (
-            sender.last_error or ""
-        ), f"expected 'worker interrupted', got {sender.last_error!r}"
-        assert sender.close_count == 0
+        with pytest.raises(KeyboardInterrupt):
+            run(drive_push_egress(ki_stream(), sender))
+        assert sender.total_closes == 0
 
     def test_at_most_one_close_total(self):
-        """_terminate is guarded by `closed`; double-close must not happen."""
         sender = FakeSender()
         run(drive_push_egress(gen("x"), sender))
         assert (
-            sender.total_closes <= 1
-        ), f"stream closed {sender.total_closes} times (expected ≤1)"
+            sender.total_closes == 1
+        ), f"stream closed {sender.total_closes} times (expected exactly 1)"
 
-    def test_send_raises_mid_stream_terminates_exactly_once(self):
-        """If send() raises, the stream still terminates exactly once via close_with_error."""
+    def test_send_raising_propagates(self):
+        """A failing `send` is how the consumer-gone case surfaces.
+
+        The real sender raises `RuntimeError` once the consumer drops the
+        response stream, having already stopped the request context. Letting it
+        out unwinds the handler — and its `finally` blocks — instead of looping
+        on a dead channel.
+        """
 
         class SenderFailsOnSecond(FakeSender):
             def send(self, obj):
                 if len(self.sent) >= 1:
-                    raise RuntimeError("queue full")
+                    raise RuntimeError("consumer dropped the response stream")
                 super().send(obj)
 
         sender = SenderFailsOnSecond()
-        run(drive_push_egress(gen("a", "b", "c"), sender))
-        assert (
-            sender.total_closes == 1
-        ), f"after send() raises: expected 1 close, got {sender.total_closes}"
-        assert sender.error_close_count == 1
+        with pytest.raises(RuntimeError, match="consumer dropped"):
+            run(drive_push_egress(gen("a", "b", "c"), sender))
+        assert sender.sent == ["a"]
+        assert sender.total_closes == 0
 
-    def test_broken_close_does_not_propagate(self):
-        """If close() itself raises, the exception is swallowed."""
-        sender = BrokenSender()
-        run(drive_push_egress(gen("a"), sender))  # must not raise
+    def test_failing_close_propagates(self):
+        """A `close()` that raises is a bridge failure, not something to hide.
 
-    def test_broken_close_with_error_does_not_propagate(self):
+        It reaches Rust as the generator's exception; the sink close is
+        idempotent, so the stream still terminates.
+        """
         sender = BrokenSender()
-        run(
-            drive_push_egress(raising_gen([], ValueError("x")), sender)
-        )  # must not raise
+        with pytest.raises(RuntimeError, match="close exploded"):
+            run(drive_push_egress(gen("a"), sender))
 
 
 # ===========================================================================
@@ -490,7 +491,12 @@ class TestChunkDelivery:
     def test_chunks_before_exception_are_sent(self):
         """Items before a handler exception should all be delivered."""
         sender = FakeSender()
-        run(drive_push_egress(raising_gen([0, 1, 2], ValueError("mid-stream")), sender))
+        with pytest.raises(ValueError):
+            run(
+                drive_push_egress(
+                    raising_gen([0, 1, 2], ValueError("mid-stream")), sender
+                )
+            )
         assert sender.sent == [
             0,
             1,
@@ -700,7 +706,7 @@ class TestDecoratorAppliedToRealHandlers:
     endpoint just reverts to the pull path, with no error and no failure.
     """
 
-    HANDLERS = {
+    HANDLERS: ClassVar[dict[str, list[str]]] = {
         "handlers.py": ["EncodeHandler", "PrefillHandler", "DecodeHandler"],
         "aggregated_handler.py": ["AggregatedHandler"],
     }

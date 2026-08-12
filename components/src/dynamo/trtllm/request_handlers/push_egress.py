@@ -7,7 +7,7 @@ On the pull path Rust drives the handler's async generator, taking the GIL on
 tokio threads once per response. Here the handler -- already on the event loop
 holding the GIL when it produces a response -- hands it straight to a Rust
 ``response_sender`` instead, and Rust advances the generator once per REQUEST
-rather than once per RESPONSE. Rationale and measurements: DYN-3703.
+rather than once per RESPONSE. Rationale and measurements: #12845.
 
 Three invariants are load-bearing; breaking any of them is silent:
 
@@ -25,15 +25,20 @@ Three invariants are load-bearing; breaking any of them is silent:
    would otherwise follow to the undecorated function and hide the parameter,
    reverting every endpoint to the pull path with nothing logged.
 
-3. **The sender.** ``send(obj)`` once per response; ``close()`` on normal end;
-   ``close_with_error(msg)`` on failure. Both closes are idempotent, and Rust
-   closes the sink when the generator finishes as a safety net.
+3. **The sender.** ``send(obj)`` once per response and ``close()`` on normal
+   end -- and nothing on failure. Exceptions propagate out of the handler, so
+   Rust classifies them with ``map_python_exception`` and terminates the
+   stream with a *typed* backend error. Reporting them here instead, through
+   ``close_with_error``, would flatten every failure to an untyped string:
+   ``EngineShutdown`` would stop triggering request migration and worker
+   inhibition, and a client's bad input would surface as an unknown server
+   error. ``close()`` is idempotent, and Rust closes the sink when the
+   generator finishes as a safety net.
 """
 
-import asyncio
 import functools
 import logging
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -44,51 +49,24 @@ _warned_no_sender = False
 async def drive_push_egress(
     stream: AsyncGenerator[Any, None], response_sender: Any
 ) -> None:
-    """Drain ``stream`` into ``response_sender``, then terminate it exactly once.
+    """Drain ``stream`` into ``response_sender``, then close it.
 
-    ``send()`` per response, then ``close()`` on normal completion or
-    cancellation and ``close_with_error()`` on failure. Errors are reported
-    through the sender rather than re-raised, since it is the only channel Rust
-    is listening on for response data.
+    ``send()`` per response, ``close()`` on normal completion.
+
+    Nothing is caught. Every way this can fail -- an engine shutdown, a
+    rejected request, a cancellation, the consumer dropping the stream -- is
+    an exception, and the only correct thing to do with it is let it out:
+    Rust's ``map_python_exception`` turns it into a *typed* backend error and
+    terminates the stream with that, exactly as it does for the same exception
+    on the pull path. Catching it to report a string through the sender would
+    erase the type that request migration, worker inhibition and
+    invalid-argument reporting all key on.
     """
-    closed = False
-
-    def _terminate(error: Optional[str]) -> None:
-        nonlocal closed
-        if closed:
-            return
-        closed = True
-        try:
-            if error is None:
-                response_sender.close()
-            else:
-                response_sender.close_with_error(error)
-        except Exception:
-            logger.exception("push egress: failed to close the Rust response stream")
-
-    try:
-        async for response in stream:
-            # The actual Python -> Rust crossing: depythonize and enqueue,
-            # both under the GIL we are already holding.
-            response_sender.send(response)
-    except (asyncio.CancelledError, GeneratorExit):
-        # Client/connection cancellation. `_cancellation_monitor` has already
-        # abort()ed the engine request and `_generate_locally_impl` swallows its
-        # own CancelledError, so getting here means the enclosing task was
-        # cancelled. End the stream normally -- the pull path's cancelled
-        # generator likewise just stops producing -- then re-raise so asyncio's
-        # cancellation contract is honored.
-        _terminate(None)
-        raise
-    except Exception as exc:
-        logger.exception("push egress: request failed")
-        _terminate(f"{type(exc).__name__}: {exc}")
-    except BaseException:
-        # KeyboardInterrupt / SystemExit: still close the stream, then let it go.
-        _terminate("worker interrupted")
-        raise
-    else:
-        _terminate(None)
+    async for response in stream:
+        # The actual Python -> Rust crossing: encode to request-plane bytes
+        # and enqueue, both under the GIL we are already holding.
+        response_sender.send(response)
+    response_sender.close()
 
 
 async def drive_push_egress_stream(

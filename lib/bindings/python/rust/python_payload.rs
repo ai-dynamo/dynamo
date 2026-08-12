@@ -152,35 +152,46 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
 
 /// Response encoder for the push egress path (`push_egress.rs`).
 ///
-/// The push path converts each response to an owned Rust value on the Python
-/// thread that produced it, so by the time a frame reaches here it holds no
-/// Python object: encoding is pure serde. No GIL, and — unlike the
-/// [`PythonResponseItem`] encoder above — no `spawn_blocking` hop either.
-impl IngressResponseEncoder<Annotated<serde_json::Value>> for PythonIngressPayloadAdapter {
+/// The push path encodes each response all the way to request-plane bytes on
+/// the Python thread that produced it, under the GIL that thread already holds
+/// (`push_egress::PushFrame`). By the time a frame reaches here there is
+/// nothing left to do but forward it: no GIL, no second serde pass, and —
+/// unlike the [`PythonResponseItem`] encoder above — no `spawn_blocking` hop.
+///
+/// The only work left is the terminal complete-final frame, which carries no
+/// Python data at all, and the rare codec re-encode described on
+/// [`push_egress::PushFrame`].
+impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayloadAdapter {
     async fn encode_response(
         &self,
         payload_codec: RequestPlanePayloadCodec,
-        response: Option<Annotated<serde_json::Value>>,
+        response: Option<crate::push_egress::PushFrame>,
         complete_final: bool,
     ) -> Result<EncodedResponseFrame, PipelineError> {
-        let is_error = response
-            .as_ref()
-            .is_some_and(|response| response.err().is_some());
-        let wrapper = NetworkStreamWrapper {
-            data: response,
-            complete_final,
-        };
-        let bytes = payload_codec.encode(&wrapper).map_err(|error| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} push-egress response: {error}",
-                payload_codec.name()
-            ))
+        if complete_final {
+            let wrapper = NetworkStreamWrapper::<Annotated<()>> {
+                data: None,
+                complete_final: true,
+            };
+            let bytes = payload_codec.encode(&wrapper).map_err(|error| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} push-egress final response: {error}",
+                    payload_codec.name()
+                ))
+            })?;
+            return Ok(EncodedResponseFrame {
+                bytes: bytes.into(),
+                is_error: false,
+                stop_stream: false,
+            });
+        }
+
+        let frame = response.ok_or_else(|| {
+            PipelineError::SerializationError(
+                "push-egress response item missing before final frame".to_string(),
+            )
         })?;
-        Ok(EncodedResponseFrame {
-            bytes: bytes.into(),
-            is_error,
-            stop_stream: false,
-        })
+        frame.into_encoded(payload_codec)
     }
 }
 
@@ -236,7 +247,16 @@ fn encode_python_response(
     }
 }
 
-fn parse_python_response(
+/// Interpret one Python response object as a wire `Annotated<PythonPayload>`.
+///
+/// Shared by both egress paths — pull via [`encode_python_response`], push via
+/// `push_egress::PushFrame::encode` — so the two cannot drift and start
+/// disagreeing about what a given Python object means on the wire. The payload
+/// stays a [`PythonPayload`], which transcodes straight into the request-plane
+/// codec and therefore preserves everything that codec can represent (binary
+/// values, non-finite floats, non-string mapping keys). The GIL is already held
+/// on both paths.
+pub(crate) fn parse_python_response(
     item: Py<PyAny>,
     py: Python<'_>,
 ) -> Result<Annotated<PythonPayload>, String> {
