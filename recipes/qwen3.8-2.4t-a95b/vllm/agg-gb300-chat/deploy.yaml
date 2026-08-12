@@ -15,7 +15,7 @@ spec:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen38max-agg
+  name: qwen38max-agg-chat
 spec:
   backendFramework: vllm
   components:
@@ -26,7 +26,6 @@ spec:
         spec:
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB300
-          tolerations:
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
@@ -38,6 +37,8 @@ spec:
               args: [--router-mode, kv, --router-kv-events, --http-port, "8000"]
               env:
                 - {name: HF_HOME, value: /model-cache}
+                - {name: HF_HUB_OFFLINE, value: "1"}
+                - {name: TRANSFORMERS_OFFLINE, value: "1"}
               volumeMounts:
                 - {name: model-cache, mountPath: /model-cache, readOnly: true}
     - name: VllmDecodeWorker
@@ -52,7 +53,6 @@ spec:
         spec:
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB300
-          tolerations:
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -84,6 +84,8 @@ spec:
               env:
                 - {name: PYTHONUNBUFFERED, value: "1"}
                 - {name: HF_HOME, value: /model-cache}
+                - {name: HF_HUB_OFFLINE, value: "1"}
+                - {name: TRANSFORMERS_OFFLINE, value: "1"}
                 - {name: NCCL_SOCKET_IFNAME, value: eth0}
                 - {name: GLOO_SOCKET_IFNAME, value: eth0}
                 - {name: VLLM_USE_V2_MODEL_RUNNER, value: "0"}
@@ -100,14 +102,6 @@ spec:
               command: [/bin/bash, -lc]
               args:
                 - |
-                  # RC4 predates native support for the final checkpoint's
-                  # architecture name and model.language_model weight prefix.
-                  sed -i '/^class Qwen3_5ForCausalLMBase(/,/^):$/ { /^):$/a\    hf_to_vllm_mapper = WeightsMapper(\n        orig_to_new_prefix={"model.language_model.": "model."}\n    )\n
-                  }' \
-                    /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_5.py &&
-                  sed -i \
-                    's@return loader.load_weights(weights)$@return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)@' \
-                    /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_5.py &&
                   exec python3 -m dynamo.vllm \
                     --model Qwen/Qwen3.8-2.4T-A95B \
                     --hf-overrides '{"architectures":["Qwen3_5MoeForCausalLM"]}' \

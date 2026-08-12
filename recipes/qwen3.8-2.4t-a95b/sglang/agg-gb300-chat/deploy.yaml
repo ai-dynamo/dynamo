@@ -13,7 +13,7 @@ data:
     kv-cache-dtype: fp8_e4m3
     tensor-parallel-size: 16
     expert-parallel-size: 1
-    context-length: 278528
+    context-length: 262144
     mem-fraction-static: 0.90
     max-running-requests: 256
     speculative-algorithm: NEXTN
@@ -69,7 +69,6 @@ spec:
         spec:
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB300
-          tolerations:
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
@@ -92,12 +91,9 @@ spec:
         nodeCount: 4
 
       podTemplate:
-        metadata:
-          annotations:
-            dynamo.nvidia.com/sglang-config-sha256: "9330ad3d44559c7e8034eab5014fcc9a803e70f1b7aaf5a50f017d62a45b3d7d"
         spec:
           nodeSelector:
-          tolerations:
+            nvidia.com/gpu.product: NVIDIA-GB300
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -144,7 +140,6 @@ spec:
                 - {name: NCCL_CUMEM_ENABLE, value: "1"}
                 - {name: SGLANG_FLASHINFER_AUTOTUNE_CACHE, value: "1"}
                 - {name: SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S, value: "3600"}
-                - {name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN, value: "1"}
               command: [/bin/bash, -lc]
               args:
                 - |
