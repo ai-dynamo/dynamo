@@ -648,19 +648,8 @@ func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
-		Config: &configv1alpha1.OperatorConfiguration{
-			Checkpoint: configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{
-					Type: configv1alpha1.CheckpointStorageTypePVC,
-					PVC: configv1alpha1.CheckpointPVCConfig{
-						PVCName: "checkpoint-storage",
-						Create:  true,
-						Size:    "1Gi",
-					},
-				},
-			},
-		},
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{}},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -679,7 +668,7 @@ func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(
 	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	require.ErrorContains(t, err, "checkpoint functionality is disabled")
 
-	t.Log("Verify rejection happens before checkpoint or storage resources are created")
+	t.Log("Verify rejection happens before checkpoint resources are created")
 	checkpoints := &v1alpha1.DynamoCheckpointList{}
 	require.NoError(t, reconciler.List(ctx, checkpoints, client.InNamespace("default")))
 	assert.Empty(t, checkpoints.Items)
@@ -905,13 +894,13 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 	require.NotNil(t, checkpointInfos["worker"])
 	assert.True(t, checkpointInfos["worker"].Exists)
 
-	t.Log("Verify lifecycle annotations, ownership, finalizer, and labels were synchronized")
+	t.Log("Verify lifecycle annotations, ownership, labels, and absence of cleanup finalizers")
 	updated := &v1alpha1.DynamoCheckpoint{}
 	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: existing.Name, Namespace: "default"}, updated))
 	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyRetain),
 		updated.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
 	assert.Empty(t, updated.OwnerReferences)
-	assert.True(t, controller_common.ContainsFinalizer(updated))
+	assert.Empty(t, updated.Finalizers)
 	assert.Equal(t, "test-dgd", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
 	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
 }
@@ -1264,100 +1253,6 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
 	assert.Contains(t, err.Error(), friendlyCheckpointName)
-}
-
-func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
-	t.Log("Build checkpoint storage configuration that creates a PVC")
-	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	ctx := context.Background()
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config: &configv1alpha1.OperatorConfiguration{
-			Checkpoint: configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{
-					Type: configv1alpha1.CheckpointStorageTypePVC,
-					PVC: configv1alpha1.CheckpointPVCConfig{
-						PVCName:          "snapshot-pvc",
-						BasePath:         "/checkpoints",
-						Create:           true,
-						Size:             "2Gi",
-						StorageClassName: "efs-sc",
-						AccessMode:       string(corev1.ReadWriteMany),
-					},
-				},
-			},
-		},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
-
-	ref := friendlyCheckpointName
-	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoGraphDeploymentSpec{
-			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: string(commonconsts.ComponentTypeWorker),
-					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
-						Enabled:       true,
-						Mode:          v1alpha1.CheckpointModeAuto,
-						CheckpointRef: &ref,
-					},
-				},
-			},
-		},
-	})
-
-	t.Log("Reconcile checkpoint resources")
-	if _, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd); err != nil {
-		t.Fatalf("reconcileCheckpoints() error = %v", err)
-	}
-
-	t.Log("Verify the checkpoint storage PVC settings")
-	pvc := &corev1.PersistentVolumeClaim{}
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: "snapshot-pvc", Namespace: "default"}, pvc); err != nil {
-		t.Fatalf("expected checkpoint storage PVC to be created: %v", err)
-	}
-	storageRequest := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-	if storageRequest.String() != "2Gi" {
-		t.Fatalf("PVC storage request = %s, want 2Gi", storageRequest.String())
-	}
-	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "efs-sc" {
-		t.Fatalf("PVC storageClassName = %v, want efs-sc", pvc.Spec.StorageClassName)
-	}
-	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
-		t.Fatalf("PVC accessModes = %v, want [ReadWriteMany]", pvc.Spec.AccessModes)
-	}
 }
 
 func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {

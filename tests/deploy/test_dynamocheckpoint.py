@@ -38,12 +38,18 @@ TRANSIENT_K8S_EXCEPTIONS = (
 
 DGD_PLURAL = "dynamographdeployments"
 CHECKPOINT_PLURAL = "dynamocheckpoints"
+POD_SNAPSHOT_PLURAL = "podsnapshots"
+POD_SNAPSHOT_CONTENT_PLURAL = "podsnapshotcontents"
 
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
 CHECKPOINT_MODEL = "Qwen/Qwen3-0.6B"
 CHECKPOINT_STORAGE_MOUNT_PATH = "/checkpoints"
-TRTLLM_HF_HOME = f"{CHECKPOINT_STORAGE_MOUNT_PATH}/trtllm-hf-cache"
+# The volume the operator used to inject into workload pods. Nothing should
+# create it any more; the name is kept so the test can assert its absence.
+CHECKPOINT_VOLUME_NAME = "checkpoint-storage"
+TRTLLM_HF_HOME = "/tmp/trtllm-hf-cache"
+RESTORE_MOUNT_PATHS = {"/tmp/checkpoint", "/tmp/snapshot-binaries"}
 
 CHECKPOINT_ID_LABEL = "nvidia.com/snapshot-checkpoint-id"
 CHECKPOINT_SOURCE_LABEL = "nvidia.com/snapshot-is-checkpoint-source"
@@ -162,10 +168,9 @@ CHECKPOINT_BACKENDS = {
             "--free-gpu-memory-fraction",
             "0.10",
         ),
-        # UCX_TLS is always set. HF_HOME defaults to the snapshot PVC so restore
-        # pods keep weights without a model-cache PVC; when CI passes
-        # --model-cache-pvc, _new_checkpoint_spec skips this HF_HOME so the
-        # shared cache mount can own it (same as regular deploy tests).
+        # UCX_TLS is always set. HF_HOME uses container-local storage unless CI
+        # passes --model-cache-pvc, in which case _new_checkpoint_spec skips
+        # this value so the unrelated shared model-cache mount can own it.
         env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
         # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
         # rollout overlap during initial DGD startup.
@@ -349,8 +354,11 @@ async def _get_checkpoint(
 async def _wait_for_checkpoint_ready(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
-) -> tuple[str, str]:
+) -> tuple[str, str, Any, str]:
+    observed_source_pod: Any = None
+
     async def fetch_status() -> dict[str, Any]:
+        nonlocal observed_source_pod
         dgd = await _get_dgd(deployment)
         status = (
             dgd.get("status", {})
@@ -361,6 +369,18 @@ async def _wait_for_checkpoint_ready(
         checkpoint = None
         if checkpoint_name:
             checkpoint = await _get_checkpoint(deployment, checkpoint_name)
+        source_pods = [
+            pod
+            for pod in deployment.get_pods([backend.decode_component]).get(
+                backend.decode_component, []
+            )
+            if pod.raw.get("metadata", {})
+            .get("labels", {})
+            .get(CHECKPOINT_SOURCE_LABEL)
+            == "true"
+        ]
+        if source_pods:
+            observed_source_pod = source_pods[0]
         return {"dgd_status": status, "checkpoint": checkpoint}
 
     value = await _wait_for(
@@ -373,8 +393,42 @@ async def _wait_for_checkpoint_ready(
     checkpoint = value["checkpoint"]
     identity_hash = checkpoint["status"]["identityHash"]
     checkpoint_name = checkpoint["metadata"]["name"]
+    if observed_source_pod is None:
+        raise AssertionError(
+            f"checkpoint {checkpoint_name} became Ready without observing its source Job pod"
+        )
+    snapshot_name = checkpoint.get("status", {}).get("podSnapshotName")
+    if not snapshot_name:
+        raise AssertionError(
+            f"checkpoint {checkpoint_name} is Ready without status.podSnapshotName"
+        )
+    if deployment._custom_api is None:
+        raise RuntimeError("Kubernetes API not initialized")
+    snapshot = await deployment._custom_api.get_namespaced_custom_object(
+        group="nvidia.com",
+        version="v1alpha1",
+        namespace=deployment.namespace,
+        plural=POD_SNAPSHOT_PLURAL,
+        name=snapshot_name,
+    )
+    content_name = snapshot.get("status", {}).get("boundSnapshotContentName")
+    if not content_name:
+        raise AssertionError(
+            f"PodSnapshot {snapshot_name} is Ready without bound content"
+        )
+    content = await deployment._custom_api.get_cluster_custom_object(
+        group="nvidia.com",
+        version="v1alpha1",
+        plural=POD_SNAPSHOT_CONTENT_PLURAL,
+        name=content_name,
+    )
+    snapshot_handle = content.get("status", {}).get("snapshotHandle", "")
+    if not snapshot_handle:
+        raise AssertionError(
+            f"PodSnapshotContent {content_name} is Ready without status.snapshotHandle"
+        )
     logger.info("Checkpoint is Ready: %s (%s)", checkpoint_name, identity_hash)
-    return checkpoint_name, identity_hash
+    return checkpoint_name, identity_hash, observed_source_pod, snapshot_handle
 
 
 def _checkpoint_is_ready(result: dict[str, Any]) -> bool:
@@ -505,6 +559,67 @@ async def _wait_for_restored_decode_pod(
     return restored
 
 
+def _assert_no_checkpoint_storage(pod: Any, target_container: str) -> None:
+    """Assert the workload pod never mounts checkpoint storage itself.
+
+    This is the central claim of the agent-owned checkpoint PVC design: the node
+    agent is the only PVC mounter, and the artifact reaches the container as a
+    bind mount it does not own. A pod carrying the volume would still restore
+    successfully, so the inference assertions alone cannot catch a regression
+    here.
+    """
+    spec = pod.raw.get("spec", {})
+
+    offending_volumes = [
+        volume.get("name")
+        for volume in spec.get("volumes", [])
+        if volume.get("name") == CHECKPOINT_VOLUME_NAME
+    ]
+    if offending_volumes:
+        pytest.fail(
+            f"pod {pod.name} carries checkpoint storage volumes {offending_volumes}; "
+            "only the snapshot agent may mount the checkpoint PVC",
+            pytrace=False,
+        )
+
+    for container in spec.get("containers", []):
+        if container.get("name") != target_container:
+            continue
+        offending_mounts = [
+            mount.get("mountPath")
+            for mount in container.get("volumeMounts", [])
+            if mount.get("name") == CHECKPOINT_VOLUME_NAME
+            or mount.get("mountPath") == CHECKPOINT_STORAGE_MOUNT_PATH
+        ]
+        if offending_mounts:
+            pytest.fail(
+                f"container {target_container} in pod {pod.name} mounts checkpoint "
+                f"storage at {offending_mounts}",
+                pytrace=False,
+            )
+
+
+def _assert_restore_mounts_removed(pod: Any) -> None:
+    result = pod.exec(["cat", "/proc/self/mountinfo"])
+    if result.returncode != 0:
+        pytest.fail(
+            f"could not inspect mounts in restored pod {pod.name}: {result.stderr!r}",
+            pytrace=False,
+        )
+    mount_points = {
+        line.split()[4]
+        for line in result.stdout.decode().splitlines()
+        if len(line.split()) >= 5
+    }
+    leftovers = sorted(RESTORE_MOUNT_PATHS & mount_points)
+    if leftovers:
+        pytest.fail(
+            f"restored pod {pod.name} still exposes temporary restore mounts "
+            f"{leftovers}",
+            pytrace=False,
+        )
+
+
 def _assert_chat_response(response: requests.Response, expected_model: str) -> None:
     if response.status_code != 200:
         pytest.fail(
@@ -624,7 +739,22 @@ async def test_dgd_checkpoint_restore_deploy(
         logger.info("Validating inference before restore")
         _assert_inference(base_url, deployment_spec.endpoint, backend.model)
 
-        _, checkpoint_hash = await _wait_for_checkpoint_ready(deployment, backend)
+        (
+            _,
+            checkpoint_hash,
+            checkpoint_source_pod,
+            snapshot_handle,
+        ) = await _wait_for_checkpoint_ready(deployment, backend)
+        _assert_no_checkpoint_storage(checkpoint_source_pod, backend.target_container)
+        expected_handle = (
+            f"{CHECKPOINT_STORAGE_MOUNT_PATH}/{checkpoint_hash}/versions/1"
+        )
+        if snapshot_handle != expected_handle:
+            pytest.fail(
+                f"agent reported checkpoint handle {snapshot_handle!r}, "
+                f"expected {expected_handle!r}",
+                pytrace=False,
+            )
 
         old_decode_pods = await _wait_for_decode_runtime_pod_count(
             deployment,
@@ -633,6 +763,9 @@ async def test_dgd_checkpoint_restore_deploy(
             timeout_s=DECODE_SCALE_TIMEOUT,
         )
         old_pod_names = {pod.name for pod in old_decode_pods}
+        # Runtime workers also remain independent of checkpoint storage.
+        for pod in old_decode_pods:
+            _assert_no_checkpoint_storage(pod, backend.target_container)
         logger.info("Scaling decode down from pods: %s", sorted(old_pod_names))
         await _scale_decode_component(deployment, backend, replicas=0)
         await _wait_for_decode_runtime_pod_count(
@@ -644,13 +777,19 @@ async def test_dgd_checkpoint_restore_deploy(
 
         logger.info("Scaling decode back up to trigger restore")
         await _scale_decode_component(deployment, backend, replicas=1)
-        await _wait_for_restored_decode_pod(
+        restored_pod = await _wait_for_restored_decode_pod(
             deployment,
             backend=backend,
             old_pod_names=old_pod_names,
             checkpoint_hash=checkpoint_hash,
         )
+        # The restored worker read its checkpoint through a mount the agent made
+        # and removed, so its own spec must reference no checkpoint storage.
+        _assert_no_checkpoint_storage(restored_pod, backend.target_container)
+        _assert_restore_mounts_removed(restored_pod)
         await deployment._wait_for_ready(timeout=DGD_READY_TIMEOUT)
 
         logger.info("Validating inference after restore")
+        # Serving after restore is the indirect proof that the agent placed a
+        # correct, readable artifact at the path nsrestore expects.
         _assert_inference(base_url, deployment_spec.endpoint, backend.model)

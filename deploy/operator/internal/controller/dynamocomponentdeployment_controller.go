@@ -81,8 +81,6 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
-// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
-
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -203,15 +201,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err != nil {
 			return
 		}
-	}
-
-	checkpointStorageReconciler := newDCDCheckpointStorageReconciler(
-		r.Client,
-		r.Config.Checkpoint.Storage,
-		r.RuntimeConfig.Gate,
-	)
-	if err = checkpointStorageReconciler.Reconcile(ctx, dynamoComponentDeployment); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile checkpoint storage: %w", err)
 	}
 
 	// Create the appropriate workload resource based on deployment type

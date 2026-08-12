@@ -131,7 +131,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints/finalizers
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers

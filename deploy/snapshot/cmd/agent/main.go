@@ -15,6 +15,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/controller"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
 
@@ -34,6 +35,9 @@ func main() {
 	}
 	if err := cfg.Validate(); err != nil {
 		fatal(agentLog, err, "Invalid configuration")
+	}
+	if err := nsmount.ValidateBasePathMount(cfg.Storage.BasePath); err != nil {
+		fatal(agentLog, err, "Invalid checkpoint storage mount")
 	}
 
 	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)

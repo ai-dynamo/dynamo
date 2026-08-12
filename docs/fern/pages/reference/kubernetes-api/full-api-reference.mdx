@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 181 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 177 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
-<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
+<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
 <div id="nvidia-com-v1alpha1" />
@@ -76,7 +76,8 @@ See [MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v
 
 <Accordion id="checkpointdeletionpolicy" title="CheckpointDeletionPolicy">
 CheckpointDeletionPolicy defines what happens to DGD-managed automatic
-checkpoint resources when the owning DGD is deleted.
+checkpoint custom resources when the owning DGD is deleted. Checkpoint
+artifact data is retained for both policies.
 
 
 **Kind:** `enum`
@@ -86,8 +87,8 @@ checkpoint resources when the owning DGD is deleted.
 
 **Allowed values**
 
-- <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs and artifacts when the owning DGD is deleted.
-- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
+- <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs when the owning DGD is deleted.
+- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
 </Accordion>
 
 <Accordion id="checkpointmode" title="CheckpointMode">
@@ -477,8 +478,8 @@ See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1
 
 <Accordion id="dynamocheckpointstoragetype" title="DynamoCheckpointStorageType">
 Deprecated: StorageType is retained for compatibility with older
-DynamoCheckpoint status consumers. The current checkpoint flow publishes
-PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
+DynamoCheckpoint status consumers. The current checkpoint flow leaves
+storage ownership and artifact publication to the snapshot-agent.
 
 
 **Kind:** `type`
@@ -1870,6 +1871,11 @@ PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
 **Kind:** `type`
 **Appears in:** [PodSnapshotContent](#podsnapshotcontent)
 
+<ParamField path="snapshotHandle" type="string">
+SnapshotHandle is the resolved location of the captured artifact. It is written solely by the node agent and is never used as restore input.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="conditions" type="Condition array">
 Conditions reflect the latest observations of the PodSnapshotContent's state. Standard types are Ready and Failed.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
@@ -1909,7 +1915,7 @@ PodSnapshotSource identifies the workload captured by a PodSnapshot.
 **Appears in:** [PodSnapshotSpec](#podsnapshotspec)
 
 <ParamField path="podRef" type="PodReference" required={true}>
-PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod (control volume, checkpoint storage mount) before creating the PodSnapshot. The capture target container is carried on PodRef.Containers, not a pod annotation.
+PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod's control volume before creating the PodSnapshot. The capture target container is carried on PodRef.Containers, not a pod annotation.
 See [PodReference](#podreference).
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
@@ -2221,7 +2227,7 @@ See [CheckpointStartupPolicy](#checkpointstartuppolicy).
 </ParamField>
 
 <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+DeletionPolicy defines whether a DGD-managed automatic checkpoint CR is deleted or retained when the owning DGD is deleted. Artifact data remains. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
 See [CheckpointDeletionPolicy](#checkpointdeletionpolicy).
 **Validation:** Enum: [Delete Retain]  Optional: \&#123;\&#125;
 </ParamField>
@@ -2471,7 +2477,8 @@ BackendType specifies the inference backend.
 
 <Accordion id="v1beta1-checkpointdeletionpolicy" title="CheckpointDeletionPolicy">
 CheckpointDeletionPolicy defines what happens to DGD-managed automatic
-checkpoint resources when the owning DGD is deleted.
+checkpoint custom resources when the owning DGD is deleted. Checkpoint
+artifact data is retained for both policies.
 
 
 **Kind:** `enum`
@@ -2481,8 +2488,8 @@ checkpoint resources when the owning DGD is deleted.
 
 **Allowed values**
 
-- <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs and artifacts when the owning DGD is deleted.
-- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
+- <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs when the owning DGD is deleted.
+- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
 </Accordion>
 
 <Accordion id="v1beta1-checkpointmode" title="CheckpointMode">
@@ -2562,7 +2569,7 @@ See [CheckpointStartupPolicy](#v1beta1-checkpointstartuppolicy).
 </ParamField>
 
 <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+DeletionPolicy defines whether a DGD-managed automatic checkpoint CR is deleted or retained when the owning DGD is deleted. Artifact data remains. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
 See [CheckpointDeletionPolicy](#v1beta1-checkpointdeletionpolicy).
 **Validation:** Enum: [Delete Retain]  Optional: \&#123;\&#125;
 </ParamField>
@@ -4342,82 +4349,6 @@ Enabled indicates if checkpoint functionality is enabled
 Seccomp controls the localhost seccomp profile applied to checkpoint and restore pods. A nil value means "use the default profile"; set Seccomp.Disabled=true to disable seccomp injection entirely.
 See [CheckpointSeccompConfiguration](#checkpointseccompconfiguration).
 </ParamField>
-
-<ParamField path="storage" type="CheckpointStorageConfiguration">
-Storage optionally configures the namespace-local checkpoint PVC that workload pods mount. When omitted, the operator preserves the legacy behavior of discovering storage from a snapshot-agent DaemonSet in the workload namespace.
-See [CheckpointStorageConfiguration](#checkpointstorageconfiguration).
-</ParamField>
-
-<ParamField path="cleanupImage" type="string" default="busybox:1.36">
-CleanupImage is the image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. It must provide a POSIX shell and `rm`.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpointociconfig" title="CheckpointOCIConfig">
-Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-<ParamField path="uri" type="string">
-URI is the legacy OCI URI (oci://registry/repository).
-</ParamField>
-
-<ParamField path="credentialsSecretRef" type="string">
-CredentialsSecretRef is the legacy docker config secret name.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpointpvcconfig" title="CheckpointPVCConfig">
-CheckpointPVCConfig configures the namespace-local PVC mounted into
-checkpoint and restore workload pods.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-<ParamField path="pvcName" type="string">
-PVCName is the PVC name in each workload namespace.
-</ParamField>
-
-<ParamField path="basePath" type="string">
-BasePath is the mount path inside checkpoint and restore workload pods.
-</ParamField>
-
-<ParamField path="create" type="boolean">
-Create tells the operator to create the PVC in workload namespaces when it is missing. When false, the PVC must already exist.
-</ParamField>
-
-<ParamField path="size" type="string">
-Size is the storage request used when Create is true.
-</ParamField>
-
-<ParamField path="storageClassName" type="string">
-StorageClassName is the optional StorageClass name used when Create is true.
-</ParamField>
-
-<ParamField path="accessMode" type="string">
-AccessMode is the PVC access mode used when Create is true.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpoints3config" title="CheckpointS3Config">
-Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-<ParamField path="uri" type="string">
-URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix).
-</ParamField>
-
-<ParamField path="credentialsSecretRef" type="string">
-CredentialsSecretRef is the legacy credentials secret name.
-</ParamField>
 </Accordion>
 
 <Accordion id="checkpointseccompconfiguration" title="CheckpointSeccompConfiguration">
@@ -4438,34 +4369,6 @@ Disabled, when true, suppresses seccomp profile injection entirely. Use this for
 
 <ParamField path="profile" type="string">
 Profile is the localhost seccomp profile path. Empty falls back to DefaultSeccompProfile. Ignored when Disabled is true.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpointstorageconfiguration" title="CheckpointStorageConfiguration">
-CheckpointStorageConfiguration configures checkpoint storage for operator
-pod mutations. Only PVC storage is implemented today.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointConfiguration](#checkpointconfiguration)
-
-<ParamField path="type" type="string">
-Type is the storage backend type. Only pvc is implemented today.
-</ParamField>
-
-<ParamField path="pvc" type="CheckpointPVCConfig">
-PVC configuration for pvc-based settings.
-See [CheckpointPVCConfig](#checkpointpvcconfig).
-</ParamField>
-
-<ParamField path="s3" type="CheckpointS3Config">
-Deprecated: S3 is retained for compatibility and ignored.
-See [CheckpointS3Config](#checkpoints3config).
-</ParamField>
-
-<ParamField path="oci" type="CheckpointOCIConfig">
-Deprecated: OCI is retained for compatibility and ignored.
-See [CheckpointOCIConfig](#checkpointociconfig).
 </ParamField>
 </Accordion>
 

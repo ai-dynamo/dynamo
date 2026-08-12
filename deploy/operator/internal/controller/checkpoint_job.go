@@ -71,20 +71,6 @@ func buildCheckpointJob(
 	// NewCheckpointJob handles control volume + readiness probe from the
 	// snapshot contract.
 
-	if err := checkpoint.EnsureStoragePVC(ctx, kubeClient, ckpt.Namespace, config.Checkpoint.Storage); err != nil {
-		return nil, err
-	}
-	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
-		return nil, err
-	} else if ok {
-		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
-		snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
-		if podTemplate.Annotations == nil {
-			podTemplate.Annotations = map[string]string{}
-		}
-		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
-	}
-
 	// Decide whether cuda-checkpoint needs --launch-job from the rendered pod
 	// template, not from deprecated identity fields. Regular pods expose GPUs
 	// as scalar resources; GMS/DRA-prepared checkpoint pods expose them through

@@ -84,8 +84,6 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		Infos:    make(map[string]*checkpoint.CheckpointInfo),
 	}
 	logger := log.FromContext(ctx)
-	storageEnsured := false
-
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		componentName := component.ComponentName
@@ -98,14 +96,6 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		}
 
 		logger.Info("Reconciling checkpoint for component", "component", componentName)
-		if !storageEnsured {
-			if err := checkpoint.EnsureStoragePVC(ctx, r.Client, dgd.Namespace, r.config.Checkpoint.Storage); err != nil {
-				logger.Error(err, "Failed to ensure checkpoint storage PVC", "component", componentName)
-				return dgdCheckpointsResult{}, fmt.Errorf("failed to ensure checkpoint storage PVC for component %s: %w", componentName, err)
-			}
-			storageEnsured = true
-		}
-
 		alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
 		startupPolicy := alphaCheckpointConfig.StartupPolicy
 		if startupPolicy == "" {

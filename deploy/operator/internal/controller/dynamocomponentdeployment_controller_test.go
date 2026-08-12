@@ -1772,37 +1772,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
 	}
 
-	snapshotAgentDaemonSet := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: "default",
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      "checkpoints",
-							MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: "checkpoints",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: "snapshot-pvc",
-							},
-						},
-					}},
-				},
-			},
-		},
-	}
-
 	makeDCD := func(checkpointRef string) *v1beta1.DynamoComponentDeployment {
 		return betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1837,7 +1806,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	}
 
 	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
-		objs = append(objs, snapshotAgentDaemonSet.DeepCopy())
 		return &DynamoComponentDeploymentReconciler{
 			Client: fake.NewClientBuilder().
 				WithScheme(s).
@@ -2266,36 +2234,6 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 	}
 
 	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
-		objs = append(objs, &appsv1.DaemonSet{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "snapshot-agent",
-				Namespace: "default",
-				Labels: map[string]string{
-					snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-				},
-			},
-			Spec: appsv1.DaemonSetSpec{
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name: snapshotprotocol.SnapshotAgentContainerName,
-							VolumeMounts: []corev1.VolumeMount{{
-								Name:      "checkpoints",
-								MountPath: "/checkpoints",
-							}},
-						}},
-						Volumes: []corev1.Volume{{
-							Name: "checkpoints",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "snapshot-pvc",
-								},
-							},
-						}},
-					},
-				},
-			},
-		})
 		return &DynamoComponentDeploymentReconciler{
 			Client: fake.NewClientBuilder().
 				WithScheme(s).

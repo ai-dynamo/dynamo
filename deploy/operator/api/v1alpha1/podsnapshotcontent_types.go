@@ -81,6 +81,11 @@ type PodSnapshotContentSource struct {
 
 // PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
 type PodSnapshotContentStatus struct {
+	// SnapshotHandle is the resolved location of the captured artifact.
+	// It is written solely by the node agent and is never used as restore input.
+	// +optional
+	SnapshotHandle string `json:"snapshotHandle,omitempty"`
+
 	// Conditions reflect the latest observations of the PodSnapshotContent's state.
 	// Standard types are Ready and Failed.
 	// +optional

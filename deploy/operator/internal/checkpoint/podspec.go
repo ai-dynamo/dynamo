@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -31,54 +30,29 @@ import (
 )
 
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
-	_ = ApplyRestorePodMetadataWithStorageConfig(
-		labels,
-		annotations,
-		checkpointInfo,
-		configv1alpha1.CheckpointStorageConfiguration{},
-	)
-}
-
-func ApplyRestorePodMetadataWithStorageConfig(
-	labels map[string]string,
-	annotations map[string]string,
-	checkpointInfo *CheckpointInfo,
-	storageConfig configv1alpha1.CheckpointStorageConfiguration,
-) error {
 	enabled := checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready
 	hash := ""
 	artifactVersion := ""
-	var (
-		storage snapshotprotocol.Storage
-		ok      bool
-		err     error
-	)
 	if enabled {
 		if labels == nil {
-			return fmt.Errorf("checkpoint restore labels map is required when checkpoint restore metadata is enabled")
+			return
 		}
 		if annotations == nil {
-			return fmt.Errorf("checkpoint restore annotations map is required when checkpoint restore metadata is enabled")
+			return
 		}
 		hash = checkpointInfo.Hash
 		artifactVersion = checkpointInfo.ArtifactVersion
-		storage, ok, err = StorageFromConfig(storageConfig)
-		if err != nil {
-			return err
-		}
 	}
 
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
 	if annotations != nil {
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
-		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
-		delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
 		delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 		delete(annotations, commonconsts.CheckpointNameAnnotation)
 		delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
 	}
 	if !enabled {
-		return nil
+		return
 	}
 
 	targets := checkpointInfo.RestoreTargetContainers
@@ -86,10 +60,6 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		targets = []string{commonconsts.MainContainerName}
 	}
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
-	if ok {
-		snapshotprotocol.ApplyCheckpointStorageMetadata(annotations, storage)
-	}
-	return nil
 }
 
 func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) error {
@@ -103,8 +73,6 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	delete(labels, snapshotprotocol.RestoreTargetLabel)
 	delete(labels, snapshotprotocol.CheckpointSourceLabel)
 	delete(annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
-	delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
-	delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, commonconsts.CheckpointNameAnnotation)
 	delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
@@ -142,27 +110,6 @@ func InjectCheckpointIntoPodSpec(
 		namespace,
 		podSpec,
 		checkpointInfo,
-		configv1alpha1.CheckpointStorageConfiguration{},
-		seccompProfile,
-	)
-}
-
-func InjectCheckpointIntoPodSpecWithStorageConfig(
-	ctx context.Context,
-	reader ctrlclient.Reader,
-	namespace string,
-	podSpec *corev1.PodSpec,
-	checkpointInfo *CheckpointInfo,
-	storageConfig configv1alpha1.CheckpointStorageConfiguration,
-	seccompProfile string,
-) error {
-	return injectCheckpointIntoPodSpec(
-		ctx,
-		reader,
-		namespace,
-		podSpec,
-		checkpointInfo,
-		storageConfig,
 		seccompProfile,
 	)
 }
@@ -172,8 +119,7 @@ func InjectCheckpointIntoPodSpecWithStorageConfig(
 // pass the resolved value between observation and rendering without depending
 // on checkpoint storage internals.
 type ResolvedPodSpecRestore struct {
-	info    CheckpointInfo
-	storage snapshotprotocol.Storage
+	info CheckpointInfo
 }
 
 // ResolvePodSpecRestore performs the reads needed before checkpoint restore
@@ -184,7 +130,6 @@ func ResolvePodSpecRestore(
 	reader ctrlclient.Reader,
 	namespace string,
 	checkpointInfo *CheckpointInfo,
-	storageConfig configv1alpha1.CheckpointStorageConfiguration,
 ) (*ResolvedPodSpecRestore, error) {
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
 		return nil, nil
@@ -220,21 +165,8 @@ func ResolvePodSpecRestore(
 		info.ArtifactVersion = snapshotprotocol.DefaultCheckpointArtifactVersion
 	}
 
-	storage, err := ResolveStorage(
-		ctx,
-		reader,
-		namespace,
-		info.Hash,
-		info.ArtifactVersion,
-		storageConfig,
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	return &ResolvedPodSpecRestore{
-		info:    info,
-		storage: storage,
+		info: info,
 	}, nil
 }
 
@@ -259,7 +191,6 @@ func InjectResolvedCheckpointIntoPodSpec(
 	if err := snapshotprotocol.PrepareRestorePodSpec(
 		podSpec,
 		annotations,
-		restore.storage,
 		seccompProfile,
 		restore.info.Ready,
 	); err != nil {
@@ -300,14 +231,13 @@ func injectCheckpointIntoPodSpec(
 	namespace string,
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
-	storageConfig configv1alpha1.CheckpointStorageConfiguration,
 	seccompProfile string,
 ) error {
 	// Only mutate the worker pod spec once the checkpoint is Ready. Before
 	// the checkpoint exists, the worker must cold-start normally without
-	// the snapshot-control volume, DYN_SNAPSHOT_CONTROL_DIR, checkpoint PVC
-	// mount, or localhost seccomp profile.
-	restore, err := ResolvePodSpecRestore(ctx, reader, namespace, checkpointInfo, storageConfig)
+	// the snapshot-control volume, DYN_SNAPSHOT_CONTROL_DIR, or localhost
+	// seccomp profile.
+	restore, err := ResolvePodSpecRestore(ctx, reader, namespace, checkpointInfo)
 	if err != nil {
 		return err
 	}

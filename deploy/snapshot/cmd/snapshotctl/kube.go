@@ -31,15 +31,15 @@ const (
 	podSnapshotPollInterval = 3 * time.Second
 )
 
-func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, client.Client, string, snapshotprotocol.Storage, error) {
+func loadRunContext(manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, client.Client, string, error) {
 	pod, err := loadPod(manifestPath)
 	if err != nil {
-		return nil, nil, nil, "", snapshotprotocol.Storage{}, err
+		return nil, nil, nil, "", err
 	}
 
 	clientset, restConfig, currentNamespace, err := loadClientset(kubeContext)
 	if err != nil {
-		return nil, nil, nil, "", snapshotprotocol.Storage{}, err
+		return nil, nil, nil, "", err
 	}
 
 	namespace := currentNamespace
@@ -58,14 +58,9 @@ func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride 
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
 	crClient, err := client.New(restConfig, client.Options{Scheme: scheme})
 	if err != nil {
-		return nil, nil, nil, "", snapshotprotocol.Storage{}, fmt.Errorf("create controller-runtime client: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("create controller-runtime client: %w", err)
 	}
-
-	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
-	if err != nil {
-		return nil, nil, nil, "", snapshotprotocol.Storage{}, err
-	}
-	return pod, clientset, crClient, namespace, storage, nil
+	return pod, clientset, crClient, namespace, nil
 }
 
 func loadClientset(kubeContext string) (kubernetes.Interface, *rest.Config, string, error) {
@@ -228,17 +223,6 @@ func ctxRemaining(ctx context.Context) time.Duration {
 		return time.Until(d)
 	}
 	return time.Hour
-}
-
-func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotprotocol.Storage, error) {
-	daemonSets, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: snapshotprotocol.SnapshotAgentLabelSelector,
-	})
-	if err != nil {
-		return snapshotprotocol.Storage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
-	}
-
-	return snapshotprotocol.DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)
 }
 
 func loadPod(manifestPath string) (*corev1.Pod, error) {

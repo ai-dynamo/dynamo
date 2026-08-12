@@ -11,6 +11,8 @@
 # Optional targets for CI:
 #   docker build --target linter --build-context operator=../operator .   # Run linting
 #   docker build --target tester --build-context operator=../operator .   # Run tests
+#   docker build --target integration-tester --build-context operator=../operator .
+#   docker run --rm --privileged <integration-tester-image>
 
 # =============================================================================
 # Build Arguments
@@ -68,6 +70,17 @@ RUN golangci-lint run --timeout=5m
 FROM go-base AS tester
 
 RUN go test ./... -v
+
+# Run this target as a privileged Linux container. These tests exercise real
+# mount namespaces and cannot run during an ordinary (unprivileged) image build.
+FROM go-base AS integration-tester
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["go", "test", "-tags=integration", "-v", "./internal/nsmount/nsintegration"]
 
 # =============================================================================
 # Stage: Builder - Build Go binaries
@@ -468,7 +481,3 @@ USER root
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Dynamo Snapshot requires x86_64" >&2; exit 1; \
     fi
-
-# Checkpoint volume mount point. This is a storage concern — no restore tooling
-# is provisioned here; see the stage comment above.
-RUN mkdir -p /checkpoints

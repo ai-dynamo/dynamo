@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -23,23 +22,47 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
-// Mounter mounts the agent binary bundle into a placeholder container's mount namespace.
+const (
+	// invalidPID is returned alongside an error when no placeholder container
+	// has been resolved, so callers can tell "no target" from a real PID.
+	invalidPID = -1
+	// nsRestoreBinary is the executable the agent runs inside the target. It is
+	// opened on the agent side and exec'd through its fd, never by name inside
+	// the target: see execNSRestore.
+	nsRestoreBinary = "nsrestore"
+)
+
+// Mounter mounts src at dst inside a placeholder container's mount namespace.
+// The attributes are the mounter's own: each implementation carries one policy,
+// so the restore path names paths and never repeats mount flags.
 type Mounter interface {
-	Mount(ctx context.Context, pid int) (nsmount.MountPoint, error)
+	Mount(ctx context.Context, pid int, src, dst string) (nsmount.MountPoint, error)
+}
+
+// Mounters carries one Mounter per policy the restore path needs. They are
+// independent, so the caller unwinds them individually and in reverse order.
+type Mounters struct {
+	// Bundle mounts the agent binaries, which must stay executable.
+	Bundle Mounter
+	// Artifact mounts the checkpoint, which must not be executable.
+	Artifact Mounter
 }
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointID                string
-	CheckpointLocation          string
-	ContainerCheckpointLocation string
-	ContainerID                 string
-	StartedAt                   time.Time
-	PodName                     string
-	PodNamespace                string
-	TargetPodIP                 string
-	ContainerName               string
-	Clientset                   kubernetes.Interface
+	CheckpointID    string
+	ArtifactVersion string
+	BasePath        string
+	ContainerID     string
+	StartedAt       time.Time
+	PodName         string
+	PodNamespace    string
+	TargetPodIP     string
+	ContainerName   string
+	Clientset       kubernetes.Interface
+	// OnArtifactReady runs after the descriptor-pinned artifact and manifest
+	// have been validated, but before any target namespace is modified.
+	OnArtifactReady func() error
 }
 
 // Restore performs external restore for the given request.
@@ -50,7 +73,7 @@ type RestoreRequest struct {
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounter Mounter) (placeholderPID int, retErr error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts Mounters) (placeholderPID int, retErr error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -59,37 +82,69 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"container", req.ContainerName,
 	)
 
+	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.CheckpointID, req.ArtifactVersion)
+	if err != nil {
+		return invalidPID, fmt.Errorf("resolve checkpoint artifact: %w", err)
+	}
+	manifest, err := types.ReadManifest(artifactPath)
+	if err != nil {
+		return invalidPID, fmt.Errorf("read checkpoint manifest: %w", err)
+	}
+	if manifest.CheckpointID != req.CheckpointID {
+		return invalidPID, fmt.Errorf("checkpoint manifest ID %q does not match requested ID %q", manifest.CheckpointID, req.CheckpointID)
+	}
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map.
 	hostInspectStart := time.Now()
-	snap, err := inspectRestore(ctx, rt, log, req)
+	snap, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
-		return 0, err
+		return invalidPID, err
+	}
+	if req.OnArtifactReady != nil {
+		if err := req.OnArtifactReady(); err != nil {
+			return snap.PlaceholderPID, fmt.Errorf("publish artifact-ready restore state: %w", err)
+		}
 	}
 	hostInspectDuration := time.Since(hostInspectStart)
 
-	// Phase 2: Mount agent binaries into the placeholder's namespace so nsrestore is reachable.
+	// Phase 2: Mount agent binaries then the checkpoint artifact into the
+	// placeholder's namespace so nsrestore can reach both. Deferred cleanup
+	// unwinds in reverse: artifact first (LIFO), then bundle.
 	injectStart := time.Now()
-	mp, err := mountBundle(ctx, mounter, snap.PlaceholderPID)
+	// Named once and reused: the flag nsrestore receives must be the place the
+	// artifact was actually mounted.
+	checkpointDst := nsmount.CheckpointDst
+	bundleMount, err := mounts.Bundle.Mount(ctx, snap.PlaceholderPID, nsmount.SnapshotBinSrc, nsmount.SnapshotBinDst)
 	if err != nil {
-		return 0, err
+		return snap.PlaceholderPID, fmt.Errorf("mount restore resources: %w", err)
+	}
+	// Pass a background context: Unmount has its own internal timeout
+	// (nsmount.unmountTimeout) around the ns-bind-mount subprocess.
+	//
+	// Cleanup failures are deliberately not promoted to retErr. The controller
+	// treats any error from Restore as a failed restore and SIGKILLs the
+	// placeholder, so surfacing one here would destroy a workload that already
+	// restored successfully. Log it and let the pod continue.
+	defer func() {
+		if cleanupErr := bundleMount.Unmount(context.Background(), true); cleanupErr != nil {
+			log.Error(cleanupErr, "failed to clean bundle mount from placeholder namespace")
+		}
+	}()
+
+	artifactMount, err := mounts.Artifact.Mount(ctx, snap.PlaceholderPID, artifactPath, checkpointDst)
+	if err != nil {
+		return snap.PlaceholderPID, fmt.Errorf("mount restore resources: %w", err)
 	}
 	injectDuration := time.Since(injectStart)
 	defer func() {
-		// Pass a background context: mp.Unmount has its own internal timeout
-		// (nsmount.unmountTimeout) around the ns-bind-mount subprocess.
-		if cleanupErr := mp.Unmount(context.Background()); cleanupErr != nil {
-			// Deliberately not promoted to retErr. The controller treats any
-			// error from Restore as a failed restore and SIGKILLs the placeholder,
-			// so surfacing a cleanup failure here would destroy a workload that
-			// already restored successfully. Log it and let the pod continue.
-			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
+		if cleanupErr := artifactMount.Unmount(context.Background(), true); cleanupErr != nil {
+			log.Error(cleanupErr, "failed to clean artifact mount from placeholder namespace")
 		}
 	}()
 
 	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
-	result, err := execNSRestore(ctx, log, req, snap, mp)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, checkpointDst)
 	if err != nil {
-		return 0, fmt.Errorf("nsrestore failed: %w", err)
+		return snap.PlaceholderPID, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	restoreDuration := hostInspectDuration + injectDuration + result.TotalDuration()
 	log.Info("Restore timing summary",
@@ -112,7 +167,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	validationStart := time.Now()
 	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
-		return 0, err
+		return snap.PlaceholderPID, err
 	}
 
 	log.Info("=== External restore completed ===",
@@ -125,14 +180,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	return snap.PlaceholderPID, nil
 }
 
-func mountBundle(ctx context.Context, mounter Mounter, pid int) (nsmount.MountPoint, error) {
-	mp, err := mounter.Mount(ctx, pid)
-	if err != nil {
-		return nil, fmt.Errorf("mount agent bundle into placeholder: %w", err)
-	}
-	return mp, nil
-}
-
 func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger) error {
 	procRoot := filepath.Join(targetRoot, "proc")
 	if err := snapshotruntime.ValidateProcessState(procRoot, restoredPID); err != nil {
@@ -143,35 +190,16 @@ func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger
 	return nil
 }
 
-func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
-	if req.CheckpointLocation == "" {
-		return nil, fmt.Errorf("checkpoint location is required")
-	}
-
-	checkpointPath := req.CheckpointLocation
-	baseAbs, err := filepath.Abs(filepath.Dir(checkpointPath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve checkpoint base path: %w", err)
-	}
-	checkpointAbs, err := filepath.Abs(checkpointPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve checkpoint path: %w", err)
-	}
-	if checkpointAbs != baseAbs && !strings.HasPrefix(checkpointAbs, baseAbs+string(os.PathSeparator)) {
-		return nil, fmt.Errorf("invalid checkpoint id %q", req.CheckpointID)
-	}
-
-	m, err := types.ReadManifest(checkpointPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
-	}
-
+func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, m *types.CheckpointManifest) (*types.RestoreContainerSnapshot, error) {
 	containerName := req.ContainerName
 	if containerName == "" {
 		containerName = "main"
 	}
 
-	var placeholderPID int
+	var (
+		placeholderPID int
+		err            error
+	)
 	if req.ContainerID != "" {
 		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
 	} else {
@@ -221,7 +249,6 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	return &types.RestoreContainerSnapshot{
-		CheckpointPath: checkpointPath,
 		PlaceholderPID: placeholderPID,
 		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
 		CgroupRoot:     cgroupRoot,
@@ -245,18 +272,10 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 //     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
 //     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
 //     mount namespace.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint) (*RestoreInNamespaceResult, error) {
-	checkpointPath := req.ContainerCheckpointLocation
-	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
-		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
-	}
-	if checkpointPath == "" {
-		checkpointPath = snap.CheckpointPath
-	}
-
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
 	// Open nsrestore from the agent host side before entering the container
 	// namespace, so the binary fd is immune to rename attacks inside the container.
-	binaryFile, err := os.Open(filepath.Join(nsmount.SnapshotBinSrc, "nsrestore"))
+	binaryFile, err := os.Open(filepath.Join(nsmount.SnapshotBinSrc, nsRestoreBinary))
 	if err != nil {
 		return nil, fmt.Errorf("open nsrestore from agent bundle: %w", err)
 	}

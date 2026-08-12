@@ -5,13 +5,17 @@ import (
 	"errors"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,13 +39,17 @@ type fakeRuntime struct {
 	resolvedContainerIDs []string
 	// resolveContainerPID, when set, is returned by ResolveContainer with no error so the
 	// capture path can advance past container resolution.
-	resolveContainerPID int
+	resolveContainerPID   int
+	rejectCanceledContext bool
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
 func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	r.resolvedContainerIDs = append(r.resolvedContainerIDs, id)
+	if r.rejectCanceledContext && ctx.Err() != nil {
+		return 0, nil, ctx.Err()
+	}
 	if r.resolveContainerPID > 0 {
 		return r.resolveContainerPID, nil, nil
 	}
@@ -63,20 +71,20 @@ func (r *fakeRuntime) Close() error { return nil }
 // reached by a test that was previously relying on Phase 1 failing first.
 type noopInjector struct{}
 
-func (noopInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+func (noopInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
 
 type noopMountPoint struct{}
 
-func (noopMountPoint) Path(name string) (string, error) { return "/noop/" + name, nil }
-func (noopMountPoint) Unmount(_ context.Context) error  { return nil }
-func (noopMountPoint) NsFd() *os.File                   { return nil }
+func (noopMountPoint) Unmount(_ context.Context, _ bool) error { return nil }
+func (noopMountPoint) Path(name string) (string, error)        { return "", nil }
+func (noopMountPoint) NsFd() *os.File                          { return nil }
 
-// errorInjector always returns the wrapped error from Mount.
+// errorInjector always fails the bundle mount phase.
 type errorInjector struct{ err error }
 
-func (e errorInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+func (e errorInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountPoint, error) {
 	return nil, e.err
 }
 
@@ -92,13 +100,13 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
 			Storage: types.StorageSpec{
-				Type:     snapshotprotocol.StorageTypePVC,
+				Type:     "pvc",
 				BasePath: t.TempDir(),
 			},
 		},
 		clientset: fake.NewClientset(objs...),
 		runtime:   &fakeRuntime{},
-		injector:  noopInjector{},
+		injector:  executor.Mounters{Bundle: noopInjector{}, Artifact: noopInjector{}},
 		log:       testr.New(t),
 		holderID:  "test-holder",
 		inFlight:  make(map[string]struct{}),
@@ -160,7 +168,7 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 	}
 }
 
-func TestCheckpointLocationsFromPod(t *testing.T) {
+func TestArtifactPathForPod(t *testing.T) {
 	pod := makePod(
 		"test-pod",
 		"default",
@@ -173,119 +181,54 @@ func TestCheckpointLocationsFromPod(t *testing.T) {
 		},
 	)
 
-	t.Run("agent mount uses the agent-visible path", func(t *testing.T) {
+	t.Run("the agent base path and the pod version compose the artifact path", func(t *testing.T) {
 		w := makeTestController(t)
 		w.config.Storage.BasePath = "/checkpoints"
 
-		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 0)
-		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
-		}
-
-		expected := "/checkpoints/abc123/versions/2"
-		if locations.HostPath != expected {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
-		}
-		if locations.ContainerPath != expected {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
-		}
+		got, err := w.artifactPathForPod(pod, "abc123")
+		require.NoError(t, err)
+		assert.Equal(t, "/checkpoints/abc123/versions/2", got)
 	})
 
-	t.Run("pod mount uses the target container root from host proc", func(t *testing.T) {
+	t.Run("a missing version annotation falls back to the protocol default", func(t *testing.T) {
+		unversioned := pod.DeepCopy()
+		delete(unversioned.Annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
+
 		w := makeTestController(t)
 		w.config.Storage.BasePath = "/checkpoints"
-		w.config.Storage.AccessMode = types.StorageAccessModePodMount
 
-		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 1234)
-		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
-		}
-
-		expectedContainerPath := "/checkpoints/abc123/versions/2"
-		expectedHostPath := filepath.Join(snapshotruntime.HostProcPath, "1234", "root", "checkpoints/abc123/versions/2")
-		if locations.HostPath != expectedHostPath {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expectedHostPath)
-		}
-		if locations.ContainerPath != expectedContainerPath {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expectedContainerPath)
-		}
+		got, err := w.artifactPathForPod(unversioned, "abc123")
+		require.NoError(t, err)
+		assert.Equal(t, "/checkpoints/abc123/versions/"+snapshotprotocol.DefaultCheckpointArtifactVersion, got)
 	})
 
-	t.Run("pod storage annotation overrides agent base path", func(t *testing.T) {
-		annotatedPod := pod.DeepCopy()
-		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "/pod-checkpoints/"
-
-		w := makeTestController(t)
-		w.config.Storage.BasePath = "/agent-checkpoints"
-
-		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
-		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+	t.Run("a pod cannot redirect the artifact path", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			basePath     string
+			checkpointID string
+			version      string
+		}{
+			{name: "missing base path", basePath: "", checkpointID: "abc123", version: "2"},
+			{name: "relative base path", basePath: "checkpoints", checkpointID: "abc123", version: "2"},
+			{name: "unclean base path", basePath: "/checkpoints/../escape", checkpointID: "abc123", version: "2"},
+			{name: "traversal in the checkpoint ID", basePath: "/checkpoints", checkpointID: "../escape", version: "2"},
+			{name: "separator in the checkpoint ID", basePath: "/checkpoints", checkpointID: "a/b", version: "2"},
+			{name: "traversal in the version", basePath: "/checkpoints", checkpointID: "abc123", version: ".."},
+			{name: "separator in the version", basePath: "/checkpoints", checkpointID: "abc123", version: "2/3"},
 		}
 
-		expected := "/pod-checkpoints/abc123/versions/2"
-		if locations.HostPath != expected {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
-		}
-		if locations.ContainerPath != expected {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
-		}
-	})
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				hostile := pod.DeepCopy()
+				hostile.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] = tc.version
 
-	t.Run("blank pod storage annotation falls back to agent base path", func(t *testing.T) {
-		annotatedPod := pod.DeepCopy()
-		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "   "
+				w := makeTestController(t)
+				w.config.Storage.BasePath = tc.basePath
 
-		w := makeTestController(t)
-		w.config.Storage.BasePath = "/agent-checkpoints"
-
-		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
-		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
-		}
-
-		expected := "/agent-checkpoints/abc123/versions/2"
-		if locations.HostPath != expected {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
-		}
-		if locations.ContainerPath != expected {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
-		}
-	})
-
-	t.Run("missing base path returns an error", func(t *testing.T) {
-		w := makeTestController(t)
-		w.config.Storage.BasePath = ""
-
-		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
-			t.Fatal("expected error for missing base path")
-		}
-	})
-
-	t.Run("non-clean base path returns an error", func(t *testing.T) {
-		annotatedPod := pod.DeepCopy()
-		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "/checkpoints/../escape"
-
-		w := makeTestController(t)
-		w.config.Storage.BasePath = "/agent-checkpoints"
-		w.config.Storage.AccessMode = types.StorageAccessModePodMount
-
-		_, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 1234)
-		if err == nil {
-			t.Fatal("expected error for non-clean checkpoint location")
-		}
-		if !strings.Contains(err.Error(), "absolute, clean") {
-			t.Fatalf("expected clean-path validation error, got: %v", err)
-		}
-	})
-
-	t.Run("pod mount requires a host PID", func(t *testing.T) {
-		w := makeTestController(t)
-		w.config.Storage.BasePath = "/checkpoints"
-		w.config.Storage.AccessMode = types.StorageAccessModePodMount
-
-		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
-			t.Fatal("expected error for missing host PID")
+				_, err := w.artifactPathForPod(hostile, tc.checkpointID)
+				require.Error(t, err)
+			})
 		}
 	})
 }
@@ -748,25 +691,25 @@ func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
 	pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, true,
 		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID}, nil)
 
-	// Write a minimal manifest so inspectRestore can load it.
-	checkpointDir := filepath.Join(t.TempDir(), checkpointID)
-	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
-		t.Fatalf("create checkpoint dir: %v", err)
-	}
-	if err := types.WriteManifest(checkpointDir, &types.CheckpointManifest{CheckpointID: checkpointID}); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-
 	injectErr := errors.New("injector unavailable")
 	w := makeTestController(t, pod)
+
+	// The agent resolves the artifact under its own base path, so the fixture
+	// has to sit where the agent will look rather than anywhere the pod names.
+	checkpointDir := filepath.Join(
+		w.config.Storage.BasePath, checkpointID, "versions",
+		snapshotprotocol.DefaultCheckpointArtifactVersion,
+	)
+	require.NoError(t, os.MkdirAll(checkpointDir, 0o755))
+	require.NoError(t, types.WriteManifest(checkpointDir, &types.CheckpointManifest{CheckpointID: checkpointID}))
+
 	// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
 	// returns ESRCH instead of killing the test process.
 	w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
-	w.injector = errorInjector{err: injectErr}
+	w.injector = executor.Mounters{Bundle: errorInjector{err: injectErr}, Artifact: errorInjector{err: injectErr}}
 
 	_ = w.runRestore(
 		context.Background(), pod, "main", "ctr-abc", checkpointID,
-		checkpointLocations{HostPath: checkpointDir, ContainerPath: checkpointDir},
 		"default/test-pod/main/ctr-abc",
 		time.Time{},
 	)
@@ -774,4 +717,134 @@ func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
 	if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
 		t.Fatal("expected RestoreFailed event when injector returns an error")
 	}
+}
+
+func startRestoreTarget(t *testing.T) (int, chan error) {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	require.NoError(t, cmd.Start())
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitCh:
+		case <-time.After(time.Second):
+		}
+	})
+	return cmd.Process.Pid, waitCh
+}
+
+func requireTargetKilled(t *testing.T, waitCh chan error) {
+	t.Helper()
+	select {
+	case err := <-waitCh:
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr)
+		status, ok := exitErr.Sys().(syscall.WaitStatus)
+		require.True(t, ok)
+		assert.True(t, status.Signaled())
+		assert.Equal(t, syscall.SIGKILL, status.Signal())
+		waitCh <- err // let test cleanup observe that Wait already completed
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore failure did not terminate the target")
+	}
+}
+
+func TestRunRestore_AllFailureStagesKillTheTarget(t *testing.T) {
+	tests := []struct {
+		name          string
+		rejectPatches bool
+		prepare       func(t *testing.T, w *NodeController, pod *corev1.Pod, checkpointID string)
+	}{
+		{
+			name: "invalid artifact coordinates",
+			prepare: func(_ *testing.T, _ *NodeController, pod *corev1.Pod, _ string) {
+				pod.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] = "../escape"
+			},
+		},
+		{
+			name: "artifact path is not a directory",
+			prepare: func(t *testing.T, w *NodeController, _ *corev1.Pod, checkpointID string) {
+				path := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte("not a directory"), 0o600))
+			},
+		},
+		{
+			name: "mount helper fails after artifact validation",
+			prepare: func(t *testing.T, w *NodeController, _ *corev1.Pod, checkpointID string) {
+				path := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+				require.NoError(t, os.MkdirAll(path, 0o755))
+				require.NoError(t, types.WriteManifest(path, &types.CheckpointManifest{CheckpointID: checkpointID}))
+				failing := errorInjector{err: errors.New("mount helper failed")}
+				w.injector = executor.Mounters{Bundle: failing, Artifact: failing}
+			},
+		},
+		{
+			name:          "failure status cannot be persisted",
+			rejectPatches: true,
+			prepare: func(_ *testing.T, _ *NodeController, pod *corev1.Pod, _ string) {
+				pod.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation] = "../escape"
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			checkpointID := "test-checkpoint"
+			pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, true,
+				map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID}, nil)
+			w := makeTestController(t, pod)
+			pid, waitCh := startRestoreTarget(t)
+			w.runtime = &fakeRuntime{resolveContainerPID: pid}
+			tc.prepare(t, w, pod, checkpointID)
+			if tc.rejectPatches {
+				w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+					return true, nil, errors.New("status patch rejected")
+				})
+			}
+
+			_ = w.runRestore(
+				context.Background(), pod, "main", "ctr-abc", checkpointID,
+				"default/test-pod/main/ctr-abc", time.Time{},
+			)
+
+			requireTargetKilled(t, waitCh)
+			if !tc.rejectPatches {
+				got, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				keys, err := snapshotprotocol.RestoreStatusAnnotationKeysFor("main")
+				require.NoError(t, err)
+				assert.Equal(t, snapshotprotocol.RestoreStatusFailed, got.Annotations[keys.Status])
+			}
+			assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed"))
+		})
+	}
+}
+
+func TestRunRestore_CanceledParentStillMarksFailedAndKills(t *testing.T) {
+	checkpointID := "test-checkpoint"
+	pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, true,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
+		map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "../escape"},
+	)
+	w := makeTestController(t, pod)
+	pid, waitCh := startRestoreTarget(t)
+	w.runtime = &fakeRuntime{resolveContainerPID: pid, rejectCanceledContext: true}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := w.runRestore(
+		canceledCtx, pod, "main", "ctr-abc", checkpointID,
+		"default/test-pod/main/ctr-abc", time.Time{},
+	)
+
+	require.ErrorContains(t, err, "artifact version")
+	requireTargetKilled(t, waitCh)
+	got, getErr := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, getErr)
+	keys, keyErr := snapshotprotocol.RestoreStatusAnnotationKeysFor("main")
+	require.NoError(t, keyErr)
+	assert.Equal(t, snapshotprotocol.RestoreStatusFailed, got.Annotations[keys.Status])
 }

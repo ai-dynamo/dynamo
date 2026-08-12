@@ -20,6 +20,7 @@ endif
 CONTAINER_TOOL ?= docker
 # Snapshot runtime images ship cuda-checkpoint and are amd64-only.
 RUNTIME_IMAGE_PLATFORM ?= linux/amd64
+INTEGRATION_TEST_IMG ?= snapshot-nsmount-integration:local
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 SHELL = /usr/bin/env bash -o pipefail
@@ -47,6 +48,13 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: fmt vet ## Run tests.
 	go test ./... -v -coverprofile cover.out
+
+.PHONY: docker-test-integration
+docker-test-integration: ## Exercise the real namespace-mount helper in a privileged Linux container.
+	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target integration-tester \
+		--build-context operator=../operator \
+		-t ${INTEGRATION_TEST_IMG} .
+	$(CONTAINER_TOOL) run --rm --privileged ${INTEGRATION_TEST_IMG}
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.

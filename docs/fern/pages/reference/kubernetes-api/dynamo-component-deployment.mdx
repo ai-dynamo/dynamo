@@ -242,7 +242,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Immediate</Badge> <Badge intent="note" minimal>WaitForCheckpoint</Badge></span>
   </ParamField>
   <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-    Whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit `checkpointRef` checkpoints are never owned or deleted by the DGD.
+    Whether a DGD-managed automatic checkpoint CR is deleted or retained when the owning DGD is deleted. Checkpoint artifact data remains for both policies. Explicit `checkpointRef` checkpoints are never owned or deleted by the DGD.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Delete</Badge> <Badge intent="note" minimal>Retain</Badge></span>
   </ParamField>

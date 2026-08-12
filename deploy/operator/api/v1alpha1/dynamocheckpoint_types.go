@@ -38,8 +38,8 @@ const (
 )
 
 // Deprecated: StorageType is retained for compatibility with older
-// DynamoCheckpoint status consumers. The current checkpoint flow publishes
-// PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
+// DynamoCheckpoint status consumers. The current checkpoint flow leaves
+// storage ownership and artifact publication to the snapshot-agent.
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 

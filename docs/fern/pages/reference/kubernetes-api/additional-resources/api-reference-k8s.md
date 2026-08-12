@@ -65,7 +65,8 @@ _Appears in:_
 _Underlying type:_ _string_
 
 CheckpointDeletionPolicy defines what happens to DGD-managed automatic
-checkpoint resources when the owning DGD is deleted.
+checkpoint custom resources when the owning DGD is deleted. Checkpoint
+artifact data is retained for both policies.
 
 _Validation:_
 - Enum: [Delete Retain]
@@ -75,8 +76,8 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
-| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+| `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs when the owning DGD is deleted.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
 
 
 #### CheckpointMode
@@ -379,8 +380,8 @@ _Appears in:_
 _Underlying type:_ _string_
 
 Deprecated: StorageType is retained for compatibility with older
-DynamoCheckpoint status consumers. The current checkpoint flow publishes
-PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
+DynamoCheckpoint status consumers. The current checkpoint flow leaves
+storage ownership and artifact publication to the snapshot-agent.
 
 _Validation:_
 - Enum: [pvc s3 oci]
@@ -1289,6 +1290,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `snapshotHandle` _string_ | SnapshotHandle is the resolved location of the captured artifact.<br />It is written solely by the node agent and is never used as restore input. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reflect the latest observations of the PodSnapshotContent's state.<br />Standard types are Ready and Failed. |  | Optional: \{\} <br /> |
 
 
@@ -1323,7 +1325,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod (control volume, checkpoint storage mount)<br />before creating the PodSnapshot. The capture target container is carried on<br />PodRef.Containers, not a pod annotation. |  | Required: \{\} <br /> |
+| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod's control volume before creating the<br />PodSnapshot. The capture target container is carried on PodRef.Containers,<br />not a pod annotation. |  | Required: \{\} <br /> |
 
 
 #### PodSnapshotSpec
@@ -1590,7 +1592,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
 | `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named checkpoint. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | StartupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />- Immediate: start workers cold immediately; later Pods restore from the<br />  checkpoint once it is Ready.<br />- WaitForCheckpoint: keep worker replicas at zero until the checkpoint is<br />  Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
-| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR is<br />deleted or retained when the owning DGD is deleted. Artifact data remains.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `checkpointRef` _string_ | CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.<br />If specified, this service's Identity is ignored and the referenced checkpoint is used directly. |  | Optional: \{\} <br /> |
 | `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; no action is needed.<br />Use CheckpointRef to restore an existing checkpoint. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | TargetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
@@ -1793,7 +1795,8 @@ _Appears in:_
 _Underlying type:_ _string_
 
 CheckpointDeletionPolicy defines what happens to DGD-managed automatic
-checkpoint resources when the owning DGD is deleted.
+checkpoint custom resources when the owning DGD is deleted. Checkpoint
+artifact data is retained for both policies.
 
 _Validation:_
 - Enum: [Delete Retain]
@@ -1803,8 +1806,8 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
-| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+| `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs when the owning DGD is deleted.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
 
 
 #### CheckpointMode
@@ -1881,7 +1884,7 @@ _Appears in:_
 | `enabled` _boolean_ | enabled indicates whether checkpointing is enabled for this component.<br />When true, omit checkpointRef for a DGD-managed automatic checkpoint or<br />set checkpointRef to restore an existing checkpoint. Omit the checkpoint<br />block, or set enabled=false, to disable checkpointing. |  | Required: \{\} <br /> |
 | `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named checkpoint. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | startupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />`Immediate` (default): start workers cold immediately; later Pods restore<br />from the checkpoint once it is Ready.<br />`WaitForCheckpoint`: keep worker replicas at zero until the checkpoint is<br />Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
-| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR is<br />deleted or retained when the owning DGD is deleted. Artifact data remains.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `checkpointRef` _string_ | checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.<br />When set, this component's `identity` is ignored and the referenced<br />checkpoint is used directly. |  | Optional: \{\} <br /> |
 | `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; no action is needed.<br />Use checkpointRef to restore an existing checkpoint. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | targetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
@@ -3208,66 +3211,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
-| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage optionally configures the namespace-local checkpoint PVC that<br />workload pods mount. When omitted, the operator preserves the legacy<br />behavior of discovering storage from a snapshot-agent DaemonSet in the<br />workload namespace. |  |  |
-| `cleanupImage` _string_ | CleanupImage is the image used by best-effort artifact cleanup Jobs for<br />automatically-created checkpoints. It must provide a POSIX shell and `rm`. | busybox:1.36 |  |
-
-
-#### CheckpointOCIConfig
-
-
-
-Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the legacy OCI URI (oci://registry/repository). |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy docker config secret name. |  |  |
-
-
-#### CheckpointPVCConfig
-
-
-
-CheckpointPVCConfig configures the namespace-local PVC mounted into
-checkpoint and restore workload pods.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the PVC name in each workload namespace. |  |  |
-| `basePath` _string_ | BasePath is the mount path inside checkpoint and restore workload pods. |  |  |
-| `create` _boolean_ | Create tells the operator to create the PVC in workload namespaces when<br />it is missing. When false, the PVC must already exist. |  |  |
-| `size` _string_ | Size is the storage request used when Create is true. |  |  |
-| `storageClassName` _string_ | StorageClassName is the optional StorageClass name used when Create is true. |  |  |
-| `accessMode` _string_ | AccessMode is the PVC access mode used when Create is true. |  |  |
-
-
-#### CheckpointS3Config
-
-
-
-Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix). |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy credentials secret name. |  |  |
 
 
 #### CheckpointSeccompConfiguration
@@ -3290,26 +3233,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ | Disabled, when true, suppresses seccomp profile injection entirely.<br />Use this for clusters where custom localhost profiles are not allowed<br />(e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle<br />io_uring natively. |  |  |
 | `profile` _string_ | Profile is the localhost seccomp profile path. Empty falls back to<br />DefaultSeccompProfile. Ignored when Disabled is true. |  |  |
-
-
-#### CheckpointStorageConfiguration
-
-
-
-CheckpointStorageConfiguration configures checkpoint storage for operator
-pod mutations. Only PVC storage is implemented today.
-
-
-
-_Appears in:_
-- [CheckpointConfiguration](#checkpointconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `type` _string_ | Type is the storage backend type. Only pvc is implemented today. |  |  |
-| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for pvc-based settings. |  |  |
-| `s3` _[CheckpointS3Config](#checkpoints3config)_ | Deprecated: S3 is retained for compatibility and ignored. |  |  |
-| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | Deprecated: OCI is retained for compatibility and ignored. |  |  |
 
 
 #### DRAConfiguration

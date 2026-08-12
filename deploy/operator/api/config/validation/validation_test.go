@@ -18,7 +18,6 @@
 package validation
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -133,29 +132,6 @@ func TestValidateOperatorConfiguration_CheckpointEnabledRequiresNoStorageConfig(
 	errs := ValidateOperatorConfiguration(cfg)
 	if len(errs) != 0 {
 		t.Errorf("expected no errors for checkpoint config without storage settings, got: %v", errs)
-	}
-}
-
-func TestValidateOperatorConfiguration_CheckpointDeprecatedStorageConfigIsAccepted(t *testing.T) {
-	cfg := validConfig()
-	rawConfig := []byte(`{
-		"checkpoint": {
-			"enabled": true,
-			"storage": {
-				"type": "s3",
-				"s3": {
-					"uri": "s3://legacy-bucket/checkpoints"
-				}
-			}
-		}
-	}`)
-	if err := json.Unmarshal(rawConfig, cfg); err != nil {
-		t.Fatalf("failed to unmarshal compatibility config: %v", err)
-	}
-
-	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 0 {
-		t.Errorf("expected no errors for deprecated checkpoint storage config, got: %v", errs)
 	}
 }
 

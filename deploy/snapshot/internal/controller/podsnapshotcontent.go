@@ -42,9 +42,6 @@ type CheckpointParams struct {
 	CheckpointID string
 	// HostPath is the agent-resolved destination directory for the dump.
 	HostPath string
-	// ContainerPath is the destination as seen inside the workload container's mount
-	// namespace (equal to HostPath under agentMount storage).
-	ContainerPath string
 	// StartedAt marks when the controller observed the work order, for timing.
 	StartedAt time.Time
 }
@@ -203,19 +200,16 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID)
+	artifactPath, err := w.artifactPathForPod(pod, id)
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
-	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
 	}
 
 	// Resume: a present artifact with unwritten status means a prior dump finished but the
 	// status write did not. The artifact dir exists only after the executor's atomic rename,
 	// so its presence means a completed dump.
-	if artifactPresent(loc.HostPath) {
-		return w.setSnapshotContentSucceeded(ctx, content)
+	if artifactPresent(artifactPath) {
+		return w.setSnapshotContentSucceeded(ctx, content, artifactPath)
 	}
 
 	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(id)}
@@ -228,7 +222,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	}
 
 	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, loc, leaseKey, id)
+	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, artifactPath, leaseKey, id)
 	return nil
 }
 
@@ -242,7 +236,7 @@ func (w *NodeController) runCheckpoint(
 	containerName, containerID string,
 	containerPID int,
 	checkpointID string,
-	loc checkpointLocations,
+	artifactPath string,
 	leaseKey client.ObjectKey,
 	inFlightKey string,
 ) {
@@ -267,8 +261,7 @@ func (w *NodeController) runCheckpoint(
 		ContainerID:   containerID,
 		ContainerPID:  containerPID,
 		CheckpointID:  checkpointID,
-		HostPath:      loc.HostPath,
-		ContainerPath: loc.ContainerPath,
+		HostPath:      artifactPath,
 		StartedAt:     time.Now(),
 	}
 	if err := w.checkpointFn(leaseCtx, params); err != nil {
@@ -292,7 +285,7 @@ func (w *NodeController) runCheckpoint(
 		return
 	}
 
-	if err := w.setSnapshotContentSucceeded(ctx, content); err != nil {
+	if err := w.setSnapshotContentSucceeded(ctx, content, artifactPath); err != nil {
 		logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 	}
 }
@@ -409,8 +402,9 @@ func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *co
 
 // setSnapshotContentSucceeded patches status with the Ready condition. On any error the caller
 // should surface it so the next reconcile iteration retries.
-func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent) error {
+func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, snapshotHandle string) error {
 	patch := client.MergeFrom(content.DeepCopy())
+	content.Status.SnapshotHandle = snapshotHandle
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    nvidiacomv1alpha1.PodSnapshotConditionReady,
 		Status:  metav1.ConditionTrue,
@@ -424,6 +418,7 @@ func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, conten
 // that a concurrent failure write wins and this patch is rejected rather than overwriting it.
 func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, reason string, cause error) error {
 	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	content.Status.SnapshotHandle = ""
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    nvidiacomv1alpha1.PodSnapshotConditionFailed,
 		Status:  metav1.ConditionTrue,

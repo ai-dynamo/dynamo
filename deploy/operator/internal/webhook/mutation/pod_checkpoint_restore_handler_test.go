@@ -58,13 +58,6 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		&configv1alpha1.OperatorConfiguration{
 			Checkpoint: configv1alpha1.CheckpointConfiguration{
 				Enabled: true,
-				Storage: configv1alpha1.CheckpointStorageConfiguration{
-					Type: snapshotprotocol.StorageTypePVC,
-					PVC: configv1alpha1.CheckpointPVCConfig{
-						PVCName:  "snapshot-pvc",
-						BasePath: "/checkpoints",
-					},
-				},
 			},
 		},
 	)
@@ -91,7 +84,16 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		assert.Equal(t, "true", patchesByPath["/metadata/labels/nvidia.com~1snapshot-is-restore-target"])
 		assert.Equal(t, "2", patchesByPath["/metadata/annotations/nvidia.com~1snapshot-artifact-version"])
 		assert.NotContains(t, patchesByPath, "/metadata/annotations/nvidia.com~1snapshot-target-containers")
+		assert.NotContains(t, patchesByPath, "/metadata/annotations/nvidia.com~1snapshot-storage-type")
+		assert.NotContains(t, patchesByPath, "/metadata/annotations/nvidia.com~1snapshot-storage-base-path")
 		assert.Contains(t, patchesByPath, "/spec/volumes")
+		volumes, ok := patchesByPath["/spec/volumes"].([]any)
+		require.True(t, ok, "expected volumes patch, got %#v", patchesByPath)
+		for _, volume := range volumes {
+			volumeMap, ok := volume.(map[string]any)
+			require.True(t, ok, "expected volume object, got %#v", volume)
+			assert.NotEqual(t, "checkpoint-storage", volumeMap["name"])
+		}
 		for _, patch := range resp.Patches {
 			assert.NotContains(t, patch.Path, "/command")
 			assert.NotContains(t, patch.Path, "/args")
