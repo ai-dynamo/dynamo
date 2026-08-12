@@ -443,6 +443,16 @@ impl<T> RegisteredStream<T> {
         cleanup.0.take();
         (connection_info, stream_provider)
     }
+
+    /// Await the stream provider while keeping registration cleanup armed.
+    ///
+    /// If the returned future is dropped before the provider resolves, the
+    /// registration is removed from the transport's pending-subject tables.
+    pub async fn wait(
+        self,
+    ) -> Result<Result<T, StreamPrologueError>, tokio::sync::oneshot::error::RecvError> {
+        self.stream_provider.await
+    }
 }
 
 /// After registering a stream, the [`PendingConnections`] object is returned to the caller. This
