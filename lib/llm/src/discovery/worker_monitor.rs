@@ -572,7 +572,7 @@ pub struct KvWorkerMonitor {
     /// bounds the monitoring task to the WorkerSet that spawned it instead of to the
     /// process. Without this the task — and the KV metrics `EventSubscriber`, the decode
     /// and prefill `RuntimeConfigWatch`es and the instance watcher it holds — survives
-    /// every WorkerSet rebuild and accumulates for the life of the frontend (DYN-3731).
+    /// every WorkerSet rebuild and accumulates for the life of the frontend (#10729).
     lifecycle: CancellationToken,
 }
 
@@ -1818,8 +1818,8 @@ mod tests {
         rt.shutdown();
     }
 
-    /// DYN-3731: the monitoring task must be bound to the lifetime of the WorkerSet that
-    /// owns the monitor, not to the process.
+    /// Regression test for #10729: the monitoring task must be bound to the lifetime of
+    /// the WorkerSet that owns the monitor, not to the process.
     ///
     /// The observable is the strong count of `worker_load_states`: the spawned task
     /// captures a clone of that `Arc` alongside the KV metrics `EventSubscriber`, the
