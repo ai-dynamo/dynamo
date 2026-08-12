@@ -1149,7 +1149,10 @@ mod tests {
         let (agent_context, compaction) =
             agent_context_and_compaction_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "canonical");
-        assert_eq!(compaction, None);
+        assert_eq!(
+            compaction.and_then(|compaction| compaction.strategy),
+            Some("memento".to_string())
+        );
     }
 
     #[test]
