@@ -8,7 +8,6 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
-use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
@@ -70,30 +69,6 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
     None
 }
 
-fn validate_request_end_trace(
-    common_request: &PreprocessedRequest,
-    context: &Context<()>,
-    trace_block_size: usize,
-) -> bool {
-    let request_id = context.id();
-    if let Some(reason) = request_trace_rejection(common_request) {
-        tracing::warn!(
-            %request_id,
-            reason,
-            "request trace skipped because the request cannot be represented as one replay request"
-        );
-        return false;
-    }
-    if trace_block_size == 0 {
-        tracing::warn!(
-            %request_id,
-            "request trace skipped because the KV cache block size is unavailable"
-        );
-        return false;
-    }
-    true
-}
-
 fn shared_replay_metrics(
     token_ids: &[crate::protocols::TokenIdType],
     trace_block_size: usize,
@@ -119,32 +94,18 @@ pub(crate) fn build_request_end_trace_state(
     )
 }
 
-/// Build request-end state with a new tracker for native endpoints that do not
-/// already have one. Validation runs before the tracker allocation.
 pub(crate) fn build_new_request_end_trace_state(
-    common_request: &PreprocessedRequest,
+    common_request: &mut PreprocessedRequest,
     context: &Context<()>,
     trace_block_size: usize,
-    agent_context: Option<&AgentContext>,
-) -> Option<(RequestEndTraceState, Arc<RequestTracker>)> {
-    if !validate_request_end_trace(common_request, context, trace_block_size) {
-        return None;
-    }
-
+) -> Option<RequestEndTraceState> {
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(common_request.token_ids.len(), None);
-    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)?;
     let tracker_option = Some(tracker.clone());
-    let agent = agent_context.map(|agent_context| {
-        super::build_agent_context_trace_state_from_agent(
-            common_request,
-            &tracker_option,
-            context,
-            agent_context,
-        )
-    });
-    let state = RequestEndTraceState::new(agent, tracker.clone(), replay_metrics);
-    Some((state, tracker))
+    let state =
+        build_request_end_trace_state(common_request, &tracker_option, context, trace_block_size)?;
+    common_request.tracker = tracker_option;
+    Some(state)
 }
 
 fn build_request_end_trace_state_for_policy(
@@ -161,7 +122,12 @@ fn build_request_end_trace_state_for_policy(
     }
 
     let request_id = context.id();
-    if !validate_request_end_trace(common_request, context, trace_block_size) {
+    if let Some(reason) = request_trace_rejection(common_request) {
+        tracing::warn!(
+            %request_id,
+            reason,
+            "request trace skipped because the request cannot be represented as one replay request"
+        );
         return None;
     }
 
@@ -176,7 +142,16 @@ fn build_request_end_trace_state_for_policy(
         }
     };
 
-    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)?;
+    let replay_metrics = match shared_replay_metrics(&common_request.token_ids, trace_block_size) {
+        Some(metrics) => metrics,
+        None => {
+            tracing::warn!(
+                %request_id,
+                "request trace skipped because the KV cache block size is unavailable"
+            );
+            return None;
+        }
+    };
     let agent = has_agent_context
         .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
         .flatten();
@@ -195,7 +170,7 @@ pub(crate) fn finish_reason_metadata_handle(
         .and_then(RequestEndTraceState::finish_reason_metadata)
 }
 
-pub(crate) fn wrap_request_end_stream<Resp>(
+fn wrap_request_end_stream<Resp>(
     stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
     request_id: String,

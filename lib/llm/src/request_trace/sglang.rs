@@ -3,7 +3,6 @@
 
 //! Request-trace adapter for native SGLang `/generate` responses.
 
-use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -17,15 +16,12 @@ use serde_json::Value;
 
 use super::SharedFinishReasonMetadata;
 use super::integration::{RequestEndTraceState, emit_request_end_trace_state};
-use crate::discovery::GenerateTraceConfig;
-use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use dynamo_runtime::pipeline::Context;
 
 const NATIVE_RESPONSE_KEY: &str = "sglang_response";
-const TOOL_OUTPUT_LIMIT: usize = 16 * 1024;
 
 pub(crate) struct SglangRequestTrace(SglangRequestTraceState);
 
@@ -37,7 +33,6 @@ enum SglangRequestTraceState {
 
 struct ActiveSglangRequestTrace {
     request_end: RequestEndTraceState,
-    tool_call_parser: Option<String>,
 }
 
 impl SglangRequestTrace {
@@ -56,44 +51,32 @@ impl SglangRequestTrace {
     pub(crate) fn prepare(
         self,
         context: Context<PreprocessedRequest>,
-        trace_config: Option<GenerateTraceConfig>,
+        trace_block_size: Option<u32>,
     ) -> (Self, Context<PreprocessedRequest>) {
         if matches!(self.0, SglangRequestTraceState::Disabled) {
             return (self, context);
         }
-        let Some(trace_config) = trace_config else {
+        let Some(trace_block_size) = trace_block_size else {
             tracing::warn!(
                 "native SGLang request trace skipped because runtime metadata is missing"
             );
             return (Self(SglangRequestTraceState::Disabled), context);
         };
         let (mut request, context) = context.into_parts();
-        let agent_context = context
-            .get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
-            .ok()
-            .flatten();
-        let Some((request_end, tracker)) = super::integration::build_new_request_end_trace_state(
-            &request,
+        crate::preprocessor::attach_agent_context_from_context(&mut request, &context);
+        let Some(request_end) = super::integration::build_new_request_end_trace_state(
+            &mut request,
             &context,
-            trace_config.kv_cache_block_size as usize,
-            agent_context.as_deref(),
+            trace_block_size as usize,
         ) else {
             return (
                 Self(SglangRequestTraceState::Disabled),
                 context.map(|_| request),
             );
         };
-        request.tracker = Some(tracker);
-        let finish_reason_metadata = request_end.finish_reason_metadata();
-        let tool_call_parser = finish_reason_metadata
-            .as_ref()
-            .and(trace_config.tool_call_parser);
         (
             Self(SglangRequestTraceState::Active(Box::new(
-                ActiveSglangRequestTrace {
-                    request_end,
-                    tool_call_parser,
-                },
+                ActiveSglangRequestTrace { request_end },
             ))),
             context.map(|_| request),
         )
@@ -113,7 +96,6 @@ impl SglangRequestTrace {
             stream,
             engine_context,
             active.request_end,
-            active.tool_call_parser,
             request_id,
         ))
     }
@@ -126,9 +108,6 @@ struct SglangTraceStream {
     request_id: Option<String>,
     tracker: Arc<RequestTracker>,
     finish_reason_metadata: Option<SharedFinishReasonMetadata>,
-    tool_call_parser: Option<String>,
-    tool_output: Option<ToolOutputBuffer>,
-    pending_tool_finalize: Option<(String, String)>,
     first_token_recorded: bool,
     observed_osl: usize,
     terminal_recorded: bool,
@@ -139,7 +118,6 @@ impl std::fmt::Debug for SglangTraceStream {
         formatter
             .debug_struct("SglangTraceStream")
             .field("trace_active", &self.request_end.is_some())
-            .field("tool_parser_active", &self.tool_call_parser.is_some())
             .field("terminal_recorded", &self.terminal_recorded)
             .finish_non_exhaustive()
     }
@@ -150,14 +128,10 @@ impl SglangTraceStream {
         stream: EngineStream<Annotated<LLMEngineOutput>>,
         engine_context: Arc<dyn AsyncEngineContext>,
         request_end: RequestEndTraceState,
-        tool_call_parser: Option<String>,
         request_id: String,
     ) -> Self {
         let tracker = request_end.request_tracker();
         let finish_reason_metadata = request_end.finish_reason_metadata();
-        let tool_output = tool_call_parser
-            .as_deref()
-            .map(ToolOutputBuffer::for_parser);
         Self {
             inner: Some(stream),
             engine_context,
@@ -165,9 +139,6 @@ impl SglangTraceStream {
             request_id: Some(request_id),
             tracker,
             finish_reason_metadata,
-            tool_call_parser,
-            tool_output,
-            pending_tool_finalize: None,
             first_token_recorded: false,
             observed_osl: 0,
             terminal_recorded: false,
@@ -184,14 +155,6 @@ impl SglangTraceStream {
                 self.tracker.record_first_token();
                 self.first_token_recorded = true;
             }
-        }
-
-        if let Some(tool_output) = self.tool_output.as_mut()
-            && let Some(text) = native_response.get("text").and_then(Value::as_str)
-        {
-            // Dynamo workers force SGLang's incremental streaming mode, so
-            // native response text is a delta rather than a cumulative prefix.
-            tool_output.push(text);
         }
 
         let Some(meta_info) = native_response.get("meta_info") else {
@@ -215,38 +178,6 @@ impl SglangTraceStream {
         if let Some(metadata) = self.finish_reason_metadata.as_ref() {
             record_finish_reason(metadata, finish_reason);
         }
-        if let (Some(output), Some(parser)) = (
-            self.tool_output.take().and_then(ToolOutputBuffer::finish),
-            self.tool_call_parser.take(),
-        ) {
-            self.pending_tool_finalize = Some((output, parser));
-        }
-    }
-
-    fn spawn_pending_tool_finalize(&mut self) {
-        let Some((output, parser)) = self.pending_tool_finalize.take() else {
-            return;
-        };
-        let Some(request_end) = self.request_end.take() else {
-            return;
-        };
-        let request_id = self
-            .request_id
-            .take()
-            .expect("active request trace must own a request id");
-        let metadata = self
-            .finish_reason_metadata
-            .clone()
-            .expect("tool parsing is only active for agent request traces");
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!("request-trace tool metadata skipped outside a Tokio runtime");
-            emit_request_end_trace_state(request_end, request_id);
-            return;
-        };
-        runtime.spawn(async move {
-            record_tool_calls(&metadata, &output, &parser).await;
-            emit_request_end_trace_state(request_end, request_id);
-        });
     }
 
     fn finish(&mut self) {
@@ -259,7 +190,6 @@ impl SglangTraceStream {
         // the two observers stay ordered without a global atomic RMW.
         self.tracker.record_osl(self.observed_osl);
         self.tracker.record_finish();
-        self.spawn_pending_tool_finalize();
         if let (Some(request_end), Some(request_id)) =
             (self.request_end.take(), self.request_id.take())
         {
@@ -303,109 +233,6 @@ impl AsyncEngineContextProvider for SglangTraceStream {
 }
 
 impl AsyncEngineStream<Annotated<LLMEngineOutput>> for SglangTraceStream {}
-
-struct ToolOutputBuffer {
-    start_tokens: Cow<'static, [String]>,
-    max_start_token_len: usize,
-    buffer: String,
-    capturing: bool,
-}
-
-impl ToolOutputBuffer {
-    fn for_parser(parser: &str) -> Self {
-        use dynamo_parsers::tool_calling::config::ParserConfig;
-
-        let config = dynamo_parsers::tool_calling::parsers::get_tool_parser_map().get(parser);
-        let start_tokens: Cow<'static, [String]> = config.map_or_else(
-            || Cow::Borrowed(&[] as &[String]),
-            |config| match &config.parser_config {
-                ParserConfig::Json(config) | ParserConfig::Harmony(config) => {
-                    Cow::Borrowed(config.tool_call_start_tokens.as_slice())
-                }
-                parser_config => Cow::Owned(parser_config.tool_call_start_tokens()),
-            },
-        );
-        let capture_all = config.is_none_or(|config| {
-            matches!(config.parser_config, ParserConfig::Pythonic)
-                || matches!(
-                    &config.parser_config,
-                    ParserConfig::Json(config) | ParserConfig::Harmony(config)
-                        if config.bare_json_mode
-                )
-                || start_tokens.is_empty()
-        });
-        let max_start_token_len = start_tokens.iter().map(String::len).max().unwrap_or(0);
-        Self {
-            start_tokens,
-            max_start_token_len,
-            buffer: String::new(),
-            capturing: capture_all,
-        }
-    }
-
-    fn push(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if self.capturing {
-            self.push_captured(text);
-            return;
-        }
-        self.buffer.push_str(text);
-
-        if let Some(start) = self
-            .start_tokens
-            .iter()
-            .filter_map(|token| self.buffer.find(token))
-            .min()
-        {
-            if start > 0 {
-                self.buffer.drain(..start);
-            }
-            self.capturing = true;
-            self.truncate_to_limit();
-            return;
-        }
-
-        let keep = self.max_start_token_len.saturating_sub(1);
-        if self.buffer.len() <= keep {
-            return;
-        }
-        if keep == 0 {
-            self.buffer.clear();
-            return;
-        }
-        let mut discard = self.buffer.len() - keep;
-        while discard > 0 && !self.buffer.is_char_boundary(discard) {
-            discard -= 1;
-        }
-        self.buffer.drain(..discard);
-    }
-
-    fn push_captured(&mut self, text: &str) {
-        let available = TOOL_OUTPUT_LIMIT.saturating_sub(self.buffer.len());
-        let mut end = available.min(text.len());
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.buffer.push_str(&text[..end]);
-    }
-
-    fn truncate_to_limit(&mut self) {
-        if self.buffer.len() <= TOOL_OUTPUT_LIMIT {
-            return;
-        }
-        let mut end = TOOL_OUTPUT_LIMIT;
-        while !self.buffer.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.buffer.truncate(end);
-    }
-
-    fn finish(self) -> Option<String> {
-        (self.capturing && !self.buffer.is_empty()).then_some(self.buffer)
-    }
-}
 
 fn native_response(response: &Annotated<LLMEngineOutput>) -> Option<&Value> {
     response
@@ -463,50 +290,6 @@ fn record_finish_reason(metadata: &SharedFinishReasonMetadata, finish_reason: &V
     };
     if let Some(normalized) = normalized {
         metadata.record_choice_finish_reason(0, normalized);
-    }
-}
-
-async fn record_tool_calls(
-    metadata: &SharedFinishReasonMetadata,
-    output_text: &str,
-    tool_call_parser: &str,
-) {
-    if output_text.is_empty() {
-        return;
-    }
-
-    let tool_calls = match dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize(
-        output_text,
-        Some(tool_call_parser),
-        None,
-    )
-    .await
-    {
-        Ok((tool_calls, _)) => tool_calls,
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                parser = tool_call_parser,
-                "failed to parse native SGLang output for request-trace tool metadata"
-            );
-            return;
-        }
-    };
-
-    for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
-        let Ok(tool_call_index) = u32::try_from(tool_call_index) else {
-            tracing::warn!("too many native SGLang tool calls to represent in request trace");
-            break;
-        };
-        metadata.record_tool_call(
-            0,
-            tool_call_index,
-            Some(&tool_call.id),
-            Some(&tool_call.function.name),
-        );
-    }
-    if !tool_calls.is_empty() {
-        metadata.infer_tool_call_finish_reason(0);
     }
 }
 
@@ -583,108 +366,24 @@ mod tests {
     }
 
     #[test]
-    fn records_native_finish_reason_metadata() {
-        let metadata = SharedFinishReasonMetadata::default();
-        record_finish_reason(&metadata, &serde_json::json!({"type": "tool_calls"}));
-
-        let metadata = snapshot(metadata);
-        assert_eq!(
-            metadata.backend_finish_reason.as_deref(),
-            Some("tool_calls")
-        );
-        assert_eq!(metadata.finish_reason, Some(FinishReason::ToolCalls));
-        assert_eq!(metadata.choices.len(), 1);
-        assert_eq!(
-            metadata.choices[0].finish_reason,
-            Some(FinishReason::ToolCalls)
-        );
-    }
-
-    #[test]
-    fn cancellation_remains_raw_backend_metadata() {
-        for finish_type in ["cancelled", "abort"] {
+    fn normalizes_known_finish_reasons_only() {
+        for (finish_type, expected) in [
+            ("stop", Some(FinishReason::Stop)),
+            ("length", Some(FinishReason::Length)),
+            ("content_filter", Some(FinishReason::ContentFilter)),
+            ("tool_calls", Some(FinishReason::ToolCalls)),
+            ("function_call", Some(FinishReason::FunctionCall)),
+            ("cancelled", None),
+            ("abort", None),
+        ] {
             let metadata = SharedFinishReasonMetadata::default();
             record_finish_reason(&metadata, &serde_json::json!({"type": finish_type}));
 
             let metadata = snapshot(metadata);
             assert_eq!(metadata.backend_finish_reason.as_deref(), Some(finish_type));
-            assert_eq!(metadata.finish_reason, None);
-            assert_eq!(metadata.choices[0].finish_reason, None);
+            assert_eq!(metadata.finish_reason, expected);
+            assert_eq!(metadata.choices[0].finish_reason, expected);
         }
-    }
-
-    #[tokio::test]
-    async fn parses_tool_metadata_without_arguments() {
-        let metadata = SharedFinishReasonMetadata::default();
-        record_tool_calls(
-            &metadata,
-            r#"<think>Inspect the weather.</think><tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>"#,
-            "qwen25",
-        )
-        .await;
-
-        let metadata = snapshot(metadata);
-        assert_eq!(metadata.finish_reason, Some(FinishReason::ToolCalls));
-        assert_eq!(metadata.tool_calls.len(), 1);
-        assert!(metadata.tool_calls[0].id.is_some());
-        assert_eq!(metadata.tool_calls[0].name.as_deref(), Some("get_weather"));
-        assert!(
-            serde_json::to_value(&metadata.tool_calls[0])
-                .unwrap()
-                .get("arguments")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_metadata_preserves_length_finish_reason() {
-        let metadata = SharedFinishReasonMetadata::default();
-        record_finish_reason(&metadata, &serde_json::json!({"type": "length"}));
-        record_tool_calls(
-            &metadata,
-            r#"<tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>"#,
-            "qwen25",
-        )
-        .await;
-
-        let metadata = snapshot(metadata);
-        assert_eq!(metadata.finish_reason, Some(FinishReason::Length));
-        assert_eq!(
-            metadata.choices[0].finish_reason,
-            Some(FinishReason::Length)
-        );
-        assert_eq!(metadata.tool_calls.len(), 1);
-    }
-
-    #[test]
-    fn marker_buffer_discards_normal_output_and_handles_split_marker() {
-        let mut output = ToolOutputBuffer::for_parser("qwen25");
-        output.push(&"ordinary reasoning ".repeat(1_000));
-        assert!(output.buffer.len() < 32);
-        output.push("<tool_");
-        output.push("call>{\"name\":\"weather\",\"arguments\":{}}</tool_call>");
-
-        let output = output.finish().expect("tool marker should enable capture");
-        assert!(output.starts_with("<tool_call>"));
-        assert!(!output.contains("ordinary reasoning"));
-    }
-
-    #[test]
-    fn marker_buffer_ignores_output_without_tool_calls() {
-        let mut output = ToolOutputBuffer::for_parser("qwen25");
-        output.push(&"plain response ".repeat(1_000));
-        assert!(output.finish().is_none());
-    }
-
-    #[test]
-    fn tool_output_buffer_caps_captured_text_on_char_boundary() {
-        let mut output = ToolOutputBuffer::for_parser("qwen25");
-        output.push("<tool_call>");
-        output.push(&"🦀".repeat(TOOL_OUTPUT_LIMIT));
-
-        let output = output.finish().expect("tool marker should enable capture");
-        assert!(output.len() <= TOOL_OUTPUT_LIMIT);
-        assert!(output.starts_with("<tool_call>"));
     }
 
     #[tokio::test]
@@ -719,7 +418,6 @@ mod tests {
             Annotated::from_data(LLMEngineOutput {
                 engine_data: Some(serde_json::json!({
                     "sglang_response": {
-                        "text": "<think>Inspect the weather.</think><tool_call>{\"name\":\"get_",
                         "output_ids": [101],
                         "meta_info": {
                             "finish_reason": null,
@@ -734,7 +432,6 @@ mod tests {
             Annotated::from_data(LLMEngineOutput {
                 engine_data: Some(serde_json::json!({
                     "sglang_response": {
-                        "text": "weather\",\"arguments\":{\"city\":\"SF\"}}</tool_call>",
                         "output_ids": [102],
                         "meta_info": {
                             "finish_reason": {"type": "stop", "matched": "END"},
@@ -749,10 +446,7 @@ mod tests {
         ]));
 
         let responses = SglangRequestTrace(SglangRequestTraceState::Active(Box::new(
-            ActiveSglangRequestTrace {
-                request_end: state,
-                tool_call_parser: Some("qwen25".to_string()),
-            },
+            ActiveSglangRequestTrace { request_end: state },
         )))
         .wrap(stream, "req-sglang".to_string())
         .collect::<Vec<_>>()
@@ -781,74 +475,17 @@ mod tests {
         assert!(request.ttft_ms.is_some());
         assert!(request.total_time_ms.is_some());
         let finish = request.finish_reason_metadata.expect("finish metadata");
-        assert_eq!(finish.finish_reason, Some(FinishReason::ToolCalls));
+        assert_eq!(finish.finish_reason, Some(FinishReason::Stop));
         assert_eq!(finish.backend_finish_reason.as_deref(), Some("stop"));
         assert_eq!(
             finish.stop_reason,
             Some(StopReason::String("END".to_string()))
         );
-        assert_eq!(finish.tool_calls.len(), 1);
-        assert!(finish.tool_calls[0].id.is_some());
-        assert_eq!(finish.tool_calls[0].name.as_deref(), Some("get_weather"));
+        assert!(finish.tool_calls.is_empty());
     }
 
     #[tokio::test]
-    async fn incomplete_stream_emits_observed_output_length() {
-        BUS.init(16);
-        let mut receiver = BUS.subscribe();
-        let tracker = Arc::new(RequestTracker::new());
-        let state = RequestEndTraceState::new(
-            None,
-            tracker,
-            Arc::new(RequestReplayMetrics {
-                trace_block_size: 2,
-                input_length: 3,
-                input_sequence_hashes: vec![11, 22],
-            }),
-        );
-        let stream = engine_stream(futures::stream::iter([Annotated::from_data(
-            LLMEngineOutput {
-                engine_data: Some(serde_json::json!({
-                    "sglang_response": {
-                        "text": "partial",
-                        "output_ids": [101, 102],
-                        "meta_info": {
-                            "finish_reason": null,
-                            "completion_tokens": 2
-                        }
-                    }
-                })),
-                ..Default::default()
-            },
-        )]));
-        let mut wrapped = SglangRequestTrace(SglangRequestTraceState::Active(Box::new(
-            ActiveSglangRequestTrace {
-                request_end: state,
-                tool_call_parser: None,
-            },
-        )))
-        .wrap(stream, "req-incomplete".to_string());
-
-        assert!(wrapped.next().await.is_some());
-        drop(wrapped);
-
-        let record = loop {
-            let record = receiver.recv().await.unwrap();
-            if record
-                .request
-                .as_ref()
-                .is_some_and(|request| request.request_id == "req-incomplete")
-            {
-                break record;
-            }
-        };
-        let request = record.request.expect("request metrics");
-        assert_eq!(request.request_id, "req-incomplete");
-        assert_eq!(request.output_tokens, Some(2));
-    }
-
-    #[tokio::test]
-    async fn terminal_stream_records_native_length_after_inner_drop() {
+    async fn drop_records_observed_length_after_inner_stream() {
         BUS.init(16);
         let mut receiver = BUS.subscribe();
         let tracker = Arc::new(RequestTracker::new());
@@ -864,10 +501,9 @@ mod tests {
         let response = Annotated::from_data(LLMEngineOutput {
             engine_data: Some(serde_json::json!({
                 "sglang_response": {
-                    "text": "done",
                     "output_ids": [101, 102],
                     "meta_info": {
-                        "finish_reason": {"type": "stop"},
+                        "finish_reason": null,
                         "completion_tokens": 2
                     }
                 }
@@ -880,12 +516,9 @@ mod tests {
             drop_osl: 1,
         });
         let mut wrapped = SglangRequestTrace(SglangRequestTraceState::Active(Box::new(
-            ActiveSglangRequestTrace {
-                request_end: state,
-                tool_call_parser: None,
-            },
+            ActiveSglangRequestTrace { request_end: state },
         )))
-        .wrap(stream, "req-terminal-order".to_string());
+        .wrap(stream, "req-drop-order".to_string());
 
         assert!(wrapped.next().await.is_some());
         drop(wrapped);
@@ -895,7 +528,7 @@ mod tests {
             if record
                 .request
                 .as_ref()
-                .is_some_and(|request| request.request_id == "req-terminal-order")
+                .is_some_and(|request| request.request_id == "req-drop-order")
             {
                 break record;
             }

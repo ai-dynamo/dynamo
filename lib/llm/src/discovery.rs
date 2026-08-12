@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod model;
+pub(crate) use model::GenerateWorkerRuntime;
 pub use model::Model;
-pub(crate) use model::{GenerateTraceConfig, GenerateWorkerRuntime};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{
