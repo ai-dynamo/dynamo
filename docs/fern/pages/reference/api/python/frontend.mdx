@@ -285,7 +285,7 @@ Handles:
 - Reasoning content extraction via SGLang ReasoningParser
 - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L957`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L957)
+[`components/src/dynamo/frontend/sglang_prepost.py#L979`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L979)
 
 **Public methods**
 
@@ -297,7 +297,7 @@ __init__(*, tokenizer, tool_call_parser: ToolCallParserType | None, reasoning_pa
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L966)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L988)
 
 <h4 id="api-dynamo-frontend-sglang-prepost-sglangstreamingpostprocessor-process-output">process_output</h4>
 
@@ -317,7 +317,7 @@ Dict with ``token_ids`` and optional ``finish_reason``.
 
 - `dict[str, Any] | None` — OpenAI choice dict or ``None`` if nothing to emit yet.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1224)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1246)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-prepost-streamingpostprocessor" title="StreamingPostProcessor (class)">
@@ -403,7 +403,7 @@ from dynamo.frontend.thinking import apply_default_thinking_mode_to_template_kwa
 apply_default_thinking_mode_to_template_kwargs(chat_template_kwargs: dict[str, Any], default_thinking_mode: str | None, *, request_has_root_thinking: bool = False) -> dict[str, Any]
 ```
 
-[`components/src/dynamo/frontend/thinking.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/thinking.py#L33)
+[`components/src/dynamo/frontend/thinking.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/thinking.py#L34)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-async-main" title="async_main (function)">
@@ -824,7 +824,7 @@ from dynamo.frontend.thinking import runtime_default_thinking_mode
 runtime_default_thinking_mode(runtime_config: dict[str, Any] | None) -> str | None
 ```
 
-[`components/src/dynamo/frontend/thinking.py#L20`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/thinking.py#L20)
+[`components/src/dynamo/frontend/thinking.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/thinking.py#L21)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-setup-engine-factory" title="setup_engine_factory (function)">
