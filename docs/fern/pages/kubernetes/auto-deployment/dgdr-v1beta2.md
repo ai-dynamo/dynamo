@@ -411,6 +411,13 @@ the Sweeper version that produced the candidate.
 
 Copy a candidate's `spec` into a DGD after the owning DGDR reports `Completed=True`:
 
+The Search UI shows the selected DGDC as syntax-highlighted YAML before deployment. Choose
+`Rolling Update` to update an existing DGD while keeping ready capacity available, or choose
+`Replace` to replace the target in one deployment operation. Review the materialized DGD spec, then
+select **Deploy**.
+
+![Mock candidate deployment dialog showing syntax-highlighted DGDC YAML, Rolling Update and Replace strategies, and a Deploy button](../../../assets/img/dgdr-candidate-promotion-ui-mock.svg)
+
 ```bash
 kubectl get dgdc minimax-planner-search-g4-0 -n inference -o json \
   | jq '{
