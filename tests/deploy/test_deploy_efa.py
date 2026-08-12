@@ -205,7 +205,25 @@ def assert_nixl_used_libfabric(deployment: ManagedDeployment) -> None:
             else "Check FI_PROVIDER=efa, FI_LOG_LEVEL>=info, and the EFA device/resources."
         )
     )
-    logger.info("EFA path confirmed: NIXL registered memory regions via LIBFABRIC/EFA")
+    # A second, independent gate. Finding libfabric registration lines does not by
+    # itself rule out a partial fallback, so require the UCX marker to be absent too.
+    # Verified safe to assert: on a known-good EFA run against
+    # vllm-runtime:1.3.1-efa the marker does not appear, so this cannot fire on a
+    # healthy deployment. The line is emitted by a dependency rather than this repo,
+    # which is why it was confirmed by observation before being made a gate.
+    sample = next((ln for ln in combined.splitlines() if UCX_FALLBACK_MARKER in ln), "")
+    assert not saw_ucx_fallback, (
+        "EFA NOT confirmed: worker logs contain the UCX fallback marker "
+        f"({UCX_FALLBACK_MARKER!r}) even though libfabric registration lines are "
+        f"present, which means at least part of the transfer used UCX: {sample.strip()!r}. "
+        "Check that --kv-transfer-config still pins "
+        "kv_connector_extra_config.backends=['LIBFABRIC']."
+    )
+
+    logger.info(
+        "EFA path confirmed: NIXL registered memory regions via LIBFABRIC/EFA, "
+        "and no UCX fallback marker present"
+    )
 
 
 def _read_nixl_rx_bytes(pod) -> float | None:
@@ -259,7 +277,7 @@ def assert_efa_rdma_traffic(rx_before: float | None, rx_after: float | None) -> 
     everywhere. When the counter cannot be read at all we log loudly and leave
     the verdict to assert_nixl_used_libfabric; when it CAN be read, it must grow.
     """
-    if rx_after is None:
+    if rx_before is None and rx_after is None:
         logger.warning(
             "NIXL %s not readable on this platform — skipping the RDMA-traffic "
             "assertion and relying on the libfabric log evidence. Check "
@@ -268,8 +286,20 @@ def assert_efa_rdma_traffic(rx_before: float | None, rx_after: float | None) -> 
             NIXL_TELEMETRY_PORT,
         )
         return
-    baseline = rx_before or 0.0
-    assert rx_after > baseline, (
+
+    # Exactly one sample is an infrastructure failure, not a platform without
+    # telemetry. Substituting a zero baseline here would let any pre-existing
+    # counter value satisfy the delta below without the request having moved a
+    # single byte -- and the counter is routinely nonzero before the request,
+    # because model-availability probing already warms the path.
+    assert rx_before is not None and rx_after is not None, (
+        f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} was readable on "
+        f"only one of the two scrapes (before={rx_before}, after={rx_after}). Treating "
+        "the missing sample as zero would be a false pass. Check the exporter on "
+        f":{NIXL_TELEMETRY_PORT}."
+    )
+
+    assert rx_after > rx_before, (
         f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} did not "
         f"increase across the completion (before={rx_before}, after={rx_after}). "
         "A disagg request must pull KV from prefill to decode; a flat counter means "
