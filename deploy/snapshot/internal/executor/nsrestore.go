@@ -34,6 +34,11 @@ type RestoreInNamespaceResult struct {
 	CUDADuration           time.Duration `json:"cudaDuration"`
 }
 
+// TotalDuration returns the sum of all in-namespace restore phase durations.
+func (r RestoreInNamespaceResult) TotalDuration() time.Duration {
+	return r.NSRestoreSetupDuration + r.CRIURestoreDuration + r.CUDADuration
+}
+
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
 func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logger) (*RestoreInNamespaceResult, error) {
 	restoreStart := time.Now()

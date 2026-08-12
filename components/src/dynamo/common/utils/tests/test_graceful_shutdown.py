@@ -3,10 +3,10 @@
 
 """Unit tests for graceful_shutdown.py
 
-Tests the drain_callback mechanism added to prevent decode worker segfaults when
-a prefill worker scales down before in-flight NIXL KV transfers complete (issue
-#7319), and the cleanup_callback mechanism that releases engine resources (GPU
-memory, PyTorch process groups) before the Rust runtime tears down.
+Tests the callback ordering and failure handling used during graceful shutdown.
+The drain callback prevents decode worker segfaults when a prefill worker scales
+down before in-flight NIXL KV transfers complete (issue #7319). The cleanup
+callback releases engine resources before the runtime shuts down.
 
 These tests import graceful_shutdown directly (bypassing the dynamo package hierarchy)
 so they work without GPU, NIXL, or TensorRT-LLM installed.
@@ -163,63 +163,8 @@ def test_drain_callback_exception_does_not_block_shutdown():
     mock_runtime.shutdown.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# cleanup_callback tests
-#
-# Regression coverage for the unified backend leak: when the Rust runtime
-# tears down on SIGTERM, the Python Worker.run() finally block cannot finish
-# engine.cleanup() before the loop's native backing collapses. cleanup_callback
-# moves engine.cleanup() into the signal-handler path, *before* runtime.shutdown().
-# ---------------------------------------------------------------------------
-
-
-def test_cleanup_callback_called_before_shutdown():
-    """Cleanup callback must be awaited before runtime.shutdown().
-
-    This is the regression test for the unified backend GPU/process-group leak:
-    engine.cleanup() must run before the Rust runtime tears down, otherwise
-    PyTorch's destroy_process_group() never fires.
-    """
-    call_order = []
-
-    mock_runtime = MagicMock()
-    mock_runtime.shutdown = MagicMock(side_effect=lambda: call_order.append("shutdown"))
-
-    async def mock_cleanup():
-        call_order.append("cleanup")
-
-    async def _run():
-        mock_endpoint = AsyncMock()
-        mock_endpoint.unregister_endpoint_instance = AsyncMock(return_value=None)
-
-        await graceful_shutdown_with_discovery(
-            runtime=mock_runtime,
-            endpoints=[mock_endpoint],
-            shutdown_event=None,
-            grace_period_s=0,
-            cleanup_callback=mock_cleanup,
-        )
-
-    asyncio.run(_run())
-
-    assert "cleanup" in call_order, "cleanup_callback was not called"
-    assert "shutdown" in call_order, "runtime.shutdown was not called"
-    cleanup_idx = call_order.index("cleanup")
-    shutdown_idx = call_order.index("shutdown")
-    assert cleanup_idx < shutdown_idx, (
-        "cleanup_callback must be called before runtime.shutdown() so the "
-        "Python engine releases GPU memory and process groups before the "
-        "Rust runtime tears down"
-    )
-
-
 def test_cleanup_callback_runs_after_drain():
-    """When both callbacks are set, drain runs before cleanup.
-
-    Drain releases in-flight NIXL transfers; cleanup releases engine
-    resources. Cleanup must wait until drain finishes so the engine isn't
-    torn down with active RDMA references pointing into its GPU memory.
-    """
+    """Drain, cleanup, and runtime shutdown must run in that order."""
     call_order = []
 
     mock_runtime = MagicMock()
@@ -246,19 +191,11 @@ def test_cleanup_callback_runs_after_drain():
 
     asyncio.run(_run())
 
-    assert call_order == [
-        "drain",
-        "cleanup",
-        "shutdown",
-    ], f"expected drain -> cleanup -> shutdown, got {call_order}"
+    assert call_order == ["drain", "cleanup", "shutdown"]
 
 
 def test_cleanup_callback_exception_does_not_block_shutdown():
-    """Cleanup callback exceptions must not block shutdown.
-
-    A failing engine.cleanup() (e.g., engine handle already half-torn-down)
-    must not strand the process; runtime.shutdown() still has to run.
-    """
+    """A cleanup failure must not prevent runtime shutdown."""
     mock_runtime = MagicMock()
 
     async def failing_cleanup():
@@ -282,14 +219,8 @@ def test_cleanup_callback_exception_does_not_block_shutdown():
 
 @pytest.mark.timeout(1)
 def test_cleanup_callback_timeout_does_not_block_shutdown(monkeypatch):
-    """A hanging cleanup callback must time out and let shutdown proceed.
-
-    If engine.cleanup() blocks (e.g., NCCL stuck), graceful shutdown still
-    needs to call runtime.shutdown() so the orchestrator can reap the pod.
-    """
-    # Shorten the timeout so the test runs quickly.
+    """A hanging cleanup callback must time out before runtime shutdown."""
     monkeypatch.setattr(_gs, "_DEFAULT_CLEANUP_TIMEOUT_SECS", 0.05)
-
     mock_runtime = MagicMock()
 
     async def hanging_cleanup():

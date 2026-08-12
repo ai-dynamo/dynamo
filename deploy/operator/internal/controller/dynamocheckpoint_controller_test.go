@@ -28,6 +28,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +42,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -89,7 +90,7 @@ func makeCheckpointReconciler(s *runtime.Scheme, objs ...client.Object) *Checkpo
 		Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(&nvidiacomv1alpha1.DynamoCheckpoint{}).Build(),
 		Config:        checkpointTestConfig(),
 		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 	}
 }
 
@@ -547,7 +548,7 @@ func TestCheckpointReconciler_handlePendingFailsUnpreparedGMSCheckpoint(t *testi
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
 	result, err := r.handlePending(context.Background(), ckpt)
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -597,10 +598,29 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
 	})
 
-	t.Run("GMS snapshot fails when gate is disabled", func(t *testing.T) {
+	t.Run("prepared GMS checkpoint is accepted under the checkpoint gate", func(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
-		ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
-		r := makeCheckpointReconciler(s, ckpt)
+		ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+		}
+		claimTemplateName := "checkpoint-gpu"
+		require.NoError(t, dra.ApplyClaim(&ckpt.Spec.Job.PodTemplateSpec.Spec, claimTemplateName))
+		gms.EnsureServerSidecar(
+			&ckpt.Spec.Job.PodTemplateSpec.Spec,
+			&ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0],
+		)
+		claimTemplate, toDelete, err := dra.GenerateResourceClaimTemplate(
+			ctx,
+			nil,
+			claimTemplateName,
+			testNamespace,
+			1,
+			"",
+		)
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		r := makeCheckpointReconciler(s, ckpt, claimTemplate)
 
 		result, err := r.Reconcile(ctx, ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
@@ -610,12 +630,13 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Contains(t, updated.Status.Message, "GMS + Snapshot is temporarily disabled")
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
+		assert.Empty(t, updated.Status.Message)
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
-		assert.Empty(t, jobs.Items)
+		require.Len(t, jobs.Items, 1)
+		assert.Equal(t, updated.Status.JobName, jobs.Items[0].Name)
 	})
 
 	t.Run("Pending checkpoint is paused when checkpoint gate is disabled", func(t *testing.T) {

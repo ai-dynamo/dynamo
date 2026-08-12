@@ -38,7 +38,8 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
-CANCELLATION_MAX_TOKENS = 16384
+CANCELLATION_MAX_TOKENS = 2048
+PREFILL_CANCELLATION_MAX_TOKENS = 128
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
 
@@ -344,6 +345,9 @@ def test_request_cancellation_vllm_aggregated(
                     pattern="Decode Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
                 )
 
                 # For streaming, read 5 responses before cancelling
@@ -424,7 +428,9 @@ def test_request_cancellation_vllm_decode_cancel(
 
                 # Send streaming request (non-blocking)
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, "chat_completion_stream"
+                    frontend.frontend_port,
+                    "chat_completion_stream",
+                    max_tokens=CANCELLATION_MAX_TOKENS,
                 )
 
                 # Poll for "Decode Request ID" pattern in decode worker (vLLM v2 pattern)
@@ -434,6 +440,7 @@ def test_request_cancellation_vllm_decode_cancel(
                     match_type="contains",
                     max_wait_ms=10000,
                     poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
                 )
 
                 # Verify same request ID reached prefill worker (as "Prefill Request ID")
@@ -531,13 +538,17 @@ def test_request_cancellation_vllm_prefill_cancel(
 
                 # Send request with long prompt (non-blocking)
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, "completion", use_long_prompt=True
+                    frontend.frontend_port,
+                    "completion",
+                    use_long_prompt=True,
+                    max_tokens=PREFILL_CANCELLATION_MAX_TOKENS,
                 )
 
                 request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern="Prefill Request ID: ",
                     match_type="contains",
+                    cancellable_request=cancellable_req,
                 )
 
                 # Cancel during prefill phase

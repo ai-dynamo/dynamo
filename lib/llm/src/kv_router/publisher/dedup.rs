@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, StorageTier,
+    ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, ResidencyDomain, StorageTier,
 };
 
 /// Reference-counting filter that deduplicates KV cache events.
@@ -16,10 +16,11 @@ use dynamo_kv_router::protocols::{
 ///
 /// - **Store**: always passes through; increments refcount for the rank.
 /// - **Remove**: only passes through when refcount decrements to 0.
-/// - **Cleared**: resets refcounts for the emitting rank across storage tiers.
+/// - **Cleared**: resets refcounts for the emitting rank and domain across storage tiers.
 pub(super) struct EventDedupFilter {
-    /// Per-(dp_rank, storage_tier) refcounts.
-    per_rank_tier: HashMap<(u32, StorageTier), HashMap<ExternalSequenceBlockHash, usize>>,
+    /// Per-(dp_rank, storage_tier, residency_domain) refcounts.
+    per_rank_tier:
+        HashMap<(u32, StorageTier, ResidencyDomain), HashMap<ExternalSequenceBlockHash, usize>>,
 }
 
 impl EventDedupFilter {
@@ -32,15 +33,16 @@ impl EventDedupFilter {
     /// Track a store event. Increments refcount for each block hash on the
     /// given (DP rank, storage tier). Stores always pass through — this only
     /// updates bookkeeping.
-    pub(super) fn track_store(
+    pub(super) fn track_store_in_domain(
         &mut self,
         dp_rank: u32,
         storage_tier: StorageTier,
+        residency_domain: ResidencyDomain,
         data: &KvCacheStoreData,
     ) {
         let refcounts = self
             .per_rank_tier
-            .entry((dp_rank, storage_tier))
+            .entry((dp_rank, storage_tier, residency_domain))
             .or_default();
         for block in &data.blocks {
             *refcounts.entry(block.block_hash).or_insert(0) += 1;
@@ -50,15 +52,16 @@ impl EventDedupFilter {
     /// Filter a remove event. Retains only block hashes whose refcount on the
     /// given (DP rank, storage tier) decrements to 0 (removing them from the
     /// map). Returns `None` if no hashes survive filtering.
-    pub(super) fn filter_remove(
+    pub(super) fn filter_remove_in_domain(
         &mut self,
         dp_rank: u32,
         storage_tier: StorageTier,
+        residency_domain: ResidencyDomain,
         mut data: KvCacheRemoveData,
     ) -> Option<KvCacheRemoveData> {
         let refcounts = self
             .per_rank_tier
-            .entry((dp_rank, storage_tier))
+            .entry((dp_rank, storage_tier, residency_domain))
             .or_default();
         data.block_hashes.retain(|hash| {
             match refcounts.entry(*hash) {
@@ -83,9 +86,37 @@ impl EventDedupFilter {
         }
     }
 
-    /// Clear refcounts for one DP rank across all storage tiers.
+    /// Clear refcounts for one DP rank and residency domain across storage tiers.
+    pub(super) fn clear_rank_domain(&mut self, dp_rank: u32, domain: ResidencyDomain) {
+        self.per_rank_tier
+            .retain(|(tracked_dp_rank, _, tracked_domain), _| {
+                *tracked_dp_rank != dp_rank || *tracked_domain != domain
+            });
+    }
+
+    #[cfg(test)]
+    pub(super) fn track_store(
+        &mut self,
+        dp_rank: u32,
+        storage_tier: StorageTier,
+        data: &KvCacheStoreData,
+    ) {
+        self.track_store_in_domain(dp_rank, storage_tier, ResidencyDomain::Worker, data);
+    }
+
+    #[cfg(test)]
+    pub(super) fn filter_remove(
+        &mut self,
+        dp_rank: u32,
+        storage_tier: StorageTier,
+        data: KvCacheRemoveData,
+    ) -> Option<KvCacheRemoveData> {
+        self.filter_remove_in_domain(dp_rank, storage_tier, ResidencyDomain::Worker, data)
+    }
+
+    #[cfg(test)]
     pub(super) fn clear_rank(&mut self, dp_rank: u32) {
         self.per_rank_tier
-            .retain(|(tracked_dp_rank, _), _| *tracked_dp_rank != dp_rank);
+            .retain(|(tracked_dp_rank, _, _), _| *tracked_dp_rank != dp_rank);
     }
 }
