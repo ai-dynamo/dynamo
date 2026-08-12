@@ -46,10 +46,10 @@ def nixl_connector(monkeypatch):
     module = ModuleType(module_name)
     module.NixlConnector = NixlConnector
     monkeypatch.setitem(sys.modules, module_name, module)
-    monkeypatch.delitem(
+    monkeypatch.setitem(
         sys.modules,
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
-        raising=False,
+        None,
     )
     monkeypatch.setattr(patches, "_register_kv_caches_patched", False)
     patches.patch_register_kv_caches()

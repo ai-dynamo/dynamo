@@ -89,6 +89,8 @@ pub struct CommonExt {
     pub prompt_logprobs: Option<u32>,
 
     /// Minimum number of output tokens vLLM batches before emitting a stream update.
+    /// This is a vLLM-specific request extension; other backends use their
+    /// engine-level streaming configuration and ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub stream_interval: Option<u32>,

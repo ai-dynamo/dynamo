@@ -1128,31 +1128,36 @@ class StreamingPostProcessor:
                 choice = self._emit_tool_calls_choice(output)
             elif output.finish_reason:
                 choice = self._build_choice(output, {})
-        elif delta_message.tool_calls:
-            self._merge_streaming_tool_calls(delta_message.tool_calls)
-            if output.finish_reason and self.in_progress_tool_calls:
-                # Tool calls and finish_reason arrived in the same chunk.
-                # Emit now — there will be no subsequent process_output call
-                # to drain the buffer.
+        else:
+            if delta_message.tool_calls:
+                self._merge_streaming_tool_calls(delta_message.tool_calls)
+
+            if delta_message.content or delta_message.reasoning:
+                delta = {"role": "assistant"}
+                content = delta_message.content
+                if self.in_progress_tool_calls and self._is_control_only_content(
+                    content
+                ):
+                    content = None
+                if content:
+                    delta["content"] = content
+                if delta_message.reasoning:
+                    delta["reasoning_content"] = delta_message.reasoning
+                if self.in_progress_tool_calls:
+                    delta["tool_calls"] = self._dump_in_progress_tool_calls()
+                    self.in_progress_tool_calls.clear()
+                if len(delta) > 1:
+                    choice = self._build_choice(output, delta)
+            elif delta_message.tool_calls:
+                if output.finish_reason and self.in_progress_tool_calls:
+                    # Tool calls and finish_reason arrived in the same chunk.
+                    # Emit now — there will be no subsequent process_output call
+                    # to drain the buffer.
+                    choice = self._emit_tool_calls_choice(output)
+            elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)
-        elif delta_message.content or delta_message.reasoning:
-            delta = {"role": "assistant"}
-            content = delta_message.content
-            if self.in_progress_tool_calls and self._is_control_only_content(content):
-                content = None
-            if content:
-                delta["content"] = content
-            if delta_message.reasoning:
-                delta["reasoning_content"] = delta_message.reasoning
-            if self.in_progress_tool_calls:
-                delta["tool_calls"] = self._dump_in_progress_tool_calls()
-                self.in_progress_tool_calls.clear()
-            if len(delta) > 1:
-                choice = self._build_choice(output, delta)
-        elif self.in_progress_tool_calls:
-            choice = self._emit_tool_calls_choice(output)
-        elif output.finish_reason:
-            choice = self._build_choice(output, {})
+            elif output.finish_reason:
+                choice = self._build_choice(output, {})
 
         self.previous_text = current_text
         self.previous_token_ids = current_token_ids

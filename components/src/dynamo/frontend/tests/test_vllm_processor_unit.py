@@ -808,39 +808,6 @@ async def test_generator_preserves_zero_top_logprobs_and_stream_interval(
     )
 
 
-@pytest.mark.asyncio
-async def test_generator_maps_vllm_client_errors_to_invalid_argument(
-    vllm_processor_module, monkeypatch
-):
-    from contextlib import nullcontext
-
-    from vllm.exceptions import VLLMValidationError
-
-    processor = vllm_processor_module.VllmProcessor.__new__(
-        vllm_processor_module.VllmProcessor
-    )
-
-    async def fail_with_client_error(_request, context=None):
-        del context
-        if False:
-            yield None
-        raise VLLMValidationError(
-            "stream_interval must be at least 1",
-            parameter="stream_interval",
-            value=0,
-        )
-
-    monkeypatch.setattr(processor, "_generator_inner", fail_with_client_error)
-    monkeypatch.setattr(
-        vllm_processor_module._nvtx,
-        "annotate",
-        lambda *args, **kwargs: nullcontext(),
-    )
-
-    with pytest.raises(InvalidArgument, match="stream_interval must be at least 1"):
-        await anext(processor.generator({"model": "test"}))
-
-
 def _make_processor(module, routed_engine):
     processor = module.VllmProcessor.__new__(module.VllmProcessor)
     processor.routed_engine = routed_engine

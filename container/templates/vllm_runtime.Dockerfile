@@ -233,7 +233,15 @@ RUN uv pip uninstall triton && \
 # Resolve the same include directories Triton's XPU driver will use for its
 # first-request JIT, and fail the image build if the SYCL development headers
 # are not discoverable there.
-RUN /opt/venv/bin/python -c "from pathlib import Path; from triton.backends.intel.driver import COMPILATION_HELPER; roots = COMPILATION_HELPER.include_dir; assert any((Path(root) / 'sycl/sycl.hpp').is_file() for root in roots), f'SYCL headers not found in Triton include paths: {roots}'"
+RUN /opt/venv/bin/python <<'PY'
+from pathlib import Path
+
+from triton.backends.intel.driver import COMPILATION_HELPER
+
+roots = COMPILATION_HELPER.include_dir
+if not any((Path(root) / "sycl/sycl.hpp").is_file() for root in roots):
+    raise RuntimeError(f"SYCL headers not found in Triton include paths: {roots}")
+PY
 {% endif %}
 
 {% if context.vllm.enable_modelexpress == "true" %}
@@ -255,15 +263,23 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
 # `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
 # heterogeneous per-layer configs, but vLLM's corresponding support missed
-# 0.27.1 and the engine crashes during ModelConfig initialization. Apply the
-# upstream-recommended 5.14.1 workaround after all optional runtime packages
-# have been layered, and fail the image build if the final version drifts.
+# 0.27.1 and the engine crashes during ModelConfig initialization. XPU already
+# ships 5.14.1; apply the same final runtime invariant to every device after
+# optional packages are layered. The dev/test requirements do not redeclare
+# Transformers, so derived development images retain this version.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
         "transformers==${TRANSFORMERS_VERSION}" && \
-    python3 -c "import importlib.metadata as md, sys; actual = md.version('transformers'); expected = sys.argv[1]; assert actual == expected, f'expected transformers {expected}, found {actual}'" \
-        "${TRANSFORMERS_VERSION}"
+    python3 - "${TRANSFORMERS_VERSION}" <<'PY'
+import importlib.metadata as md
+import sys
+
+actual = md.version("transformers")
+expected = sys.argv[1]
+if actual != expected:
+    raise RuntimeError(f"expected transformers {expected}, found {actual}")
+PY
 
 {% if device == "xpu" %}
 RUN apt-get update && \
