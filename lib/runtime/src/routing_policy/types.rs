@@ -92,9 +92,35 @@ impl Default for RouteContext {
     fn default() -> Self {
         Self {
             required_cache_hits: 0,
-            non_cpu_to_cpu_ratio: 8,
+            non_cpu_to_cpu_ratio: DEFAULT_NON_CPU_TO_CPU_RATIO,
         }
     }
+}
+
+/// Throughput of one non-CPU worker relative to one CPU worker, when nothing configures it.
+pub(crate) const DEFAULT_NON_CPU_TO_CPU_RATIO: usize = 8;
+
+/// Pick the non-CPU to CPU throughput ratio from the router configuration, falling back to
+/// [`DYN_ENCODER_CUDA_TO_CPU_RATIO`](crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO)
+/// and then to [`DEFAULT_NON_CPU_TO_CPU_RATIO`]. A ratio below 1 is ignored, from either source.
+///
+/// Split from [`non_cpu_to_cpu_ratio`] so the precedence rules can be tested without touching
+/// process environment.
+pub(crate) fn resolve_non_cpu_to_cpu_ratio(configured: Option<usize>, env: Option<&str>) -> usize {
+    configured
+        .filter(|value| *value >= 1)
+        .or_else(|| {
+            env.and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value >= 1)
+        })
+        .unwrap_or(DEFAULT_NON_CPU_TO_CPU_RATIO)
+}
+
+/// Resolve the non-CPU to CPU throughput ratio, reading the environment once.
+pub(crate) fn non_cpu_to_cpu_ratio(configured: Option<usize>) -> usize {
+    use crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO;
+    let env = std::env::var(DYN_ENCODER_CUDA_TO_CPU_RATIO).ok();
+    resolve_non_cpu_to_cpu_ratio(configured, env.as_deref())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,4 +133,55 @@ pub(crate) enum AdmissionKind {
 pub(crate) struct RouteDecision {
     pub(crate) target: RouteTarget,
     pub(crate) admission: AdmissionKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_ratio_wins_over_environment() {
+        assert_eq!(resolve_non_cpu_to_cpu_ratio(Some(3), Some("16")), 3);
+    }
+
+    #[test]
+    fn environment_applies_when_nothing_is_configured() {
+        assert_eq!(resolve_non_cpu_to_cpu_ratio(None, Some("16")), 16);
+    }
+
+    #[test]
+    fn default_applies_when_neither_source_gives_a_ratio() {
+        assert_eq!(
+            resolve_non_cpu_to_cpu_ratio(None, None),
+            DEFAULT_NON_CPU_TO_CPU_RATIO
+        );
+    }
+
+    #[test]
+    fn unusable_environment_values_fall_back_to_the_default() {
+        for value in ["", "0", "-1", "eight", "8.5"] {
+            assert_eq!(
+                resolve_non_cpu_to_cpu_ratio(None, Some(value)),
+                DEFAULT_NON_CPU_TO_CPU_RATIO,
+                "value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_zero_falls_through_to_the_environment() {
+        assert_eq!(resolve_non_cpu_to_cpu_ratio(Some(0), Some("16")), 16);
+        assert_eq!(
+            resolve_non_cpu_to_cpu_ratio(Some(0), None),
+            DEFAULT_NON_CPU_TO_CPU_RATIO
+        );
+    }
+
+    #[test]
+    fn the_route_context_default_uses_the_default_ratio() {
+        assert_eq!(
+            RouteContext::default().non_cpu_to_cpu_ratio,
+            DEFAULT_NON_CPU_TO_CPU_RATIO
+        );
+    }
 }

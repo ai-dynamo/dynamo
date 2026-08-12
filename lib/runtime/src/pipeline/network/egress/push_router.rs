@@ -19,7 +19,7 @@ use crate::{
     protocols::{EndpointId, maybe_error::MaybeError},
     routing_policy::{
         CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
-        RouteTarget,
+        RouteTarget, non_cpu_to_cpu_ratio,
     },
     traits::DistributedRuntimeProvider,
 };
@@ -197,6 +197,13 @@ where
 
     /// Optional typed request extractor for multimodal embedding cache keys.
     multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+
+    /// Throughput of one non-CPU worker relative to one CPU worker, used by
+    /// `RouterMode::DeviceAwareWeighted`. Resolved once at construction from the value a
+    /// caller passed to [`Self::with_non_cpu_to_cpu_ratio`], else from
+    /// [`environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO`](crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO),
+    /// to avoid a syscall per request.
+    non_cpu_to_cpu_ratio: usize,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -563,6 +570,7 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(None),
             _phantom: PhantomData,
         })
     }
@@ -637,6 +645,7 @@ where
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(None),
             _phantom: PhantomData,
         };
 
@@ -685,8 +694,20 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(None),
             _phantom: PhantomData,
         })
+    }
+
+    /// Set the throughput of one non-CPU worker relative to one CPU worker, which
+    /// `RouterMode::DeviceAwareWeighted` uses to split traffic between the two groups.
+    ///
+    /// This takes precedence over
+    /// [`environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO`](crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO).
+    /// A ratio below 1 is ignored, so the environment variable and then the default of 8 apply.
+    pub fn with_non_cpu_to_cpu_ratio(mut self, ratio: usize) -> Self {
+        self.non_cpu_to_cpu_ratio = non_cpu_to_cpu_ratio(Some(ratio));
+        self
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
@@ -1080,11 +1101,6 @@ where
                 (instance.instance_id, device)
             })
             .collect::<HashMap<_, _>>();
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value >= 1)
-            .unwrap_or(8);
 
         let (request_cache_keys, cache_matched_candidates) =
             if let (Some(indexer), Some(extractor)) = (
@@ -1125,7 +1141,7 @@ where
             candidates,
             context: RouteContext {
                 required_cache_hits: request_cache_key_count,
-                non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                non_cpu_to_cpu_ratio: self.non_cpu_to_cpu_ratio,
             },
             embedding_cache_hit,
             request_cache_keys: request_cache_keys.len(),
@@ -1244,11 +1260,6 @@ where
                     .iter()
                     .map(|instance| (instance.instance_id, instance.device_type.clone()))
                     .collect();
-                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .filter(|value| *value >= 1)
-                    .unwrap_or(8);
                 let candidates = instance_ids
                     .iter()
                     .map(|worker_id| RouteCandidate {
@@ -1270,7 +1281,7 @@ where
                         CandidateView::DeviceAware(&candidates),
                         RouteContext {
                             required_cache_hits: 0,
-                            non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                            non_cpu_to_cpu_ratio: self.non_cpu_to_cpu_ratio,
                         },
                     )
                     .map(|decision| decision.target.worker_id)
