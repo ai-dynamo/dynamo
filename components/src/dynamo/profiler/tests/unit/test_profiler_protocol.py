@@ -164,7 +164,7 @@ def test_dgd_serialization_omits_unset_optional_fields() -> None:
 @pytest.mark.parametrize(
     ("backend", "worker_name"),
     [
-        ("vllm", "decode"),
+        ("vllm", "worker"),
         ("sglang", "decode"),
         ("trtllm", "TRTLLMWorker"),
     ],
@@ -185,7 +185,7 @@ def test_aggregate_worker_lookup_resolves_generic_component(
 @pytest.mark.parametrize(
     ("backend", "worker_name"),
     [
-        ("vllm", "decode"),
+        ("vllm", "worker"),
         ("sglang", "decode"),
         ("trtllm", "TRTLLMWorker"),
     ],

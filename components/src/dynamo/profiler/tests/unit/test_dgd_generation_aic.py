@@ -609,28 +609,31 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("prefill", "prefill"),
-                    _component("decode", "decode"),
+                    _component("custom-prefill", "prefill"),
+                    _component("custom-decode", "decode"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
         components = _component_map(cfg)
-        assert _benchmark_mode(components["prefill"]) == "prefill"
-        assert _benchmark_mode(components["decode"]) == "decode"
+        assert _benchmark_mode(components["custom-prefill"]) == "prefill"
+        assert _benchmark_mode(components["custom-decode"]) == "decode"
         assert "env" not in _main_container(components["Frontend"])
 
-    def test_agg_sets_single_worker(self):
+    @pytest.mark.parametrize(
+        "worker_name", ["worker", "VllmDecodeWorker", "VllmWorker", "custom-worker"]
+    )
+    def test_agg_resolves_worker_by_type(self, worker_name: str):
         cfg = {
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("worker", "worker"),
+                    _component(worker_name, "worker"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        assert _benchmark_mode(_component_map(cfg)["worker"]) == "agg"
+        assert _benchmark_mode(_component_map(cfg)[worker_name]) == "agg"
 
     def test_agg_template_sets_single_generic_worker(self):
         cfg = load_dgd_template("vllm", "agg")
@@ -650,12 +653,12 @@ class TestEnableVllmBenchmarkMode:
         template_path = repository_root / "examples/backends/vllm/deploy/agg.yaml"
         cfg = yaml.safe_load(template_path.read_text(encoding="utf-8"))
 
-        services = cfg["spec"]["services"]
-        assert "worker" in services
-        assert "decode" not in services
+        components = _component_map(cfg)
+        assert "worker" in components
+        assert "decode" not in components
 
         enable_vllm_benchmark_mode(cfg)
-        assert _benchmark_mode(services["worker"]) == "agg"
+        assert _benchmark_mode(components["worker"]) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
         # Simulates a user override that sets DYN_BENCHMARK_MODE to an
@@ -683,13 +686,13 @@ class TestEnableVllmBenchmarkMode:
         # Unrelated env vars are preserved.
         assert {"name": "SOMETHING_ELSE", "value": "keep"} in env
 
-    def test_non_vllm_components_unchanged(self):
+    def test_non_worker_components_unchanged(self):
         cfg = {
             "spec": {
                 "components": [
-                    _component("prefill", "prefill"),
-                    _component("decode", "decode"),
                     _component("Frontend", "frontend"),
+                    _component("Planner", "planner"),
+                    _component("Gateway", "epp"),
                 ]
             }
         }
