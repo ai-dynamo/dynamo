@@ -199,32 +199,30 @@ fn stream_error_frame(message: &str, type_slug: &str, code: u16) -> String {
 /// Build the inline SSE error frame for a stream that already committed its
 /// HTTP status.
 ///
-/// Classification mirrors the pre-commit path in `backend_error_response`: a
-/// request the backend rejected as invalid forwards its message verbatim, and
-/// everything else stays sanitized so internals never reach the caller. The
-/// `code` field is advisory here — the real status went out with the 200 — but
-/// `message` and `type` are what a streaming client actually reads, and
-/// reporting `Internal server error` for every failure made a caller's own bad
-/// request indistinguishable from an engine fault.
+/// Every frame stays sanitized. That is deliberate and predates this
+/// classification: the body used to be `err.to_string()` until it was replaced
+/// with a static message to stop backend internals reaching clients. Nothing
+/// here reintroduces that — only the *category* is recovered, never the text.
+///
+/// Note the asymmetry with the pre-commit path, which does forward a rejection's
+/// message on a 400. It can afford to; a streamed frame cannot, because
+/// `Backend(InvalidArgument)` also covers any Python `ValueError`/`TypeError` an
+/// engine raises, whose text may name paths or tensor shapes.
+///
+/// `code` is advisory here — the real status went out with the 200 — but `type`
+/// is what a streaming client reads to tell its own bad request apart from an
+/// engine fault, and reporting `internal_server_error` for every failure erased
+/// that distinction.
 fn openai_stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     use crate::http::service::metrics::{
         request_was_cancelled, request_was_rejected, request_was_unavailable,
     };
     use crate::http::service::openai::find_invalid_argument_in_chain;
 
-    if let Some(invalid_argument) = find_invalid_argument_in_chain(error) {
-        return (
-            ErrorType::Validation,
-            stream_error_frame(
-                invalid_argument.message(),
-                "invalid_request_error",
-                axum::http::StatusCode::BAD_REQUEST.as_u16(),
-            ),
-        );
-    }
-
     // Same precedence as `ErrorMessage::from_anyhow`.
-    let (sanitized, error_type) = if request_was_rejected(error) {
+    let (sanitized, error_type) = if find_invalid_argument_in_chain(error).is_some() {
+        (SanitizedError::InvalidRequest, ErrorType::Validation)
+    } else if request_was_rejected(error) {
         (SanitizedError::Overloaded, ErrorType::Overload)
     } else if request_was_unavailable(error) {
         (SanitizedError::Unavailable, ErrorType::Unavailable)
@@ -890,19 +888,20 @@ mod tests {
         }
     }
 
-    /// A rejection names something the caller can fix, so — unlike an internal
-    /// fault — its message must reach a streaming client, matching what the
-    /// pre-commit path returns for the same error.
+    /// A rejection is reported as a rejection — the caller can tell the fault
+    /// was theirs — but the backend's text never rides along. `InvalidArgument`
+    /// covers engine-raised `ValueError`s too, so the message is not safe to
+    /// forward on a path that cannot inspect where it came from.
     #[tokio::test]
-    async fn test_mid_stream_invalid_argument_forwards_backend_message() {
+    async fn test_mid_stream_invalid_argument_reports_category_without_message() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as RuntimeErrorType};
 
         let (_metrics, guard, ctx, handle) = setup_test("invalid-arg-model", "req-invalid");
-        let message = "CustomEncoder failed: placeholder tokens (0) != image tensors (1)";
+        let backend_detail = "ValueError: shape mismatch at /opt/dynamo/engine/worker.py:512";
         let stream = typed_error_stream(
             DynamoError::builder()
                 .error_type(RuntimeErrorType::Backend(BackendError::InvalidArgument))
-                .message(message)
+                .message(backend_detail)
                 .build(),
         );
 
@@ -910,9 +909,17 @@ mod tests {
         let body = collect_sse_body(monitored).await;
         let frame = error_frame(&body);
 
-        assert_eq!(frame["message"], message);
+        assert_eq!(frame["message"], "Invalid request");
         assert_eq!(frame["type"], "invalid_request_error");
         assert_eq!(frame["code"], 400);
+        assert!(
+            !body.contains("worker.py"),
+            "leaked backend detail. Body:\n{body}"
+        );
+        assert!(
+            !body.contains("shape mismatch"),
+            "leaked backend detail. Body:\n{body}"
+        );
         assert!(
             body.contains("data: [DONE]"),
             "stream must still terminate. Body:\n{body}"
