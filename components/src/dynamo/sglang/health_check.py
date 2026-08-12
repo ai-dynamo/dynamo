@@ -119,13 +119,19 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
         bootstrap_port = 0
         if engine is not None:
             try:
-                inner_tm = engine.tokenizer_manager
-                self.dp_size = max(1, int(getattr(inner_tm.server_args, "dp_size", 1)))
-                bootstrap_port = getattr(
-                    inner_tm.server_args, "disaggregation_bootstrap_port", 0
-                )
+                server_args = engine.tokenizer_manager.server_args
             except Exception as e:
-                logger.warning(f"Failed to get bootstrap port from engine: {e}")
+                logger.warning("Failed to get server args from engine: %s", e)
+            else:
+                try:
+                    bootstrap_port = server_args.disaggregation_bootstrap_port
+                except (AttributeError, TypeError, ValueError) as e:
+                    logger.warning("Failed to get bootstrap port from engine: %s", e)
+
+                try:
+                    self.dp_size = max(1, int(server_args.dp_size))
+                except (AttributeError, TypeError, ValueError) as e:
+                    logger.warning("Failed to get DP size from engine: %s", e)
 
         # Create bootstrap_info for fake-transfer mode
         # FAKE_BOOTSTRAP_HOST tells SGLang to skip real KV-transfer
@@ -158,10 +164,10 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
             self.default_payload["token_ids"] = [bos_token_id]
 
         logger.info(
-            f"Disagg health check configured: "
-            f"bootstrap_host={FAKE_BOOTSTRAP_HOST}, "
-            f"bootstrap_port={bootstrap_port}, "
-            f"dp_size={self.dp_size}"
+            "Disagg health check configured: bootstrap_host=%s, bootstrap_port=%s, dp_size=%s",
+            FAKE_BOOTSTRAP_HOST,
+            bootstrap_port,
+            self.dp_size,
         )
 
         super().__init__()

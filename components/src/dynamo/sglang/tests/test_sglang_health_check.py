@@ -76,3 +76,21 @@ def test_disagg_multi_dp_payloads_cover_every_rank():
 
 def test_disagg_single_dp_keeps_dict_payload():
     assert isinstance(SglangDisaggHealthCheckPayload().to_runtime_payload(), dict)
+
+
+def test_invalid_dp_size_does_not_discard_bootstrap_port(caplog):
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=None,
+            server_args=SimpleNamespace(
+                dp_size=None,
+                disaggregation_bootstrap_port=8998,
+            ),
+        )
+    )
+
+    payload = SglangDisaggHealthCheckPayload(engine)
+
+    assert payload.dp_size == 1
+    assert payload.default_payload["bootstrap_info"]["bootstrap_port"] == 8998
+    assert "Failed to get DP size" in caplog.text

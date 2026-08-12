@@ -287,10 +287,8 @@ impl HealthCheckManager {
                 }
             });
 
-        let is_healthy = futures::future::join_all(probes)
-            .await
-            .into_iter()
-            .all(|ok| ok);
+        let results = futures::future::join_all(probes).await;
+        let is_healthy = !results.is_empty() && results.into_iter().all(|ok| ok);
         self.drt.system_health().lock().set_endpoint_health_status(
             endpoint_subject,
             if is_healthy {
@@ -440,6 +438,15 @@ mod push_handler_notify_tests {
                 num_chunks: 1,
                 error_indices: vec![],
                 failing_dp_rank: Some(dp_rank),
+                seen_payloads: Some(seen_payloads),
+            })
+        }
+
+        fn tracking(seen_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>) -> Arc<Self> {
+            Arc::new(Self {
+                num_chunks: 1,
+                error_indices: vec![],
+                failing_dp_rank: None,
                 seen_payloads: Some(seen_payloads),
             })
         }
@@ -721,6 +728,134 @@ mod push_handler_notify_tests {
             endpoint,
             HealthStatus::NotReady,
             "one failed DP rank must fail the complete canary cycle",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_payload_cycle_is_ready_when_every_rank_passes() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.multi_payload_success";
+        let seen_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = MockStreamingEngine::tracking(seen_payloads.clone());
+        let payloads = (0..3)
+            .map(|dp_rank| serde_json::json!({"routing": {"dp_rank": dp_rank}}))
+            .collect();
+
+        drt.system_health().lock().register_health_check_targets(
+            endpoint,
+            Instance {
+                component: "test_component".to_string(),
+                endpoint: endpoint.to_string(),
+                namespace: "test_namespace".to_string(),
+                instance_id: 0,
+                transport: TransportType::Nats(endpoint.to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            },
+            payloads,
+        );
+        drt.local_endpoint_registry()
+            .register(endpoint.to_string(), engine);
+
+        let manager = HealthCheckManager::new(
+            drt.clone(),
+            HealthCheckConfig {
+                canary_wait_time: Duration::from_secs(1),
+                request_timeout: Duration::from_secs(1),
+            },
+        );
+        let target = drt
+            .system_health()
+            .lock()
+            .get_health_check_target(endpoint)
+            .unwrap();
+
+        manager
+            .send_health_check_requests(endpoint, &target)
+            .await
+            .unwrap();
+
+        let mut seen_ranks: Vec<u64> = seen_payloads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|payload| {
+                payload
+                    .pointer("/routing/dp_rank")
+                    .unwrap()
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        seen_ranks.sort_unstable();
+        assert_eq!(seen_ranks, vec![0, 1, 2]);
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "all DP ranks must pass the complete canary cycle",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_payload_cycle_stays_not_ready() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.empty_payload";
+        drt.local_endpoint_registry()
+            .register(endpoint.to_string(), MockStreamingEngine::success(1));
+        drt.system_health()
+            .lock()
+            .set_endpoint_health_status(endpoint, HealthStatus::NotReady);
+        drt.system_health().lock().register_health_check_target(
+            endpoint,
+            Instance {
+                component: "test_component".to_string(),
+                endpoint: endpoint.to_string(),
+                namespace: "test_namespace".to_string(),
+                instance_id: 0,
+                transport: TransportType::Nats(endpoint.to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            },
+            serde_json::json!([]),
+        );
+        assert!(
+            drt.system_health()
+                .lock()
+                .get_health_check_target(endpoint)
+                .is_none(),
+            "registration must reject an empty payload array"
+        );
+        let target = crate::system_health::HealthCheckTarget {
+            instance: Instance {
+                component: "test_component".to_string(),
+                endpoint: endpoint.to_string(),
+                namespace: "test_namespace".to_string(),
+                instance_id: 0,
+                transport: TransportType::Nats(endpoint.to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            },
+            payload: serde_json::json!([]),
+        };
+        let manager = HealthCheckManager::new(
+            drt.clone(),
+            HealthCheckConfig {
+                canary_wait_time: Duration::from_secs(1),
+                request_timeout: Duration::from_secs(1),
+            },
+        );
+
+        manager
+            .send_health_check_requests(endpoint, &target)
+            .await
+            .unwrap();
+
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "an empty payload set must not mark the endpoint ready",
         );
     }
 

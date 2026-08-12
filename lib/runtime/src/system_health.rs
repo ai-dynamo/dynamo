@@ -183,6 +183,13 @@ impl SystemHealth {
         instance: component::Instance,
         payload: serde_json::Value,
     ) {
+        if payload.as_array().is_some_and(Vec::is_empty) {
+            tracing::warn!(
+                endpoint = endpoint_subject,
+                "Ignoring empty health check payload array"
+            );
+            return;
+        }
         self.register_health_check_targets(endpoint_subject, instance, vec![payload]);
     }
 
