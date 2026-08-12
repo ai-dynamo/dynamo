@@ -253,11 +253,17 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
                         loop {
                             match receiver.try_recv() {
                                 Ok(record) => sink.emit(&record).await,
-                                Err(broadcast::error::TryRecvError::Lagged(count)) => tracing::warn!(
-                                    sink = name,
-                                    dropped = count,
-                                    "request trace bus lagged during shutdown; dropped records"
-                                ),
+                                Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                                    #[cfg(feature = "request-trace-s3")]
+                                    if name == "s3" {
+                                        super::s3_sink::record_bus_lagged_records(count);
+                                    }
+                                    tracing::warn!(
+                                        sink = name,
+                                        dropped = count,
+                                        "request trace bus lagged during shutdown; dropped records"
+                                    );
+                                }
                                 Err(
                                     broadcast::error::TryRecvError::Empty
                                     | broadcast::error::TryRecvError::Closed
@@ -269,11 +275,17 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
                     message = receiver.recv() => {
                         match message {
                             Ok(record) => sink.emit(&record).await,
-                            Err(broadcast::error::RecvError::Lagged(count)) => tracing::warn!(
-                                sink = name,
-                                dropped = count,
-                                "request trace bus lagged; dropped records"
-                            ),
+                            Err(broadcast::error::RecvError::Lagged(count)) => {
+                                #[cfg(feature = "request-trace-s3")]
+                                if name == "s3" {
+                                    super::s3_sink::record_bus_lagged_records(count);
+                                }
+                                tracing::warn!(
+                                    sink = name,
+                                    dropped = count,
+                                    "request trace bus lagged; dropped records"
+                                );
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }

@@ -29,6 +29,7 @@ use crate::kv_router::metrics::{
 };
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
+use crate::request_trace::register_frontend_metrics;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
@@ -1167,6 +1168,9 @@ impl HttpServiceConfigBuilder {
         }
         if let Err(e) = register_lora_allocation_metrics(&registry) {
             tracing::warn!("Failed to register LoRA allocation metrics: {}", e);
+        }
+        if let Err(e) = register_frontend_metrics(&registry) {
+            tracing::warn!("Failed to register request-trace metrics: {}", e);
         }
 
         let mut all_docs = Vec::new();

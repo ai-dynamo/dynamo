@@ -15,7 +15,7 @@ one or more sinks. For the capture and replay workflow, see
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
 | `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_end`, `request_payload`, `tool` | Comma-separated record types. Setting the variable enables only the listed types. |
-| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated sinks. |
+| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel`, `s3` | Comma-separated sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | Path or prefix | Literal path for `jsonl`; segment prefix for `jsonl_gz`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File encoding and rotation mode. |
 | `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
@@ -25,6 +25,11 @@ one or more sinks. For the capture and replay workflow, see
 | `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | `1000` | Integer milliseconds | Periodic file flush interval. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | `268435456` | Positive integer bytes | Gzip roll threshold in uncompressed bytes. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
+| `DYN_REQUEST_TRACE_S3_BUCKET` | unset | Bucket name | Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`. |
+| `DYN_REQUEST_TRACE_S3_REGION` | unset | Region | Optional S3 region override. |
+| `DYN_REQUEST_TRACE_S3_PREFIX` | unset | Key prefix | Optional prefix for S3 object keys. |
+| `DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES` | `67108864` | Positive integer bytes | Uncompressed S3 batch roll threshold. |
+| `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS` | `10000` | Positive integer milliseconds | Periodic S3 batch flush interval. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional PULL endpoint for harness tool events. Configure it on only one process. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame topic filter. |
 | `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset | Header names | Comma- or whitespace-separated allowlist captured only on `request_payload` rows. Values are unredacted. |
@@ -69,6 +74,58 @@ The `s3` sink is compiled in only when `dynamo-llm` is built with the `request-t
 feature. Shipped Dynamo Python wheels enable it; local source builds pass
 `--features request-trace-s3` to `maturin develop`.
 </Note>
+
+### Prometheus Metrics and Alerts
+
+The HTTP frontend exposes these metrics at its `/metrics` endpoint when Dynamo is built with the
+`request-trace-s3` feature. They describe the S3 sink after request-trace sampling and fan-out. A
+record filtered before the S3 sink is not counted as accepted or dropped here.
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `dynamo_frontend_request_trace_s3_records_accepted_total` | Counter | Records accepted by the S3 sink queue. |
+| `dynamo_frontend_request_trace_s3_records_dropped_total{reason}` | Counter | Records lost to the bounded sink queue, broadcast lag, serialization, gzip finalization, or a terminal upload failure. `reason` has a fixed value set. |
+| `dynamo_frontend_request_trace_s3_queue_depth` | Gauge | Records in the bounded S3 sink queue. The current capacity is 2048 records. |
+| `dynamo_frontend_request_trace_s3_in_memory_batch_uncompressed_bytes` | Gauge | Bytes in the active in-memory JSONL batch before gzip compression. |
+| `dynamo_frontend_request_trace_s3_oldest_buffered_record_age_seconds` | Gauge | Age of the oldest record in the active in-memory batch. |
+| `dynamo_frontend_request_trace_s3_upload_duration_seconds` | Histogram | Duration of each completed or terminally failed S3 upload. |
+| `dynamo_frontend_request_trace_s3_uploaded_bytes_total` | Counter | Compressed bytes successfully uploaded to S3. |
+| `dynamo_frontend_request_trace_s3_upload_terminal_retry_attempts_total` | Counter | Retry attempts reported by terminal object-store upload errors. The underlying client does not expose retry attempts for uploads that eventually succeed. |
+| `dynamo_frontend_request_trace_s3_upload_terminal_failures_total` | Counter | Batches discarded after the object-store retry policy terminates. |
+
+The S3 sink has no durable disk spool or replay queue. The in-memory byte and age gauges do not
+measure a spool and reset when Dynamo begins to gzip an upload batch. A process crash, forced
+termination, or terminal upload failure can still lose records.
+
+Add rules to the Prometheus deployment that scrapes the frontend. Alert policy and routing remain a
+deployment concern; Dynamo does not install a `PrometheusRule`.
+
+```yaml
+groups:
+  - name: dynamo-request-trace-s3
+    rules:
+      - alert: DynamoRequestTraceS3RecordsDropped
+        expr: increase(dynamo_frontend_request_trace_s3_records_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Dynamo request-trace records are being dropped before S3 upload
+      - alert: DynamoRequestTraceS3UploadTerminalFailure
+        expr: increase(dynamo_frontend_request_trace_s3_upload_terminal_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Dynamo discarded a request-trace S3 batch after retries
+      - alert: DynamoRequestTraceS3QueueNearCapacity
+        expr: dynamo_frontend_request_trace_s3_queue_depth > 1638
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Dynamo request-trace S3 queue is above 80 percent capacity
+```
 
 ## Record Types
 

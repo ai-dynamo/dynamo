@@ -83,6 +83,18 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
     Ok(())
 }
 
+/// Register request-trace metrics on the HTTP frontend's Prometheus registry.
+///
+/// The S3 sink is an optional build feature, so source builds without it keep
+/// the existing metrics surface unchanged.
+pub(crate) fn register_frontend_metrics(
+    registry: &prometheus::Registry,
+) -> Result<(), prometheus::Error> {
+    #[cfg(feature = "request-trace-s3")]
+    s3_sink::register_metrics(registry)?;
+    Ok(())
+}
+
 pub(crate) async fn start_tool_event_ingest_from_policy(
     drt: DistributedRuntime,
     local_model: &LocalModel,

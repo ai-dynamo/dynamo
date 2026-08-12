@@ -27,8 +27,8 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -58,8 +58,142 @@ const DEFAULT_BUFFER_INITIAL_BYTES: usize = 256 * 1024;
 const S3_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Prometheus metrics for the direct S3 request-trace sink.
+///
+/// These are deliberately process-wide because request tracing starts at most
+/// one worker per process. Metric labels are limited to the fixed drop reasons;
+/// bucket, object key, and error text must not become labels.
+struct S3RequestTraceMetrics {
+    records_accepted: prometheus::IntCounter,
+    records_dropped: prometheus::IntCounterVec,
+    queue_depth: prometheus::IntGauge,
+    in_memory_batch_bytes: prometheus::IntGauge,
+    oldest_buffered_record_age_seconds: prometheus::Gauge,
+    upload_duration_seconds: prometheus::Histogram,
+    uploaded_bytes: prometheus::IntCounter,
+    upload_terminal_retry_attempts: prometheus::IntCounter,
+    upload_terminal_failures: prometheus::IntCounter,
+}
+
+impl S3RequestTraceMetrics {
+    fn new() -> Self {
+        let metric = |suffix: &str| format!("dynamo_frontend_request_trace_s3_{suffix}");
+        Self {
+            records_accepted: prometheus::IntCounter::new(
+                metric("records_accepted_total"),
+                "Request-trace records accepted by the S3 sink queue",
+            )
+            .expect("valid S3 request-trace accepted-record metric"),
+            records_dropped: prometheus::IntCounterVec::new(
+                prometheus::Opts::new(
+                    metric("records_dropped_total"),
+                    "Request-trace records dropped before S3 upload",
+                ),
+                &["reason"],
+            )
+            .expect("valid S3 request-trace dropped-record metric"),
+            queue_depth: prometheus::IntGauge::new(
+                metric("queue_depth"),
+                "Current number of request-trace records queued for the S3 sink",
+            )
+            .expect("valid S3 request-trace queue-depth metric"),
+            in_memory_batch_bytes: prometheus::IntGauge::new(
+                metric("in_memory_batch_uncompressed_bytes"),
+                "Uncompressed request-trace bytes buffered in the active in-memory S3 batch",
+            )
+            .expect("valid S3 request-trace in-memory-bytes metric"),
+            oldest_buffered_record_age_seconds: prometheus::Gauge::new(
+                metric("oldest_buffered_record_age_seconds"),
+                "Age of the oldest record in the active in-memory S3 batch",
+            )
+            .expect("valid S3 request-trace oldest-buffered-record metric"),
+            upload_duration_seconds: prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(
+                    metric("upload_duration_seconds"),
+                    "End-to-end duration of a completed or terminally failed S3 upload",
+                )
+                .buckets(vec![
+                    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 90.0,
+                ]),
+            )
+            .expect("valid S3 request-trace upload-duration metric"),
+            uploaded_bytes: prometheus::IntCounter::new(
+                metric("uploaded_bytes_total"),
+                "Compressed request-trace bytes successfully uploaded to S3",
+            )
+            .expect("valid S3 request-trace uploaded-bytes metric"),
+            upload_terminal_retry_attempts: prometheus::IntCounter::new(
+                metric("upload_terminal_retry_attempts_total"),
+                "Object-store retry attempts reported by terminally failed S3 uploads",
+            )
+            .expect("valid S3 request-trace terminal-retry-attempt metric"),
+            upload_terminal_failures: prometheus::IntCounter::new(
+                metric("upload_terminal_failures_total"),
+                "S3 upload batches discarded after the object-store retry policy terminates",
+            )
+            .expect("valid S3 request-trace terminal-failure metric"),
+        }
+    }
+
+    fn register(&self, registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.records_accepted.clone()))?;
+        registry.register(Box::new(self.records_dropped.clone()))?;
+        registry.register(Box::new(self.queue_depth.clone()))?;
+        registry.register(Box::new(self.in_memory_batch_bytes.clone()))?;
+        registry.register(Box::new(self.oldest_buffered_record_age_seconds.clone()))?;
+        registry.register(Box::new(self.upload_duration_seconds.clone()))?;
+        registry.register(Box::new(self.uploaded_bytes.clone()))?;
+        registry.register(Box::new(self.upload_terminal_retry_attempts.clone()))?;
+        registry.register(Box::new(self.upload_terminal_failures.clone()))?;
+        Ok(())
+    }
+
+    fn reset_gauges(&self) {
+        self.queue_depth.set(0);
+        self.in_memory_batch_bytes.set(0);
+        self.oldest_buffered_record_age_seconds.set(0.0);
+    }
+
+    fn set_queue_depth(&self, depth: usize) {
+        self.queue_depth.set(depth.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_batch_state(&self, bytes: u64, oldest: Option<Instant>) {
+        self.in_memory_batch_bytes
+            .set(bytes.try_into().unwrap_or(i64::MAX));
+        self.oldest_buffered_record_age_seconds.set(
+            oldest
+                .map(|enqueued_at| enqueued_at.elapsed().as_secs_f64())
+                .unwrap_or(0.0),
+        );
+    }
+
+    fn record_drop(&self, reason: &'static str, count: u64) {
+        self.records_dropped
+            .with_label_values(&[reason])
+            .inc_by(count);
+    }
+}
+
+static S3_REQUEST_TRACE_METRICS: LazyLock<S3RequestTraceMetrics> =
+    LazyLock::new(S3RequestTraceMetrics::new);
+
+pub(super) fn register_metrics(registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
+    S3_REQUEST_TRACE_METRICS.register(registry)
+}
+
+pub(super) fn record_bus_lagged_records(count: u64) {
+    S3_REQUEST_TRACE_METRICS.record_drop("bus_lag", count);
+}
+
+#[derive(Clone)]
+struct QueuedRecord {
+    record: RequestTraceRecord,
+    enqueued_at: Instant,
+}
+
 pub struct S3RequestTraceSink {
-    tx: mpsc::Sender<RequestTraceRecord>,
+    tx: mpsc::Sender<QueuedRecord>,
     shutdown: CancellationToken,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Count of records dropped by `emit` because the batcher channel was full
@@ -102,6 +236,7 @@ impl S3RequestTraceSink {
         );
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        S3_REQUEST_TRACE_METRICS.reset_gauges();
         let shutdown = CancellationToken::new();
         let upload_options = S3UploadOptions {
             bucket,
@@ -137,6 +272,12 @@ impl S3RequestTraceSink {
     /// cannot flood the log with one line per dropped record. Returns `true`
     /// when this call emitted the warning (i.e. it was the first drop).
     fn note_dropped(&self, reason: &str) -> bool {
+        let metric_reason = match reason {
+            "channel_full" => "channel_full",
+            "channel_closed" => "channel_closed",
+            _ => "unknown",
+        };
+        S3_REQUEST_TRACE_METRICS.record_drop(metric_reason, 1);
         if self.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
             tracing::warn!(
                 target: "dynamo_llm::request_trace",
@@ -158,12 +299,18 @@ impl RequestTraceSink for S3RequestTraceSink {
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
-        if let Err(error) = self.tx.try_send(record.clone()) {
+        if let Err(error) = self.tx.try_send(QueuedRecord {
+            record: record.clone(),
+            enqueued_at: Instant::now(),
+        }) {
             let reason = match error {
                 mpsc::error::TrySendError::Full(_) => "channel_full",
                 mpsc::error::TrySendError::Closed(_) => "channel_closed",
             };
             self.note_dropped(reason);
+        } else {
+            S3_REQUEST_TRACE_METRICS.records_accepted.inc();
+            S3_REQUEST_TRACE_METRICS.set_queue_depth(CHANNEL_CAPACITY - self.tx.capacity());
         }
     }
 
@@ -200,7 +347,7 @@ impl RequestTraceSink for S3RequestTraceSink {
 async fn run_worker(
     store: Arc<dyn ObjectStore>,
     options: S3UploadOptions,
-    mut rx: mpsc::Receiver<RequestTraceRecord>,
+    mut rx: mpsc::Receiver<QueuedRecord>,
     shutdown: CancellationToken,
     roll_uncompressed_bytes: u64,
     flush_interval: Duration,
@@ -221,13 +368,15 @@ async fn run_worker(
                 // land a record after we start draining. Then `recv()` yields
                 // every already-enqueued record and returns `None` once empty.
                 rx.close();
-                while let Some(record) = rx.recv().await {
-                    if let Err(error) = batch.push(&record) {
+                while let Some(queued) = rx.recv().await {
+                    S3_REQUEST_TRACE_METRICS.set_queue_depth(rx.len());
+                    if let Err(error) = batch.push(&queued.record, queued.enqueued_at) {
                         tracing::warn!(
                             target: "dynamo_llm::request_trace",
                             %error,
                             "request trace s3: serialize failed during shutdown"
                         );
+                        S3_REQUEST_TRACE_METRICS.record_drop("serialization_failed", 1);
                     } else if batch.uncompressed_bytes() >= roll_uncompressed_bytes {
                         // Enforce the roll threshold during shutdown too, so a
                         // full channel can't collapse into one oversized PUT
@@ -248,12 +397,14 @@ async fn run_worker(
             message = rx.recv() => {
                 match message {
                     Some(record) => {
-                        if let Err(error) = batch.push(&record) {
+                        S3_REQUEST_TRACE_METRICS.set_queue_depth(rx.len());
+                        if let Err(error) = batch.push(&record.record, record.enqueued_at) {
                             tracing::warn!(
                                 target: "dynamo_llm::request_trace",
                                 %error,
                                 "request trace s3: serialize failed; dropping record"
                             );
+                            S3_REQUEST_TRACE_METRICS.record_drop("serialization_failed", 1);
                         } else if batch.uncompressed_bytes() >= roll_uncompressed_bytes {
                             upload_ready_batch(&uploader, &mut batch, &mut seq).await;
                         }
@@ -271,9 +422,11 @@ async fn run_worker(
 }
 
 async fn upload_ready_batch(uploader: &Arc<S3Uploader>, batch: &mut JsonlBatch, seq: &mut u64) {
+    let batch_records = batch.lines();
     let ready = match batch.take_finished().await {
         Ok(bytes) => bytes,
         Err(error) => {
+            S3_REQUEST_TRACE_METRICS.record_drop("gzip_finalize_failed", batch_records);
             tracing::warn!(
                 target: "dynamo_llm::request_trace",
                 %error,
@@ -285,20 +438,58 @@ async fn upload_ready_batch(uploader: &Arc<S3Uploader>, batch: &mut JsonlBatch, 
     let this_seq = *seq;
     *seq = seq.saturating_add(1);
     let key = uploader.object_key(SystemTime::now(), this_seq);
-    let batch_bytes = ready.len();
-    if let Err(error) = uploader.put_object(key.clone(), ready).await {
-        // The client exhausted its retries (three total attempts, bounded by
-        // the operation timeout). The batch is dropped here rather
-        // than requeued; a persistent retry buffer is a follow-up concern
-        // tracked in the S3 layout PR.
-        tracing::warn!(
-            target: "dynamo_llm::request_trace",
-            key = %key,
-            batch_bytes,
-            %error,
-            "request trace s3: put_object failed after retries; batch discarded"
-        );
+    let batch_bytes = ready.bytes.len();
+    let upload_started = Instant::now();
+    match uploader.put_object(key.clone(), ready.bytes).await {
+        Ok(()) => {
+            S3_REQUEST_TRACE_METRICS
+                .upload_duration_seconds
+                .observe(upload_started.elapsed().as_secs_f64());
+            S3_REQUEST_TRACE_METRICS
+                .uploaded_bytes
+                .inc_by(batch_bytes as u64);
+        }
+        Err(error) => {
+            S3_REQUEST_TRACE_METRICS
+                .upload_duration_seconds
+                .observe(upload_started.elapsed().as_secs_f64());
+            S3_REQUEST_TRACE_METRICS.upload_terminal_failures.inc();
+            S3_REQUEST_TRACE_METRICS.record_drop("terminal_upload_failure", ready.records);
+            S3_REQUEST_TRACE_METRICS
+                .upload_terminal_retry_attempts
+                .inc_by(terminal_retry_attempts(&error));
+            // The client exhausted its retries (three total attempts, bounded by
+            // the operation timeout). The batch is dropped here rather
+            // than requeued; a persistent retry buffer is a follow-up concern
+            // tracked in the S3 layout PR.
+            tracing::warn!(
+                target: "dynamo_llm::request_trace",
+                key = %key,
+                batch_bytes,
+                %error,
+                "request trace s3: put_object failed after retries; batch discarded"
+            );
+        }
     }
+}
+
+/// `object_store` exposes retry counts only in the terminal `RetryError`
+/// display text. Successful uploads do not surface their internal attempts.
+/// Keep this parser narrow so changes to the dependency's message fail closed
+/// to zero rather than inventing retry attempts.
+fn terminal_retry_attempts(error: &anyhow::Error) -> u64 {
+    const PREFIX: &str = "after ";
+    const SUFFIX: &str = " retries";
+
+    error
+        .chain()
+        .find_map(|cause| {
+            let message = cause.to_string();
+            let start = message.find(PREFIX)? + PREFIX.len();
+            let end = message[start..].find(SUFFIX)? + start;
+            message[start..end].parse().ok()
+        })
+        .unwrap_or(0)
 }
 
 struct S3Uploader {
@@ -381,6 +572,12 @@ fn request_trace_s3_builder(bucket: &str, region: Option<&str>) -> AmazonS3Build
 struct JsonlBatch {
     raw: Vec<u8>,
     lines: u64,
+    oldest_enqueued_at: Option<Instant>,
+}
+
+struct FinishedBatch {
+    bytes: Vec<u8>,
+    records: u64,
 }
 
 impl JsonlBatch {
@@ -388,6 +585,7 @@ impl JsonlBatch {
         Self {
             raw: Vec::with_capacity(DEFAULT_BUFFER_INITIAL_BYTES),
             lines: 0,
+            oldest_enqueued_at: None,
         }
     }
 
@@ -399,23 +597,33 @@ impl JsonlBatch {
         self.raw.len() as u64
     }
 
-    fn push(&mut self, record: &RequestTraceRecord) -> Result<()> {
+    fn lines(&self) -> u64 {
+        self.lines
+    }
+
+    fn push(&mut self, record: &RequestTraceRecord, enqueued_at: Instant) -> Result<()> {
         let mut line = serde_json::to_vec(record).context("serializing request trace record")?;
         line.push(b'\n');
         self.raw.extend_from_slice(&line);
         self.lines = self.lines.saturating_add(1);
+        self.oldest_enqueued_at.get_or_insert(enqueued_at);
+        S3_REQUEST_TRACE_METRICS
+            .set_batch_state(self.uncompressed_bytes(), self.oldest_enqueued_at);
         Ok(())
     }
 
     /// Consume the accumulated JSONL, gzip it on a blocking worker, and
     /// leave the batch empty so it can accept the next record.
-    async fn take_finished(&mut self) -> Result<Vec<u8>> {
+    async fn take_finished(&mut self) -> Result<FinishedBatch> {
         let raw = std::mem::replace(
             &mut self.raw,
             Vec::with_capacity(DEFAULT_BUFFER_INITIAL_BYTES),
         );
+        let records = self.lines;
         self.lines = 0;
-        tokio::task::spawn_blocking(move || {
+        self.oldest_enqueued_at = None;
+        S3_REQUEST_TRACE_METRICS.set_batch_state(0, None);
+        let bytes = tokio::task::spawn_blocking(move || {
             let mut encoder = GzEncoder::new(
                 Vec::with_capacity(raw.len() / 4 + DEFAULT_BUFFER_INITIAL_BYTES),
                 Compression::default(),
@@ -428,7 +636,8 @@ impl JsonlBatch {
                 .context("finalizing gzip batch for s3 upload")
         })
         .await
-        .context("gzip encoder task panicked")?
+        .context("gzip encoder task panicked")??;
+        Ok(FinishedBatch { bytes, records })
     }
 }
 
@@ -593,6 +802,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn s3_metrics_register_all_metric_families() {
+        let registry = prometheus::Registry::new();
+        S3RequestTraceMetrics::new().register(&registry).unwrap();
+        let names: Vec<_> = registry
+            .gather()
+            .into_iter()
+            .map(|family| family.name().to_string())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "dynamo_frontend_request_trace_s3_in_memory_batch_uncompressed_bytes",
+                "dynamo_frontend_request_trace_s3_oldest_buffered_record_age_seconds",
+                "dynamo_frontend_request_trace_s3_queue_depth",
+                "dynamo_frontend_request_trace_s3_records_accepted_total",
+                "dynamo_frontend_request_trace_s3_records_dropped_total",
+                "dynamo_frontend_request_trace_s3_upload_duration_seconds",
+                "dynamo_frontend_request_trace_s3_upload_terminal_failures_total",
+                "dynamo_frontend_request_trace_s3_upload_terminal_retry_attempts_total",
+                "dynamo_frontend_request_trace_s3_uploaded_bytes_total",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_retry_attempts_extracts_object_store_retry_count() {
+        let error = anyhow::anyhow!(
+            "Generic S3 error: Error performing PUT https://bucket.example/key in 90s, after 2 retries, max_retries: 2, retry_timeout: 90s - timeout"
+        );
+        assert_eq!(terminal_retry_attempts(&error), 2);
+        assert_eq!(
+            terminal_retry_attempts(&anyhow::anyhow!("permission denied")),
+            0
+        );
+    }
+
     fn test_uploader(prefix: &str) -> S3Uploader {
         S3Uploader {
             store: Arc::new(InMemory::new()),
@@ -613,7 +860,7 @@ mod tests {
     /// same backpressure path a stalled uploader would cause. The receiver is
     /// returned to the caller and held so the channel stays open (full), not
     /// closed. No S3 client or worker task is created.
-    fn stalled_sink(capacity: usize) -> (S3RequestTraceSink, mpsc::Receiver<RequestTraceRecord>) {
+    fn stalled_sink(capacity: usize) -> (S3RequestTraceSink, mpsc::Receiver<QueuedRecord>) {
         let (tx, rx) = mpsc::channel(capacity);
         let sink = S3RequestTraceSink {
             tx,
