@@ -31,7 +31,6 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -114,12 +113,10 @@ func groveScaleInterceptor(funcs interceptor.Funcs, onUpdate func()) interceptor
 			ResourceVersion: object.GetResourceVersion(),
 		}
 		switch resource := object.(type) {
-		case *unstructured.Unstructured:
-			replicas, found, err := unstructured.NestedInt64(resource.Object, "spec", "replicas")
-			if err != nil || !found {
-				return errors.New("scale resource has no replicas")
-			}
-			scaleObject.Spec.Replicas = int32(replicas)
+		case *grovev1alpha1.PodClique:
+			scaleObject.Spec.Replicas = resource.Spec.Replicas
+		case *grovev1alpha1.PodCliqueScalingGroup:
+			scaleObject.Spec.Replicas = resource.Spec.Replicas
 		default:
 			return errors.New("unexpected scale resource")
 		}
@@ -142,10 +139,10 @@ func groveScaleInterceptor(funcs interceptor.Funcs, onUpdate func()) interceptor
 			return err
 		}
 		switch resource := object.(type) {
-		case *unstructured.Unstructured:
-			if err := unstructured.SetNestedField(resource.Object, int64(scaleObject.Spec.Replicas), "spec", "replicas"); err != nil {
-				return err
-			}
+		case *grovev1alpha1.PodClique:
+			resource.Spec.Replicas = scaleObject.Spec.Replicas
+		case *grovev1alpha1.PodCliqueScalingGroup:
+			resource.Spec.Replicas = scaleObject.Spec.Replicas
 		default:
 			return errors.New("unexpected scale resource")
 		}

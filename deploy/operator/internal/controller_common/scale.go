@@ -23,7 +23,6 @@ import (
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,8 +38,14 @@ func ScaleResource(ctx context.Context, kubeClient client.Client, gvr schema.Gro
 	if err != nil {
 		return fmt.Errorf("failed to resolve kind for %s: %w", gvr.String(), err)
 	}
-	resource := &unstructured.Unstructured{}
-	resource.SetGroupVersionKind(gvk)
+	resourceObject, err := kubeClient.Scheme().New(gvk)
+	if err != nil {
+		return fmt.Errorf("failed to create resource object for %s: %w", gvk.String(), err)
+	}
+	resource, ok := resourceObject.(client.Object)
+	if !ok {
+		return fmt.Errorf("resource object for %s does not implement client.Object", gvk.String())
+	}
 	resource.SetNamespace(namespace)
 	resource.SetName(name)
 
