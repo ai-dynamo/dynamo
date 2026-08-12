@@ -341,8 +341,8 @@ The frontend registers these metrics when queueing is enabled by `--router-queue
   KV cache events applied to the router's radix-tree index. Includes events applied to the device tier and lower tiers such as host-pinned memory and disk. Appears only when `--router-kv-overlap-score-credit` is greater than 0 and workers publish KV events. Labeled by `status` and `event_type` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
 </ParamField>
 
-<ParamField path="dynamo_kvrouter_ckf_mutation_total" type="counter">
-  CKF block-level mutation outcomes recorded by the router indexer, finer-grained than the event `status` on the counter above. Labeled by `outcome` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
+<ParamField path="dynamo_component_ckf_mutation_total" type="counter">
+  CKF block-level mutation outcomes recorded by the router indexer, labeled by `outcome` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels). **Registered, always zero.** The series is created and exported, but no code path currently increments it, so it reads 0 in every deployment. Do not build alerts or dashboard panels on it. The standalone indexer exports the same counter as `dynamo_kvrouter_ckf_mutation_total`, with the same caveat.
 </ParamField>
 
 The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer](../../developer-guide/knowledge-base/modular-components/router/standalone-indexer.md).

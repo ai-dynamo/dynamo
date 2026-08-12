@@ -112,7 +112,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="outcome" type="string">
-  `[Shared]` On `dynamo_kvrouter_ckf_mutation_total` — the block-level CKF mutation outcome, finer-grained than the event `status` above.
+  `[Shared]` On `dynamo_component_ckf_mutation_total`, and on `dynamo_kvrouter_ckf_mutation_total` from the standalone indexer — the block-level CKF mutation outcome. Both counters are registered but never incremented today, so no series carries this label in practice.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>unknown_remove</Badge> <Badge intent="note" minimal>capacity_exhausted</Badge></span>
 </ParamField>
