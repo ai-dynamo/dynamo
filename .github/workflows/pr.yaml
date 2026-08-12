@@ -1477,8 +1477,15 @@ jobs:
           # dynamo-deploy-test namespace and ci-nightly-high-priority class
           # from KUBE_CONTEXT.
           vcluster_name: ci-${{ github.run_id }}-gb200
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          repository: ${{ vars.ACR_REPOSITORY }}
+          # Pull the operator from ECR, not ACR. setup-dynamo-operator never
+          # creates an imagePullSecret, so the kubelet pulls with whatever
+          # identity the cluster itself has. On the AKS deploy-tester that is
+          # AcrPull via managed identity; aws-dev-01 has no Azure credentials,
+          # so the ACR pull went out anonymous and 401'd. The operator job
+          # pushes the same <sha>-operator tag to both registries, so only the
+          # registry host and repository path change here.
+          registry: ${{ vars.ECR_REGISTRY }}
+          repository: ${{ vars.ECR_REPOSITORY }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
