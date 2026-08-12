@@ -4420,7 +4420,8 @@ impl OpenAIPreprocessor {
                                 }
                                 ChoiceReasoningState {
                                     parser,
-                                    guided_json_bypass_decision: None,
+                                    guided_json_bypass_decision: (!bypass_bare_guided_json)
+                                        .then_some(false),
                                     pending_reasoning: String::new(),
                                     pending_content: String::new(),
                                     left_reasoning: false,
@@ -4619,8 +4620,11 @@ impl OpenAIPreprocessor {
                 let flushed: Vec<(u32, Option<String>, Option<String>)> = indices
                     .into_iter()
                     .filter_map(|index| {
-                        let (content, reasoning) =
-                            drain_deferred_reasoning(state.choices.get_mut(&index)?);
+                        let choice_state = state.choices.get_mut(&index)?;
+                        if choice_state.guided_json_bypass_decision != Some(false) {
+                            return None;
+                        }
+                        let (content, reasoning) = drain_deferred_reasoning(choice_state);
                         (content.is_some() || reasoning.is_some())
                             .then_some((index, content, reasoning))
                     })

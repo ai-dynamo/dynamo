@@ -4201,6 +4201,35 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tool_call_survi
     }
 }
 
+#[tokio::test]
+async fn postprocessor_parsing_stream_force_nonempty_guided_bypass_stays_quiet_at_eof() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let input_stream = stream::iter(vec![Annotated::from_data(mock_content_chunk(json))]);
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        ..
+    } = drain_stream(output_stream).await;
+
+    assert!(reasoning.is_empty());
+    assert_clean_tool_call(
+        "bare guided JSON at EOF",
+        &content,
+        &tool_calls,
+        "San Francisco",
+    );
+}
+
 /// The streaming and non-streaming paths must produce the same `content` and
 /// `reasoning_content` for the same model output. They reach it by different
 /// means — the aggregator moves reasoning into empty content, while the stream
