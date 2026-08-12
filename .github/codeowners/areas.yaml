@@ -1133,10 +1133,6 @@ shared:
   owners:
   - operator
   - gms
-- glob: deploy/operator/samples/*gms*
-  owners:
-  - operator
-  - gms
 - glob: deploy/operator/samples/**/*gms*
   owners:
   - operator
@@ -1460,11 +1456,6 @@ shared:
   owners:
   - performance
   - tokenspeed
-- glob: recipes/**/sglang/*Dockerfile*
-  owners:
-  - performance
-  - backend-sglang
-  - ops
 - glob: recipes/**/sglang/**/*Dockerfile*
   owners:
   - performance
