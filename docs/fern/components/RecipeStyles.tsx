@@ -2182,6 +2182,13 @@ body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-
     font-weight: 600;
 }
 
+/* Engine axis: hide blocks that do not match the checked inference engine */
+body:has(input[name="recipe-engine"][value="vllm"]:checked) [data-engine]:not([data-engine~="vllm"]),
+body:has(input[name="recipe-engine"][value="sglang"]:checked) [data-engine]:not([data-engine~="sglang"]),
+body:has(input[name="recipe-engine"][value="trtllm"]:checked) [data-engine]:not([data-engine~="trtllm"]) {
+    display: none;
+}
+
 /* Picker dimension extensions: hopper/blackwell SKUs and a generic
    recipe-variant axis for single-dimension pickers (topology, build, etc.) */
 body:has(input[name="recipe-sku"][value="hopper"]:checked) [data-sku]:not([data-sku~="hopper"]),
