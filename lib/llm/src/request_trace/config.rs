@@ -23,6 +23,21 @@ const DEFAULT_LEGACY_AUDIT_NATS_SUBJECT: &str = "dynamo.audit.v1";
 const DEFAULT_OTEL_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_S3_ROLL_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_S3_FLUSH_INTERVAL_MS: u64 = 10_000;
+const DEFAULT_S3_ATTEMPT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_S3_OPERATION_TIMEOUT_MS: u64 = 90_000;
+const DEFAULT_S3_MAX_RETRIES: usize = 2;
+const DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
+const DEFAULT_S3_RETRY_MAX_BACKOFF_MS: u64 = 15_000;
+const DEFAULT_S3_RETRY_BACKOFF_BASE: f64 = 2.0;
+const MIN_S3_TIMEOUT_MS: u64 = 1_000;
+const MAX_S3_ATTEMPT_TIMEOUT_MS: u64 = 90_000;
+const MAX_S3_OPERATION_TIMEOUT_MS: u64 = 300_000;
+const MAX_S3_RETRIES: usize = 10;
+const MIN_S3_RETRY_BACKOFF_MS: u64 = 10;
+const MAX_S3_RETRY_INITIAL_BACKOFF_MS: u64 = 10_000;
+const MAX_S3_RETRY_MAX_BACKOFF_MS: u64 = 60_000;
+const MIN_S3_RETRY_BACKOFF_BASE: f64 = 1.1;
+const MAX_S3_RETRY_BACKOFF_BASE: f64 = 10.0;
 
 const CAPTURE_UNINITIALIZED: u8 = 0;
 const CAPTURE_ACTIVE: u8 = 1;
@@ -103,6 +118,12 @@ pub struct RequestTracePolicy {
     pub s3_prefix: Option<String>,
     pub s3_roll_uncompressed_bytes: u64,
     pub s3_flush_interval_ms: u64,
+    pub s3_attempt_timeout_ms: u64,
+    pub s3_operation_timeout_ms: u64,
+    pub s3_max_retries: usize,
+    pub s3_retry_initial_backoff_ms: u64,
+    pub s3_retry_max_backoff_ms: u64,
+    pub s3_retry_backoff_base: f64,
 }
 
 impl RequestTracePolicy {
@@ -234,6 +255,66 @@ fn load_from_env() -> RequestTracePolicy {
         env_u64(&[env_request_trace::DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS])
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_S3_FLUSH_INTERVAL_MS);
+    let s3_attempt_timeout_ms = env_bounded_u64(
+        env_request_trace::DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS,
+        DEFAULT_S3_ATTEMPT_TIMEOUT_MS,
+        MIN_S3_TIMEOUT_MS,
+        MAX_S3_ATTEMPT_TIMEOUT_MS,
+    );
+    let configured_s3_operation_timeout_ms = env_bounded_u64(
+        env_request_trace::DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS,
+        DEFAULT_S3_OPERATION_TIMEOUT_MS,
+        MIN_S3_TIMEOUT_MS,
+        MAX_S3_OPERATION_TIMEOUT_MS,
+    );
+    let s3_operation_timeout_ms = if configured_s3_operation_timeout_ms < s3_attempt_timeout_ms {
+        tracing::warn!(
+            attempt_timeout_ms = s3_attempt_timeout_ms,
+            operation_timeout_ms = configured_s3_operation_timeout_ms,
+            default_operation_timeout_ms = DEFAULT_S3_OPERATION_TIMEOUT_MS,
+            "request trace: S3 operation timeout must not be shorter than the attempt timeout; using default"
+        );
+        DEFAULT_S3_OPERATION_TIMEOUT_MS
+    } else {
+        configured_s3_operation_timeout_ms
+    };
+    let s3_max_retries = env_bounded_usize(
+        env_request_trace::DYN_REQUEST_TRACE_S3_MAX_RETRIES,
+        DEFAULT_S3_MAX_RETRIES,
+        0,
+        MAX_S3_RETRIES,
+    );
+    let s3_retry_initial_backoff_ms = env_bounded_u64(
+        env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS,
+        DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS,
+        MIN_S3_RETRY_BACKOFF_MS,
+        MAX_S3_RETRY_INITIAL_BACKOFF_MS,
+    );
+    let configured_s3_retry_max_backoff_ms = env_bounded_u64(
+        env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS,
+        DEFAULT_S3_RETRY_MAX_BACKOFF_MS,
+        MIN_S3_RETRY_BACKOFF_MS,
+        MAX_S3_RETRY_MAX_BACKOFF_MS,
+    );
+    let s3_retry_max_backoff_ms = if configured_s3_retry_max_backoff_ms
+        < s3_retry_initial_backoff_ms
+    {
+        tracing::warn!(
+            initial_backoff_ms = s3_retry_initial_backoff_ms,
+            max_backoff_ms = configured_s3_retry_max_backoff_ms,
+            default_max_backoff_ms = DEFAULT_S3_RETRY_MAX_BACKOFF_MS,
+            "request trace: S3 retry maximum backoff must not be shorter than the initial backoff; using default"
+        );
+        DEFAULT_S3_RETRY_MAX_BACKOFF_MS
+    } else {
+        configured_s3_retry_max_backoff_ms
+    };
+    let s3_retry_backoff_base = env_bounded_f64(
+        env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE,
+        DEFAULT_S3_RETRY_BACKOFF_BASE,
+        MIN_S3_RETRY_BACKOFF_BASE,
+        MAX_S3_RETRY_BACKOFF_BASE,
+    );
 
     RequestTracePolicy {
         enabled,
@@ -256,6 +337,12 @@ fn load_from_env() -> RequestTracePolicy {
         s3_prefix,
         s3_roll_uncompressed_bytes,
         s3_flush_interval_ms,
+        s3_attempt_timeout_ms,
+        s3_operation_timeout_ms,
+        s3_max_retries,
+        s3_retry_initial_backoff_ms,
+        s3_retry_max_backoff_ms,
+        s3_retry_backoff_base,
     }
 }
 
@@ -392,6 +479,63 @@ fn env_u64(names: &[&str]) -> Option<u64> {
     })
 }
 
+fn env_bounded_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    let Some(raw) = env_trimmed(name) else {
+        return default;
+    };
+    match raw.parse::<u64>() {
+        Ok(value) if (min..=max).contains(&value) => value,
+        _ => {
+            tracing::warn!(
+                env = name,
+                min,
+                max,
+                default,
+                "request trace: invalid bounded S3 configuration; using default"
+            );
+            default
+        }
+    }
+}
+
+fn env_bounded_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
+    let Some(raw) = env_trimmed(name) else {
+        return default;
+    };
+    match raw.parse::<usize>() {
+        Ok(value) if (min..=max).contains(&value) => value,
+        _ => {
+            tracing::warn!(
+                env = name,
+                min,
+                max,
+                default,
+                "request trace: invalid bounded S3 configuration; using default"
+            );
+            default
+        }
+    }
+}
+
+fn env_bounded_f64(name: &str, default: f64, min: f64, max: f64) -> f64 {
+    let Some(raw) = env_trimmed(name) else {
+        return default;
+    };
+    match raw.parse::<f64>() {
+        Ok(value) if value.is_finite() && (min..=max).contains(&value) => value,
+        _ => {
+            tracing::warn!(
+                env = name,
+                min,
+                max,
+                default,
+                "request trace: invalid bounded S3 configuration; using default"
+            );
+            default
+        }
+    }
+}
+
 fn parse_file_format(value: &str) -> RequestTraceFileFormat {
     match value.trim().to_lowercase().as_str() {
         "jsonl" => RequestTraceFileFormat::Jsonl,
@@ -455,6 +599,12 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
         env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+        env_request_trace::DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS,
+        env_request_trace::DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS,
+        env_request_trace::DYN_REQUEST_TRACE_S3_MAX_RETRIES,
+        env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS,
+        env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS,
+        env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE,
         env_audit::DYN_AUDIT_SINKS,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
         env_audit::DYN_AUDIT_CAPACITY,
@@ -511,6 +661,150 @@ mod tests {
                 DEFAULT_OTEL_MAX_PAYLOAD_BYTES
             );
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn s3_upload_policy_defaults_preserve_existing_behavior() {
+        with_request_trace_env(&[], || {
+            let policy = load_from_env();
+            assert_eq!(policy.s3_attempt_timeout_ms, DEFAULT_S3_ATTEMPT_TIMEOUT_MS);
+            assert_eq!(
+                policy.s3_operation_timeout_ms,
+                DEFAULT_S3_OPERATION_TIMEOUT_MS
+            );
+            assert_eq!(policy.s3_max_retries, DEFAULT_S3_MAX_RETRIES);
+            assert_eq!(
+                policy.s3_retry_initial_backoff_ms,
+                DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS
+            );
+            assert_eq!(
+                policy.s3_retry_max_backoff_ms,
+                DEFAULT_S3_RETRY_MAX_BACKOFF_MS
+            );
+            assert_eq!(policy.s3_retry_backoff_base, DEFAULT_S3_RETRY_BACKOFF_BASE);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn s3_upload_policy_accepts_bounded_overrides() {
+        with_request_trace_env(
+            &[
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS,
+                    "5000",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS,
+                    "12000",
+                ),
+                (env_request_trace::DYN_REQUEST_TRACE_S3_MAX_RETRIES, "0"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS,
+                    "250",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS,
+                    "5000",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE,
+                    "3.5",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(policy.s3_attempt_timeout_ms, 5_000);
+                assert_eq!(policy.s3_operation_timeout_ms, 12_000);
+                assert_eq!(policy.s3_max_retries, 0);
+                assert_eq!(policy.s3_retry_initial_backoff_ms, 250);
+                assert_eq!(policy.s3_retry_max_backoff_ms, 5_000);
+                assert_eq!(policy.s3_retry_backoff_base, 3.5);
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn s3_upload_policy_rejects_out_of_range_or_incompatible_values() {
+        with_request_trace_env(
+            &[
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS,
+                    "999",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS,
+                    "300001",
+                ),
+                (env_request_trace::DYN_REQUEST_TRACE_S3_MAX_RETRIES, "11"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS,
+                    "9",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS,
+                    "60001",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE,
+                    "1.0",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(policy.s3_attempt_timeout_ms, DEFAULT_S3_ATTEMPT_TIMEOUT_MS);
+                assert_eq!(
+                    policy.s3_operation_timeout_ms,
+                    DEFAULT_S3_OPERATION_TIMEOUT_MS
+                );
+                assert_eq!(policy.s3_max_retries, DEFAULT_S3_MAX_RETRIES);
+                assert_eq!(
+                    policy.s3_retry_initial_backoff_ms,
+                    DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS
+                );
+                assert_eq!(
+                    policy.s3_retry_max_backoff_ms,
+                    DEFAULT_S3_RETRY_MAX_BACKOFF_MS
+                );
+                assert_eq!(policy.s3_retry_backoff_base, DEFAULT_S3_RETRY_BACKOFF_BASE);
+            },
+        );
+
+        with_request_trace_env(
+            &[
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS,
+                    "5000",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS,
+                    "4999",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS,
+                    "5000",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS,
+                    "4999",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(policy.s3_attempt_timeout_ms, 5_000);
+                assert_eq!(
+                    policy.s3_operation_timeout_ms,
+                    DEFAULT_S3_OPERATION_TIMEOUT_MS
+                );
+                assert_eq!(policy.s3_retry_initial_backoff_ms, 5_000);
+                assert_eq!(
+                    policy.s3_retry_max_backoff_ms,
+                    DEFAULT_S3_RETRY_MAX_BACKOFF_MS
+                );
+            },
+        );
     }
 
     #[test]

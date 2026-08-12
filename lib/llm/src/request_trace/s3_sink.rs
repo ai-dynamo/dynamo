@@ -34,7 +34,7 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use flate2::{Compression, write::GzEncoder};
 use object_store::{
-    Attribute, Attributes, ClientConfigKey, ObjectStore, RetryConfig,
+    Attribute, Attributes, BackoffConfig, ClientConfigKey, ObjectStore, RetryConfig,
     aws::{AmazonS3Builder, AmazonS3ConfigKey},
     path::Path as ObjectPath,
 };
@@ -52,11 +52,9 @@ const CHANNEL_CAPACITY: usize = 2048;
 const DEFAULT_BUFFER_INITIAL_BYTES: usize = 256 * 1024;
 // Bound S3 upload duration so a stalled endpoint or slow network cannot wedge
 // the worker task indefinitely. `attempt_timeout` covers a single HTTP attempt;
-// the outer timeout bounds the full call including retries (three total).
-// After the operation timeout expires the batch is discarded with
+// the outer timeout bounds the full call including retries. After the operation
+// timeout expires the batch is discarded with
 // a warning; a persistent retry queue is deferred to a follow-up PR.
-const S3_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
-const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct S3RequestTraceSink {
     tx: mpsc::Sender<RequestTraceRecord>,
@@ -78,6 +76,12 @@ struct S3UploadOptions {
     /// overwrite a previous batch, and two frontends sharing a hostname
     /// stay disjoint.
     run_id: String,
+    attempt_timeout: Duration,
+    operation_timeout: Duration,
+    max_retries: usize,
+    retry_initial_backoff: Duration,
+    retry_max_backoff: Duration,
+    retry_backoff_base: f64,
 }
 
 impl S3RequestTraceSink {
@@ -94,21 +98,27 @@ impl S3RequestTraceSink {
         let run_id = Uuid::new_v4().simple().to_string();
         let roll_uncompressed_bytes = policy.s3_roll_uncompressed_bytes;
         let flush_interval = Duration::from_millis(policy.s3_flush_interval_ms.max(1));
+        let upload_options = S3UploadOptions {
+            bucket,
+            prefix,
+            host,
+            run_id,
+            attempt_timeout: Duration::from_millis(policy.s3_attempt_timeout_ms),
+            operation_timeout: Duration::from_millis(policy.s3_operation_timeout_ms),
+            max_retries: policy.s3_max_retries,
+            retry_initial_backoff: Duration::from_millis(policy.s3_retry_initial_backoff_ms),
+            retry_max_backoff: Duration::from_millis(policy.s3_retry_max_backoff_ms),
+            retry_backoff_base: policy.s3_retry_backoff_base,
+        };
 
         let store: Arc<dyn ObjectStore> = Arc::new(
-            request_trace_s3_builder(&bucket, policy.s3_region.as_deref())
+            request_trace_s3_builder(&upload_options, policy.s3_region.as_deref())
                 .build()
                 .context("building request trace S3 client")?,
         );
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let shutdown = CancellationToken::new();
-        let upload_options = S3UploadOptions {
-            bucket,
-            prefix,
-            host,
-            run_id,
-        };
         let worker_shutdown = shutdown.clone();
         let worker = tokio::spawn(async move {
             run_worker(
@@ -338,7 +348,7 @@ impl S3Uploader {
             .with_context(|| format!("invalid request trace S3 object key {key:?}"))?;
         let attributes = Attributes::from_iter([(Attribute::ContentType, "application/gzip")]);
         tokio::time::timeout(
-            S3_OPERATION_TIMEOUT,
+            self.options.operation_timeout,
             self.store
                 .put_opts(&location, body.into(), attributes.into()),
         )
@@ -354,25 +364,32 @@ impl S3Uploader {
     }
 }
 
-fn request_trace_s3_builder(bucket: &str, region: Option<&str>) -> AmazonS3Builder {
-    let retry_config = RetryConfig {
-        max_retries: 2,
-        retry_timeout: S3_OPERATION_TIMEOUT,
-        ..Default::default()
-    };
+fn request_trace_s3_builder(options: &S3UploadOptions, region: Option<&str>) -> AmazonS3Builder {
     let mut builder = AmazonS3Builder::from_env()
-        .with_bucket_name(bucket)
+        .with_bucket_name(&options.bucket)
         .with_config(
             AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
-            format!("{}s", S3_ATTEMPT_TIMEOUT.as_secs()),
+            format!("{}ms", options.attempt_timeout.as_millis()),
         )
-        .with_retry(retry_config);
+        .with_retry(request_trace_s3_retry_config(options));
     if let Some(region) = region {
         builder = builder.with_region(region);
     } else if let Ok(region) = std::env::var("AWS_REGION") {
         builder = builder.with_region(region);
     }
     builder
+}
+
+fn request_trace_s3_retry_config(options: &S3UploadOptions) -> RetryConfig {
+    RetryConfig {
+        backoff: BackoffConfig {
+            init_backoff: options.retry_initial_backoff,
+            max_backoff: options.retry_max_backoff,
+            base: options.retry_backoff_base,
+        },
+        max_retries: options.max_retries,
+        retry_timeout: options.operation_timeout,
+    }
 }
 
 /// Buffers raw JSONL bytes until the batch is ready to flush; gzip
@@ -576,7 +593,7 @@ mod tests {
                 ("AWS_PROXY_URL", Some("http://proxy.example:8080")),
             ],
             || {
-                let builder = request_trace_s3_builder("b", Some("us-west-2"));
+                let builder = request_trace_s3_builder(&test_options(""), Some("us-west-2"));
                 assert_eq!(
                     builder
                         .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp))
@@ -593,6 +610,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn s3_builder_applies_upload_policy() {
+        let mut options = test_options("");
+        options.attempt_timeout = Duration::from_millis(2_500);
+        options.operation_timeout = Duration::from_secs(12);
+        options.max_retries = 4;
+        options.retry_initial_backoff = Duration::from_millis(250);
+        options.retry_max_backoff = Duration::from_secs(5);
+        options.retry_backoff_base = 3.5;
+
+        let builder = request_trace_s3_builder(&options, Some("us-west-2"));
+        assert_eq!(
+            builder
+                .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::Timeout))
+                .as_deref(),
+            Some("2500ms")
+        );
+
+        let retry = request_trace_s3_retry_config(&options);
+        assert_eq!(retry.max_retries, 4);
+        assert_eq!(retry.retry_timeout, Duration::from_secs(12));
+        assert_eq!(retry.backoff.init_backoff, Duration::from_millis(250));
+        assert_eq!(retry.backoff.max_backoff, Duration::from_secs(5));
+        assert_eq!(retry.backoff.base, 3.5);
+    }
+
     fn test_uploader(prefix: &str) -> S3Uploader {
         S3Uploader {
             store: Arc::new(InMemory::new()),
@@ -606,6 +649,12 @@ mod tests {
             prefix: prefix.to_string(),
             host: "frontend-0".to_string(),
             run_id: "cafebabe".to_string(),
+            attempt_timeout: Duration::from_secs(30),
+            operation_timeout: Duration::from_secs(90),
+            max_retries: 2,
+            retry_initial_backoff: Duration::from_millis(100),
+            retry_max_backoff: Duration::from_secs(15),
+            retry_backoff_base: 2.0,
         }
     }
 

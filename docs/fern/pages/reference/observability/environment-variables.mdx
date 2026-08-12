@@ -340,6 +340,32 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
   Periodic flush interval for the `s3` sink in milliseconds. A partial batch is uploaded when this elapses so low-volume traces still reach S3.
 </ParamField>
 
+<ParamField path="DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS" type="integer" default="30000">
+  Timeout for one S3 upload attempt in milliseconds. Values must be from `1000` through `90000` and cannot exceed `DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS" type="integer" default="90000">
+  Total timeout for an S3 upload, including retries, in milliseconds. Values must be from `1000` through `300000` and cannot be shorter than `DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_MAX_RETRIES" type="integer" default="2">
+  Number of S3 upload retries after the initial attempt. Values from `0` through `10` are accepted; the default permits three total attempts.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS" type="integer" default="100">
+  Initial decorrelated-jitter backoff between S3 retries, in milliseconds. Values must be from `10` through `10000`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS" type="integer" default="15000">
+  Maximum decorrelated-jitter backoff between S3 retries, in milliseconds. Values must be from `10` through `60000` and cannot be shorter than `DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE" type="number" default="2.0">
+  Decorrelated-jitter backoff multiplier. Values must be from `1.1` through `10.0`.
+</ParamField>
+
+Out-of-range values use their defaults. If either maximum duration is shorter than its corresponding attempt or initial duration, Dynamo uses the default maximum duration.
+
 <ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT" type="string">
   Optional ZMQ PULL bind address for harness tool events. Configure it on only one process.
 </ParamField>

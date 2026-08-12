@@ -54,7 +54,12 @@ elapses. Object keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{se
 earlier batches. Credentials come from the shared object-store client's provider chain (environment
 variables, IMDS, IRSA, and Pod Identity). Shared AWS config and credential profiles are not loaded;
 how the frontend pod is credentialed is a deployment concern. On terminal upload failure the batch
-is dropped and a warning is logged; no on-disk retry queue is kept.
+is dropped and a warning is logged; no on-disk retry queue is kept. The default policy uses a
+30-second timeout per attempt, a 90-second total operation timeout, and two retries after the first
+attempt. Retries use decorrelated jitter with a 100-millisecond initial backoff, 15-second maximum
+backoff, and a multiplier of 2.0. Configure those limits with the
+`DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS`, `DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS`,
+`DYN_REQUEST_TRACE_S3_MAX_RETRIES`, and `DYN_REQUEST_TRACE_S3_RETRY_*` variables.
 
 ```bash
 export DYN_REQUEST_TRACE=1

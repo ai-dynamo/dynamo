@@ -605,6 +605,39 @@ pub mod llm {
         /// still land in S3. Default `10000` (10 s).
         pub const DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS: &str =
             "DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS";
+
+        /// Timeout for one S3 upload attempt in milliseconds. Values must be
+        /// in the inclusive range `1000..=90000`. Default `30000` (30 s).
+        pub const DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS: &str =
+            "DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS";
+
+        /// Total timeout for an S3 upload, including retries, in milliseconds.
+        /// Values must be in the inclusive range `1000..=300000` and must not
+        /// be shorter than `DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS`. Default
+        /// `90000` (90 s).
+        pub const DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS: &str =
+            "DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS";
+
+        /// Maximum S3 upload retries after the initial attempt. Values must be
+        /// in the inclusive range `0..=10`. Default `2` (three total attempts).
+        pub const DYN_REQUEST_TRACE_S3_MAX_RETRIES: &str = "DYN_REQUEST_TRACE_S3_MAX_RETRIES";
+
+        /// Initial S3 retry backoff in milliseconds. Values must be in the
+        /// inclusive range `10..=10000`. Default `100` (100 ms).
+        pub const DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS: &str =
+            "DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS";
+
+        /// Maximum S3 retry backoff in milliseconds. Values must be in the
+        /// inclusive range `10..=60000` and must not be shorter than
+        /// `DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS`. Default `15000`
+        /// (15 s).
+        pub const DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS: &str =
+            "DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS";
+
+        /// Multiplier for the decorrelated-jitter S3 retry backoff. Values must
+        /// be in the inclusive range `1.1..=10.0`. Default `2.0`.
+        pub const DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE: &str =
+            "DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE";
     }
 }
 
