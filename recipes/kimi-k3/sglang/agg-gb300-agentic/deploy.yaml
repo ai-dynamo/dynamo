@@ -64,7 +64,7 @@ spec:
                 - round-robin
                 - --router-kv-events
                 - --router-min-initial-workers
-                - "1"
+                - "3"
                 - --dyn-chat-processor
                 - sglang
                 - --model-name
@@ -154,8 +154,6 @@ spec:
                 - "64"
                 - --mem-fraction-static
                 - "0.92"
-                - --kv-cache-dtype
-                - fp8_e4m3
                 - --weight-loader-prefetch-checkpoints
                 - --enable-multimodal
                 - --dyn-reasoning-parser
@@ -171,7 +169,6 @@ spec:
                 - --enable-nccl-nvls
                 - --kv-cache-dtype
                 - fp8_e4m3
-                - --enable-metrics
                 - --host
                 - 0.0.0.0
                 - --port
@@ -203,10 +200,10 @@ spec:
                 - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
                   value: "1"
                 # For perf benchmarking only
-                - name: SGLANG_SIMULATE_ACC_LEN
-                  value: "4.05"
-                - name: SGLANG_SIMULATE_ACC_METHOD
-                  value: match-expected
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "4.05"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
               ports:
                 - name: system
                   containerPort: 9090
