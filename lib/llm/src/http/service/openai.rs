@@ -6416,6 +6416,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_responses_conversion_errors_are_client_errors() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::InvalidArgument("ambiguous tools".to_string()).into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
+        );
+    }
+
     // ── streaming dispatch tests ──────────────────────────────────────
 
     use std::collections::{HashMap, HashSet};

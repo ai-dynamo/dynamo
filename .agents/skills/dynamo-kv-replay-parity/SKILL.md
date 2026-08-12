@@ -1,6 +1,6 @@
 ---
 name: dynamo-kv-replay-parity
-description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across native-G1 vLLM and SGLang configurations, including forced preemption and disaggregated handoff lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
+description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across native-G1 vLLM and SGLang configurations, including forced scheduler-pressure and disaggregated handoff lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -37,8 +37,9 @@ Resolve and record before running anything:
 Use the project root `.venv/bin/python` for Python analysis and `uv pip` for any approved
 installation. Do not compare against moving branches or reuse a binary after changing its
 checkout. Do not describe the configuration as "all features"; record explicit feature
-names. The current campaign is native-G1-only; do not add removed KVBM replay features or
-runtime arguments to make a historical command line build.
+names. Feature names can differ between `dynamo-mocker` and `dynamo-bench`. The current
+campaign is native-G1-only; do not add removed KVBM replay features or runtime arguments
+to make a historical command line build.
 
 ## Stage 1: Pin revisions and artifacts
 
@@ -51,12 +52,19 @@ runtime arguments to make a historical command line build.
    `--canonical-reports-jsonl` requires `replay-bench`, which also selects the seeded
    router.
 5. Reuse that artifact across all native-G1 correctness and performance rows. Do not
-   build separate engine or production-routing artifacts. If the named manifest feature
-   or runtime contract no longer exists, stop and report that this protocol needs
+   build separate engine, topology, or production-routing artifacts. If the named manifest
+   feature or runtime contract no longer exists, stop and report that this protocol needs
    updating rather than guessing a replacement matrix.
 6. Copy the artifacts to a temporary campaign directory. Record exact features, binary
    SHA-256, binary size, and `.text` size.
 7. Return each checkout to its original branch after extracting the binaries.
+
+Build the current benchmark artifact with:
+
+```bash
+cargo build --release -p dynamo-bench --no-default-features \
+  --features replay-bench --bench offline_replay_bench
+```
 
 Never build while collecting performance samples.
 
@@ -128,18 +136,27 @@ configuration family when rows genuinely share every relevant parameter. For eac
 configuration, prove that it exercised every applicable path:
 
 - KV-overlap-sensitive routing;
-- immediate and queued placement;
-- a small, bounded number of preemptions at the block-capacity edge;
+- immediate placement, plus queued placement only when queueing is explicitly enabled;
+- the row's bounded preemption or retraction band at the block-capacity edge;
 - disaggregated prefill/decode handoff;
 - terminal cleanup.
 
 Use coverage counters, lifecycle traces, or report evidence rather than inferring these
-paths from successful completion. Target one to three preemptions per configuration. Zero
-means the edge was not exercised; repeated preempt/re-admit cycling, a rapidly growing
-preemption count, or failure to advance virtual time invalidates the fixture. Tune capacity
-or concurrency minimally and identically for baseline and candidate within the row or
-family, and back off rather than accepting a preemption flood. Never tune the revisions
-separately.
+paths from successful completion. Target the bounded pressure band recorded for the
+qualified seed. When no seed exists, start with one to three pressure events to prove the
+lifecycle. For throttle-oriented disaggregated vLLM and SGLang seeds, target 10 to 20 fully
+readmitted pressure events so repeated scheduling is exercised. Zero means the edge was
+not exercised; repeated preempt/re-admit cycling, a rapidly growing pressure count, or
+failure to advance virtual time invalidates the fixture. Tune capacity or concurrency
+minimally and identically for baseline and candidate within the row or family, and back
+off rather than accepting a pressure flood. Never tune the revisions separately.
+
+The offline replay CLI leaves the router queue threshold unset by default. In that mode,
+all route decisions are immediate and zero queued placements are expected; engine-side
+scheduler waiting is not router queue coverage. If queue lifecycle coverage is required,
+enable it through an explicit queue-capable harness or forced fixture and record the exact
+threshold. Account for every route decision, but never relabel scheduler waiting as queued
+placement.
 
 ### Start from qualified internal-polynomial seeds
 
@@ -149,14 +166,17 @@ before searching for capacity edges. Treat those configurations and observed cou
 suggested starting points, not universal constants or substitutes for qualification on the
 pinned baseline. Requalify one frozen configuration identically on both revisions.
 
-Use the reference's expected preemption, retraction, queue, reuse, worker, and handoff
-signals as drift detectors. Matching lifecycle counts do not waive an unstable canonical
-digest; stop correctness and performance work for that row until both internal
-determinism and cross-revision parity are established.
+Use the reference's expected preemption, retraction, reuse, worker, and handoff signals as
+drift detectors. Treat queue counts as expected signals only when queueing was explicitly
+enabled. Matching lifecycle counts do not waive an unstable canonical digest; stop
+correctness and performance work for that row until both internal determinism and
+cross-revision parity are established.
 
 ## Stage 4: Run byte parity
 
-Run the 5,000-request corpus for this authoritative matrix:
+Run the 5,000-request corpus for this authoritative matrix. Treat both disaggregated rows
+as the primary scheduler and handoff requalification. Keep the aggregated rows as
+secondary parity coverage for the corresponding engine semantics.
 
 | Engine semantics | Topology | Memory path | Routing |
 | --- | --- | --- | --- |
@@ -204,9 +224,9 @@ candidate back to known-wrong behavior just to obtain identical bytes.
 Use small deterministic fixtures only for required paths the long corpus cannot reliably
 trigger:
 
-- single-worker KV-router queueing;
+- single-worker KV-router queueing with an explicit queue threshold;
 - a preemption-edge fixture that targets one to three preemptions and then completes;
-- scale-to-zero followed by scale-up and pending-work release; and
+- scale-to-zero followed by scale-up and pending-work release;
 - backend-specific prefill/decode handoff ordering.
 
 Assert bounded preemption, continued virtual-time progress, and the lifecycle itself. A

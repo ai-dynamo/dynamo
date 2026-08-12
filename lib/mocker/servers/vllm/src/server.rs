@@ -131,7 +131,6 @@ impl VllmMockerService {
                     anyhow::anyhow!("max_num_batched_tokens exceeds the Control API range")
                 })?
                 .unwrap_or_default(),
-            supports_explicit_data_parallel_rank: true,
         };
         Ok(Self {
             config: Arc::new(config),
@@ -156,14 +155,38 @@ impl VllmMockerService {
 
     async fn start_generation(
         &self,
-        request: pb::GenerateRequest,
+        request: Request<pb::GenerateRequest>,
     ) -> Result<(PreparedRequest, LiveRequest, OwnedSemaphorePermit), Status> {
+        let data_parallel_rank = request
+            .metadata()
+            .get("x-data-parallel-rank")
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        Box::new(Status::invalid_argument(
+                            "x-data-parallel-rank metadata must be an unsigned 32-bit integer",
+                        ))
+                    })
+            })
+            .transpose()
+            .map_err(|status| *status)?;
+        if let Some(rank) = data_parallel_rank
+            && rank != DP_RANK
+        {
+            return Err(Status::invalid_argument(format!(
+                "data_parallel_rank {rank} is not served; expected {DP_RANK}"
+            )));
+        }
         let permit = self
             .request_permits
             .clone()
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
-        let prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
+        let prepared =
+            PreparedRequest::new(request.into_inner(), &self.config).map_err(|status| *status)?;
         let live = self
             .engine
             .submit(prepared.direct_request())
@@ -184,7 +207,7 @@ impl pb::inference_server::Inference for VllmMockerService {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<pb::GenerateResponse>, Status> {
-        let (prepared, mut live, _permit) = self.start_generation(request.into_inner()).await?;
+        let (prepared, mut live, _permit) = self.start_generation(request).await?;
         let mut output_ids = Vec::with_capacity(prepared.max_output_tokens);
         while let Some(signal) = live.recv().await {
             let token_id = checked_token(&signal).map_err(|status| *status)?;
@@ -205,7 +228,7 @@ impl pb::inference_server::Inference for VllmMockerService {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
-        let (prepared, mut live, permit) = self.start_generation(request.into_inner()).await?;
+        let (prepared, mut live, permit) = self.start_generation(request).await?;
         // Decouple LiveEngine's small fixed per-request buffer from client and
         // transport pacing. A pump drains the engine promptly into a buffer
         // bounded by this request's own token budget, so a bursty producer
