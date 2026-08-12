@@ -464,6 +464,7 @@ pub struct RouterConfig {
 impl RouterConfig {
     #[new]
     #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, encoder_cuda_to_cpu_ratio=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
