@@ -27,6 +27,7 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.lora.manager import get_lora_manager
+from dynamo.common.model_taints import MODEL_TAINT_ROUTE, register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
@@ -45,6 +46,7 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_event_block_size
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -328,7 +330,9 @@ class LoraMixin:
                                 model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.server_args.model_path,
-                                kv_cache_block_size=self.config.server_args.page_size,
+                                kv_cache_block_size=kv_event_block_size(
+                                    self.config.server_args
+                                ),
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.server_args.model_path,
@@ -605,6 +609,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         )
         self._pause_lock = asyncio.Lock()
 
+        # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
+        # phase, so concurrent scale_elastic_ep calls must not overlap.
+        self._scale_ep_lock = asyncio.Lock()
+
         # LoRA tracking (via LoraMixin)
         self._init_lora_tracking()
 
@@ -870,6 +878,101 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
+    def _supports_elastic_ep(self) -> bool:
+        """Whether this handler's engine can serve runtime elastic-EP scaling.
+
+        Not every worker qualifies: encode-only workers run with ``engine=None``,
+        and some engine stand-ins (e.g. route unit-test doubles) have no
+        ``tokenizer_manager``. Probe for the ``scale_elastic_ep`` entry point so
+        those cases skip the route instead of registering one that fails at call
+        time.
+        """
+        if self.engine is None:
+            return False
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        return tokenizer_manager is not None and hasattr(
+            tokenizer_manager, "scale_elastic_ep"
+        )
+
+    def _require_elastic_ep_backend(self) -> Optional[dict]:
+        """Return an error dict if elastic EP is not enabled, else ``None``."""
+        if self.engine.tokenizer_manager.server_args.elastic_ep_backend is None:
+            return {
+                "status": "error",
+                "message": "elastic EP is not enabled (set --elastic-ep-backend)",
+            }
+        return None
+
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale up the expert-parallel group to ``new_ep_size`` ranks.
+
+        SGLang integrates the GPUs contributed by a separately-launched joining
+        group (``--elastic-ep-join-mode scale``), redistributes experts (ePLB)
+        across the widened EP group, and keeps serving on the leader — no
+        restart.
+
+        Only scale-up is supported today: SGLang rejects a target smaller than
+        the current EP size. ``new_ep_size`` is the target number of EP ranks.
+        """
+
+        def err(message: str) -> dict:
+            return {"status": "error", "message": message}
+
+        body = body or {}
+        if not isinstance(body, dict):
+            return err("request body must be a JSON object")
+
+        new_ep_size = body.get("new_ep_size")
+        if new_ep_size is None:
+            return err("Missing required field: new_ep_size")
+        # bool is an int subclass — reject it so True/False can't pose as a size.
+        if isinstance(new_ep_size, bool) or not isinstance(new_ep_size, int):
+            return err(f"new_ep_size must be an integer, got: {new_ep_size!r}")
+        if new_ep_size <= 0:
+            return err("new_ep_size must be a positive integer")
+
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+
+        from sglang.srt.managers.io_struct import ScaleElasticEPReqInput
+
+        tokenizer_manager = self.engine.tokenizer_manager
+        async with self._scale_ep_lock:
+            try:
+                result = await tokenizer_manager.scale_elastic_ep(
+                    ScaleElasticEPReqInput(new_ep_size=new_ep_size)
+                )
+            except Exception as e:
+                logger.error("[ElasticEP] Scaling failed: %s", e)
+                return err(str(e))
+
+        response = {
+            "status": "ok" if result.success else "error",
+            "message": result.message
+            or (
+                f"Scaled to ep_size={new_ep_size}"
+                if result.success
+                else "scale_elastic_ep failed"
+            ),
+            "old_ep_size": result.old_ep_size,
+            "new_ep_size": result.new_ep_size,
+        }
+        if not result.success:
+            response["pending_ep_size"] = result.pending_ep_size
+        return response
+
+    async def is_scaling_elastic_ep(self, body: dict) -> dict:
+        """Return the engine's current elastic-EP scale state.
+
+        Lets a caller poll for scale-up completion (``scale_phase`` reaches
+        ``serving_expanded``).
+        """
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+        return dict(self.engine.tokenizer_manager.get_elastic_ep_state())
+
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -893,13 +996,22 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/update_weights_from_ipc": self.update_weights_from_ipc,
             "control/update_weight_version": self.update_weight_version,
         }
+        # Register elastic-EP scaling only on workers whose engine can serve it
+        # (see _supports_elastic_ep); the rest simply don't expose the route.
+        if self._supports_elastic_ep():
+            built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
+            built_in_routes[
+                "control/is_scaling_elastic_ep"
+            ] = self.is_scaling_elastic_ep
+        reserved_routes = {*built_in_routes, MODEL_TAINT_ROUTE}
         for path, _ in configured_routes:
-            if path in built_in_routes:
+            if path in reserved_routes:
                 raise ValueError(
                     f"Configured SGLang engine route /engine/{path} collides "
                     "with a built-in route"
                 )
 
+        register_model_taint_route(runtime, self.generate_endpoint)
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
         for path, configured_handler in configured_routes:

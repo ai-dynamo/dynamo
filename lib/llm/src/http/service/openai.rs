@@ -48,8 +48,12 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
-    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, SESSION_AFFINITY_CONTEXT_KEY,
+    SessionAffinityId, agent_context_from_headers, apply_header_routing_overrides,
+    session_affinity_from_headers,
+};
+use crate::protocols::common::input_trigger::{
+    classify_chat_request, classify_completion_request, classify_response_request,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -133,6 +137,12 @@ pub(crate) struct ErrorMessage {
     metric_error_type: Option<ErrorType>,
 }
 
+impl ErrorMessage {
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
@@ -194,7 +204,7 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
 /// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
 /// `Backend(InvalidArgument)`; both variants are 400-worthy.
-fn find_invalid_argument_in_chain<'a>(
+pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
     use dynamo_runtime::error::{BackendError, ErrorType};
@@ -595,11 +605,25 @@ pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request_id: String,
     headers: &HeaderMap,
 ) -> Result<Context<T>, ErrorResponse> {
+    context_from_headers_with_input_trigger(request, request_id, headers, |_| None)
+}
+
+fn context_from_headers_with_input_trigger<T, F>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+    classify_input_trigger: F,
+) -> Result<Context<T>, ErrorResponse>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce(&T) -> Option<InputTrigger>,
+{
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(agent_context) = agent_context_from_headers(headers) {
+    if let Some(mut agent_context) = agent_context_from_headers(headers) {
+        agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity_from_headers(headers) {
@@ -709,7 +733,10 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_completion_request(request))
+        })?;
     let context = request.context();
 
     // create the connection handles
@@ -1875,7 +1902,10 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_chat_request(request))
+        })?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2956,7 +2986,10 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request =
+        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_response_request(request))
+        })?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4277,10 +4310,16 @@ async fn audio_speech(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate audio"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Audios);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -4294,12 +4333,17 @@ async fn audio_speech(
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold audio stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold audio stream")
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     // Check for failure before marking success
     if response.status == "failed" {
+        // Without this the guard drops on its default and books this 400 as an
+        // internal error.
+        inflight.mark_error(ErrorType::Validation);
         return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
     }
 
@@ -4749,6 +4793,7 @@ mod tests {
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
                 kv_hints: None,
+                input_trigger: None,
             },
         );
 
@@ -4764,6 +4809,42 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
+    }
+
+    #[test]
+    fn test_context_from_headers_classifies_only_agent_requests() {
+        let calls = std::cell::Cell::new(0);
+        let classify = |_: &()| {
+            calls.set(calls.get() + 1);
+            Some(InputTrigger::Other)
+        };
+
+        context_from_headers_with_input_trigger(
+            (),
+            "request-1".to_string(),
+            &HeaderMap::new(),
+            classify,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let source = context_from_headers_with_input_trigger(
+            (),
+            "request-2".to_string(),
+            &headers,
+            classify,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            source
+                .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+                .unwrap()
+                .input_trigger,
+            Some(InputTrigger::Other)
+        );
     }
 
     #[test]
@@ -6335,6 +6416,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_responses_conversion_errors_are_client_errors() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::InvalidArgument("ambiguous tools".to_string()).into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
+        );
+    }
+
     // ── streaming dispatch tests ──────────────────────────────────────
 
     use std::collections::{HashMap, HashSet};
@@ -7361,6 +7455,7 @@ mod tests {
             content: Some(vec![ChatCompletionTokenLogprob {
                 token: "h".to_string(),
                 logprob: -0.5,
+                token_id: None,
                 bytes: Some(vec![104]),
                 top_logprobs: vec![],
             }]),

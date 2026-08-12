@@ -117,7 +117,3 @@ type PodSnapshotContentList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PodSnapshotContent `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&PodSnapshotContent{}, &PodSnapshotContentList{})
-}

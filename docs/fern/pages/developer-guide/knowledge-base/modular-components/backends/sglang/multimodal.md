@@ -98,6 +98,8 @@ SGLang RadixAttention includes a per-image `pad_value` token in its prefix-cache
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 
+Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so image identity no longer contributes to cache overlap.
+
 Launch an aggregated deployment with multimodal KV routing:
 
 ```bash

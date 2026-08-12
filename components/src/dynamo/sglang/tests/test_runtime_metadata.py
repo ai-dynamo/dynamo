@@ -11,6 +11,7 @@ from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
+    kv_event_block_size,
 )
 
 pytestmark = [
@@ -20,6 +21,19 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    "server_args, expected",
+    [
+        (SimpleNamespace(page_size=64), 64),
+        (SimpleNamespace(page_size=64, dcp_size=1), 64),
+        (SimpleNamespace(page_size=64, dcp_size=None), 64),
+        (SimpleNamespace(page_size=64, dcp_size=8), 512),
+    ],
+)
+def test_kv_event_block_size_accounts_for_dcp(server_args, expected):
+    assert kv_event_block_size(server_args) == expected
 
 
 def test_spec_decode_runtime_data_uses_speculative_num_steps():
@@ -181,14 +195,17 @@ def test_hicache_native_offloading_capacity_ignores_invalid_values(value):
     )
 
 
-def test_hicache_requires_reported_host_capacity():
-    assert (
-        get_hicache_native_offloading_capacity(
-            SimpleNamespace(hicache_write_policy="write_back"),
-            {"max_total_num_tokens": 100},
-        )
-        is None
-    )
+def test_hicache_derives_ratio_based_capacity():
+    assert get_hicache_native_offloading_capacity(
+        SimpleNamespace(
+            enable_hierarchical_cache=True,
+            hicache_size=0,
+            hicache_write_policy="write_back",
+            hicache_ratio=3.0,
+            page_size=16,
+        ),
+        {"max_total_num_tokens": 100},
+    ) == {"total_tokens": 304}
 
 
 @pytest.mark.parametrize(

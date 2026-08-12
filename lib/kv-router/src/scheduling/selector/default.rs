@@ -96,12 +96,12 @@ pub struct DefaultWorkerSelector {
     picker: DefaultWorkerPicker,
 }
 
-pub struct DefaultWorkerScorer<C = KvRouterConfig> {
+pub(super) struct DefaultWorkerScorer<C = KvRouterConfig> {
     pub(super) kv_router_config: C,
     pub(super) worker_type: &'static str,
 }
 
-pub struct DefaultWorkerPicker {
+pub(super) struct DefaultWorkerPicker {
     default_temperature: f64,
     // Preserve DefaultWorkerSelector's Sync contract. Zero-temperature selection never locks.
     softmax_scratch: Mutex<DefaultSoftmaxScratch>,
@@ -179,8 +179,9 @@ impl DefaultWorkerSelector {
     }
 }
 
+#[cfg(test)]
 impl DefaultWorkerScorer<KvRouterConfig> {
-    pub fn new(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
+    pub(super) fn new(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
         Self {
             kv_router_config,
             worker_type,
@@ -226,7 +227,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
         let shared_overlap_blocks =
-            weights.shared_cache_multiplier * cache.shared_beyond_device_blocks as f64;
+            weights.shared_cache_multiplier * cache.default_shared_beyond_device_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
@@ -244,7 +245,8 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             1.0
         };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit * cache.device_overlap_blocks
+        let overlap_credit_blocks = effective_overlap_score_credit
+            * cache.default_device_overlap_blocks
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
             + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;
@@ -266,7 +268,12 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             let overlap_adjusted_decode_blocks =
                 (decode_cost_blocks - overlap_credit_blocks).max(0.0);
             let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            // Stamped for the same reason as the two rows below: this row is emitted from the
+            // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
+            // it, and this branch returns early without reaching them.
             tracing::debug!(
+                request_id = context.request_id,
+                worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
                  = max(0, {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}) + {active_request_cost_blocks:.3}",
@@ -286,7 +293,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if cache.shared_beyond_device_blocks > 0 {
+        if cache.default_shared_beyond_device_blocks > 0 {
             tracing::debug!(
                 request_id = context.request_id,
                 worker_type = self.worker_type,
@@ -298,7 +305,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                cache.shared_beyond_device_blocks,
+                cache.default_shared_beyond_device_blocks,
                 load.raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
@@ -335,7 +342,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
 }
 
 impl DefaultWorkerPicker {
-    pub fn new(default_temperature: f64) -> Self {
+    pub(super) fn new(default_temperature: f64) -> Self {
         Self::from_parts(
             default_temperature,
             #[cfg(any(test, feature = "bench"))]
@@ -349,7 +356,9 @@ where
     C: Borrow<KvRouterConfig> + Send,
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+        WorkerInputs::ALL
+            | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+            | WorkerInputs::DEFAULT_POLICY_CACHE
     }
 
     fn score(
@@ -395,7 +404,9 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
 ) -> Option<(WorkerWithDpRank, f64)> {
     debug_assert_eq!(
         scorer.required_worker_inputs(),
-        WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+        WorkerInputs::ALL
+            | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+            | WorkerInputs::DEFAULT_POLICY_CACHE
     );
     if let Some(worker) = eligibility.pinned_worker() {
         let row = input.row(worker, None, WorkerInputs::ALL);
@@ -602,7 +613,7 @@ mod tests {
             request.eligibility(),
             block_size,
             weights,
-            WorkerInputs::ALL,
+            WorkerInputs::ALL | WorkerInputs::DEFAULT_POLICY_CACHE,
         );
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
@@ -706,7 +717,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1013,7 +1024,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1066,7 +1077,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1137,7 +1148,7 @@ mod tests {
                 priority_jump: 0.0,
                 strict_priority: 0,
                 policy_class: None,
-                session_id: None,
+                session_context: None,
                 expected_output_tokens: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
@@ -1206,7 +1217,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1271,7 +1282,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1352,7 +1363,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1424,7 +1435,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1700,7 +1711,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1717,6 +1728,51 @@ mod tests {
             result.worker, worker0,
             "effective overlap should still credit older callers without tier maps"
         );
+    }
+
+    #[test]
+    fn summary_overlap_fallback_preserves_default_shared_prefix() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
+        let mut request = base_request(64);
+        request.overlap.effective_overlap_blocks.insert(worker, 2.0);
+        #[allow(clippy::single_range_in_vec_init)]
+        let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
+        request.shared_cache_hits = Some(shared_hits);
+        let default_input = WorkerSelectionInput::new(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+            LogitWeights {
+                overlap_score_credit: 1.0,
+                overlap_score_credit_decay: 0.0,
+                prefill_load_scale: 1.0,
+                shared_cache_multiplier: 1.0,
+            },
+            WorkerInputs::CACHE | WorkerInputs::DEFAULT_POLICY_CACHE,
+        );
+        let custom_input = WorkerSelectionInput::new(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+            LogitWeights {
+                overlap_score_credit: 1.0,
+                overlap_score_credit_decay: 0.0,
+                prefill_load_scale: 1.0,
+                shared_cache_multiplier: 1.0,
+            },
+            WorkerInputs::CACHE,
+        );
+
+        let default_row = default_input.row(worker, None, WorkerInputs::CACHE);
+        let custom_row = custom_input.row(worker, None, WorkerInputs::CACHE);
+
+        assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
+        assert_eq!(custom_row.cache.shared_beyond_device_blocks, 4);
+        assert_eq!(default_row.cache.default_device_overlap_blocks, 2.0);
+        assert_eq!(default_row.cache.default_shared_beyond_device_blocks, 2);
     }
 
     /// Without shared cache hits, the scoring should be unchanged.
@@ -1757,7 +1813,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

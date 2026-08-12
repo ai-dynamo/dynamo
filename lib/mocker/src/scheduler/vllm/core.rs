@@ -53,9 +53,25 @@ pub(crate) struct VllmRequestState {
     pub(crate) num_computed_tokens: usize,
     pub(crate) num_preemptions: usize,
     pub(crate) offload_dependency: Option<OffloadDependency>,
+    /// Prefix tokens found cached at first admission (set once: a preempted
+    /// request re-probes against a cache warmed by its own blocks, which
+    /// would inflate the value).
+    pub(crate) cached_prefix_tokens: Option<usize>,
+    /// Whether the admission cache truth was already attached to a signal.
+    pub(crate) cached_tokens_signaled: bool,
 }
 
 impl VllmRequestState {
+    /// Admission cache truth rides the request's first signal only.
+    fn take_cached_tokens_for_signal(&mut self) -> Option<usize> {
+        if self.cached_tokens_signaled {
+            None
+        } else {
+            self.cached_tokens_signaled = true;
+            self.cached_prefix_tokens
+        }
+    }
+
     fn prompt_is_prebuilt(&self) -> bool {
         self.num_computed_tokens >= self.sequence.num_input_tokens()
             && self.sequence.num_allocated_tokens() >= self.sequence.num_input_tokens()
@@ -879,18 +895,16 @@ impl VllmCore {
     ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let prompt_len = request.tokens.len();
-        let mut max_output_tokens = request.max_output_tokens;
+        let requested_max_output_tokens = request.max_output_tokens;
+        let mut max_output_tokens = request.effective_max_output_tokens();
         let planned_output_ids = request.output_token_ids;
-        if let Some(planned_output_ids) = planned_output_ids.as_ref()
-            && planned_output_ids.len() != max_output_tokens
-        {
+        if planned_output_ids.is_some() && max_output_tokens != requested_max_output_tokens {
             tracing::warn!(
                 %uuid,
-                requested = max_output_tokens,
-                planned = planned_output_ids.len(),
+                requested = requested_max_output_tokens,
+                planned = max_output_tokens,
                 "planned output token count differs from max_output_tokens; using planned count"
             );
-            max_output_tokens = planned_output_ids.len();
         }
         if let Some(clamped) = policy::normalize_max_output_tokens(
             self.args.scheduling_policy(),
@@ -939,6 +953,8 @@ impl VllmCore {
             num_computed_tokens: 0,
             num_preemptions: 0,
             offload_dependency: None,
+            cached_prefix_tokens: None,
+            cached_tokens_signaled: false,
         }
     }
 
@@ -1621,6 +1637,7 @@ impl VllmCore {
                 completed: true,
                 rejected: true,
                 handoff_delay_ms: None,
+                cached_tokens: None,
             });
         }
         #[cfg(debug_assertions)]
@@ -2159,6 +2176,12 @@ impl VllmCore {
         *token_budget = token_budget.saturating_sub(tokens_used);
 
         let admission = if from_waiting {
+            self.state
+                .requests
+                .get_mut(&uuid)
+                .unwrap_or_else(|| panic!("schedule_request: {uuid} removed mid-pass (admission)"))
+                .cached_prefix_tokens
+                .get_or_insert(cached_prefix_tokens);
             Some(AdmissionEvent {
                 uuid,
                 reused_input_tokens: cached_prefix_tokens,
@@ -2207,6 +2230,12 @@ impl VllmCore {
         // without manufacturing an output token.
         let mut output_signals = Vec::with_capacity(already_complete.len() + ready.len());
         for (uuid, handoff_delay_ms, cleanup) in already_complete {
+            // The request's only signal; read before complete_source drops the state.
+            let cached_tokens = self
+                .state
+                .requests
+                .get_mut(&uuid)
+                .and_then(VllmRequestState::take_cached_tokens_for_signal);
             self.complete_source(uuid, cleanup);
             output_signals.push(OutputSignal {
                 uuid,
@@ -2214,6 +2243,7 @@ impl VllmCore {
                 completed: true,
                 rejected: false,
                 handoff_delay_ms,
+                cached_tokens,
             });
         }
 
@@ -2343,22 +2373,30 @@ impl VllmCore {
                 continue;
             }
 
-            let handoff_delay_ms = self.state.requests.get(&uuid).and_then(|request| {
-                request.debug_assert_progress(uuid);
-                compute_prefill_handoff_delay_ms(
-                    self.args.worker_type,
-                    completed,
-                    request.sequence.num_input_tokens(),
-                    self.args.kv_transfer_bandwidth,
-                    self.args.kv_bytes_per_token,
-                )
-            });
+            let worker_type = self.args.worker_type;
+            let kv_transfer_bandwidth = self.args.kv_transfer_bandwidth;
+            let kv_bytes_per_token = self.args.kv_bytes_per_token;
+            let (handoff_delay_ms, cached_tokens) = match self.state.requests.get_mut(&uuid) {
+                Some(request) => {
+                    request.debug_assert_progress(uuid);
+                    let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                        worker_type,
+                        completed,
+                        request.sequence.num_input_tokens(),
+                        kv_transfer_bandwidth,
+                        kv_bytes_per_token,
+                    );
+                    (handoff_delay_ms, request.take_cached_tokens_for_signal())
+                }
+                None => (None, None),
+            };
             let output_signal = OutputSignal {
                 uuid,
                 token_id: emitted_token_id,
                 completed,
                 rejected: false,
                 handoff_delay_ms,
+                cached_tokens,
             };
             if completed {
                 self.complete_source(uuid, deferred_deref);
@@ -2578,7 +2616,7 @@ impl VllmCore {
                     );
                 }
 
-                let prompt_tokens = {
+                let (prompt_tokens, cached_tokens) = {
                     let request = self
                         .state
                         .requests
@@ -2587,13 +2625,15 @@ impl VllmCore {
                     if !is_complete && let RequestKvState::Kvbm(sequence) = &mut request.sequence {
                         sequence.commit_allocation(sequence.len());
                     }
-                    request.sequence.num_input_tokens()
+                    let cached_tokens = request.take_cached_tokens_for_signal();
+                    (request.sequence.num_input_tokens(), cached_tokens)
                 };
                 output_signals.push(OutputSignal {
                     uuid,
                     token_id: Some(token_id),
                     completed: is_complete,
                     rejected: false,
+                    cached_tokens,
                     handoff_delay_ms: compute_prefill_handoff_delay_ms(
                         self.args.worker_type,
                         is_complete,

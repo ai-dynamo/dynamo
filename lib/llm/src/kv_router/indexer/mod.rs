@@ -10,9 +10,9 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     indexer::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
-        ThreadPoolIndexer,
+        ThreadPoolIndexer, record_unsupported_residency_event,
     },
-    protocols::{DpRank, RouterEvent, WorkerId},
+    protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -30,7 +30,9 @@ mod recovery;
 pub mod remote;
 mod side;
 
-pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
+pub use self::embedding_cache::{
+    EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
+};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
@@ -238,57 +240,70 @@ impl Indexer {
     }
 
     pub(crate) async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let targets_primary = match event.targets_primary() {
+            Ok(targets_primary) => targets_primary,
+            Err(_) => {
+                match self {
+                    Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                        lower_tier.record_unsupported_residency_event(&event);
+                    }
+                    Self::Remote { .. } | Self::None => {
+                        record_unsupported_residency_event(None, &event);
+                    }
+                }
+                return Ok(());
+            }
+        };
+        let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Self::KvIndexer {
                 primary,
                 lower_tier,
                 ..
-            } => match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    primary
-                        .event_sender()
-                        .send(event.clone())
-                        .await
-                        .map_err(|_| KvRouterError::IndexerOffline)?;
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        primary
+                            .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
+                            .await?;
+                    }
 
                     for indexer in lower_tier.all() {
-                        indexer.enqueue_event(event.clone())?;
+                        indexer.apply_event_and_wait(event.clone()).await?;
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
+                } else if targets_primary {
                     primary
                         .event_sender()
                         .send(event)
                         .await
                         .map_err(|_| KvRouterError::IndexerOffline)?;
-                }
-                _ => {
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
                         .enqueue_event(event)?;
                 }
-            },
+            }
             Self::Concurrent {
                 primary,
                 lower_tier,
                 ..
-            } => match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    primary.enqueue_event(event.clone())?;
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        primary.apply_event_and_wait(event.clone()).await?;
+                    }
 
                     for indexer in lower_tier.all() {
-                        indexer.enqueue_event(event.clone())?;
+                        indexer.apply_event_and_wait(event.clone()).await?;
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
+                } else if targets_primary {
                     primary.enqueue_event(event)?;
-                }
-                _ => {
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
                         .enqueue_event(event)?;
                 }
-            },
+            }
             Self::Remote { .. } | Self::None => {}
         }
         Ok(())
@@ -542,6 +557,7 @@ mod tests {
                 ))
                 .await;
         }
+        flush_indexer(&indexer).await;
 
         indexer
             .reset_worker_dp_rank_and_wait(reset_rank.worker_id, reset_rank.dp_rank)

@@ -30,7 +30,15 @@ this applies the same rule to the components that hold CSS directly.
 
 Usage: python3 check_style_components.py [files...]
 With no arguments, checks every docs/fern/components/*Styles.tsx.
+
+Coverage stops at *Styles.tsx rather than every components/*.tsx because
+roughly twenty components hold a CSS literal and three of them
+(ModelEABuildCards, TagLookup, TerminalDemo) interpolate into it deliberately,
+which this check reads as a defect. Widening it properly needs a way to mark
+those as intentional. Until then, a component with its own CSS should keep it
+in a *Styles.tsx file, as PublicationsStyles.tsx does.
 """
+
 from __future__ import annotations
 
 import re
@@ -49,6 +57,11 @@ def check(path: Path) -> list[str]:
     if not matches:
         return problems
 
+    # Guarded like check_agent_twins does: pre-commit passes repo-relative
+    # paths, so an unguarded relative_to raises ValueError before the message
+    # prints -- on the one run that matters, the author gets a pathlib
+    # traceback instead of the diagnostic this check exists to produce.
+    rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
     for match in matches:
         name, body = match.group(1), match.group(2)
         start_line = text[: match.start(2)].count("\n") + 1
@@ -59,7 +72,7 @@ def check(path: Path) -> list[str]:
             line = start_line + body[:index].count("\n")
             snippet = body.splitlines()[body[:index].count("\n")].strip()[:72]
             problems.append(
-                f"{path.relative_to(REPO)}:{line}: {label} inside {name}\n"
+                f"{rel}:{line}: {label} inside {name}\n"
                 f"      {snippet}\n"
                 f"      A {label} ends the template literal and breaks the build."
             )
@@ -68,7 +81,15 @@ def check(path: Path) -> list[str]:
 
 def main() -> int:
     args = [Path(a) for a in sys.argv[1:]]
-    targets = args or sorted((ROOT / "components").glob("*Styles.tsx"))
+    # The *Styles.tsx convention plus the two components that hold CSS under
+    # another name. Not every component: this check forbids interpolation,
+    # which holds for a pure CSS literal and not for ordinary TSX.
+    targets = args or sorted(
+        p
+        for p in (ROOT / "components").glob("*.tsx")
+        if p.stem.endswith("Styles")
+        or p.stem in {"ReleaseSupportMatrix", "FeatureInteractions"}
+    )
     targets = [t for t in targets if t.suffix == ".tsx" and t.exists()]
 
     problems: list[str] = []

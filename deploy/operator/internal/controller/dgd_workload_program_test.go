@@ -36,7 +36,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -171,7 +171,7 @@ func TestPersistWorkloadProgramResultEmitsEventsAfterStatusUpdate(t *testing.T) 
 					},
 				}).
 				Build()
-			recorder := record.NewFakeRecorder(1)
+			recorder := events.NewFakeRecorder(1)
 			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Recorder: recorder}
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			result := newWorkloadProgramResult(dgd)
@@ -375,7 +375,7 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &commonController.RuntimeConfig{},
 	}
@@ -479,7 +479,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 					},
 				}).
 				Build()
-			recorder := record.NewFakeRecorder(1)
+			recorder := events.NewFakeRecorder(1)
 			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
