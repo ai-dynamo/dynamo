@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -21,6 +23,8 @@ type RestoreOptions struct {
 	CUDADeviceMap  string
 	CgroupRoot     string
 	TargetPodIP    string
+	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
+	BundleDir string
 }
 
 type RestoreInNamespaceResult struct {
@@ -28,6 +32,11 @@ type RestoreInNamespaceResult struct {
 	NSRestoreSetupDuration time.Duration `json:"nsrestoreSetupDuration"`
 	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
 	CUDADuration           time.Duration `json:"cudaDuration"`
+}
+
+// TotalDuration returns the sum of all in-namespace restore phase durations.
+func (r RestoreInNamespaceResult) TotalDuration() time.Duration {
+	return r.NSRestoreSetupDuration + r.CRIURestoreDuration + r.CUDADuration
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -120,9 +129,27 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		}
 	}()
 
+	// Open the cuda-checkpoint-helper fd BEFORE CRIU runs. CRIU restores the
+	// original mount namespace of the checkpointed process, which did not include
+	// the bundle mount at /tmp/snapshot-binaries. The C helper's umount code
+	// tolerates ENOENT from umount2 with the comment "Already gone (CRIU removed
+	// it during namespace restore)" — confirming this is observed behaviour. By
+	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
+	// the fd remains valid even if the mount is gone.
+	var cudaHelperFdPath string
+	if !m.CUDA.IsEmpty() {
+		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
+		f, err := os.Open(helperPath)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to open cuda-checkpoint-helper before CRIU restore: %w", err)
+		}
+		defer f.Close()
+		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+	}
+
 	// CRIU restore
 	criuRestoreStart := time.Now()
-	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -166,7 +193,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
+		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}

@@ -93,10 +93,11 @@ pub enum WorkerKvQueryResponse {
     /// Events served from the circular buffer with original event IDs. The batch
     /// is recovery-equivalent to replaying the requested `start_event_id` through
     /// the current buffered tail. If the rank stream contains one or more `Cleared`
-    /// events, the source may omit events before the latest clear while preserving
-    /// that clear event and all following events. `last_event_id` is taken from the
-    /// same buffer snapshot and should be used as the recovery watermark after
-    /// applying the batch.
+    /// all-domain `Cleared` events, the source may omit events before the latest such
+    /// clear while preserving that clear event and all following events. Domain-scoped
+    /// clears remain ordinary ordered events. `last_event_id` is taken from the same
+    /// buffer snapshot and should be used as the recovery watermark after applying the
+    /// batch.
     Events {
         events: Vec<RouterEvent>,
         last_event_id: u64,
@@ -107,10 +108,14 @@ pub enum WorkerKvQueryResponse {
     TreeDump {
         events: Vec<RouterEvent>,
         last_event_id: u64,
+        /// Scope authoritatively represented by this snapshot. Legacy responses
+        /// omitted this field and always represented the whole rank.
+        #[serde(default)]
+        reset_scope: ResetScope,
     },
     /// The exact tree dump could not be produced. This is distinct from an
-    /// authoritative empty tree so recovery can apply its explicit fail-open
-    /// reset policy without mistaking an indexer failure for exact state.
+    /// authoritative empty tree; recovery must leave indexed state and its
+    /// admission cursor unchanged.
     TreeDumpFailed { last_event_id: u64, message: String },
     /// Requested range is newer than available data
     TooNew {

@@ -339,7 +339,15 @@ service.
 </ParamField>
 
 <ParamField path="min_endpoint" type="integer" default="1">
-  Minimum number of engine endpoints (replicas) to maintain per worker type.
+  Minimum engine endpoints for aggregated deployments. In disaggregated deployments, this value applies to both prefill and decode unless a role-specific value is set. In prefill-only or decode-only deployments, it supplies the active role when the corresponding role-specific value is unset. Must be nonnegative; use `0` for scale-to-zero compatibility.
+</ParamField>
+
+<ParamField path="prefill_min_endpoint" type="integer | null" default="null">
+  Minimum prefill endpoints in disaggregated and prefill-only modes. When set, replaces the prefill value supplied by `min_endpoint`. Must be at least `1`.
+</ParamField>
+
+<ParamField path="decode_min_endpoint" type="integer | null" default="null">
+  Minimum decode endpoints in disaggregated and decode-only modes. When set, replaces the decode value supplied by `min_endpoint`. Aggregated deployments use `min_endpoint`. Must be at least `1`.
 </ParamField>
 
 <ParamField path="decode_engine_num_gpu" type="integer" default="null">
@@ -496,6 +504,10 @@ These fields default from environment variables and are excluded from serialized
 
 <ParamField path="live_dashboard_port" type="integer" default="8080">
   Port for the live diagnostics dashboard HTTP server. `0` disables. When enabled, visit `http://host:port/` for a real-time Plotly report.
+</ParamField>
+
+<ParamField path="control_api_port" type="integer" default="9086">
+  Port for the loopback-only runtime minimum-endpoint API. `0` disables the API. The operator does not expose this port through a Kubernetes Service.
 </ParamField>
 
 ### Scheduling and plugin pipeline

@@ -716,9 +716,9 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
-        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID, HEADER_DYNAMO_PARENT_SESSION_ID,
-        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
-        HEADER_OPENCODE_SESSION_ID,
+        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
+        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -1056,13 +1056,7 @@ mod tests {
 
         let cases = [
             (HEADER_CLAUDE_CODE_SESSION_ID, "claude-run-1", None, None),
-            ("Session-ID", "codex-run-1", None, None),
-            (
-                HEADER_CODEX_SESSION_ID,
-                "codex-run-2",
-                Some("opencode-parent"),
-                None,
-            ),
+            (HEADER_CODEX_THREAD_ID, "codex-root", None, None),
             (
                 HEADER_OPENCODE_SESSION_ID,
                 "opencode-run-1",
@@ -1094,13 +1088,62 @@ mod tests {
     }
 
     #[test]
+    fn agent_context_from_codex_thread_headers_preserves_subagent_lineage() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-child".parse().unwrap());
+        headers.insert(HEADER_CODEX_PARENT_THREAD_ID, "codex-root".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "codex-child");
+        assert_eq!(
+            agent_context.parent_session_id.as_deref(),
+            Some("codex-root")
+        );
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "codex-child"
+        );
+    }
+
+    #[test]
+    fn agent_context_ignores_self_parent_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_PARENT_THREAD_ID,
+            "codex-thread".parse().unwrap(),
+        );
+
+        assert_eq!(
+            agent_context_from_headers(&headers)
+                .unwrap()
+                .parent_session_id,
+            None
+        );
+    }
+
+    #[test]
+    fn codex_session_id_is_ignored_without_thread_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", "codex-run".parse().unwrap());
+        assert!(agent_context_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_id,
+            "codex-thread"
+        );
+    }
+
+    #[test]
     fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
         );
-        headers.insert(HEADER_CODEX_SESSION_ID, "codex-session".parse().unwrap());
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
         headers.insert(
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),
