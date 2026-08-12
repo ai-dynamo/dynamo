@@ -14,8 +14,7 @@
 # limitations under the License.
 # Dynamo Snapshot - Checkpoint/Restore Infrastructure
 # This chart deploys the checkpoint storage (PVC) and CRIU agent (DaemonSet)
-# in a single namespace. Install this chart in each namespace where you want
-# to enable checkpoint/restore functionality for DynamoGraphDeployments.
+# in a single namespace. Every agent pod mounts the same RWX checkpoint PVC.
 
 # Container runtime backend. Leave socketPath empty to use the conventional
 # path for the chosen type.
@@ -34,23 +33,13 @@ storage:
   # Only pvc is implemented today.
   type: pvc
 
-  # How snapshot-agent accesses checkpoint storage:
-  # - agentMount: snapshot-agent mounts the PVC directly. This is the legacy
-  #   namespace-local mode and requires installing the chart in every workload
-  #   namespace that needs checkpoints. On multi-node clusters this generally
-  #   requires ReadWriteMany storage because DaemonSet pods on multiple nodes
-  #   mount the same PVC.
-  # - podMount: workload checkpoint/restore pods mount their namespace-local
-  #   PVC, and a cluster-level snapshot-agent reaches it through
-  #   /host/proc/<pid>/root. Use this when installing one snapshot-agent
-  #   DaemonSet in an infrastructure namespace. Because the DaemonSet no longer
-  #   mounts the PVC from every GPU node, suitable ReadWriteOnce storage
-  #   classes can be used for sequential checkpoint/restore workflows.
-  accessMode: agentMount
-
-  # PVC configuration (when type=pvc)
+  # PVC configuration. Chart-created claims always use ReadWriteMany.
   pvc:
-    # Create a new PVC (set to false if using existing PVC)
+    # Create a new PVC (set to false if using existing PVC).
+    # An existing claim must also be ReadWriteMany: every agent pod mounts it,
+    # so on a multi-node cluster a ReadWriteOnce claim leaves every agent but
+    # one stuck in ContainerCreating, with a scheduler message that never
+    # mentions access modes.
     create: true
     # PVC name used by the snapshot-agent checkpoint store
     name: snapshot-pvc
@@ -58,13 +47,7 @@ storage:
     size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
-    # Access mode. ReadWriteMany is safest for concurrent multi-node access;
-    # podMount can use ReadWriteOnce for sequential checkpoint/restore when
-    # the storage backend can attach the volume to the active workload node.
-    accessMode: ReadWriteMany
-    # PVC mount path. In agentMount mode this is mounted inside the
-    # snapshot-agent pod. In podMount mode the operator must mount the PVC
-    # into checkpoint/restore workload pods at the same path.
+    # PVC mount path inside every snapshot-agent pod.
     basePath: /checkpoints
 
   # Reserved for future snapshot-owned backends. Unsupported today.
@@ -150,10 +133,10 @@ rbac:
   # Create RBAC resources
   create: true
 
-  # Namespace-scoped RBAC (recommended, required for PVC storage)
+  # Namespace-scoped RBAC (recommended)
   # - true (default): Creates Role/RoleBinding, agent watches pods in chart's namespace only
   # - false: Creates ClusterRole/ClusterRoleBinding, agent watches all pods on assigned nodes
-  # Note: PVC storage requires namespace-scoped mode (true) as PVCs are namespace-scoped
+  # The PVC stays in the chart release namespace in either mode.
   namespaceRestricted: true
 
 # Static configuration (loaded from ConfigMap)

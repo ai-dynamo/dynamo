@@ -141,7 +141,7 @@ func TestExecMounter_Unmount_Error(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 
-	err = handle.Unmount(context.Background())
+	err = handle.Unmount(context.Background(), false)
 	if err == nil {
 		t.Fatal("expected error from umount-fd, got nil")
 	}
@@ -150,7 +150,7 @@ func TestExecMounter_Unmount_Error(t *testing.T) {
 	}
 
 	// Second call must return the same stored error without invoking the binary again.
-	err2 := handle.Unmount(context.Background())
+	err2 := handle.Unmount(context.Background(), false)
 	if err2 != err {
 		t.Errorf("second Unmount returned different error: %v", err2)
 	}
@@ -167,10 +167,10 @@ func TestExecMounter_Unmount_Idempotent(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 
-	if err := handle.Unmount(context.Background()); err != nil {
+	if err := handle.Unmount(context.Background(), false); err != nil {
 		t.Fatalf("first Unmount: %v", err)
 	}
-	if err := handle.Unmount(context.Background()); err != nil {
+	if err := handle.Unmount(context.Background(), false); err != nil {
 		t.Fatalf("second Unmount: %v", err)
 	}
 
@@ -184,4 +184,90 @@ func TestExecMounter_Unmount_Idempotent(t *testing.T) {
 	if umountFdCalls != 1 {
 		t.Errorf("expected exactly 1 umount-fd call, got %d (all calls: %v)", umountFdCalls, calls)
 	}
+}
+
+// TestExecMounter_Mount_AttributeTokens covers the whole attribute set reaching
+// the helper. Attributes are inputs now rather than something the subcommand
+// implies, so the order and completeness of the tokens is the contract.
+func TestExecMounter_Mount_AttributeTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		opts MountOptions
+		want []string
+	}{
+		{
+			name: "no attributes at all",
+			opts: MountOptions{},
+			want: nil,
+		},
+		{
+			name: "bundle policy leaves execution alone",
+			opts: MountOptions{ReadOnly: true, NoSuid: true, NoDev: true},
+			want: []string{"ro", "nosuid", "nodev"},
+		},
+		{
+			name: "artifact policy adds noexec",
+			opts: MountOptions{ReadOnly: true, NoSuid: true, NoDev: true, NoExec: true},
+			want: []string{"ro", "nosuid", "nodev", "noexec"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logFile := filepath.Join(t.TempDir(), "args.log")
+			bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
+			m := newMounterForTest(t, bin)
+
+			if _, err := m.Mount(context.Background(), os.Getpid(), "/src", "/dst", tc.opts); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			got := readLines(t, logFile)
+			fixed := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src", "/dst"}
+			if len(got) < len(fixed) {
+				t.Fatalf("args: got %v, want at least %v", got, fixed)
+			}
+			gotAttrs := got[len(fixed):]
+			if len(gotAttrs) != len(tc.want) {
+				t.Fatalf("attrs: got %v, want %v", gotAttrs, tc.want)
+			}
+			for i := range tc.want {
+				if gotAttrs[i] != tc.want[i] {
+					t.Errorf("attr[%d]: got %q, want %q", i, gotAttrs[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestExecMounter_Unmount_StrictToken covers strictness reaching the helper on
+// the unmount side, both through a held ref and through the refless path
+// startup recovery uses.
+func TestExecMounter_Unmount_StrictToken(t *testing.T) {
+	t.Run("held ref carries strict", func(t *testing.T) {
+		logFile := filepath.Join(t.TempDir(), "args.log")
+		bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
+		m := newMounterForTest(t, bin)
+
+		ref, err := m.Mount(context.Background(), os.Getpid(), "/src", "/dst", MountOptions{})
+		if err != nil {
+			t.Fatalf("Mount: %v", err)
+		}
+		if err := ref.Unmount(context.Background(), true); err != nil {
+			t.Fatalf("Unmount: %v", err)
+		}
+
+		got := readLines(t, logFile)
+		want := []string{"umount-fd", fmt.Sprintf("%d", nsFdChildNum), "/dst", "strict"}
+		if len(got) < len(want) {
+			t.Fatalf("args: got %v", got)
+		}
+		unmountArgs := got[len(got)-len(want):]
+		for i := range want {
+			if unmountArgs[i] != want[i] {
+				t.Fatalf("unmount args: got %v, want %v", unmountArgs, want)
+			}
+		}
+	})
+
 }

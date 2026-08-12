@@ -148,18 +148,13 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(pod.Labels, pod.Annotations, info, h.config.Checkpoint.Storage); err != nil {
-		logger.Error(err, "checkpoint restore candidate not mutated because restore metadata could not be applied",
-			"namespace", podNamespace, "pod", pod.Name, "checkpoint", checkpointName)
-		return admission.Allowed("checkpoint restore metadata unavailable")
-	}
-	if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
+	checkpoint.ApplyRestorePodMetadata(pod.Labels, pod.Annotations, info)
+	if err := checkpoint.InjectCheckpointIntoPodSpec(
 		ctx,
 		h.client,
 		podNamespace,
 		&pod.Spec,
 		info,
-		h.config.Checkpoint.Storage,
 		h.config.Checkpoint.EffectiveSeccompProfile(),
 	); err != nil {
 		logger.Error(err, "checkpoint restore candidate not mutated because restore pod spec injection failed",

@@ -2329,9 +2329,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 				return nil, fmt.Errorf("failed to apply checkpoint candidate metadata for role %s: %w", p.r.Name, err)
 			}
 		} else {
-			if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
-				return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
-			}
+			checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
 		}
 	}
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
@@ -2536,7 +2534,6 @@ func GenerateGrovePodCliqueSet(
 				reader,
 				dynamoDeployment.Namespace,
 				checkpointInfo,
-				operatorConfig.Checkpoint.Storage,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve checkpoint restore for component %s: %w", componentName, err)

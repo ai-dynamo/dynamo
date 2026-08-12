@@ -20,15 +20,17 @@ const (
 
 // fakemountRef implements mountRef for tests.
 type fakemountRef struct {
-	dst        string
-	unmountLog *[]string
+	dst           string
+	unmountLog    *[]string
+	strictUnmount bool
 }
 
 func (h *fakemountRef) TargetPath() string { return h.dst }
 func (h *fakemountRef) NsFd() *os.File     { return nil }
 
-func (h *fakemountRef) Unmount(_ context.Context) error {
+func (h *fakemountRef) Unmount(_ context.Context, strict bool) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
+	h.strictUnmount = strict
 	return nil
 }
 
@@ -60,22 +62,21 @@ const testPID = 42
 
 func newMounter(t *testing.T, m *mockMounter) *NSMounter {
 	t.Helper()
-	nsm, err := newWithMounter(testSrc, testDst, m, logr.Discard())
-	if err != nil {
-		t.Fatalf("newWithMounter: %v", err)
-	}
-	return nsm
+	return newWithMounter(m, logr.Discard())
 }
 
 func TestMount_MountsAgentBundle(t *testing.T) {
 	m := &mockMounter{}
-	_, err := newMounter(t, m).Mount(context.Background(), testPID)
+	_, err := newMounter(t, m).ReadOnly().Mount(context.Background(), testPID, testSrc, testDst)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// nosuid and nodev used to be implied by the helper's `ro` token; they are
+	// requested explicitly now that attributes are inputs.
 	want := []mountCall{
-		{pid: testPID, src: testSrc, dst: testDst, opts: MountOptions{ReadOnly: true}},
+		{pid: testPID, src: testSrc, dst: testDst,
+			opts: MountOptions{ReadOnly: true, NoSuid: true, NoDev: true}},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d mount calls, want %d", len(m.calls), len(want))
@@ -87,7 +88,7 @@ func TestMount_MountsAgentBundle(t *testing.T) {
 
 func TestMount_Path(t *testing.T) {
 	m := &mockMounter{}
-	mp, err := newMounter(t, m).Mount(context.Background(), testPID)
+	mp, err := newMounter(t, m).ReadOnly().Mount(context.Background(), testPID, testSrc, testDst)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,12 +105,12 @@ func TestMount_Path(t *testing.T) {
 
 func TestMount_Unmounts(t *testing.T) {
 	m := &mockMounter{}
-	mp, err := newMounter(t, m).Mount(context.Background(), testPID)
+	mp, err := newMounter(t, m).ReadOnly().Mount(context.Background(), testPID, testSrc, testDst)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := mp.Unmount(context.Background()); err != nil {
+	if err := mp.Unmount(context.Background(), false); err != nil {
 		t.Fatalf("unexpected unmount error: %v", err)
 	}
 
@@ -122,7 +123,7 @@ func TestMount_Fails(t *testing.T) {
 	mountErr := errors.New("mount failed")
 	m := &mockMounter{results: []error{mountErr}}
 
-	_, err := newMounter(t, m).Mount(context.Background(), testPID)
+	_, err := newMounter(t, m).ReadOnly().Mount(context.Background(), testPID, testSrc, testDst)
 	if !errors.Is(err, mountErr) {
 		t.Fatalf("got %v, want %v", err, mountErr)
 	}
@@ -133,7 +134,7 @@ func TestMount_Fails(t *testing.T) {
 
 func TestPath_RejectsInvalidNames(t *testing.T) {
 	m := &mockMounter{}
-	mp, err := newMounter(t, m).Mount(context.Background(), testPID)
+	mp, err := newMounter(t, m).ReadOnly().Mount(context.Background(), testPID, testSrc, testDst)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,5 +145,61 @@ func TestPath_RejectsInvalidNames(t *testing.T) {
 		if err == nil {
 			t.Errorf("Path(%q): expected error, got nil", name)
 		}
+	}
+}
+
+// TestWrappers_CarryTheirPolicy pins what each wrapper binds. The wrappers are
+// the only place mount attributes are chosen, so these two cases are the whole
+// policy this package applies.
+func TestWrappers_CarryTheirPolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		mount    func(nsm *NSMounter) (MountPoint, error)
+		wantSrc  string
+		wantDst  string
+		wantOpts MountOptions
+	}{
+		{
+			// nsrestore is executed out of this mount, so noexec must not be
+			// requested.
+			name: "read-only leaves execution alone",
+			mount: func(nsm *NSMounter) (MountPoint, error) {
+				return nsm.ReadOnly().Mount(context.Background(), testPID, testSrc, testDst)
+			},
+			wantSrc:  testSrc,
+			wantDst:  testDst,
+			wantOpts: MountOptions{ReadOnly: true, NoSuid: true, NoDev: true},
+		},
+		{
+			// The artifact is data from shared storage: executing it would turn
+			// the mount into a code-injection channel.
+			name: "read-only noexec forbids execution",
+			mount: func(nsm *NSMounter) (MountPoint, error) {
+				return nsm.ReadOnlyNoExec().Mount(context.Background(), testPID, "/checkpoints/abc/versions/1", CheckpointDst)
+			},
+			wantSrc:  "/checkpoints/abc/versions/1",
+			wantDst:  CheckpointDst,
+			wantOpts: MountOptions{ReadOnly: true, NoSuid: true, NoDev: true, NoExec: true},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockMounter{}
+			mp, err := tc.mount(newMounter(t, m))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(m.calls) != 1 {
+				t.Fatalf("got %d mount calls, want 1", len(m.calls))
+			}
+			want := mountCall{pid: testPID, src: tc.wantSrc, dst: tc.wantDst, opts: tc.wantOpts}
+			if m.calls[0] != want {
+				t.Errorf("got %+v, want %+v", m.calls[0], want)
+			}
+			if _, err := mp.Path("anything"); err != nil {
+				t.Errorf("Path: %v", err)
+			}
+		})
 	}
 }

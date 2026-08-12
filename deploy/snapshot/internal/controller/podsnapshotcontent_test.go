@@ -116,7 +116,7 @@ func makeWorkOrder(name, node, checkpointID string) *nvidiacomv1alpha1.PodSnapsh
 }
 
 // makeSourcePod builds a ready source pod that carries the capture parameters the agent reads:
-// the checkpoint-id label and the storage/version annotations checkpointLocationsFromPod needs.
+// the checkpoint-id label and artifact-version annotation. Storage is agent-owned configuration.
 // The target container comes from the work order (PodReference.Containers), not the pod.
 func makeSourcePod(checkpointID string) *corev1.Pod {
 	return &corev1.Pod{
@@ -412,12 +412,14 @@ func TestReconcileSnapshotContent_OpaqueNameUsesPodLabel(t *testing.T) {
 		if err := w.client.Get(context.Background(), types.NamespacedName{Name: content.Name}, c); err != nil {
 			return false
 		}
-		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil
+		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil &&
+			c.Status.SnapshotHandle == params.HostPath
 	}, time.Second, 5*time.Millisecond)
 }
 
 func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	content.Status.SnapshotHandle = "/untrusted/preset/handle"
 	pod := makeSourcePod("abc")
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
@@ -431,29 +433,8 @@ func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, cond)
-}
-
-func TestReconcileSnapshotContent_PodMountResolvesContainerPID(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod("abc")
-	fc := &fakeCheckpointer{}
-	w := makeNodeController(t, fc, content, pod)
-	w.config.Storage.AccessMode = snapshottypes.StorageAccessModePodMount
-	rt := &fakeRuntime{resolveContainerPID: 4242}
-	w.runtime = rt
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-
-	// podMount mode resolves the container PID and feeds it through checkpointLocationsFromPod
-	// (a zero PID would fail there with a different reason). The subsequent live-PID validation
-	// fails in a unit test because /host/proc/<pid> does not exist, which proves the non-zero
-	// PID flowed through to validatePodMountContainerPID.
-	assert.Contains(t, rt.resolvedContainerIDs, "abc123")
-	assert.False(t, fc.wasCalled())
-	got := getContent(t, w, content.Name)
-	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Equal(t, "ContainerChanged", cond.Reason)
+	assert.Equal(t, dest, got.Status.SnapshotHandle,
+		"the agent must overwrite a preset handle with its own resolved artifact path")
 }
 
 func TestReconcileSnapshotContent_PodNotFoundFails(t *testing.T) {
@@ -563,10 +544,8 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	assert.Equal(t, "main", params.ContainerName)
 	assert.Equal(t, "abc123", params.ContainerID)
 	assert.Equal(t, 7, params.ContainerPID)
-	// agentMount: HostPath == ContainerPath == resolved destination.
-	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
-	assert.Equal(t, dest, params.HostPath)
-	assert.Equal(t, dest, params.ContainerPath)
+	// The destination is composed from the agent's own base path.
+	assert.Equal(t, filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"), params.HostPath)
 
 	// setSnapshotContentSucceeded runs after checkpointFn returns, so poll for the Ready condition rather than reading once.
 	require.Eventually(t, func() bool {
@@ -574,7 +553,8 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 		if err := w.client.Get(context.Background(), types.NamespacedName{Name: content.Name}, c); err != nil {
 			return false
 		}
-		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil
+		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil &&
+			c.Status.SnapshotHandle == params.HostPath
 	}, time.Second, 5*time.Millisecond)
 }
 
@@ -622,35 +602,32 @@ func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
-	loc := checkpointLocations{
-		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-	}
+	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "abc")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", artifactPath, leaseKey, "abc")
 
 	assert.True(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, cond)
+	assert.Equal(t, artifactPath, got.Status.SnapshotHandle)
 }
 
 func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	content.Status.SnapshotHandle = "/untrusted/preset/handle"
 	fc := &fakeCheckpointer{err: errors.New("criu boom")}
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
-	loc := checkpointLocations{
-		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-	}
+	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "abc")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", artifactPath, leaseKey, "abc")
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
+	assert.Empty(t, got.Status.SnapshotHandle)
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
 }
 

@@ -174,6 +174,47 @@ func TestWaitForPodSnapshotReady(t *testing.T) {
 	assert.NotNil(t, result.Status.BoundPodSnapshotContentName)
 }
 
+func TestCheckpointHandleReadsBoundContentStatus(t *testing.T) {
+	s := snapshotScheme(t)
+	contentName := "content-1"
+	snap := &nvidiacomv1alpha1.PodSnapshot{
+		Status: nvidiacomv1alpha1.PodSnapshotStatus{
+			BoundPodSnapshotContentName: &contentName,
+		},
+	}
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: contentName},
+		Status: nvidiacomv1alpha1.PodSnapshotContentStatus{
+			SnapshotHandle: "/checkpoints/ckpt-1/versions/v1",
+		},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(s).WithObjects(content).Build()
+
+	bound, handle, err := checkpointHandle(context.Background(), crClient, snap)
+	require.NoError(t, err)
+	assert.Equal(t, contentName, bound)
+	assert.Equal(t, "/checkpoints/ckpt-1/versions/v1", handle)
+}
+
+func TestCheckpointHandleAllowsEmptyAgentHandle(t *testing.T) {
+	s := snapshotScheme(t)
+	contentName := "content-without-handle"
+	snap := &nvidiacomv1alpha1.PodSnapshot{
+		Status: nvidiacomv1alpha1.PodSnapshotStatus{
+			BoundPodSnapshotContentName: &contentName,
+		},
+	}
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: contentName},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(s).WithObjects(content).Build()
+
+	bound, handle, err := checkpointHandle(context.Background(), crClient, snap)
+	require.NoError(t, err)
+	assert.Equal(t, contentName, bound)
+	assert.Empty(t, handle)
+}
+
 // TestWaitForPodSnapshotFailed verifies that waitForPodSnapshot returns an error surfacing the
 // Failed condition's Reason and Message when the PodSnapshot fails.
 func TestWaitForPodSnapshotFailed(t *testing.T) {

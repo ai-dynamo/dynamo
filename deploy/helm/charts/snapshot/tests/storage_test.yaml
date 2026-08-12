@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: agent-owned checkpoint storage
+templates:
+  - templates/pvc.yaml
+  - templates/daemonset.yaml
+  - templates/configmap.yaml
+tests:
+  - it: creates one retained RWX claim by default
+    template: templates/pvc.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+      - equal:
+          path: spec.accessModes
+          value:
+            - ReadWriteMany
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: mounts the shared claim read-write in every agent
+    template: templates/daemonset.yaml
+    set:
+      seccomp.deploy: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+      - equal:
+          path: spec.template.spec.volumes[1].persistentVolumeClaim.claimName
+          value: snapshot-pvc
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[1].mountPath
+          value: /checkpoints
+      - notExists:
+          path: spec.template.spec.containers[0].volumeMounts[1].readOnly
+
+  - it: emits a flat agent-local base path
+    template: templates/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'basePath: "/checkpoints"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'pvc:'
+
+  - it: supports an existing shared claim without rendering a PVC
+    template: templates/pvc.yaml
+    set:
+      seccomp.deploy: false
+      storage.pvc.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: uses the configured existing claim and base path
+    template: templates/daemonset.yaml
+    set:
+      seccomp.deploy: false
+      storage.pvc.create: false
+      storage.pvc.name: existing-rwx
+      storage.pvc.basePath: /shared/checkpoints
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[1].persistentVolumeClaim.claimName
+          value: existing-rwx
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[1].mountPath
+          value: /shared/checkpoints
+
+  - it: rejects the removed storage mode selector
+    template: templates/configmap.yaml
+    set:
+      storage.accessMode: agentMount
+    asserts:
+      - failedTemplate:
+          errorPattern: storage.accessMode has been removed
+
+  - it: rejects the removed PVC access mode selector
+    template: templates/configmap.yaml
+    set:
+      storage.pvc.accessMode: ReadWriteOnce
+    asserts:
+      - failedTemplate:
+          errorPattern: storage.pvc.accessMode has been removed
+
+  - it: rejects unimplemented backends
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+    asserts:
+      - failedTemplate:
+          errorPattern: only pvc is currently implemented

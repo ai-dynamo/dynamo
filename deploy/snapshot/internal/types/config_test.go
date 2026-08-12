@@ -1,6 +1,11 @@
 package types
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func validAgentConfig() *AgentConfig {
 	return &AgentConfig{
@@ -14,39 +19,58 @@ func validAgentConfig() *AgentConfig {
 	}
 }
 
-func TestAgentConfigValidateRequiresAbsoluteStorageBasePath(t *testing.T) {
-	cfg := validAgentConfig()
-	cfg.Storage.BasePath = "checkpoints"
+func TestAgentConfigValidate_StorageBasePath(t *testing.T) {
+	t.Parallel()
 
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for relative storage base path")
+	tests := []struct {
+		name     string
+		basePath string
+		wantErr  bool
+		want     string
+	}{
+		{
+			name:     "surrounding whitespace is trimmed",
+			basePath: " /checkpoints ",
+			want:     "/checkpoints",
+		},
+		{
+			name:     "relative path is rejected",
+			basePath: "checkpoints",
+			wantErr:  true,
+		},
+		{
+			// The base path is the containment boundary for every artifact the
+			// agent mounts, so an unclean one is refused rather than cleaned.
+			name:     "unclean path is rejected",
+			basePath: "/checkpoints/../etc",
+			wantErr:  true,
+		},
+		{
+			name:     "trailing slash is unclean",
+			basePath: "/checkpoints/",
+			wantErr:  true,
+		},
+		{
+			name:     "empty path is rejected",
+			basePath: "   ",
+			wantErr:  true,
+		},
 	}
-}
 
-func TestAgentConfigValidateNormalizesStorageFields(t *testing.T) {
-	cfg := validAgentConfig()
-	cfg.Storage.BasePath = " /checkpoints "
-	cfg.Storage.AccessMode = " podMount "
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	if cfg.Storage.BasePath != "/checkpoints" {
-		t.Fatalf("Storage.BasePath = %q, want %q", cfg.Storage.BasePath, "/checkpoints")
-	}
-	if cfg.Storage.AccessMode != StorageAccessModePodMount {
-		t.Fatalf("Storage.AccessMode = %q, want %q", cfg.Storage.AccessMode, StorageAccessModePodMount)
-	}
-}
+			cfg := validAgentConfig()
+			cfg.Storage.BasePath = tc.basePath
 
-func TestAgentConfigValidateDefaultsStorageAccessMode(t *testing.T) {
-	cfg := validAgentConfig()
-
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	if cfg.Storage.AccessMode != StorageAccessModeAgentMount {
-		t.Fatalf("Storage.AccessMode = %q, want %q", cfg.Storage.AccessMode, StorageAccessModeAgentMount)
+			err := cfg.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.Storage.BasePath)
+		})
 	}
 }

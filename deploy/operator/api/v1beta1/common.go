@@ -322,16 +322,17 @@ const (
 )
 
 // CheckpointDeletionPolicy defines what happens to DGD-managed automatic
-// checkpoint resources when the owning DGD is deleted.
+// checkpoint custom resources when the owning DGD is deleted. Checkpoint
+// artifact data is retained for both policies.
 // +kubebuilder:validation:Enum=Delete;Retain
 type CheckpointDeletionPolicy string
 
 const (
 	// CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint
-	// CRs and artifacts when the owning DGD is deleted.
+	// CRs when the owning DGD is deleted.
 	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
 	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
-	// and artifacts after the owning DGD is deleted. Users can reference the
+	// after the owning DGD is deleted. Users can reference the
 	// retained checkpoint with checkpointRef if they accept compatibility risk.
 	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
 )
@@ -362,8 +363,8 @@ type ComponentCheckpointConfig struct {
 	// +kubebuilder:default=Immediate
 	StartupPolicy CheckpointStartupPolicy `json:"startupPolicy,omitempty"`
 
-	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
-	// artifact are deleted or retained when the owning DGD is deleted.
+	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR is
+	// deleted or retained when the owning DGD is deleted. Artifact data remains.
 	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
 	// +optional
 	// +kubebuilder:default=Delete

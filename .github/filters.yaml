@@ -210,6 +210,7 @@ operator:
 snapshot:
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
+  - 'deploy/helm/charts/snapshot/**'
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
   - 'tests/deploy/test_dynamocheckpoint.py'

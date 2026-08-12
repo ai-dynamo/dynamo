@@ -6,8 +6,11 @@ kind: ConfigMap
 {{- if ne .Values.storage.type "pvc" }}
 {{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
 {{- end }}
-{{- if not (has .Values.storage.accessMode (list "agentMount" "podMount")) }}
-{{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount or podMount" .Values.storage.accessMode) }}
+{{- if hasKey .Values.storage "accessMode" }}
+{{- fail "snapshot.storage.accessMode has been removed; every snapshot-agent mounts the shared RWX PVC" }}
+{{- end }}
+{{- if hasKey .Values.storage.pvc "accessMode" }}
+{{- fail "snapshot.storage.pvc.accessMode has been removed; chart-created claims always use ReadWriteMany" }}
 {{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
@@ -18,7 +21,6 @@ data:
   config.yaml: |
     storage:
       type: {{ .Values.storage.type | quote }}
-      accessMode: {{ .Values.storage.accessMode | quote }}
       {{- if eq .Values.storage.type "pvc" }}
       basePath: {{ .Values.storage.pvc.basePath | quote }}
       {{- end }}

@@ -686,8 +686,8 @@ spec:
                     deletionPolicy:
                       default: Delete
                       description: |-
-                        DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
-                        artifact are deleted or retained when the owning DGD is deleted.
+                        DeletionPolicy defines whether a DGD-managed automatic checkpoint CR is
+                        deleted or retained when the owning DGD is deleted. Artifact data remains.
                         Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
                       enum:
                         - Delete
@@ -11963,8 +11963,8 @@ spec:
                         deletionPolicy:
                           default: Delete
                           description: |-
-                            DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
-                            artifact are deleted or retained when the owning DGD is deleted.
+                            DeletionPolicy defines whether a DGD-managed automatic checkpoint CR is
+                            deleted or retained when the owning DGD is deleted. Artifact data remains.
                             Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
                           enum:
                             - Delete

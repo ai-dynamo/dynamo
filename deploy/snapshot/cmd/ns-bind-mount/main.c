@@ -2,27 +2,20 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * ns-bind-mount: bind-mount or unmount a directory in another process's mount namespace.
+ * Single-threaded mount-namespace helper. Go cannot call setns(CLONE_NEWNS)
+ * from its multithreaded runtime, so this exists purely to perform a mount on
+ * its behalf. It carries no policy: which paths and which attributes are the
+ * caller's to choose.
  *
- * Mount:      ns-bind-mount <pid> <src> <dst> [ro]
- * Mount-fd:   ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]
- * Unmount:    ns-bind-mount umount <pid> <dst>
- * Unmount-fd: ns-bind-mount umount-fd <ns_fd> <dst> [created]
+ *   mount-fd  <ns_fd> <src> <dst> [ro] [nosuid] [nodev] [noexec]
+ *   umount-fd <ns_fd> <dst> [created] [strict]
  *
- * mount-fd is the preferred form: the caller (Go) opens /proc/<pid>/ns/mnt
- * before launching the helper and passes the fd through ExtraFiles, so the
- * namespace is pinned at open time rather than re-resolved from the PID inside
- * the helper.  Both mount paths apply mount_setattr(MOUNT_ATTR_RDONLY) to the
- * cloned tree *before* attaching so the mount is never visible as writable
- * inside the target namespace.  Unmount enters the namespace the same way and
- * calls umount2(MNT_DETACH).  Both subcommands run as single-threaded C
- * processes so setns(CLONE_NEWNS) is allowed (prohibited in multithreaded Go
- * programs).
- *
- * Requires Linux 5.12+ (mount_setattr; open_tree/move_mount need only 5.2).
+ * The destination is still validated, because the target namespace belongs to
+ * an untrusted container that could otherwise swap it between the check and the
+ * mount. That is a property of mounting safely, not a restriction on the caller.
  */
-
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -45,63 +38,52 @@
 #ifndef __NR_mount_setattr
 #define __NR_mount_setattr 442
 #endif
-
+#ifndef __NR_openat2
+#define __NR_openat2 437
+#endif
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+#ifndef UMOUNT_NOFOLLOW
+#define UMOUNT_NOFOLLOW 0x00000008
+#endif
 #define OPEN_TREE_CLONE 1
 #define MOVE_MOUNT_F_EMPTY_PATH 0x00000004
-
+#define MOVE_MOUNT_T_EMPTY_PATH 0x00000040
+/* openat2 resolve flags, named locally because <linux/openat2.h> is not present
+ * on every builder image. */
+#define NS_RESOLVE_NO_XDEV 0x01
+#define NS_RESOLVE_NO_MAGICLINKS 0x02
+#define NS_RESOLVE_NO_SYMLINKS 0x04
+#define NS_RESOLVE_BENEATH 0x08
+struct ns_open_how {
+  uint64_t flags, mode, resolve;
+};
 #ifndef MOUNT_ATTR_RDONLY
 #define MOUNT_ATTR_RDONLY 0x00000001
 #define MOUNT_ATTR_NOSUID 0x00000002
 #define MOUNT_ATTR_NODEV 0x00000004
+#define MOUNT_ATTR_NOEXEC 0x00000008
 struct mount_attr {
-  uint64_t attr_set;
-  uint64_t attr_clr;
-  uint64_t propagation;
-  uint64_t userns_fd;
+  uint64_t attr_set, attr_clr, propagation, userns_fd;
 };
 #endif
 
-/* Paths the caller is allowed to pass as src and dst.  Both the Go layer and
- * this binary enforce these prefixes so that a bug in the controller cannot
- * cause arbitrary host paths to be mounted into (or unmounted from) a foreign
- * namespace.
- *
- * These values mirror the Go constants in internal/nsmount/injector.go:
- *   SnapshotBinSrc = "/snapshot-binaries"       → ALLOWED_SRC_PREFIX
- *   SnapshotBinDst = "/tmp/snapshot-binaries"   → ALLOWED_DST_PREFIX
- * Keep them in sync when either changes. */
-#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = nsmount.SnapshotBinSrc */
-#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = nsmount.SnapshotBinDst */
+/* The four attributes this helper understands. Anything outside this set is a
+ * caller error rather than a silently dropped restriction. */
+#define MANAGED_MOUNT_ATTRS (MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC)
 
-/* Returns 0 if path is absolute and begins with allowed_prefix, -1 otherwise. */
 static int
-check_path_prefix(const char* path, const char* allowed_prefix, const char* label)
+parse_fd(const char* value)
 {
-  if (path[0] != '/') {
-    fprintf(stderr, "%s must be an absolute path: %s\n", label, path);
+  char* end;
+  errno = 0;
+  long fd = strtol(value, &end, 10);
+  if (errno || end == value || *end || fd < 0 || fd > INT_MAX) {
+    fprintf(stderr, "invalid fd: %s\n", value);
     return -1;
   }
-  size_t plen = strlen(allowed_prefix);
-  if (strncmp(path, allowed_prefix, plen) != 0 || (path[plen] != '\0' && path[plen] != '/')) {
-    fprintf(stderr, "%s must start with %s: %s\n", label, allowed_prefix, path);
-    return -1;
-  }
-  return 0;
-}
-
-/* Returns 1 if path contains a ".." path component, 0 otherwise. */
-static int
-has_dotdot_component(const char* path)
-{
-  for (const char* p = path; *p;) {
-    const char* seg = p;
-    while (*p && *p != '/') p++;
-    size_t len = (size_t)(p - seg);
-    if (len == 2 && seg[0] == '.' && seg[1] == '.')
-      return 1;
-    while (*p == '/') p++;
-  }
-  return 0;
+  return (int)fd;
 }
 
 static int
@@ -111,327 +93,277 @@ sys_open_tree(int dfd, const char* path, unsigned flags)
 }
 
 static int
-sys_move_mount(int from_dfd, const char* from_path, int to_dfd, const char* to_path, unsigned flags)
+sys_openat2(int dfd, const char* path, uint64_t flags, uint64_t resolve)
 {
-  return (int)syscall(__NR_move_mount, from_dfd, from_path, to_dfd, to_path, flags);
+  struct ns_open_how how = {.flags = flags, .mode = 0, .resolve = resolve};
+  return (int)syscall(__NR_openat2, dfd, path, &how, sizeof(how));
 }
 
-/* Enter the mount namespace of the given pid.  Returns 0 on success. */
+/* Applies exactly the requested attributes. attr_clr is the complement rather
+ * than zero: a cloned tree inherits its source mount's attributes, so an
+ * attribute the caller did not ask for has to be cleared explicitly or it
+ * survives. Without this, a bundle mounted from a noexec filesystem would stay
+ * noexec however it was requested. */
 static int
-enter_mnt_ns(int pid)
-{
-  char ns_path[256];
-  snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/mnt", pid);
-  int ns_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
-  if (ns_fd < 0) {
-    fprintf(stderr, "open %s: %s\n", ns_path, strerror(errno));
-    return -1;
-  }
-  if (setns(ns_fd, CLONE_NEWNS) < 0) {
-    fprintf(stderr, "setns %s: %s\n", ns_path, strerror(errno));
-    close(ns_fd);
-    return -1;
-  }
-  close(ns_fd);
-  return 0;
-}
-
-/* Parse a positive pid from str.  Returns the pid on success, -1 on error. */
-static int
-parse_pid(const char* str)
-{
-  char* end;
-  long val = strtol(str, &end, 10);
-  if (*end != '\0' || val <= 0 || val > INT_MAX) {
-    fprintf(stderr, "invalid pid: %s\n", str);
-    return -1;
-  }
-  return (int)val;
-}
-
-/* Apply read-only attributes to tree_fd before attaching it so the mount is
- * never visible as writable inside the target namespace. */
-static int
-apply_rdonly_attrs(int tree_fd)
+set_mount_attrs(int tree_fd, uint64_t attrs)
 {
   struct mount_attr attr = {
-      .attr_set = MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+      .attr_set = attrs,
+      .attr_clr = MANAGED_MOUNT_ATTRS & ~attrs,
   };
-  if (syscall(__NR_mount_setattr, tree_fd, "", AT_EMPTY_PATH, &attr, sizeof attr) < 0) {
-    fprintf(stderr, "mount_setattr ro: %s\n", strerror(errno));
+  if (syscall(__NR_mount_setattr, tree_fd, "", AT_EMPTY_PATH, &attr, sizeof(attr)) < 0) {
+    fprintf(stderr, "mount_setattr: %s\n", strerror(errno));
     return -1;
   }
   return 0;
 }
 
-/* Create or verify the target directory.  Returns 1 if this call created it,
- * 0 if it already existed as a plain directory, -1 on error. */
+/* Resolves dst exactly once and returns its descriptor, or -1. Sets *created
+ * when this helper made the directory.
+ *
+ * The destination lives in a namespace the workload controls, so it is resolved
+ * once and every later step works from the returned descriptor: re-resolving
+ * the path per step would let a container swap it in between. The single
+ * openat2 also subsumes the old lstat/S_ISDIR/mountinfo checks, and errno says
+ * which one failed: EXDEV for an existing mount (including a same-filesystem
+ * bind), ELOOP for a symlink anywhere in the path, ENOTDIR for a non-directory. */
 static int
-ensure_dst_dir(const char* dst)
+ensure_empty_destination(const char* dst, int* created)
 {
-  if (mkdir(dst, 0700) == 0)
-    return 1;
-  if (errno != EEXIST) {
+  *created = 0;
+
+  /* The parent and the final component are resolved separately because
+   * RESOLVE_NO_XDEV has to apply to the final component alone: /tmp is itself a
+   * mount in most containers, so asking for it across the whole path would
+   * reject every destination. Against the parent, RESOLVE_NO_SYMLINKS is what
+   * matters, so a target image pointing /tmp elsewhere is refused. */
+  const char* sep = strrchr(dst, '/');
+  if (!sep || !sep[1]) {
+    fprintf(stderr, "invalid destination %s\n", dst);
+    return -1;
+  }
+  char parent[PATH_MAX];
+  size_t parent_len = sep == dst ? 1 : (size_t)(sep - dst);
+  if (parent_len >= sizeof(parent)) {
+    fprintf(stderr, "destination %s is too long\n", dst);
+    return -1;
+  }
+  memcpy(parent, dst, parent_len);
+  parent[parent_len] = '\0';
+  const char* leaf = sep + 1;
+
+  int parent_fd = sys_openat2(
+      AT_FDCWD, parent, O_PATH | O_DIRECTORY | O_CLOEXEC, NS_RESOLVE_NO_SYMLINKS | NS_RESOLVE_NO_MAGICLINKS);
+  if (parent_fd < 0) {
+    fprintf(
+        stderr,
+        "open %s in target namespace: %s"
+        " (%s must be a real directory, not a symlink)\n",
+        parent, strerror(errno), parent);
+    return -1;
+  }
+
+  if (mkdirat(parent_fd, leaf, 0700) == 0) {
+    *created = 1;
+  } else if (errno != EEXIST) {
     fprintf(stderr, "mkdir %s: %s\n", dst, strerror(errno));
+    close(parent_fd);
     return -1;
   }
-  /* dst already existed — verify it is a plain directory, not a symlink,
-   * so a process inside the namespace cannot redirect the mount. */
-  struct stat st;
-  if (lstat(dst, &st) < 0) {
-    fprintf(stderr, "lstat %s: %s\n", dst, strerror(errno));
+
+  int fd = sys_openat2(
+      parent_fd, leaf, O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+      NS_RESOLVE_BENEATH | NS_RESOLVE_NO_SYMLINKS | NS_RESOLVE_NO_MAGICLINKS | NS_RESOLVE_NO_XDEV);
+  close(parent_fd);
+  if (fd < 0) {
+    const char* why = errno == EXDEV     ? "is already a mountpoint"
+                      : errno == ELOOP   ? "is a symlink"
+                      : errno == ENOTDIR ? "is not a directory"
+                                         : strerror(errno);
+    fprintf(stderr, "destination %s %s\n", dst, why);
+    if (*created)
+      rmdir(dst);
     return -1;
   }
-  if (!S_ISDIR(st.st_mode)) {
-    fprintf(stderr, "dst %s exists but is not a plain directory\n", dst);
-    return -1;
-  }
-  return 0;
-}
 
-static int
-do_umount(int argc, char* argv[])
-{
-  if (argc < 4) {
-    fprintf(stderr, "usage: ns-bind-mount umount <pid> <dst>\n");
-    return 1;
-  }
-  int pid = parse_pid(argv[2]);
-  if (pid < 0)
-    return 1;
-  const char* dst = argv[3];
-
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
-    return 1;
-
-  if (enter_mnt_ns(pid) < 0)
-    return 1;
-
-  /* MNT_DETACH: lazy unmount — succeeds even if the path is busy. */
-  if (umount2(dst, MNT_DETACH) < 0) {
-    if (errno != ENOENT && errno != EINVAL) {
-      fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
-      return 1;
+  if (!*created) {
+    int scan_fd = dup(fd);
+    DIR* dir = scan_fd < 0 ? NULL : fdopendir(scan_fd);
+    if (!dir) {
+      fprintf(stderr, "opendir %s: %s\n", dst, strerror(errno));
+      if (scan_fd >= 0)
+        close(scan_fd);
+      close(fd);
+      return -1;
     }
-    /* Already gone (CRIU removed it during namespace restore).
-     * Fall through to rmdir so we don't leave the directory behind. */
+    struct dirent* entry;
+    while ((entry = readdir(dir))) {
+      if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
+        fprintf(
+            stderr,
+            "destination %s is not empty (contains %s);"
+            " the restore target image must leave %s absent or empty\n",
+            dst, entry->d_name, dst);
+        closedir(dir);
+        close(fd);
+        return -1;
+      }
+    }
+    closedir(dir);
   }
-
-  /* Remove the directory we created at mount time. Ignore errors — the
-   * directory may be non-empty or already gone, neither is fatal. */
-  rmdir(dst);
-  return 0;
+  return fd;
 }
 
-/* Unmount via an open namespace fd rather than a pid.  The caller (Go) passes
- * an already-open /proc/<pid>/ns/mnt fd inherited through ExtraFiles; using
- * the fd avoids the PID-reuse window between mount time and cleanup.
- * The optional "created" argument instructs the helper to remove dst — only
- * set when the mount subcommand reported that it created the directory. */
 static int
-do_umount_fd(int argc, char* argv[])
+mount_tree(int ns_fd, const char* src, const char* dst, uint64_t attrs)
 {
-  if (argc < 4) {
-    fprintf(stderr, "usage: ns-bind-mount umount-fd <ns_fd> <dst> [created]\n");
+  /* Resolve the source without following symlinks, then clone from that
+   * descriptor. open_tree takes no resolve flags of its own, so the openat2
+   * gives the source the same treatment the destination gets. */
+  int src_fd =
+      sys_openat2(AT_FDCWD, src, O_PATH | O_DIRECTORY | O_CLOEXEC, NS_RESOLVE_NO_SYMLINKS | NS_RESOLVE_NO_MAGICLINKS);
+  if (src_fd < 0) {
+    fprintf(stderr, "open source %s: %s\n", src, strerror(errno));
     return 1;
   }
-  char* end;
-  long fd_val = strtol(argv[2], &end, 10);
-  if (*end != '\0' || fd_val < 0 || fd_val > INT_MAX) {
-    fprintf(stderr, "invalid fd: %s\n", argv[2]);
+  int tree_fd = sys_open_tree(src_fd, "", OPEN_TREE_CLONE | AT_EMPTY_PATH | O_CLOEXEC);
+  close(src_fd);
+  if (tree_fd < 0) {
+    fprintf(stderr, "open_tree %s: %s\n", src, strerror(errno));
     return 1;
   }
-  int ns_fd = (int)fd_val;
-  const char* dst = argv[3];
-  int created_dst = (argc >= 5 && strcmp(argv[4], "created") == 0);
-
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
+  if (set_mount_attrs(tree_fd, attrs) < 0) {
+    close(tree_fd);
     return 1;
   }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
-    return 1;
-
   if (setns(ns_fd, CLONE_NEWNS) < 0) {
-    fprintf(stderr, "setns fd %d: %s\n", ns_fd, strerror(errno));
+    fprintf(stderr, "setns: %s\n", strerror(errno));
+    close(tree_fd);
     return 1;
   }
-
-  if (umount2(dst, MNT_DETACH) < 0) {
-    if (errno != ENOENT && errno != EINVAL) {
-      fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
-      return 1;
-    }
-    /* Already gone (CRIU removed it during namespace restore).
-     * Fall through so we clean up the directory if we created it. */
+  int created = 0;
+  int dst_fd = ensure_empty_destination(dst, &created);
+  if (dst_fd < 0) {
+    close(tree_fd);
+    return 1;
   }
+  /* Publish destination ownership before move_mount so a caller that loses
+   * the helper after the mount becomes visible can still remove a directory
+   * this helper created during conservative rollback. */
+  printf("created_dst=%d\n", created);
+  fflush(stdout);
+  int rc = 0;
+  if (syscall(__NR_move_mount, tree_fd, "", dst_fd, "", MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH) < 0) {
+    fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
+    if (created)
+      rmdir(dst);
+    rc = 1;
+  }
+  close(dst_fd);
+  close(tree_fd);
+  return rc;
+}
 
-  /* Only remove the directory if the mount subcommand created it. */
-  if (created_dst)
+static int
+unmount_tree(int ns_fd, const char* dst, int strict, int created)
+{
+  if (setns(ns_fd, CLONE_NEWNS) < 0) {
+    fprintf(stderr, "setns: %s\n", strerror(errno));
+    return 1;
+  }
+  /* UMOUNT_NOFOLLOW reports a symlinked destination as EINVAL, which is
+   * indistinguishable from "nothing is mounted here" and would be swallowed
+   * below. Name it explicitly: a destination that turned into a symlink means
+   * the target moved the mount, so the artifact may still be attached somewhere
+   * and the unmount must not be reported as clean. */
+  struct stat st;
+  if (fstatat(AT_FDCWD, dst, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode)) {
+    fprintf(stderr, "destination %s is a symlink; refusing to unmount through it\n", dst);
+    return 1;
+  }
+  if (umount2(dst, (strict ? 0 : MNT_DETACH) | UMOUNT_NOFOLLOW) < 0 && errno != ENOENT && errno != EINVAL) {
+    fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
+    return 1;
+  }
+  if (created)
     rmdir(dst);
   return 0;
 }
 
-/* Mount via an already-open namespace fd.  The caller (Go) opens
- * /proc/<pid>/ns/mnt before launching the helper and passes the fd through
- * ExtraFiles, so the namespace is pinned at Go-side open time rather than
- * re-resolved from the PID — eliminating the PID-reuse window. */
-static int
-do_mount_fd(int argc, char* argv[])
+/* Maps an attribute token to its MOUNT_ATTR_* bit, or 0 if unknown. */
+static uint64_t
+parse_attr(const char* token)
 {
-  if (argc < 5) {
-    fprintf(stderr, "usage: ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]\n");
-    return 1;
-  }
-  char* end;
-  long fd_val = strtol(argv[2], &end, 10);
-  if (*end != '\0' || fd_val < 0 || fd_val > INT_MAX) {
-    fprintf(stderr, "invalid fd: %s\n", argv[2]);
-    return 1;
-  }
-  int ns_fd = (int)fd_val;
-  const char* src = argv[3];
-  const char* dst = argv[4];
-  int readonly = (argc >= 6 && strcmp(argv[5], "ro") == 0);
-
-  if (has_dotdot_component(src)) {
-    fprintf(stderr, "src must not contain '..' components: %s\n", src);
-    return 1;
-  }
-  if (check_path_prefix(src, ALLOWED_SRC_PREFIX, "src") < 0)
-    return 1;
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
-    return 1;
-
-  /* Clone the source mount tree before entering the target namespace. */
-  int tree_fd = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | O_CLOEXEC);
-  if (tree_fd < 0) {
-    fprintf(stderr, "open_tree %s: %s\n", src, strerror(errno));
-    return 1;
-  }
-
-  /* Apply read-only attributes before attaching so the mount is never
-   * visible as writable inside the target namespace. */
-  if (readonly) {
-    if (apply_rdonly_attrs(tree_fd) < 0) {
-      close(tree_fd);
-      return 1;
-    }
-  }
-
-  /* Enter the target namespace via the inherited fd. */
-  if (setns(ns_fd, CLONE_NEWNS) < 0) {
-    fprintf(stderr, "setns fd %d: %s\n", ns_fd, strerror(errno));
-    close(tree_fd);
-    return 1;
-  }
-
-  int created_dst = ensure_dst_dir(dst);
-  if (created_dst < 0) {
-    close(tree_fd);
-    return 1;
-  }
-
-  /* Move the cloned mount into the target namespace at dst. */
-  if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-    fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
-    close(tree_fd);
-    if (created_dst)
-      rmdir(dst);
-    return 1;
-  }
-  close(tree_fd);
-
-  printf("created_dst=%d\n", created_dst);
+  if (!strcmp(token, "ro"))
+    return MOUNT_ATTR_RDONLY;
+  if (!strcmp(token, "nosuid"))
+    return MOUNT_ATTR_NOSUID;
+  if (!strcmp(token, "nodev"))
+    return MOUNT_ATTR_NODEV;
+  if (!strcmp(token, "noexec"))
+    return MOUNT_ATTR_NOEXEC;
   return 0;
 }
 
-int
-main(int argc, char* argv[])
+static void
+usage(void)
 {
-  if (argc >= 2 && strcmp(argv[1], "mount-fd") == 0)
-    return do_mount_fd(argc, argv);
-  if (argc >= 2 && strcmp(argv[1], "umount-fd") == 0)
-    return do_umount_fd(argc, argv);
-  if (argc >= 2 && strcmp(argv[1], "umount") == 0)
-    return do_umount(argc, argv);
+  fprintf(
+      stderr,
+      "usage: ns-bind-mount mount-fd  <ns-fd> <src> <dst> [ro] [nosuid] [nodev] [noexec]\n"
+      "       ns-bind-mount umount-fd <ns-fd> <dst> [created] [strict]\n");
+}
 
-  if (argc < 4) {
-    fprintf(
-        stderr,
-        "usage: ns-bind-mount <pid> <src> <dst> [ro]\n"
-        "       ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]\n"
-        "       ns-bind-mount umount <pid> <dst>\n"
-        "       ns-bind-mount umount-fd <ns_fd> <dst> [created]\n");
+int
+main(int argc, char** argv)
+{
+  if (argc < 3) {
+    usage();
     return 1;
   }
-
-  int pid = parse_pid(argv[1]);
-  if (pid < 0)
-    return 1;
-  const char* src = argv[2];
-  const char* dst = argv[3];
-  int readonly = (argc >= 5 && strcmp(argv[4], "ro") == 0);
-
-  if (has_dotdot_component(src)) {
-    fprintf(stderr, "src must not contain '..' components: %s\n", src);
-    return 1;
-  }
-  if (check_path_prefix(src, ALLOWED_SRC_PREFIX, "src") < 0)
-    return 1;
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+  int ns_fd = parse_fd(argv[2]);
+  if (ns_fd < 0)
     return 1;
 
-  /* Clone the source mount tree before entering the target namespace. */
-  int tree_fd = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | O_CLOEXEC);
-  if (tree_fd < 0) {
-    fprintf(stderr, "open_tree %s: %s\n", src, strerror(errno));
-    return 1;
-  }
-
-  /* Apply read-only attributes before attaching so the mount is never
-   * visible as writable inside the target namespace. */
-  if (readonly) {
-    if (apply_rdonly_attrs(tree_fd) < 0) {
-      close(tree_fd);
+  if (!strcmp(argv[1], "mount-fd")) {
+    if (argc < 5) {
+      usage();
       return 1;
     }
+    uint64_t attrs = 0;
+    for (int i = 5; i < argc; i++) {
+      uint64_t bit = parse_attr(argv[i]);
+      if (!bit) {
+        fprintf(stderr, "unknown mount attribute: %s\n", argv[i]);
+        return 1;
+      }
+      attrs |= bit;
+    }
+    return mount_tree(ns_fd, argv[3], argv[4], attrs);
   }
 
-  /* Enter the target process's mount namespace. */
-  if (enter_mnt_ns(pid) < 0) {
-    close(tree_fd);
-    return 1;
+  if (!strcmp(argv[1], "umount-fd")) {
+    if (argc < 4) {
+      usage();
+      return 1;
+    }
+    /* Matched by name in any order: two optional positional flags would make
+     * "umount-fd 3 /tmp/x created" ambiguous. */
+    int created = 0, strict = 0;
+    for (int i = 4; i < argc; i++) {
+      if (!strcmp(argv[i], "created"))
+        created = 1;
+      else if (!strcmp(argv[i], "strict"))
+        strict = 1;
+      else {
+        fprintf(stderr, "unknown unmount flag: %s\n", argv[i]);
+        return 1;
+      }
+    }
+    return unmount_tree(ns_fd, argv[3], strict, created);
   }
 
-  int created_dst = ensure_dst_dir(dst);
-  if (created_dst < 0) {
-    close(tree_fd);
-    return 1;
-  }
-
-  /* Move the cloned mount into the target namespace at dst. */
-  if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-    fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
-    close(tree_fd);
-    if (created_dst)
-      rmdir(dst);
-    return 1;
-  }
-  close(tree_fd);
-
-  printf("created_dst=%d\n", created_dst);
-  return 0;
+  fprintf(stderr, "invalid operation: %s\n", argv[1]);
+  usage();
+  return 1;
 }

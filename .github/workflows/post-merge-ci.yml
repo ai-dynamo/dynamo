@@ -133,6 +133,19 @@ jobs:
           diff_event_context: push
           diff_current_branch: ${{ github.ref_name }}
           gh_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push snapshot namespace-mount tests
+        working-directory: deploy/snapshot
+        env:
+          TEST_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-nsmount-test
+          DOCKER_PROXY: ${{ vars.ECR_REGISTRY }}/dockerhub/
+        run: |
+          docker buildx build --push \
+            --platform linux/amd64 \
+            --target integration-tester \
+            --build-context operator=../operator \
+            --build-arg DOCKER_PROXY="${DOCKER_PROXY}" \
+            -t "${TEST_IMAGE}" \
+            .
 
 # ============================================================================
 # Power Agent
@@ -982,7 +995,6 @@ jobs:
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         checkpoint_enabled: 'true'
-        checkpoint_storage_size: 64Gi
 
   deploy-operator-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Operator Setup
@@ -1010,7 +1022,6 @@ jobs:
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         checkpoint_enabled: 'true'
-        checkpoint_storage_size: 64Gi
 
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Operator Setup
@@ -1038,7 +1049,6 @@ jobs:
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         checkpoint_enabled: 'true'
-        checkpoint_storage_size: 64Gi
 
   deploy-snapshot-agent-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Snapshot Agent Setup
@@ -1073,7 +1083,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1086,6 +1095,9 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          integration_test_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-nsmount-test
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
 
   deploy-snapshot-agent-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Snapshot Agent Setup
@@ -1120,7 +1132,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1133,6 +1144,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
 
   deploy-snapshot-agent-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
@@ -1167,7 +1180,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1180,6 +1192,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
 
   deploy-test-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Deploy Test
@@ -1215,7 +1229,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1229,6 +1242,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:
@@ -1280,7 +1295,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1294,6 +1308,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:
@@ -1345,7 +1361,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1359,6 +1374,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:

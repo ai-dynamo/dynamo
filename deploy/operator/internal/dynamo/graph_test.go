@@ -41,7 +41,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1245,15 +1244,7 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 func TestGenerateGrovePodCliqueSet_InjectsReadyCheckpointRestore(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(&corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "checkpoint-storage",
-				Namespace: "default",
-			},
-		}).
-		Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -1271,13 +1262,6 @@ func TestGenerateGrovePodCliqueSet_InjectsReadyCheckpointRestore(t *testing.T) {
 	operatorConfig := &configv1alpha1.OperatorConfiguration{
 		Checkpoint: configv1alpha1.CheckpointConfiguration{
 			Enabled: true,
-			Storage: configv1alpha1.CheckpointStorageConfiguration{
-				Type: snapshotprotocol.StorageTypePVC,
-				PVC: configv1alpha1.CheckpointPVCConfig{
-					PVCName:  "checkpoint-storage",
-					BasePath: "/checkpoints",
-				},
-			},
 		},
 	}
 	runtimeConfig := &controller_common.RuntimeConfig{
@@ -1306,17 +1290,21 @@ func TestGenerateGrovePodCliqueSet_InjectsReadyCheckpointRestore(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.Spec.Template.Cliques, 1)
 
+	t.Log("Verify the ready restore has control wiring but no checkpoint PVC")
 	podSpec := got.Spec.Template.Cliques[0].Spec.PodSpec
-	var checkpointVolume *corev1.Volume
-	for i := range podSpec.Volumes {
-		if podSpec.Volumes[i].Name == snapshotprotocol.CheckpointVolumeName {
-			checkpointVolume = &podSpec.Volumes[i]
-			break
+	sawControlVolume := false
+	for _, volume := range podSpec.Volumes {
+		assert.NotEqual(t, "checkpoint-storage", volume.Name)
+		if volume.Name == snapshotprotocol.SnapshotControlVolumeName {
+			sawControlVolume = true
 		}
 	}
-	require.NotNil(t, checkpointVolume)
-	require.NotNil(t, checkpointVolume.PersistentVolumeClaim)
-	assert.Equal(t, "checkpoint-storage", checkpointVolume.PersistentVolumeClaim.ClaimName)
+	assert.True(t, sawControlVolume)
+	for _, container := range podSpec.Containers {
+		for _, mount := range container.VolumeMounts {
+			assert.NotEqual(t, "checkpoint-storage", mount.Name)
+		}
+	}
 }
 
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
@@ -8440,38 +8428,9 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 		Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
 	}
 
-	// snapshot-agent DaemonSet fixture so InjectCheckpointIntoPodSpec can
-	// discover the checkpoint PVC storage in the target namespace.
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: "test-ns",
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name: snapshotprotocol.SnapshotAgentVolumeName, MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: snapshotprotocol.SnapshotAgentVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
-						},
-					}},
-				},
-			},
-		},
-	}).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
@@ -8570,34 +8529,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: "test-ns",
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name: snapshotprotocol.SnapshotAgentVolumeName, MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: snapshotprotocol.SnapshotAgentVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
-						},
-					}},
-				},
-			},
-		},
-	}).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {

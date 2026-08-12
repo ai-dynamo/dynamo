@@ -5,20 +5,32 @@ title: Snapshotting GPU Workers
 subtitle: Checkpoints initialized GPU workers with CRIU and cuda-checkpoint so later pods warm-start in seconds instead of minutes.
 ---
 
-> ⚠️ **Experimental Feature**: Dynamo Snapshot is currently in preview and may only be functional in some cluster setups. The `snapshot-agent` DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
+> [!WARNING]
+> Snapshot is experimental and might work only in some cluster configurations.
+> The `snapshot-agent` DaemonSet runs in privileged mode to perform CRIU
+> operations. See [Limitations](#limitations) for details.
 
-**Dynamo Snapshot** is infrastructure for fast-starting GPU applications in Kubernetes using CRIU (Checkpoint/Restore in Userspace) and NVIDIA's `cuda-checkpoint` utility. The usual flow is:
+**NVIDIA Dynamo Snapshot** is infrastructure for fast-starting GPU applications
+in Kubernetes using Checkpoint/Restore in Userspace (CRIU) and NVIDIA's
+`cuda-checkpoint` utility. The usual flow is:
 
 1. start a worker once and checkpoint its initialized state
-2. store that checkpoint on a namespace-local snapshot volume
+2. store that checkpoint on the snapshot agent's shared PVC
 3. restore later workers from that checkpoint instead of cold-starting again
+
+Every agent in a snapshot deployment mounts the same ReadWriteMany (RWX) claim.
+Checkpoint and restore workload pods do not mount that claim. During restore,
+the agent temporarily exposes only the selected artifact directory at
+`/tmp/checkpoint` inside the target container's mount namespace.
 
 | Startup Type | Time | What Happens |
 |--------------|------|--------------|
 | **Cold Start** | ~1 min | Download model, load to GPU, initialize engine |
 | **Warm Start** (restore from checkpoint) | ~10 sec | Restore from a ready checkpoint directory |
 
-> ⚠️ Restore time depends on storage bandwidth, GPU model, and whether the restore stays on the same node.
+> [!NOTE]
+> Restore time depends on storage bandwidth, GPU model, and whether the restore
+> stays on the same node.
 
 For more background on the snapshot architecture and startup improvements, see
 [NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes](https://developer.nvidia.com/blog/nvidia-dynamo-snapshot-fast-startup-for-inference-workloads-on-kubernetes/).
@@ -29,9 +41,8 @@ For more background on the snapshot architecture and startup improvements, see
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
 - vLLM or SGLang backend today; TensorRT-LLM is supported only for the
   experimental single-GPU aggregated text worker path.
-- Checkpoint storage. `ReadWriteMany` is the safest default for cross-node or
-  concurrent multi-node access, but `podMount` mode can also use suitable
-  `ReadWriteOnce` storage for sequential checkpoint/restore workflows.
+- Checkpoint storage that supports RWX access and concurrent visibility from
+  every node eligible to run the snapshot agent.
 - **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
 
 ## Backend and Topology Support
@@ -54,13 +65,18 @@ For the cross-feature backend overview, see [Compatibility](../../../../referenc
 ## Quick Start via `DynamoCheckpoint` CR
 
 1. Build a placeholder image
-2. Install the snapshot chart
-3. Create a `DynamoCheckpoint` and wait for it to become ready
-4. Deploy a `DynamoGraphDeployment` that restores from the corresponding `checkpointRef`
+2. Enable checkpointing in the platform
+3. Install the snapshot chart
+4. Create a `DynamoCheckpoint`
+5. Wait for the checkpoint to become ready
+6. Deploy a `DynamoGraphDeployment` that restores from its `checkpointRef`
 
 ### 1. Build and push a placeholder image
 
-Snapshot-enabled workers must use a placeholder image that wraps the normal runtime image with restore tooling. If you do not already have one, build it and push it to a registry your cluster can pull from:
+Snapshot-enabled workers use a placeholder image based on the normal runtime
+image. It enters restore standby while the agent mounts the required binaries
+temporarily into the container. If you do not already have one, build it and
+push it to a registry your cluster can pull from:
 
 ```bash
 export RUNTIME_IMAGE=registry.example.com/dynamo/vllm-runtime:1.0.0
@@ -76,21 +92,18 @@ make docker-push-placeholder \
   PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}"
 ```
 
-The placeholder image preserves the normal runtime entrypoint/command contract and adds the `criu`, `cuda-checkpoint`, and `nsrestore` tooling needed for checkpoint and restore.
+The placeholder image preserves the normal runtime entrypoint and command
+contract. It does not contain CRIU, `cuda-checkpoint`, `nsrestore`, or the
+checkpoint PVC. The agent supplies the executable bundle only while restore is
+running.
 
-To build either snapshot image against a custom CRIU fork or ref, pass
-`CRIU_REPO` and `CRIU_REF` through `make`. If they are unset, the Dockerfile
-defaults are used.
+To build the snapshot agent against a custom CRIU fork or ref, pass `CRIU_REPO`
+and `CRIU_REF` through `make`. If they are unset, the Dockerfile defaults are
+used.
 
 ```bash
 make docker-build-agent \
   IMG=registry.example.com/dynamo/snapshot-agent:1.0.0 \
-  CRIU_REPO="${YOUR_CRIU_REPO}" \
-  CRIU_REF="branch-or-sha"
-
-make docker-build-placeholder \
-  PLACEHOLDER_BASE_IMG="${RUNTIME_IMAGE}" \
-  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}" \
   CRIU_REPO="${YOUR_CRIU_REPO}" \
   CRIU_REF="branch-or-sha"
 ```
@@ -120,8 +133,9 @@ Verify that the rendered config includes `enabled: true`.
 
 ### 3. Install the snapshot chart
 
-For the default namespace-local mode, install the snapshot chart in each
-workload namespace. The chart creates the PVC and the agent in that namespace:
+For the default namespace-restricted mode, install the snapshot chart in each
+workload namespace. The chart creates the shared RWX PVC and agent DaemonSet in
+that namespace:
 
 ```bash
 helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
@@ -130,80 +144,39 @@ helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
   --set storage.pvc.create=true
 ```
 
-In the default `agentMount` mode, the snapshot-agent DaemonSet mounts the
-checkpoint PVC directly. On a multi-node GPU cluster that means agent pods on
-multiple nodes may mount the same PVC, so the PVC generally needs
-`ReadWriteMany`. The chart defaults to that mode. If your cluster does not have
-a default storage class, also set `storage.pvc.storageClass`.
+Every agent pod mounts the claim read-write at `storage.pvc.basePath`. If your
+cluster does not have a default storage class, also set
+`storage.pvc.storageClass`. The selected class must support RWX.
 
-If you are reusing an existing checkpoint PVC, do not set `storage.pvc.create=true`; install the chart with `storage.pvc.create=false` and set `storage.pvc.name` instead.
+To reuse an existing claim, set `storage.pvc.create=false` and
+`storage.pvc.name=<claim-name>`. The existing claim must be in the chart release
+namespace, declare `ReadWriteMany`, and be mountable from every eligible node.
 
-CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see `deploy/helm/charts/snapshot/README.md`).
+For CRI-O, set `runtime.type=crio`. On OpenShift, also set
+`openshift.enabled=true`. See the
+[snapshot chart README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/snapshot/README.md).
 
-For clusters that prefer one privileged snapshot agent instead of one DaemonSet
-per workload namespace, install the chart once in an infrastructure namespace.
-In this mode the chart does not create workload PVCs; the Dynamo operator either
-creates each namespace-local PVC or verifies that it already exists:
+To run one cluster-wide agent fleet, install the chart once in an infrastructure
+namespace and disable namespace restriction:
 
 ```bash
 helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
   --namespace dynamo-system \
   --create-namespace \
-  --set storage.accessMode=podMount \
-  --set storage.pvc.create=false \
+  --set storage.pvc.create=true \
   --set rbac.namespaceRestricted=false
 ```
 
-To let the operator create the workload PVC in each namespace that uses
-checkpoint/restore, configure the operator with `create: true`:
+The cluster-wide release still owns one PVC in `dynamo-system`. Every agent in
+the fleet mounts that claim; workload namespaces do not need checkpoint PVCs.
+The operator has no checkpoint storage configuration in either topology.
 
-```yaml
-dynamo-operator:
-  checkpoint:
-    enabled: true
-    storage:
-      type: pvc
-      pvc:
-        pvcName: snapshot-pvc
-        basePath: /checkpoints
-        create: true
-        size: 1Ti
-        storageClassName: ""
-        accessMode: ReadWriteMany
-```
-
-The chart and operator use separate configuration surfaces here: the snapshot
-chart PVC name is `storage.pvc.name`, while the operator config field is
-`checkpoint.storage.pvc.pvcName`.
-
-This is a key difference from `agentMount`: `podMount` removes the requirement
-that the snapshot-agent DaemonSet mount the checkpoint PVC on every GPU node.
-Only the active checkpoint/restore workload pod mounts the PVC, and the agent
-reaches it through that pod's mount namespace. `ReadWriteMany` remains the
-safest operator-managed default, especially when multiple checkpoint/restore
-pods may access the same PVC concurrently or when restore scheduling can span
-nodes. Suitable `ReadWriteOnce` storage classes can still be used for
-sequential `podMount` checkpoint/restore flows when the backend can attach the
-volume to the node running the active workload pod.
-
-`podMount` depends on the target container remaining alive while the agent
-resolves `/host/proc/<pid>/root/<basePath>`. If the container exits or restarts
-during checkpoint/restore setup, if the runtime cannot expose a stable host PID,
-or if node security settings prevent host proc traversal, the agent fails or
-skips that attempt and Kubernetes/operator reconciliation must try again after a
-fresh container is available.
-
-To use an already-present PVC instead, omit `create` or set it to `false`. The
-operator will fail reconciliation with a clear error if the named PVC does not
-exist in the workload namespace.
-
-Verify that the DaemonSet is ready. After a checkpoint or restore workload is
-reconciled, verify the workload namespace PVC:
+Verify that the DaemonSet is ready and the claim is bound:
 
 ```bash
 kubectl rollout status daemonset/snapshot-agent -n dynamo-system
 kubectl get pods -n dynamo-system -l app.kubernetes.io/component=snapshot-agent -o wide
-kubectl get pvc snapshot-pvc -n ${NAMESPACE}
+kubectl get pvc snapshot-pvc -n dynamo-system
 ```
 
 ### 4. Create a standalone `DynamoCheckpoint`
@@ -347,9 +320,10 @@ The old `mode` field is deprecated. Omit it in new configs.
 readiness. `Immediate` starts workers cold while the checkpoint job runs;
 `WaitForCheckpoint` keeps replicas at zero until the checkpoint is ready.
 
-`deletionPolicy` applies only to DGD-owned automatic checkpoints. `Delete` removes
-the checkpoint CR and artifact with the DGD; `Retain` keeps them so they can be
-used later with `checkpointRef`.
+`deletionPolicy` applies only to DGD-owned automatic checkpoint custom
+resources. `Delete` removes the checkpoint resource with the DGD. `Retain`
+preserves the resource so it can be used later with `checkpointRef`. Both
+policies leave artifact data on the snapshot PVC.
 
 ## DGD-managed automatic checkpoints
 
@@ -382,7 +356,7 @@ experimental:
   checkpoint:
     enabled: true
     startupPolicy: Immediate # default; optional
-    deletionPolicy: Delete  # default; use Retain to keep CR/artifact after DGD deletion
+    deletionPolicy: Delete  # default; use Retain to keep the CR after DGD deletion
 ```
 
 For v1alpha1 services, the automatic checkpoint config is:
@@ -391,7 +365,7 @@ For v1alpha1 services, the automatic checkpoint config is:
 checkpoint:
   enabled: true
   startupPolicy: Immediate # default; optional
-  deletionPolicy: Delete  # default; use Retain to keep CR/artifact after DGD deletion
+  deletionPolicy: Delete  # default; use Retain to keep the CR after DGD deletion
 ```
 
 Inside a `DynamoGraphDeployment`, it looks like this:
@@ -448,7 +422,10 @@ Failover restore is not yet available. The current Snapshot flow does not suppor
 
 ## Lower-Level Testing With `snapshotctl`
 
-It is possible to checkpoint and restore pods without the Dynamo operator via the lower-level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet in the namespace with the checkpoint PVC mounted.
+You can checkpoint and restore pods with the lower-level `snapshotctl` utility.
+Install the snapshot Helm chart first and ensure an agent is running on the
+workload node. A namespace-restricted agent runs in the workload namespace; a
+cluster-wide agent can run in an infrastructure namespace.
 
 `snapshotctl` is intended for lower-level debugging and validation workflows, not as the primary user-facing checkpoint interface. For command details and manifest requirements, see [deploy/snapshot/cmd/snapshotctl/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/cmd/snapshotctl/README.md).
 
@@ -463,7 +440,9 @@ snapshotctl checkpoint \
 
 The checkpoint manifest must be for a pod and use a placeholder image. `--container` names the workload container to checkpoint.
 
-If you do not pass `--checkpoint-id`, `snapshotctl` generates one and prints it:
+If you do not pass `--checkpoint-id`, `snapshotctl` generates one. After capture
+completes, it reads the artifact handle reported by the agent on the bound
+`PodSnapshotContent`:
 
 ```text
 status=completed
@@ -472,7 +451,13 @@ name=...
 checkpoint_job=...
 checkpoint_id=manual-snapshot-...
 checkpoint_location=/checkpoints/...
+pod_snapshot=...
+bound_content=...
 ```
+
+`checkpoint_location` is an observed result rather than a predicted path. If
+the agent has not populated the handle, `snapshotctl` omits that line while
+continuing to report the checkpoint ID and status.
 
 ### Restore from a worker pod manifest
 
@@ -484,7 +469,10 @@ snapshotctl restore \
   --containers main
 ```
 
-This creates a new restore pod and returns after the request is submitted. Observe progress through Kubernetes readiness, events, and logs.
+This creates a new restore pod and returns after the request is submitted.
+Restore output does not include `checkpoint_location`; the agent resolves the
+artifact from its own configuration. Observe progress through Kubernetes
+readiness, events, and logs.
 
 ### Restore an existing pod in place
 
@@ -608,9 +596,10 @@ If the worker template is wrong, the most common causes are using the raw runtim
 
 ### Restore cannot find or mount checkpoint storage
 
-For the default `agentMount` install, restore discovers checkpoint storage from
-the `snapshot-agent` DaemonSet in the workload namespace. That DaemonSet must be
-ready and must mount the checkpoint PVC.
+The agent resolves every artifact from `storage.pvc.basePath` in its own
+configuration. It does not read a storage path from the workload pod or
+checkpoint resource. For a namespace-restricted installation, verify the agent
+and PVC in the workload namespace:
 
 ```bash
 kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
@@ -618,23 +607,18 @@ kubectl get daemonset -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-ag
 kubectl get pvc -n ${NAMESPACE}
 ```
 
-For a shared-agent `podMount` install, the `snapshot-agent` DaemonSet can run in
-the infrastructure namespace instead. Verify the shared-agent pods there, then
-verify that the workload namespace has the checkpoint PVC that the operator
-created or validated:
+For a cluster-wide installation, verify the agent and its shared PVC in the
+chart release namespace:
 
 ```bash
 kubectl rollout status daemonset/snapshot-agent -n dynamo-system
 kubectl get pods -n dynamo-system -l app.kubernetes.io/component=snapshot-agent -o wide
-kubectl get pvc snapshot-pvc -n ${NAMESPACE}
+kubectl get pvc snapshot-pvc -n dynamo-system
 ```
 
-In `podMount` mode the agent reaches the checkpoint through the workload pod's
-mount namespace rather than by mounting the PVC itself. Check the workload pod's
-checkpoint storage annotations and the `snapshot-agent` logs to see the actual
-resolved checkpoint path. `snapshotctl` uses the chart's storage resolution
-path, so for lower-level `snapshotctl` debugging make sure the snapshot chart
-configuration matches the access mode you are testing.
+Check the agent logs for the resolved artifact path and confirm that every agent
+pod mounts the same claim at the configured base path. A workload pod should
+not contain a checkpoint PVC volume or a mount at that path.
 
 ### `snapshotctl` manifest is rejected or the restore target is wrong
 

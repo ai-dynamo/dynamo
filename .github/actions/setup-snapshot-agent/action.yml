@@ -16,24 +16,28 @@ inputs:
   snapshot_agent_image:
     description: 'Full snapshot-agent image reference'
     required: true
+  integration_test_image:
+    description: 'Optional image containing the privileged namespace-mount integration suite'
+    required: false
+    default: ''
   storage_size:
-    description: 'Checkpoint PVC size for agentMount mode'
+    description: 'Shared RWX checkpoint PVC size'
     required: false
     default: 1Gi
-  storage_access_mode:
-    description: 'How the snapshot-agent accesses checkpoint storage'
-    required: false
-    default: podMount
   storage_pvc_name:
-    description: 'Checkpoint PVC name used by snapshot metadata'
+    description: 'Shared RWX checkpoint PVC name'
     required: false
     default: snapshot-pvc
-  storage_pvc_access_mode:
-    description: 'Checkpoint PVC Kubernetes access mode'
+  storage_pvc_create:
+    description: 'Create the checkpoint PVC; set false to use a pre-provisioned RWX claim'
     required: false
-    default: ReadWriteOnce
+    default: 'true'
+  storage_class:
+    description: 'RWX-capable StorageClass for a chart-created claim (empty uses the cluster default)'
+    required: false
+    default: ''
   storage_base_path:
-    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
+    description: 'Checkpoint PVC mount path inside snapshot-agent pods'
     required: false
     default: /checkpoints
 
@@ -57,9 +61,9 @@ runs:
         RELEASE_NAME: ${{ inputs.release_name }}
         SNAPSHOT_AGENT_IMAGE: ${{ inputs.snapshot_agent_image }}
         STORAGE_SIZE: ${{ inputs.storage_size }}
-        STORAGE_ACCESS_MODE: ${{ inputs.storage_access_mode }}
         STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
-        STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
+        STORAGE_PVC_CREATE: ${{ inputs.storage_pvc_create }}
+        STORAGE_CLASS: ${{ inputs.storage_class }}
         STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
       run: |
         echo "::group::Install snapshot-agent"
@@ -75,20 +79,36 @@ runs:
         helm upgrade --install "${RELEASE_NAME}" ./deploy/helm/charts/snapshot \
           --namespace "${NAMESPACE}" \
           --create-namespace \
-          --wait \
           --timeout 15m \
           --set daemonset.image.repository="${SNAPSHOT_IMAGE_REPO}" \
           --set daemonset.image.tag="${SNAPSHOT_IMAGE_TAG}" \
           --set daemonset.image.pullPolicy=Always \
           --set-json=daemonset.imagePullSecrets=[] \
           --set rbac.namespaceRestricted=true \
-          --set storage.accessMode="${STORAGE_ACCESS_MODE}" \
           --set storage.pvc.name="${STORAGE_PVC_NAME}" \
-          --set storage.pvc.accessMode="${STORAGE_PVC_ACCESS_MODE}" \
           --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
-          --set storage.pvc.create=false \
+          --set storage.pvc.create="${STORAGE_PVC_CREATE}" \
           --set storage.pvc.size="${STORAGE_SIZE}" \
+          --set storage.pvc.storageClass="${STORAGE_CLASS}" \
           --debug
+
+        if ! kubectl wait "pvc/${STORAGE_PVC_NAME}" \
+          -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound \
+          --timeout=300s; then
+          echo "::error::checkpoint PVC ${NAMESPACE}/${STORAGE_PVC_NAME} did not bind; configure storage_class with an RWX-capable provisioner or supply an existing RWX claim"
+          kubectl get pvc "${STORAGE_PVC_NAME}" -n "${NAMESPACE}" -o yaml || true
+          kubectl get storageclass -o wide || true
+          exit 1
+        fi
+        PVC_ACCESS_MODES="$(kubectl get pvc "${STORAGE_PVC_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.accessModes[*]}')"
+        if [[ " ${PVC_ACCESS_MODES} " != *" ReadWriteMany "* ]]; then
+          echo "::error::checkpoint PVC ${NAMESPACE}/${STORAGE_PVC_NAME} is not ReadWriteMany: ${PVC_ACCESS_MODES}"
+          kubectl get pvc "${STORAGE_PVC_NAME}" -n "${NAMESPACE}" -o yaml
+          exit 1
+        fi
 
         DAEMONSET_NAME="$(kubectl get daemonset \
           -n "${NAMESPACE}" \
@@ -143,4 +163,44 @@ runs:
         echo "::endgroup::"
         echo "::group::Snapshot-agent logs"
         kubectl logs -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot --all-containers --tail=100
+        echo "::endgroup::"
+
+    - name: Test snapshot namespace mounts
+      if: inputs.integration_test_image != ''
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        RELEASE_NAME: ${{ inputs.release_name }}
+        INTEGRATION_TEST_IMAGE: ${{ inputs.integration_test_image }}
+      run: |
+        echo "::group::Test snapshot namespace mounts"
+        set -euo pipefail
+        JOB_NAME="${RELEASE_NAME}-nsmount-integration"
+        kubectl delete job "${JOB_NAME}" -n "${NAMESPACE}" --ignore-not-found --wait=true
+        kubectl apply -f - <<EOF
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${JOB_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          backoffLimit: 0
+          activeDeadlineSeconds: 600
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+                - name: test
+                  image: ${INTEGRATION_TEST_IMAGE}
+                  imagePullPolicy: Always
+                  securityContext:
+                    privileged: true
+        EOF
+        if ! kubectl wait "job/${JOB_NAME}" -n "${NAMESPACE}" --for=condition=complete --timeout=600s; then
+          kubectl describe job "${JOB_NAME}" -n "${NAMESPACE}" || true
+          kubectl logs "job/${JOB_NAME}" -n "${NAMESPACE}" --all-containers || true
+          exit 1
+        fi
+        kubectl logs "job/${JOB_NAME}" -n "${NAMESPACE}" --all-containers
+        kubectl delete job "${JOB_NAME}" -n "${NAMESPACE}" --wait=true
         echo "::endgroup::"

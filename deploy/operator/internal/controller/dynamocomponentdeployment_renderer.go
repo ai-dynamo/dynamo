@@ -226,13 +226,12 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
 		if checkpointInfo == nil ||
 			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint) {
-			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
+			if err := checkpoint.InjectCheckpointIntoPodSpec(
 				ctx,
 				r.reader,
 				dcd.Namespace,
 				podSpec,
 				checkpointInfo,
-				r.config.Checkpoint.Storage,
 				r.config.Checkpoint.EffectiveSeccompProfile(),
 			); err != nil {
 				return nil, errors.Wrap(err, "failed to inject checkpoint config")
@@ -257,13 +256,8 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {
 			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
 		}
-	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(
-		podLabels,
-		podAnnotations,
-		checkpointInfo,
-		r.config.Checkpoint.Storage,
-	); err != nil {
-		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
+	} else {
+		checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
 	}
 
 	if podSpec.ServiceAccountName == "" {

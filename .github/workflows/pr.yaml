@@ -270,7 +270,9 @@ jobs:
 
   helm-chart-tests:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    if: |
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true'
     name: Helm Chart Tests
     runs-on: ubuntu-latest
     steps:
@@ -281,7 +283,9 @@ jobs:
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test
-        run: make -C deploy/helm/charts/platform lint test
+        run: |
+          make -C deploy/helm/charts/platform lint test
+          make -C deploy/helm/charts/snapshot lint test
 
 # ============================================================================
 # Snapshot Agent
@@ -330,6 +334,19 @@ jobs:
           diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
           diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
           gh_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push snapshot namespace-mount tests
+        working-directory: deploy/snapshot
+        env:
+          TEST_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-nsmount-test
+          DOCKER_PROXY: ${{ vars.ECR_REGISTRY }}/dockerhub/
+        run: |
+          docker buildx build --push \
+            --platform linux/amd64 \
+            --target integration-tester \
+            --build-context operator=../operator \
+            --build-arg DOCKER_PROXY="${DOCKER_PROXY}" \
+            -t "${TEST_IMAGE}" \
+            .
 
 # ============================================================================
 # Power Agent
@@ -1442,7 +1459,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1478,7 +1494,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1514,7 +1529,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1555,7 +1569,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1571,6 +1584,9 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          integration_test_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-nsmount-test
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
 
   deploy-snapshot-agent-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Snapshot Agent Setup
@@ -1608,7 +1624,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1624,6 +1639,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
 
   deploy-snapshot-agent-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
@@ -1661,7 +1678,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1677,6 +1693,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
 
   deploy-test-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Deploy Test
@@ -1715,7 +1733,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1732,6 +1749,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:
@@ -1789,7 +1808,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1806,6 +1824,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:
@@ -1863,7 +1883,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1880,6 +1899,8 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
+          storage_size: 64Gi
+          storage_class: ${{ vars.SNAPSHOT_STORAGE_CLASS }}
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:

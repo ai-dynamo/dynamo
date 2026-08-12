@@ -14,6 +14,9 @@ import (
 
 const manifestFilename = "manifest.yaml"
 
+// ManifestFilename is the fixed name of the manifest within an artifact.
+const ManifestFilename = manifestFilename
+
 // CheckpointManifest is saved as manifest.yaml at checkpoint time and loaded at restore.
 type CheckpointManifest struct {
 	CheckpointID string    `yaml:"checkpointId"`
@@ -172,6 +175,12 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
 
+	return ParseManifest(content)
+}
+
+// ParseManifest parses and validates manifest bytes read through a caller-owned,
+// descriptor-pinned artifact directory.
+func ParseManifest(content []byte) (*CheckpointManifest, error) {
 	var data CheckpointManifest
 	if err := yaml.Unmarshal(content, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint manifest: %w", err)

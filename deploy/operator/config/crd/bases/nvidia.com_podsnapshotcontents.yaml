@@ -200,6 +200,11 @@ spec:
                       - type
                     type: object
                   type: array
+                snapshotHandle:
+                  description: |-
+                    SnapshotHandle is the resolved location of the captured artifact.
+                    It is written solely by the node agent and is never used as restore input.
+                  type: string
               type: object
           type: object
           x-kubernetes-validations:

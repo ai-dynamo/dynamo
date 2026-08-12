@@ -9,7 +9,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -45,7 +47,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		return nil, fmt.Errorf("--timeout must be greater than zero")
 	}
 
-	pod, clientset, crClient, namespace, storage, err := loadRunContext(ctx, opts.ManifestPath, opts.Namespace, opts.KubeContext)
+	pod, clientset, crClient, namespace, err := loadRunContext(opts.ManifestPath, opts.Namespace, opts.KubeContext)
 	if err != nil {
 		return nil, err
 	}
@@ -54,15 +56,6 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	if checkpointID == "" {
 		checkpointID = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointIDPrefix, time.Now().UTC().UnixNano())
 	}
-	resolvedStorage, err := snapshotprotocol.ResolveCheckpointStorage(checkpointID, "", snapshotprotocol.Storage{
-		Type:     snapshotprotocol.StorageTypePVC,
-		PVCName:  storage.PVCName,
-		BasePath: storage.BasePath,
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	containers, err := reconcileTargetContainers(pod.Annotations, opts.Container, 1, 1)
 	if err != nil {
 		return nil, err
@@ -122,17 +115,39 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		return nil, err
 	}
 
+	boundContent, checkpointLocation, err := checkpointHandle(waitCtx, crClient, snap)
+	if err != nil {
+		return nil, err
+	}
+
 	res := &result{
 		Name:               pod.Name,
 		Namespace:          namespace,
 		CheckpointID:       checkpointID,
-		CheckpointLocation: resolvedStorage.Location,
+		CheckpointLocation: checkpointLocation,
 		CheckpointJob:      checkpointJobName,
 		PodSnapshot:        snap.Name,
+		BoundContent:       boundContent,
 		Status:             "completed",
 	}
-	if snap.Status.BoundPodSnapshotContentName != nil && *snap.Status.BoundPodSnapshotContentName != "" {
-		res.BoundContent = *snap.Status.BoundPodSnapshotContentName
-	}
 	return res, nil
+}
+
+// checkpointHandle reads the agent-reported artifact location from the bound
+// content object. An empty handle is valid: capture status can still be
+// reported without predicting a storage path.
+func checkpointHandle(ctx context.Context, crClient client.Client, snap *nvidiacomv1alpha1.PodSnapshot) (string, string, error) {
+	if snap.Status.BoundPodSnapshotContentName == nil {
+		return "", "", nil
+	}
+	boundContent := strings.TrimSpace(*snap.Status.BoundPodSnapshotContentName)
+	if boundContent == "" {
+		return "", "", nil
+	}
+
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
+	if err := crClient.Get(ctx, client.ObjectKey{Name: boundContent}, content); err != nil {
+		return "", "", fmt.Errorf("get bound PodSnapshotContent %s: %w", boundContent, err)
+	}
+	return boundContent, strings.TrimSpace(content.Status.SnapshotHandle), nil
 }

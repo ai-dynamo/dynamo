@@ -21,14 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Checkpoint storage type constants retained for compatibility with older
-// operator configuration files.
-const (
-	CheckpointStorageTypePVC = "pvc"
-	CheckpointStorageTypeS3  = "s3"
-	CheckpointStorageTypeOCI = "oci"
-)
-
 // +kubebuilder:object:root=true
 
 // OperatorConfiguration is the Schema for the operator configuration.
@@ -340,15 +332,6 @@ type CheckpointConfiguration struct {
 	// restore pods. A nil value means "use the default profile"; set
 	// Seccomp.Disabled=true to disable seccomp injection entirely.
 	Seccomp *CheckpointSeccompConfiguration `json:"seccomp,omitempty"`
-	// Storage optionally configures the namespace-local checkpoint PVC that
-	// workload pods mount. When omitted, the operator preserves the legacy
-	// behavior of discovering storage from a snapshot-agent DaemonSet in the
-	// workload namespace.
-	Storage CheckpointStorageConfiguration `json:"storage"`
-	// CleanupImage is the image used by best-effort artifact cleanup Jobs for
-	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
-	// +kubebuilder:default="busybox:1.36"
-	CleanupImage string `json:"cleanupImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied
@@ -382,55 +365,6 @@ func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 		return DefaultSeccompProfile
 	}
 	return c.Seccomp.Profile
-}
-
-// CheckpointStorageConfiguration configures checkpoint storage for operator
-// pod mutations. Only PVC storage is implemented today.
-type CheckpointStorageConfiguration struct {
-	// Type is the storage backend type. Only pvc is implemented today.
-	Type string `json:"type"`
-	// PVC configuration for pvc-based settings.
-	PVC CheckpointPVCConfig `json:"pvc"`
-	// Deprecated: S3 is retained for compatibility and ignored.
-	S3 CheckpointS3Config `json:"s3"`
-	// Deprecated: OCI is retained for compatibility and ignored.
-	OCI CheckpointOCIConfig `json:"oci"`
-}
-
-// CheckpointPVCConfig configures the namespace-local PVC mounted into
-// checkpoint and restore workload pods.
-type CheckpointPVCConfig struct {
-	// PVCName is the PVC name in each workload namespace.
-	PVCName string `json:"pvcName"`
-	// BasePath is the mount path inside checkpoint and restore workload pods.
-	BasePath string `json:"basePath"`
-	// Create tells the operator to create the PVC in workload namespaces when
-	// it is missing. When false, the PVC must already exist.
-	Create bool `json:"create"`
-	// Size is the storage request used when Create is true.
-	Size string `json:"size"`
-	// StorageClassName is the optional StorageClass name used when Create is true.
-	StorageClassName string `json:"storageClassName"`
-	// AccessMode is the PVC access mode used when Create is true.
-	AccessMode string `json:"accessMode"`
-}
-
-// Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-// the current snapshot flow.
-type CheckpointS3Config struct {
-	// URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix).
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the legacy credentials secret name.
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
-}
-
-// Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
-// the current snapshot flow.
-type CheckpointOCIConfig struct {
-	// URI is the legacy OCI URI (oci://registry/repository).
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the legacy docker config secret name.
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
 }
 
 // DiscoveryConfiguration holds discovery backend settings.

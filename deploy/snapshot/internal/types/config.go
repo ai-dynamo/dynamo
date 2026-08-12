@@ -4,6 +4,7 @@ package types
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -18,15 +19,6 @@ type AgentConfig struct {
 	Restore             RestoreSpec     `yaml:"restore"`
 	CRIU                CRIUSettings    `yaml:"criu"`
 }
-
-const (
-	// StorageAccessModeAgentMount means the snapshot-agent pod mounts the
-	// checkpoint store directly at Storage.BasePath.
-	StorageAccessModeAgentMount = "agentMount"
-	// StorageAccessModePodMount means workload pods mount the checkpoint PVC,
-	// and snapshot-agent reaches it through /host/proc/<pid>/root.
-	StorageAccessModePodMount = "podMount"
-)
 
 func (c *AgentConfig) LoadEnvOverrides() {
 	if v := os.Getenv("NODE_NAME"); v != "" {
@@ -52,20 +44,10 @@ func (c *AgentConfig) Validate() error {
 	if !strings.HasPrefix(basePath, "/") {
 		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath must be an absolute path"}
 	}
+	if filepath.Clean(basePath) != basePath {
+		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath must be a clean path"}
+	}
 	c.Storage.BasePath = basePath
-	accessMode := strings.TrimSpace(c.Storage.AccessMode)
-	if accessMode == "" {
-		accessMode = StorageAccessModeAgentMount
-	}
-	switch accessMode {
-	case StorageAccessModeAgentMount, StorageAccessModePodMount:
-	default:
-		return &ConfigError{
-			Field:   "storage.accessMode",
-			Message: fmt.Sprintf("unsupported access mode %q; expected %q or %q", c.Storage.AccessMode, StorageAccessModeAgentMount, StorageAccessModePodMount),
-		}
-	}
-	c.Storage.AccessMode = accessMode
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -85,9 +67,8 @@ func (c *AgentConfig) Validate() error {
 
 // StorageSpec holds snapshot storage settings that are local to the agent deployment.
 type StorageSpec struct {
-	Type       string `yaml:"type"`
-	BasePath   string `yaml:"basePath"`
-	AccessMode string `yaml:"accessMode"`
+	Type     string `yaml:"type"`
+	BasePath string `yaml:"basePath"`
 }
 
 // RestoreSpec holds settings for the CRIU restore process.

@@ -33,17 +33,44 @@ const (
 	unmountTimeout = 10 * time.Second
 )
 
-// MountOptions configures a single namespace-aware mount operation.
+// MountOptions configures a single namespace-aware mount operation. Each field
+// is an attribute the helper applies to the cloned tree; the helper clears any
+// it is not given, so these describe the mount exactly rather than adding to
+// whatever the source already carried.
 type MountOptions struct {
-	ReadOnly bool // mount with MS_RDONLY
+	ReadOnly bool // mount read-only
+	NoSuid   bool // ignore set-user-ID and set-group-ID bits
+	NoDev    bool // disallow device special files
+	NoExec   bool // disallow execution
+}
+
+// attrArgs renders the attribute tokens the helper's mount-fd subcommand takes.
+func (o MountOptions) attrArgs() []string {
+	var args []string
+	for _, attr := range []struct {
+		set   bool
+		token string
+	}{
+		{o.ReadOnly, "ro"},
+		{o.NoSuid, "nosuid"},
+		{o.NoDev, "nodev"},
+		{o.NoExec, "noexec"},
+	} {
+		if attr.set {
+			args = append(args, attr.token)
+		}
+	}
+	return args
 }
 
 // mountRef represents an active mount inside a foreign namespace.
 // The owner must call Unmount when the mount is no longer needed.
 type mountRef interface {
-	// Unmount detaches the mount from the target namespace.
+	// Unmount detaches the mount from the target namespace. strict selects
+	// umount2(0) over MNT_DETACH, so a busy mount surfaces as an error instead
+	// of disappearing into a lazy detach.
 	// Idempotent — safe to call multiple times.
-	Unmount(ctx context.Context) error
+	Unmount(ctx context.Context, strict bool) error
 
 	// TargetPath returns the dst path as seen inside the target namespace.
 	TargetPath() string
@@ -95,7 +122,7 @@ type execMountRef struct {
 func (h *execMountRef) TargetPath() string { return h.dst }
 func (h *execMountRef) NsFd() *os.File     { return h.nsFd }
 
-func (h *execMountRef) Unmount(_ context.Context) error {
+func (h *execMountRef) Unmount(_ context.Context, strict bool) error {
 	h.once.Do(func() {
 		defer h.nsFd.Close()
 		// Fresh context with a hard timeout. The parent context is intentionally
@@ -107,6 +134,9 @@ func (h *execMountRef) Unmount(_ context.Context) error {
 		args := []string{"umount-fd", strconv.Itoa(nsFdChildNum), h.dst}
 		if h.createdDst {
 			args = append(args, "created")
+		}
+		if strict {
+			args = append(args, "strict")
 		}
 		cmd := exec.CommandContext(ctx, h.binaryPath, args...)
 		cmd.ExtraFiles = []*os.File{h.nsFd}
@@ -135,10 +165,7 @@ func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 		return nil, fmt.Errorf("open %s: %w", nsFdPath, err)
 	}
 
-	args := []string{"mount-fd", strconv.Itoa(nsFdChildNum), src, dst}
-	if opts.ReadOnly {
-		args = append(args, "ro")
-	}
+	args := append([]string{"mount-fd", strconv.Itoa(nsFdChildNum), src, dst}, opts.attrArgs()...)
 
 	cmd := exec.CommandContext(ctx, m.binaryPath, args...)
 	cmd.ExtraFiles = []*os.File{nsFd}
@@ -151,7 +178,7 @@ func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 		nsFd.Close()
 		return nil, fmt.Errorf("ns-bind-mount mount-fd %s -> %s: %w\noutput: %s", src, dst, err, strings.TrimSpace(stderr.String()))
 	}
-	m.log.Info("mounted into namespace", "src", src, "dst", dst, "readonly", opts.ReadOnly, "pid", pid)
+	m.log.Info("mounted into namespace", "src", src, "dst", dst, "attrs", opts.attrArgs(), "pid", pid)
 
 	createdDst := strings.Contains(stdout.String(), "created_dst=1")
 

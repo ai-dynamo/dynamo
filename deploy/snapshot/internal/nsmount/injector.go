@@ -23,6 +23,19 @@ const (
 	SnapshotBinSrc = "/snapshot-binaries"
 	// SnapshotBinDst is the mount destination inside the placeholder namespace.
 	SnapshotBinDst = "/tmp/snapshot-binaries"
+	// CheckpointDst is where the selected checkpoint artifact is exposed inside
+	// the placeholder namespace.
+	CheckpointDst = "/tmp/checkpoint"
+)
+
+// The two attribute sets this agent mounts with. They are named for what they
+// hold rather than what uses them; the wrapper types below bind each one.
+var (
+	// The binary bundle is executed inside the target, so exec stays allowed.
+	readOnly = MountOptions{ReadOnly: true, NoSuid: true, NoDev: true}
+	// The checkpoint artifact is data brought in from shared storage. Letting
+	// the target execute it would turn the mount into a code-injection channel.
+	readOnlyNoExec = MountOptions{ReadOnly: true, NoSuid: true, NoDev: true, NoExec: true}
 )
 
 // MountPoint represents an active bind-mount of a directory inside a foreign
@@ -33,11 +46,13 @@ type MountPoint interface {
 	// Example: mp.Path("nsrestore") → "/tmp/snapshot-binaries/nsrestore", nil
 	Path(name string) (string, error)
 
-	// Unmount removes the bind-mount from the target namespace.
+	// Unmount removes the bind-mount from the target namespace. strict selects
+	// umount2(0) over MNT_DETACH, so a busy mount is reported rather than
+	// deferred; the caller chooses per mount.
 	// Idempotent — safe to call from a defer even if Mount partially failed.
 	// A non-nil error means the mount may still be active; callers must treat
 	// this as fatal and exit so Kubernetes restarts into a clean namespace.
-	Unmount(ctx context.Context) error
+	Unmount(ctx context.Context, strict bool) error
 
 	// NsFd returns the pinned mount-namespace fd opened at Mount time.
 	// Use /proc/self/fd/<Fd()> as the --mount= argument to nsenter so the
@@ -46,11 +61,10 @@ type MountPoint interface {
 	NsFd() *os.File
 }
 
-// NSMounter mounts a source directory into a placeholder container's mount
-// namespace and returns a MountPoint for later cleanup.
+// NSMounter mounts directories into a placeholder container's mount namespace
+// and returns a MountPoint for later cleanup. It holds no paths of its own:
+// each call names its source and destination.
 type NSMounter struct {
-	src     string
-	dst     string
 	mounter mounter
 	log     logr.Logger
 }
@@ -70,7 +84,7 @@ func probeKernelMountAPI() error {
 // location. It errors if the helper binary is missing or if the kernel does not
 // support mount_setattr (Linux 5.12+), so a misconfigured node fails at agent
 // startup rather than at first restore.
-func New(src, dst string, log logr.Logger) (*NSMounter, error) {
+func New(log logr.Logger) (*NSMounter, error) {
 	if err := probeKernelMountAPI(); err != nil {
 		return nil, err
 	}
@@ -78,28 +92,50 @@ func New(src, dst string, log logr.Logger) (*NSMounter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newWithMounter(src, dst, m, log)
+	return newWithMounter(m, log), nil
 }
 
 // newWithMounter is the test seam: it takes an arbitrary mounter so tests can
 // exercise Mount without the ns-bind-mount subprocess.
-func newWithMounter(src, dst string, m mounter, log logr.Logger) (*NSMounter, error) {
-	return &NSMounter{src: src, dst: dst, mounter: m, log: log}, nil
+func newWithMounter(m mounter, log logr.Logger) *NSMounter {
+	return &NSMounter{mounter: m, log: log}
 }
 
-// Mount bind-mounts src into dst inside the mount namespace of pid.
-// The caller must call MountPoint.Unmount when done.
-func (nsm *NSMounter) Mount(ctx context.Context, pid int) (MountPoint, error) {
-	nsm.log.Info("mounting agent bundle into placeholder namespace", "pid", pid, "src", nsm.src, "dst", nsm.dst)
+// Mount bind-mounts src at dst inside pid's mount namespace with exactly the
+// given attributes. It is the general operation; the wrapper types below bind
+// the attribute sets this agent actually uses. How the mount is released is not
+// decided here: the caller passes that to MountPoint.Unmount.
+func (nsm *NSMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountPoint, error) {
+	nsm.log.Info("mounting into placeholder namespace", "pid", pid, "src", src, "dst", dst, "attrs", opts.attrArgs())
 
-	ref, err := nsm.mounter.Mount(ctx, pid, nsm.src, nsm.dst, MountOptions{ReadOnly: true})
+	ref, err := nsm.mounter.Mount(ctx, pid, src, dst, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	nsm.log.Info("agent bundle mounted", "pid", pid, "dst", ref.TargetPath())
+	nsm.log.Info("mounted into placeholder namespace", "pid", pid, "dst", ref.TargetPath())
 	return &mountPoint{mount: ref}, nil
 }
+
+// ReadOnlyMounter mounts read-only, nosuid and nodev, leaving execution
+// allowed for callers that run binaries out of the mount.
+type ReadOnlyMounter struct{ nsm *NSMounter }
+
+func (w ReadOnlyMounter) Mount(ctx context.Context, pid int, src, dst string) (MountPoint, error) {
+	return w.nsm.Mount(ctx, pid, src, dst, readOnly)
+}
+
+// ReadOnlyNoExecMounter additionally forbids execution, for data the target
+// should be able to read but never run.
+type ReadOnlyNoExecMounter struct{ nsm *NSMounter }
+
+func (w ReadOnlyNoExecMounter) Mount(ctx context.Context, pid int, src, dst string) (MountPoint, error) {
+	return w.nsm.Mount(ctx, pid, src, dst, readOnlyNoExec)
+}
+
+// ReadOnly and ReadOnlyNoExec return the wrapper for each attribute set.
+func (nsm *NSMounter) ReadOnly() ReadOnlyMounter             { return ReadOnlyMounter{nsm: nsm} }
+func (nsm *NSMounter) ReadOnlyNoExec() ReadOnlyNoExecMounter { return ReadOnlyNoExecMounter{nsm: nsm} }
 
 // mountPoint wraps a mountRef to expose the MountPoint surface:
 // Path resolves binary names relative to the mounted directory,
@@ -118,8 +154,8 @@ func (h *mountPoint) Path(name string) (string, error) {
 	return filepath.Join(h.mount.TargetPath(), name), nil
 }
 
-func (h *mountPoint) Unmount(ctx context.Context) error {
-	return h.mount.Unmount(ctx)
+func (h *mountPoint) Unmount(ctx context.Context, strict bool) error {
+	return h.mount.Unmount(ctx, strict)
 }
 
 func (h *mountPoint) NsFd() *os.File {
