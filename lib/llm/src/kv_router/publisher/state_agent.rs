@@ -160,7 +160,6 @@ struct IngressBatch {
     final_chunk: bool,
     events: Vec<PlacementEvent>,
     cache_owner_fault: Option<&'static str>,
-    response: Option<oneshot::Sender<Result<()>>>,
 }
 
 #[derive(Default)]
@@ -226,6 +225,7 @@ struct Coordinator<P> {
     control_rx: mpsc::Receiver<ControlCommand>,
     ingress_rx: mpsc::Receiver<IngressBatch>,
     attachment: Option<Attachment>,
+    ingress_generation: Option<u64>,
     next_outbound_id: u64,
     next_attachment_generation: u64,
     source_cursor: SourceCursorState,
@@ -248,11 +248,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     }
                 }
                 batch = self.ingress_rx.recv() => {
-                    let Some(mut batch) = batch else { continue };
-                    let response = batch.response.take();
-                    let result = self.handle_ingress(batch).await;
-                    if let Some(response) = response {
-                        let _ = response.send(result);
+                    let Some(batch) = batch else { continue };
+                    if let Err(error) = self.handle_ingress(batch).await {
+                        tracing::error!(%error, "KV state-agent ingress failed");
                     }
                 }
             }
@@ -303,6 +301,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     .is_some_and(|attachment| attachment.generation == generation)
                 {
                     self.attachment = None;
+                    self.ingress_generation = None;
                     self.source_cursor = SourceCursorState::default();
                     self.publish_status();
                 }
@@ -343,6 +342,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             }
         };
         attachment.ready_at_outbound_cursor = barrier_cursor;
+        self.ingress_generation = Some(attachment.generation);
         attachment.ready = true;
         // NOTE: Resetting this per-attachment cursor does not prove KVCC continuity.
         // The foundation assumes the replacement stream delivered every prior
@@ -376,6 +376,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         if attachment.generation != generation || attachment.ready {
             anyhow::bail!("attachment must be unready before detach cleanup");
         }
+        self.ingress_generation = None;
 
         // Worker mutations queued for this attachment may be discarded because the
         // ordered Worker reset supersedes them. CacheOwner mutations are post-commit
@@ -412,14 +413,14 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     }
 
     async fn handle_ingress(&mut self, batch: IngressBatch) -> Result<()> {
-        let valid_generation = self.attachment.as_ref().is_some_and(|attachment| {
-            attachment.ready
-                && attachment.generation == batch.generation
-                && !self.worker_domain_failed
-                && !self.source_failed
-        });
+        let valid_generation = self.ingress_generation == Some(batch.generation)
+            && !self.worker_domain_failed
+            && !self.source_failed;
         if !valid_generation {
-            return Ok(());
+            anyhow::bail!(
+                "ingress is closed for attachment generation {}",
+                batch.generation
+            );
         }
 
         if batch.events.len() > MAX_INGRESS_EVENTS
@@ -465,26 +466,18 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     }
 
     async fn drain_detaching_cache_owner(&mut self, generation: u64) {
-        while let Ok(mut batch) = self.ingress_rx.try_recv() {
-            let response = batch.response.take();
+        while let Ok(batch) = self.ingress_rx.try_recv() {
             if batch.generation != generation {
                 tracing::warn!(
                     queued_generation = batch.generation,
                     generation,
                     "Discarding ingress from a non-current attachment generation"
                 );
-                if let Some(response) = response {
-                    let _ = response.send(Ok(()));
-                }
                 continue;
             }
 
             if !self.source_cursor.observe(&batch) {
                 self.fail_cache_owner(generation, "raw source cursor gap during detach");
-                if let Some(response) = response {
-                    let _ =
-                        response.send(Err(anyhow::anyhow!("raw source cursor gap during detach")));
-                }
                 continue;
             }
             if let Some(reason) = batch.cache_owner_fault {
@@ -507,20 +500,17 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 // buffer. Reserve their IDs before the authoritative Worker barrier so
                 // recovery can close any publication gap without an ID collision.
                 if let Err(error) = self.reserve_locally_applied_event_ids() {
+                    tracing::error!(%error, "Failed to reserve drained state-agent event IDs");
                     self.source_failed = true;
                     self.worker_domain_failed = true;
                     self.publish_status();
-                    if let Some(response) = response {
-                        let _ = response.send(Err(error));
-                    }
                     continue;
                 }
                 self.publish_status();
             }
-            if let Some(response) = response {
-                let response_result = result.map_err(|error| anyhow::anyhow!(error.to_string()));
-                let _ = response.send(response_result);
-            }
+        }
+        if self.source_cursor.active.is_some() {
+            self.fail_cache_owner(generation, "incomplete raw source batch during detach");
         }
     }
 
@@ -612,7 +602,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ),
             };
             self.local_indexer
-                .apply_event_with_buffer_acknowledged(router_event.clone())
+                .apply_event_with_buffer(router_event.clone())
                 .await
                 .context("local residency application failed")?;
             output.push(router_event);
@@ -827,6 +817,7 @@ impl KvStateAgent {
                 control_rx,
                 ingress_rx,
                 attachment: None,
+                ingress_generation: None,
                 next_outbound_id: 1,
                 next_attachment_generation: 1,
                 source_cursor: SourceCursorState::default(),
@@ -1417,7 +1408,6 @@ async fn run_vllm_listener(
         let chunks = bounded_ingress_chunks(events)?;
         let final_chunk_index = chunks.len().saturating_sub(1);
         for (chunk_index, events) in chunks.into_iter().enumerate() {
-            let (response, received) = oneshot::channel();
             let envelope = IngressBatch {
                 generation,
                 source_cursor,
@@ -1426,20 +1416,12 @@ async fn run_vllm_listener(
                 final_chunk: chunk_index == final_chunk_index,
                 events,
                 cache_owner_fault: (chunk_index == 0).then_some(cache_owner_fault).flatten(),
-                response: Some(response),
             };
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Ok(()),
                 result = ingress_tx.send(envelope) => {
                     result.context("state-agent vLLM queue closed")?;
-                }
-            }
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Ok(()),
-                result = received => {
-                    result.context("state-agent ingress acknowledgement dropped")??;
                 }
             }
         }
@@ -1561,7 +1543,7 @@ fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<Placeme
 mod tests {
     use std::sync::{
         Mutex as StdMutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use dynamo_kv_router::{
@@ -1583,11 +1565,15 @@ mod tests {
     struct RecordingSink {
         events: Arc<StdMutex<Vec<RouterEvent>>>,
         publications: Arc<AtomicUsize>,
+        fail: Arc<AtomicBool>,
     }
 
     impl RouterEventBatchSink for RecordingSink {
         async fn publish_events(&self, events: &[RouterEvent]) -> Result<()> {
             self.publications.fetch_add(1, Ordering::Relaxed);
+            if self.fail.load(Ordering::Relaxed) {
+                anyhow::bail!("injected state-agent publication failure");
+            }
             self.events.lock().unwrap().extend_from_slice(events);
             Ok(())
         }
@@ -1726,7 +1712,6 @@ mod tests {
         source_cursor: u64,
         events: Vec<PlacementEvent>,
     ) -> Result<()> {
-        let (response, received) = oneshot::channel();
         tx.send(IngressBatch {
             generation,
             source_cursor,
@@ -1734,11 +1719,9 @@ mod tests {
             final_chunk: true,
             events,
             cache_owner_fault: None,
-            response: Some(response),
         })
         .await
-        .unwrap();
-        received.await.unwrap()
+        .context("state-agent test ingress queue closed")
     }
 
     async fn detach(control: &mpsc::Sender<ControlCommand>, generation: u64) -> Result<u64> {
@@ -1817,6 +1800,7 @@ mod tests {
                 control_rx,
                 ingress_rx,
                 attachment: None,
+                ingress_generation: None,
                 next_outbound_id: 1,
                 next_attachment_generation: 1,
                 source_cursor: SourceCursorState::default(),
@@ -1936,7 +1920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detach_drains_queued_cache_owner_before_ordered_worker_reset() {
+    async fn detach_accepts_cache_owner_ingress_after_readiness_withdrawal() {
         let owner = cache_owner_id();
         let worker = WorkerWithDpRank::new(17, 3);
         let identity = KvStateAgentIdentity {
@@ -1960,7 +1944,7 @@ mod tests {
         let sink = RecordingSink::default();
         let output = sink.events.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
         let mut coordinator = Coordinator {
             publisher: sink,
             local_indexer: local_indexer.clone(),
@@ -1970,6 +1954,7 @@ mod tests {
             control_rx,
             ingress_rx,
             attachment: None,
+            ingress_generation: None,
             next_outbound_id: 1,
             next_attachment_generation: 1,
             source_cursor: SourceCursorState::default(),
@@ -1988,9 +1973,9 @@ mod tests {
         };
         coordinator.attach(&mut attachment).await.unwrap();
 
-        let (response, received) = oneshot::channel();
-        ingress_tx
-            .try_send(IngressBatch {
+        coordinator.begin_detach(attachment.generation).unwrap();
+        coordinator
+            .handle_ingress(IngressBatch {
                 generation: attachment.generation,
                 source_cursor: 1,
                 chunk_index: 0,
@@ -2000,18 +1985,16 @@ mod tests {
                     store(worker, ResidencyDomain::CacheOwner, None, 201, 21),
                 ],
                 cache_owner_fault: None,
-                response: Some(response),
             })
+            .await
             .unwrap();
-        coordinator.begin_detach(attachment.generation).unwrap();
         assert_eq!(
             coordinator
                 .complete_detach(attachment.generation)
                 .await
                 .unwrap(),
-            3
+            4
         );
-        received.await.unwrap().unwrap();
 
         let events = output.lock().unwrap().clone();
         assert_eq!(
@@ -2025,8 +2008,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (1, ResidencyDomain::Worker, true),
-                (2, ResidencyDomain::CacheOwner, false),
-                (3, ResidencyDomain::Worker, true),
+                (2, ResidencyDomain::Worker, false),
+                (3, ResidencyDomain::CacheOwner, false),
+                (4, ResidencyDomain::Worker, true),
             ]
         );
         let WorkerKvQueryResponse::TreeDump { events, .. } =
@@ -2040,6 +2024,36 @@ mod tests {
                 .filter(|event| event.state_source == Some(owner))
                 .count(),
             1
+        );
+
+        let mut replacement = Attachment {
+            generation: 0,
+            worker,
+            vllm_zmq_endpoint: "tcp://framework-2".to_string(),
+            ready: false,
+            cache_readable: true,
+            ready_at_outbound_cursor: 0,
+        };
+        coordinator.attach(&mut replacement).await.unwrap();
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: replacement.generation,
+                source_cursor: 1,
+                chunk_index: 0,
+                final_chunk: false,
+                events: vec![store(worker, ResidencyDomain::CacheOwner, None, 301, 31)],
+                cache_owner_fault: None,
+            })
+            .await
+            .unwrap();
+        coordinator.begin_detach(replacement.generation).unwrap();
+        coordinator
+            .complete_detach(replacement.generation)
+            .await
+            .unwrap();
+        assert!(
+            !coordinator.status.load().cache_owner_ready,
+            "an incomplete raw batch must fail CacheOwner closed"
         );
     }
 
@@ -2064,7 +2078,7 @@ mod tests {
             32,
         ));
         let sink = RecordingSink::default();
-        let publications = sink.publications.clone();
+        let fail_publication = sink.fail.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let (_ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE_CAPACITY);
         let mut coordinator = Coordinator {
@@ -2076,6 +2090,7 @@ mod tests {
             control_rx,
             ingress_rx,
             attachment: None,
+            ingress_generation: None,
             next_outbound_id: 1,
             next_attachment_generation: 1,
             source_cursor: SourceCursorState::default(),
@@ -2094,22 +2109,22 @@ mod tests {
         };
         coordinator.attach(&mut attachment).await.unwrap();
         let stale_event = store(worker, ResidencyDomain::Worker, None, 99, 9);
-        coordinator
-            .handle_ingress(IngressBatch {
-                generation: attachment.generation + 1,
-                source_cursor: 1,
-                chunk_index: 0,
-                final_chunk: true,
-                events: vec![stale_event; MAX_INGRESS_EVENTS + 1],
-                cache_owner_fault: None,
-                response: None,
-            })
-            .await
-            .unwrap();
+        assert!(
+            coordinator
+                .handle_ingress(IngressBatch {
+                    generation: attachment.generation + 1,
+                    source_cursor: 1,
+                    chunk_index: 0,
+                    final_chunk: true,
+                    events: vec![stale_event; MAX_INGRESS_EVENTS + 1],
+                    cache_owner_fault: None,
+                })
+                .await
+                .is_err()
+        );
         assert!(status.load().attachment.as_ref().unwrap().ready);
 
-        let mut invalid = store(worker, ResidencyDomain::CacheOwner, None, 201, 21);
-        invalid.placement.tier = StorageTier::Device;
+        fail_publication.store(true, Ordering::Relaxed);
         assert!(
             coordinator
                 .handle_ingress(IngressBatch {
@@ -2117,17 +2132,12 @@ mod tests {
                     source_cursor: 1,
                     chunk_index: 0,
                     final_chunk: true,
-                    events: vec![
-                        store(worker, ResidencyDomain::Worker, None, 101, 11),
-                        invalid,
-                    ],
+                    events: vec![store(worker, ResidencyDomain::Worker, None, 101, 11)],
                     cache_owner_fault: None,
-                    response: None,
                 })
                 .await
                 .is_err()
         );
-        assert_eq!(publications.load(Ordering::Relaxed), 1);
         assert_eq!(local_indexer.current_event_id(), 2);
         assert_eq!(status.load().outbound_cursor, 2);
         assert!(!status.load().cache_owner_ready);

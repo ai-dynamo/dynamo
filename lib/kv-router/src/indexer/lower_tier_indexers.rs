@@ -306,14 +306,6 @@ pub fn query_lower_tiers_with_options_and_projection(
     options: LowerTierQueryOptions,
     projection: &ResidencyProjection,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    // No lower-tier indexers are allocated, so there is no continuation
-    // work to perform. Return before validating device score/hash lockstep;
-    // that invariant only matters when a lower tier will consume the
-    // continuations.
-    if indexers.is_empty() {
-        return HashMap::new();
-    }
-
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
         let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {

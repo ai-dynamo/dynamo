@@ -43,6 +43,9 @@ impl RuntimeWorkerQueryTransport {
         })
     }
 
+    // Retained for the version-aware state-agent watcher that will activate
+    // residency-v2 consumption (DEP #13044).
+    #[allow(dead_code)]
     pub(crate) async fn query_status(
         &self,
         worker_id: WorkerId,

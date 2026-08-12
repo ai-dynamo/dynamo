@@ -361,20 +361,6 @@ impl LocalKvIndexer {
         self.record_applied_event(event, result).await
     }
 
-    /// Apply one state-agent event through a result-bearing backend path.
-    ///
-    /// The legacy publisher keeps its best-effort queue-admission behavior.
-    /// State-agent publication and recovery cursors require the stronger
-    /// boundary: record the event only after the selected physical index has
-    /// acknowledged the mutation.
-    pub async fn apply_event_with_buffer_acknowledged(
-        &self,
-        event: RouterEvent,
-    ) -> Result<(), KvRouterError> {
-        let result = self.apply_event_by_tier_acknowledged(&event).await;
-        self.record_applied_event(event, result).await
-    }
-
     async fn record_applied_event(
         &self,
         event: RouterEvent,
@@ -772,34 +758,6 @@ impl LocalKvIndexer {
         } else {
             self.apply_event_to_lower_tier(event.clone()).await
         }
-    }
-
-    async fn apply_event_by_tier_acknowledged(
-        &self,
-        event: &RouterEvent,
-    ) -> Result<(), KvRouterError> {
-        let targets_primary = match event.targets_primary() {
-            Ok(targets_primary) => targets_primary,
-            Err(error) => {
-                record_unsupported_residency_event(Some(&self.metrics), event);
-                return Err(KvRouterError::Unsupported(error.to_string()));
-            }
-        };
-        if matches!(&event.event.data, KvCacheEventData::Cleared) {
-            if targets_primary {
-                self.indexer.apply_event_and_wait(event.clone()).await?;
-            }
-            for indexer in self.all_lower_tier_indexers() {
-                indexer.apply_event_and_wait(event.clone()).await?;
-            }
-        } else if targets_primary {
-            self.indexer.apply_event_and_wait(event.clone()).await?;
-        } else {
-            self.get_or_create_lower_tier_indexer(event.storage_tier)
-                .apply_event_and_wait(event.clone())
-                .await?;
-        }
-        Ok(())
     }
 
     fn get_or_create_lower_tier_indexer(

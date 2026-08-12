@@ -8,8 +8,6 @@
 //! exact matching status and recovery reaches the attachment cursor barrier.
 
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
 
 use dynamo_kv_router::{
     identity::CacheOwnerId,
@@ -18,12 +16,11 @@ use dynamo_kv_router::{
     },
     protocols::{ResidencyProjection, ResidencyProjectionError, WorkerWithDpRank},
 };
-use dynamo_runtime::component::Component;
 use dynamo_runtime::component::Instance;
 use serde::{Deserialize, Serialize};
 
 use super::PublisherId;
-use crate::kv_router::indexer::{Indexer, RuntimeWorkerQueryTransport};
+use crate::kv_router::indexer::Indexer;
 
 pub const KV_STATE_SOURCE_TOPIC_V2: &str = "kv-state-sources-v2";
 pub const KV_STATE_ATTACHMENT_TOPIC_V2: &str = "kv-state-attachments-v2";
@@ -114,84 +111,6 @@ pub fn aggregate_residency_projection<'a>(
             .into_iter()
             .filter_map(KvStateProjectionResolution::ready_mapping),
     )
-}
-
-/// Control-path reconciler for one immutable state-agent protocol lifecycle.
-///
-/// Callers own the discovery watch and bounded-backoff schedule.
-pub struct KvStateProjectionReconciler {
-    transport: Arc<RuntimeWorkerQueryTransport>,
-    status_timeout: Duration,
-}
-
-impl KvStateProjectionReconciler {
-    pub async fn new(component: &Component, status_timeout: Duration) -> anyhow::Result<Self> {
-        Ok(Self {
-            transport: Arc::new(RuntimeWorkerQueryTransport::new(component).await?),
-            status_timeout,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn reconcile(
-        &self,
-        discovery_known: bool,
-        cache_owner_id: CacheOwnerId,
-        sources: &[KvStateSourceAdvertisement],
-        attachments: &[KvStateAttachmentAdvertisement],
-        live_workers: &HashSet<WorkerWithDpRank>,
-        recovery_receipt: Option<&KvStateRecoveryReceipt>,
-    ) -> KvStateProjectionResolution {
-        if !discovery_known {
-            return KvStateProjectionResolution::Unknown(KvStateUnknownReason::WatchUncertain);
-        }
-
-        let matching_sources: Vec<_> = sources
-            .iter()
-            .filter(|source| source.cache_owner_id == cache_owner_id)
-            .collect();
-        let matching_attachments: Vec<_> = attachments
-            .iter()
-            .filter(|attachment| attachment.cache_owner_id == cache_owner_id)
-            .collect();
-        let status = if let ([source], [attachment]) =
-            (matching_sources.as_slice(), matching_attachments.as_slice())
-        {
-            self.transport
-                .query_status(
-                    attachment.worker.worker_id,
-                    attachment.worker.dp_rank,
-                    source.recovery_control_target.clone(),
-                    dynamo_kv_router::indexer::KvStateAgentIdentity {
-                        cache_owner_id,
-                        publisher_id: source.publisher_id,
-                        protocol_version: source.protocol_version,
-                    },
-                    Some(attachment.attachment_generation),
-                    self.status_timeout,
-                )
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%cache_owner_id, %error, "KV state-agent status probe failed");
-                    error
-                })
-                .ok()
-        } else {
-            None
-        };
-        // This resolves one owner only. Do not publish directly to the indexer
-        // here: the model-level controller must aggregate every ready owner and
-        // swap one immutable projection snapshot.
-        resolve_kv_state_projection(
-            discovery_known,
-            cache_owner_id,
-            sources,
-            attachments,
-            live_workers,
-            status.as_ref(),
-            recovery_receipt,
-        )
-    }
 }
 
 /// Resolve one cache owner's eligibility from an authoritative discovery
