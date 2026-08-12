@@ -120,6 +120,12 @@ kubectl create secret generic hf-token-secret \
 If you use the `model-cache` PVC, edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
 </Warning>
 
+<Warning title="MNNVL rack selection">
+This recipe ensures correct MNNVL placement by using a `ComputeDomain` together with a clique selector `nodeSelectorTerms`. Modify the DGD `nvidia.com/gpu.clique` value to match a clique ID in your cluster.
+
+As an alternative, if your cluster is set up with [Grove](https://github.com/ai-dynamo/grove/): [Auto MNNVL](https://github.com/ai-dynamo/grove/blob/main/docs/user-guide/auto-mnnvl.md) or [topology-aware scheduling](https://github.com/ai-dynamo/grove/blob/main/docs/user-guide/topology-aware-scheduling.md) can be used.
+</Warning>
+
 ## Deploy
 
 <div data-recipe-framework="vllm">
@@ -199,6 +205,7 @@ First worker launch loads weights and captures CUDA graphs and can take tens of 
 
 <div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
 
+
 Create the `model-cache` PVC and download both the Kimi-K3 checkpoint and the DSPARK draft model. The download can take several hours on a cold cache:
 
 ```bash
@@ -206,6 +213,7 @@ kubectl apply -f recipes/kimi-k3/model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f recipes/kimi-k3/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 ```
+
 
 Deploy the SGLang DynamoGraphDeployment (DGD):
 
@@ -281,8 +289,7 @@ TBD
 
 <div data-recipe-framework="sglang">
 
-- The SGLang recipe uses DSPARK speculative decoding with the `RadixArk/Kimi-K3-DSpark` draft model.
-- The benchmark trace intentionally exercises 90% KV reuse; keep SGLang prefix caching and Dynamo KV-aware routing enabled.
+TBD
 
 </div>
 
