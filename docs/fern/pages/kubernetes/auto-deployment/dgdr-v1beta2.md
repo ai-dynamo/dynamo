@@ -433,6 +433,10 @@ the generation and input hash that produced each result.
 Changes that affect the model, hardware, workload, objective, search budget, or unstructured
 parameters require new evaluations. Metadata-only changes do not change the search input.
 
+To capture traffic from an active DGD and repeat this workflow on a schedule, see [Continuous
+Profiling](continuous-profiling.md). That higher-level workflow treats the active DGD as the
+baseline and creates independent runs from successive trace windows.
+
 ## Customize Generated DGD Specs
 
 Use `spec.overrides.dgd` to merge common settings into every generated candidate. The override uses
@@ -492,6 +496,7 @@ kubectl delete dgd minimax-production -n inference
 
 - [Auto Deployment Overview](overview.mdx)
 - [Auto Deploy with DGDR v1beta1](auto-deploy-with-dgdr.md)
+- [Continuous Profiling](continuous-profiling.md)
 - [DynamoGraphDeployment Reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx)
 - [AI Simulate Sweeper Overview](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
 - [Sweeper Configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
