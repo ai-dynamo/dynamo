@@ -70,6 +70,11 @@ spec:
                 - "3"
                 - --dyn-chat-processor
                 - dynamo
+                - --model-name
+                - moonshotai/Kimi-K3
+                - --model-path
+                - /model
+                - --trust-remote-code
               ports:
                 - name: http
                   containerPort: 8000
