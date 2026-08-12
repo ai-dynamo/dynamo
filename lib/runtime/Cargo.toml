@@ -51,6 +51,9 @@ fastrand = "2"
 futures = { workspace = true }
 fs4 = { workspace = true }
 humantime = { workspace = true }
+# `AcceptBackoff::classify` recognises EMFILE/ENFILE by raw errno, which
+# `std::io::ErrorKind` has no stable variant for.
+libc = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }
