@@ -20,7 +20,7 @@ from dynamo.frontend.vllm_processor import EngineFactory
 EngineFactory(config: FrontendConfig, flags: Namespace)
 ```
 
-[`components/src/dynamo/frontend/vllm_processor.py#L931`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L931)
+[`components/src/dynamo/frontend/vllm_processor.py#L939`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L939)
 
 **Public methods**
 
@@ -32,7 +32,7 @@ __init__(config: FrontendConfig, flags: Namespace)
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L932)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L940)
 
 <h4 id="api-dynamo-frontend-vllm-processor-enginefactory-chat-engine-factory">chat_engine_factory</h4>
 
@@ -42,7 +42,7 @@ chat_engine_factory(instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard, 
 
 Called by Rust when a model is discovered.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L951)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L959)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-frontend-args-frontendarggroup" title="FrontendArgGroup (class)">
@@ -353,7 +353,7 @@ process_output(output: Any) -> dict[str, Any] | None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L894)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L928)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-vllm-processor-vllmprocessor" title="VllmProcessor (class)">
@@ -367,7 +367,7 @@ from dynamo.frontend.vllm_processor import VllmProcessor
 VllmProcessor(tokenizer: TokenizerLike, input_processor: InputProcessor, output_processor: OutputProcessor, tool_parser_class: type[ToolParser] | None, reasoning_parser_class: type[ReasoningParser] | None, routed_engine: RoutedEngine, block_size: int = 16, enable_auto_tool_choice: bool = False, default_chat_template_kwargs: dict[str, Any] | None = None, default_thinking_mode: str | None = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto')
 ```
 
-[`components/src/dynamo/frontend/vllm_processor.py#L268`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L268)
+[`components/src/dynamo/frontend/vllm_processor.py#L270`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L270)
 
 **Public methods**
 
@@ -379,7 +379,7 @@ __init__(tokenizer: TokenizerLike, input_processor: InputProcessor, output_proce
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L269)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L271)
 
 <h4 id="api-dynamo-frontend-vllm-processor-vllmprocessor-generator">generator</h4>
 
@@ -389,7 +389,7 @@ generator(request: dict[str, Any], context: Any | None = None) -> AsyncGenerator
 
 Run a single request through the engine. Does pre and post processing on this machine, delegates model inference to a backend using the router.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L468)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L470)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-thinking-apply-default-thinking-mode-to-template-kwargs" title="apply_default_thinking_mode_to_template_kwargs (function)">
@@ -654,7 +654,7 @@ from dynamo.frontend.vllm_processor import map_finish_reason
 map_finish_reason(raw_reason: str | None) -> FinishReason | None
 ```
 
-[`components/src/dynamo/frontend/vllm_processor.py#L64`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L64)
+[`components/src/dynamo/frontend/vllm_processor.py#L66`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L66)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-nvext-extra-field-requested" title="nvext_extra_field_requested (function)">

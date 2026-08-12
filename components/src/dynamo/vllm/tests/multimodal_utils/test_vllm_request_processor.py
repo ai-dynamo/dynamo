@@ -418,7 +418,7 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
         uuid_items,
     )
     processor_inputs = ProcessorInputs([], data_items, uuid_items)
-    mm_hashes = processor_inputs.get_mm_hashes("test-model")
+    mm_hashes = processor_inputs.get_mm_hashes("test-model", "blake3")
 
     assert mm_hashes == {"vision_chunk": ["catalog/image:v2"]}
 

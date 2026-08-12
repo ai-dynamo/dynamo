@@ -41,12 +41,10 @@ ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
-# oneAPI env for XPU detection: the base bakes none of it, so device_count() is 0
-# without this. ENV not setvars.sh in ENTRYPOINT, which a k8s `command:` discards.
-ENV ONEAPI_ROOT=/opt/intel/oneapi
-ENV CMPLR_ROOT=/opt/intel/oneapi/compiler/2025.3
-ENV LD_LIBRARY_PATH=/opt/intel/oneapi/umf/1.0/lib:/opt/intel/oneapi/tcm/1.4/lib:/opt/intel/oneapi/tbb/2022.3/lib:/opt/intel/oneapi/mkl/2025.3/lib:/opt/intel/oneapi/dnnl/2025.3/lib:/opt/intel/oneapi/compiler/2025.3/opt/compiler/lib:${LD_LIBRARY_PATH:-}
-ENV PATH=${PATH}:/opt/intel/oneapi/compiler/2025.3/bin:/opt/intel/oneapi/mpi/2021.15/bin
+# vLLM 0.27.1's XPU image installs the oneAPI runtime and SYCL headers in
+# /opt/venv through the intel-sycl-rt wheel. Do not set ONEAPI_ROOT to the
+# removed /opt/intel/oneapi tree: Triton gives that variable priority over its
+# wheel-metadata fallback and would search a nonexistent compiler include path.
 {% elif device == "cpu" %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
@@ -230,6 +228,11 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # Reinstalling triton-xpu ensures the triton namespace is properly configured
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
+
+# Resolve the same include directories Triton's XPU driver will use for its
+# first-request JIT, and fail the image build if the SYCL development headers
+# are not discoverable there.
+RUN /opt/venv/bin/python -c "from pathlib import Path; from triton.backends.intel.driver import COMPILATION_HELPER; roots = COMPILATION_HELPER.include_dir; assert any((Path(root) / 'sycl/sycl.hpp').is_file() for root in roots), f'SYCL headers not found in Triton include paths: {roots}'"
 {% endif %}
 
 {% if context.vllm.enable_modelexpress == "true" %}

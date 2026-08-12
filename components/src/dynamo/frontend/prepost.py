@@ -612,6 +612,7 @@ class StreamingPostProcessor:
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
         self.stream_response = stream_response
+        self.reasoning_is_done = False
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
         # the reasoning open/close tags live in the prompt and the generated
@@ -630,9 +631,17 @@ class StreamingPostProcessor:
             if reasoning_parser_class and not thinking_disabled
             else None
         )
+        if self.reasoning_parser is not None:
+            self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
+                prompt_token_ids
+            )
+            if not self.reasoning_is_done:
+                self.reasoning_parser.adjust_initial_state_from_prompt(prompt_token_ids)
         self._fast_plain_text = (
             self.tool_parser is None and self.reasoning_parser is None
         )
+        self._reasoning_parser_streaming_started = False
+        self._tool_parser_streaming_started = False
 
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
@@ -640,7 +649,6 @@ class StreamingPostProcessor:
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
-        self.reasoning_is_done = False
         self.in_progress_tool_calls: dict[int, DeltaToolCall] = {}
         # Per-choice tracking (https://github.com/ai-dynamo/dynamo/issues/8636) of whether a tool_call delta was
         # emitted on that choice, keyed by `output.index`. Required because
@@ -747,6 +755,31 @@ class StreamingPostProcessor:
             return None
         return delta_message
 
+    @staticmethod
+    def _merge_delta_messages(
+        current: DeltaMessage | None,
+        incoming: DeltaMessage | None,
+    ) -> DeltaMessage | None:
+        """Append a parser flush delta to the delta produced for this chunk."""
+        if incoming is None:
+            return current
+        if current is None:
+            return incoming
+        if incoming.content:
+            current.content = (current.content or "") + incoming.content
+        if incoming.reasoning:
+            current.reasoning = (current.reasoning or "") + incoming.reasoning
+        if incoming.tool_calls:
+            current.tool_calls = (current.tool_calls or []) + incoming.tool_calls
+        return current
+
+    @staticmethod
+    def _finish_engine_parser(parser: Any) -> DeltaMessage | None:
+        if parser is None or not getattr(parser, "engine_based_streaming", False):
+            return None
+        finish = getattr(parser, "finish_streaming", None)
+        return finish() if finish is not None else None
+
     def _add_tool_call_from_extracted(self, index: int, tool_call: Any) -> None:
         tool_delta = DeltaToolCall(
             index=index,
@@ -786,6 +819,7 @@ class StreamingPostProcessor:
     ) -> DeltaMessage | None:
         if self.tool_parser is None:
             return None
+        self._tool_parser_streaming_started = True
         return self.tool_parser.extract_tool_calls_streaming(
             previous_text=self.previous_text,
             current_text=current_text,
@@ -944,6 +978,7 @@ class StreamingPostProcessor:
                 return None
 
         elif not self.reasoning_is_done and self.reasoning_parser:
+            self._reasoning_parser_streaming_started = True
             delta_message = self.reasoning_parser.extract_reasoning_streaming(
                 self.previous_text,
                 current_text,
@@ -958,9 +993,21 @@ class StreamingPostProcessor:
             # buffer it for non-streaming extraction rather than feeding it
             # to the streaming tool parser which cannot handle the combined
             # reasoning-end + tool-start in a single chunk.
-            if self.reasoning_parser.is_reasoning_end_streaming(
-                current_token_ids, delta_token_ids
-            ):
+            if getattr(self.reasoning_parser, "engine_based_streaming", False):
+                reasoning_ended = (
+                    self.reasoning_parser.has_engine_confirmed_reasoning_end()
+                )
+            else:
+                reasoning_ended = self.reasoning_parser.is_reasoning_end_streaming(
+                    current_token_ids, delta_token_ids
+                )
+
+            if reasoning_ended:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.reasoning_parser),
+                )
+                self._reasoning_parser_streaming_started = False
                 self.reasoning_is_done = True
                 saved_reasoning = delta_message.reasoning if delta_message else None
                 post_content = (delta_message.content if delta_message else None) or ""
@@ -1029,6 +1076,20 @@ class StreamingPostProcessor:
                         current_token_ids=current_token_ids,
                         delta_token_ids=delta_token_ids,
                     )
+
+        if output.finish_reason:
+            if self._reasoning_parser_streaming_started:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.reasoning_parser),
+                )
+                self._reasoning_parser_streaming_started = False
+            if self._tool_parser_streaming_started:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.tool_parser),
+                )
+                self._tool_parser_streaming_started = False
 
         choice = None
         if delta_message is None:
