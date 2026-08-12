@@ -287,6 +287,48 @@ func TestNewCheckpointJobRejectsUnknownTarget(t *testing.T) {
 	}
 }
 
+// TestNewCheckpointJobNoWrapByDefault verifies that the container command is
+// preserved unchanged when WrapLaunchJob is false (the default). This guards
+// against accidentally re-introducing cuda-checkpoint wrapping as the default,
+// which would require cuda-checkpoint to be present in the placeholder image
+// at the exact path CRIU checkpointed it from.
+func TestNewCheckpointJobNoWrapByDefault(t *testing.T) {
+	originalCmd := []string{"python3", "-m", "dynamo.vllm"}
+	originalArgs := []string{"--model", "Qwen"}
+
+	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "main",
+				Image:   "test:latest",
+				Command: originalCmd,
+				Args:    originalArgs,
+			}},
+		},
+	}, CheckpointJobOptions{
+		Namespace:       "test-ns",
+		TargetContainer: "main",
+		CheckpointID:    "hash",
+		ArtifactVersion: "2",
+		Name:            "test-job",
+		WrapLaunchJob:   false, // explicit: this is the default from snapshotctl
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "main")
+	if strings.Join(main.Command, " ") != strings.Join(originalCmd, " ") {
+		t.Errorf("command must be unchanged without WrapLaunchJob: got %v, want %v", main.Command, originalCmd)
+	}
+	if strings.Join(main.Args, " ") != strings.Join(originalArgs, " ") {
+		t.Errorf("args must be unchanged without WrapLaunchJob: got %v, want %v", main.Args, originalArgs)
+	}
+	if len(main.Command) > 0 && main.Command[0] == "cuda-checkpoint" {
+		t.Errorf("command must not be wrapped with cuda-checkpoint by default")
+	}
+}
+
 func TestGetCheckpointJobName(t *testing.T) {
 	name := GetCheckpointJobName("abc123def4567890", "2")
 	if name != "checkpoint-job-abc123def4567890-2" {

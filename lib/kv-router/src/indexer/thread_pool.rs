@@ -490,6 +490,32 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
+    /// Apply one event on its worker lane and wait for the backend result.
+    pub async fn apply_event_and_wait(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::EventWithAck {
+                event,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
+        let applied = resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        if !applied {
+            return Err(KvRouterError::IndexerDroppedRequest);
+        }
+        Ok(())
+    }
+
     /// Wait until every worker queue has completed tasks accepted before this call.
     ///
     /// This is a FIFO progress barrier, not an event-result acknowledgement. Ordinary

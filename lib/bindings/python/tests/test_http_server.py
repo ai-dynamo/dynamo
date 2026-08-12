@@ -99,6 +99,7 @@ class MockHttpEngine:
             await asyncio.sleep(0.01)
 
 
+@pytest.mark.forked
 def test_batch_endpoint_cannot_be_changed_at_runtime():
     service = HttpService()
 

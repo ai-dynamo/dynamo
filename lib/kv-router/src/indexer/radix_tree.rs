@@ -950,10 +950,12 @@ mod tests {
         let compact = WorkerKvQueryResponse::TreeDump {
             events,
             last_event_id: 42,
+            reset_scope: ResetScope::All,
         };
         let uncompressed = WorkerKvQueryResponse::TreeDump {
             events: uncompressed_events,
             last_event_id: 42,
+            reset_scope: ResetScope::All,
         };
         assert!(
             serde_json::to_vec(&compact).unwrap().len()
