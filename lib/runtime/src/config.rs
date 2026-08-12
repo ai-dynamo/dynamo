@@ -15,7 +15,7 @@ use validator::Validate;
 pub mod environment_names;
 
 /// Default system host for health and metrics endpoints
-const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
+const DEFAULT_SYSTEM_HOST: &str = "127.0.0.1";
 
 /// Default system port for health and metrics endpoints (-1 = disabled)
 const DEFAULT_SYSTEM_PORT: i16 = -1;
