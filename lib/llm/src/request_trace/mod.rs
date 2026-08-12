@@ -4,6 +4,7 @@
 mod agent_context;
 pub mod config;
 mod integration;
+mod metrics;
 mod otel_sink;
 pub mod payload;
 pub(crate) mod payload_stream;
@@ -37,6 +38,7 @@ pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
 };
+pub(crate) use metrics::{record_sampling_decision, register_request_trace_metrics};
 pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
 pub use types::{
@@ -103,7 +105,9 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
 
 pub fn publish(record: RequestTraceRecord) {
     // Sample before the broadcast so every configured sink writes the same records.
-    if config::should_sample(&record) {
+    let retained = config::should_sample(&record);
+    record_sampling_decision(record.event_type, retained);
+    if retained {
         publish_selected(record);
     }
 }

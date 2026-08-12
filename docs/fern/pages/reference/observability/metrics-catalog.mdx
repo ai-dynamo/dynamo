@@ -119,6 +119,18 @@ The ratio is defined only when the model has an active L1 cache and observed tok
   Time to first token in seconds.
 </ParamField>
 
+### Request Trace Sampling
+
+Available when request tracing is enabled. This counter is registered on the frontend's `/metrics`
+endpoint and tracks source-level decisions before a record fans out to configured sinks.
+
+<ParamField path="dynamo_frontend_request_trace_sampling_records_total" type="counter">
+  Request-trace records evaluated by sampling. Labeled by `decision` (`retained` or `dropped`) and
+  `event_type` (`request_end`, `request_payload`, `tool_start`, `tool_end`, or `tool_error`). A
+  retained record is offered to every configured sink; this counter does not report broadcast queue
+  pressure or file, NATS, OTLP, or S3 delivery outcomes.
+</ParamField>
+
 ### Migration
 
 Counters for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.

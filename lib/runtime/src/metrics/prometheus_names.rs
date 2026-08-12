@@ -250,6 +250,9 @@ pub mod frontend_service {
     /// Calculated image-placeholder token count per image-bearing request (histogram)
     pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
 
+    /// Total request-trace records evaluated by the source sampling decision
+    pub const REQUEST_TRACE_SAMPLING_RECORDS_TOTAL: &str = "request_trace_sampling_records_total";
+
     /// Model configuration metrics
     ///
     /// Runtime config metrics (from ModelRuntimeConfig):

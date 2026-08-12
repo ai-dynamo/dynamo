@@ -1168,6 +1168,11 @@ impl HttpServiceConfigBuilder {
         if let Err(e) = register_lora_allocation_metrics(&registry) {
             tracing::warn!("Failed to register LoRA allocation metrics: {}", e);
         }
+        if crate::request_trace::is_enabled()
+            && let Err(e) = crate::request_trace::register_request_trace_metrics(&registry)
+        {
+            tracing::warn!("Failed to register request trace sampling metrics: {}", e);
+        }
 
         let mut all_docs = Vec::new();
         let mut seen_route_docs = HashSet::new();

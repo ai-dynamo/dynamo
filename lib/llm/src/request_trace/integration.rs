@@ -59,11 +59,18 @@ pub(crate) fn build_request_end_trace_state(
     context: &Context<()>,
     trace_block_size: usize,
 ) -> Option<RequestEndTraceState> {
+    let request_trace_enabled = super::policy().emit_request_end_records();
+    if !request_trace_enabled {
+        return None;
+    }
+
     let agent_session_id = common_request
         .agent_context
         .as_ref()
         .map(|context| context.session_id.as_str());
-    if !super::config::should_emit_request(agent_session_id, context.id()) {
+    let retained = super::config::should_emit_request(agent_session_id, context.id());
+    super::record_sampling_decision(super::RequestTraceEventType::RequestEnd, retained);
+    if !retained {
         return None;
     }
     build_request_end_trace_state_for_policy(
@@ -71,7 +78,7 @@ pub(crate) fn build_request_end_trace_state(
         tracker,
         context,
         trace_block_size,
-        super::policy().emit_request_end_records(),
+        request_trace_enabled,
     )
 }
 

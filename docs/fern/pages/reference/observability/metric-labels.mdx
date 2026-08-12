@@ -93,6 +93,12 @@ Added by an individual metric family. Each label appears only on the metrics not
   `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request.
 </ParamField>
 
+<ParamField path="decision" type="string">
+  `[Shared]` On `dynamo_frontend_request_trace_sampling_records_total` — the source sampling result.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>retained</Badge> <Badge intent="note" minimal>dropped</Badge></span>
+</ParamField>
+
 <ParamField path="migration_type" type="string">
   `[Shared]` On `dynamo_frontend_model_migration_total` — the category of request migration triggered by worker unavailability.
 
@@ -115,6 +121,10 @@ Added by an individual metric family. Each label appears only on the metrics not
   `[Shared]` On `dynamo_component_kv_cache_events_applied` — the kind of KV cache event.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>stored</Badge> <Badge intent="note" minimal>removed</Badge> <Badge intent="note" minimal>cleared</Badge></span>
+
+  On `dynamo_frontend_request_trace_sampling_records_total`, identifies the request-trace row type.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>request_end</Badge> <Badge intent="note" minimal>request_payload</Badge> <Badge intent="note" minimal>tool_start</Badge> <Badge intent="note" minimal>tool_end</Badge> <Badge intent="note" minimal>tool_error</Badge></span>
 </ParamField>
 
 ## Scraper-injected labels (Kubernetes)

@@ -4440,26 +4440,34 @@ impl
         let agent_session_id = agent_context
             .as_deref()
             .map(|context| context.session_id.as_str());
-        let payload_handle = if crate::request_trace::payload::payload_capture_active()
-            && crate::request_trace::config::should_emit_payload(agent_session_id, &request_id)
-        {
-            let payload_http_headers =
-                if crate::request_trace::payload::http_header_capture_active() {
-                    context
-                        .get_optional::<std::collections::BTreeMap<String, String>>(
-                            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
-                        )
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                };
-            crate::request_trace::payload::create_handle_with_agent_session(
-                &request,
-                &request_id,
-                payload_http_headers,
-                agent_session_id,
-            )
+        let payload_handle = if crate::request_trace::payload::payload_capture_active() {
+            let retained =
+                crate::request_trace::config::should_emit_payload(agent_session_id, &request_id);
+            crate::request_trace::record_sampling_decision(
+                crate::request_trace::RequestTraceEventType::RequestPayload,
+                retained,
+            );
+            if !retained {
+                None
+            } else {
+                let payload_http_headers =
+                    if crate::request_trace::payload::http_header_capture_active() {
+                        context
+                            .get_optional::<std::collections::BTreeMap<String, String>>(
+                                crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+                            )
+                            .ok()
+                            .flatten()
+                    } else {
+                        None
+                    };
+                crate::request_trace::payload::create_handle_with_agent_session(
+                    &request,
+                    &request_id,
+                    payload_http_headers,
+                    agent_session_id,
+                )
+            }
         } else {
             None
         };

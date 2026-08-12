@@ -49,6 +49,16 @@ pub enum RequestTraceEventType {
 }
 
 impl RequestTraceEventType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestEnd => "request_end",
+            Self::ToolStart => "tool_start",
+            Self::ToolEnd => "tool_end",
+            Self::ToolError => "tool_error",
+            Self::RequestPayload => "request_payload",
+        }
+    }
+
     pub fn is_tool_event(self) -> bool {
         matches!(self, Self::ToolStart | Self::ToolEnd | Self::ToolError)
     }

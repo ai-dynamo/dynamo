@@ -53,9 +53,6 @@ pub(crate) fn emit_request_end(
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
-    if !super::config::should_emit_request(None, &request_id) {
-        return;
-    }
     let request_received_ms = tracker.request_received_epoch_ms();
     let event_time_unix_ms = tracker
         .total_time_ms()
@@ -100,9 +97,6 @@ pub(crate) fn emit_agent_request_end(
     agent_context: AgentContext,
     mut request: RequestTraceMetrics,
 ) {
-    if !super::config::should_emit_request(Some(&agent_context.session_id), &request.request_id) {
-        return;
-    }
     sanitize_request(&mut request);
     super::publish_selected(RequestTraceRecord {
         schema: RequestTraceSchema::V1,
@@ -150,13 +144,15 @@ pub(crate) fn publish_tool_record(record: RequestTraceRecord) {
         return;
     }
 
-    if super::config::should_emit_request(
+    let retained = super::config::should_emit_request(
         record
             .agent_context
             .as_ref()
             .map(|context| context.session_id.as_str()),
         "",
-    ) {
+    );
+    super::record_sampling_decision(record.event_type, retained);
+    if retained {
         super::publish_selected(record);
     }
 }

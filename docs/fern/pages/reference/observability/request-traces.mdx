@@ -39,7 +39,8 @@ agent session ID for agent request, payload, and tool rows, and a stable request
 request-end and payload rows. A selected record is written to every configured sink and a rejected
 record is written to none. `DYN_AUDIT_FORCE_LOGGING` selects legacy payload records; an unset or
 `1.0` ratio retains every selected payload, while an explicit ratio also controls legacy payload
-export volume.
+export volume. `dynamo_frontend_request_trace_sampling_records_total` counts these retained and
+dropped decisions; it does not indicate whether a sink later accepted a retained record.
 
 ## Sink Behavior
 
@@ -161,3 +162,4 @@ and rejects mixed session-aware and context-free trace sets.
 - [Observe a Local Deployment](../../cli/operations/observability.mdx#capture-and-replay-requests)
 - [Logging Reference](logging.mdx#request-payload-export)
 - [Environment Variables](environment-variables.mdx#request-tracing)
+- [Metrics Catalog](metrics-catalog.mdx)
