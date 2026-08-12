@@ -251,10 +251,15 @@ func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.
 
 	lifecycle := findBookingLifecycle(bookingID)
 	if lifecycle == nil {
-		lifecycle = registerBookingLifecycle(bookingID, s.freeBooking)
+		// Only Score creates controller-owned booking lifecycles. Do not let an
+		// inbound header create router bookkeeping on a response-only path.
+		return
 	}
 	if response.EndOfStream {
 		lifecycle.cleanup(ctx, "response end of stream")
+		return
+	}
+	if request.Headers[RoutingModeHeader] != "disaggregated" {
 		return
 	}
 
