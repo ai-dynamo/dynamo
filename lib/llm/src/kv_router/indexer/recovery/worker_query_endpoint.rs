@@ -159,13 +159,10 @@ fn negotiate_tree_dump_failure(
     supports_tree_dump_failed: bool,
 ) -> WorkerKvQueryResponse {
     match response {
-        WorkerKvQueryResponse::TreeDumpFailed { last_event_id, .. }
-            if !supports_tree_dump_failed =>
-        {
-            WorkerKvQueryResponse::TreeDump {
-                events: Vec::new(),
-                last_event_id,
-            }
+        WorkerKvQueryResponse::TreeDumpFailed { message, .. } if !supports_tree_dump_failed => {
+            // Error predates TreeDumpFailed and remains non-authoritative for legacy readers.
+            // Never translate snapshot failure into an empty all-domain replacement.
+            WorkerKvQueryResponse::Error(format!("worker tree dump failed: {message}"))
         }
         response => response,
     }
@@ -217,10 +214,8 @@ mod tests {
         ));
         assert!(matches!(
             negotiate_tree_dump_failure(failure(), false),
-            WorkerKvQueryResponse::TreeDump {
-                events,
-                last_event_id: 17,
-            } if events.is_empty()
+            WorkerKvQueryResponse::Error(message)
+                if message == "worker tree dump failed: offline"
         ));
     }
 }

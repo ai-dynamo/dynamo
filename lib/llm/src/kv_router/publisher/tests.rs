@@ -561,6 +561,7 @@ mod test_event_processing {
         )
         .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Cleared));
+        assert_eq!(out.placement.residency_domain, ResidencyDomain::Worker);
     }
 
     #[test]
@@ -2452,7 +2453,7 @@ mod event_processor_tests {
 
         let host_removed = removed_event(5, 51, 1);
         let clear = KvCacheEvent {
-            event_id: 6,
+            event_id: 7,
             data: KvCacheEventData::Cleared,
             dp_rank: 1,
         };
@@ -2470,18 +2471,20 @@ mod event_processor_tests {
                 Placement::local_worker(1, 1, StorageTier::HostPinned),
                 host_removed,
             ),
-            // Clear boundary.
+            // A second physical lower tier remains in the Worker domain.
             PlacementEvent::new(
-                Placement::local_worker(1, 1, StorageTier::HostPinned),
-                clear,
+                Placement::local_worker(1, 1, StorageTier::Disk),
+                removed_event(6, 52, 1),
             ),
+            // Clear boundary.
+            PlacementEvent::new(Placement::local_worker(1, 1, StorageTier::Device), clear),
         ])
         .unwrap();
         drop(tx);
         handle.await.unwrap();
 
         let events = publisher.get_events();
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 7);
         assert!(matches!(events[0].event.data, KvCacheEventData::Stored(_)));
         let KvCacheEventData::Stored(first) = &events[0].event.data else {
             unreachable!();
@@ -2492,13 +2495,23 @@ mod event_processor_tests {
         assert_eq!(events[3].event.dp_rank, 1);
         assert_eq!(events[3].storage_tier, StorageTier::Device);
         assert_eq!(events[4].storage_tier, StorageTier::HostPinned);
-        assert!(matches!(events[5].event.data, KvCacheEventData::Cleared));
+        assert_eq!(events[5].storage_tier, StorageTier::Disk);
+        assert!(matches!(events[6].event.data, KvCacheEventData::Cleared));
+        assert!(
+            events
+                .iter()
+                .all(|event| { event.resolved_residency_domain() == Ok(ResidencyDomain::Worker) })
+        );
+        assert_eq!(
+            events[6].reset_scope(),
+            Ok(Some(ResetScope::Domain(ResidencyDomain::Worker)))
+        );
         assert_eq!(
             events
                 .iter()
                 .map(|event| event.event.event_id)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6]
+            vec![1, 2, 3, 4, 5, 6, 7]
         );
         assert_eq!(publisher.get_batches().len(), 1);
         assert_eq!(publisher.get_batches()[0], events);

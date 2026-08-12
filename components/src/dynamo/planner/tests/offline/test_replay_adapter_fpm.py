@@ -233,6 +233,15 @@ def test_planner_metadata_identifies_custom_plugins_without_secrets():
     assert "secret" not in serialized
     assert "grpc://planner-plugin:9000" not in serialized
 
+    changed_port_config = config.model_copy(
+        update={"control_api_port": config.control_api_port + 1}
+    )
+    adapter._config = changed_port_config
+    assert (
+        adapter._planner_metadata()["planner_config_digest"]
+        == metadata["planner_config_digest"]
+    )
+
     changed_config = config.model_copy(deep=True)
     changed_config.plugin_registration.in_process_plugins[0].kwargs["window"] = 8
     adapter._config = changed_config

@@ -544,6 +544,8 @@ class SmartSearchConfig(BaseModel):
         }
         planner_fields = {
             "min_endpoint",
+            "prefill_min_endpoint",
+            "decode_min_endpoint",
             "planner_scaling_policy",
             "planner_fpm_sampling",
             "planner_load_sensitivity",
