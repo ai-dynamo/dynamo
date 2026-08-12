@@ -27,7 +27,10 @@ from dynamo.profiler.utils.config import (
 from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
 from dynamo.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
 from dynamo.profiler.utils.dgd_template import load_dgd_template
-from dynamo.profiler.utils.model_info import get_mamba_cache_align_block_size
+from dynamo.profiler.utils.model_info import (
+    get_mamba_cache_align_block_size,
+    get_model_context_length,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -43,12 +46,13 @@ DEFAULT_VLLM_KV_TRANSFER_CONFIG = '{"kv_connector":"NixlConnector","kv_role":"kv
 
 
 def _get_valued_arg(args: list[str], key: str) -> str | None:
+    value = None
     for i, arg in enumerate(args):
         if arg == key and i + 1 < len(args):
-            return args[i + 1]
+            value = args[i + 1]
         if isinstance(arg, str) and arg.startswith(f"{key}="):
-            return arg.split("=", 1)[1]
-    return None
+            value = arg.split("=", 1)[1]
+    return value
 
 
 def _set_valued_arg(args: list[str], key: str, value: str) -> list[str]:
@@ -284,6 +288,50 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         return _set_valued_arg(args, "--max-num-batched-tokens", str(mamba_align_floor))
 
     @classmethod
+    def _apply_model_context_window_ceiling(
+        cls, args: list[str], model_name_or_path: str | None
+    ) -> list[str]:
+        """Keep generated ``--max-model-len`` within the model's context window."""
+        if not model_name_or_path:
+            return args
+
+        current = _get_valued_arg(args, "--max-model-len")
+        if current is None:
+            return args
+        try:
+            current_value = int(current)
+        except ValueError:
+            logger.warning(
+                "Cannot validate non-integer vLLM --max-model-len value %r",
+                current,
+            )
+            return args
+
+        try:
+            context_length = get_model_context_length(model_name_or_path)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.warning(
+                "Could not derive the model context window for %s; leaving "
+                "--max-model-len=%s unchanged.",
+                model_name_or_path,
+                current,
+                exc_info=True,
+            )
+            return args
+        if context_length is None:
+            return args
+
+        target_value = min(current_value, context_length)
+        if target_value < current_value:
+            logger.warning(
+                "Clamping vLLM --max-model-len from %d to model context window %d for %s.",
+                current_value,
+                context_length,
+                model_name_or_path,
+            )
+        return set_unique_argument_value(args, "--max-model-len", str(target_value))
+
+    @classmethod
     def apply_model_runtime_constraints(
         cls, config: dict, model_name_or_path: str | None
     ) -> dict:
@@ -295,7 +343,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
                 exc_info=True,
             )
             return config
-        for component_type in (SubComponentType.DECODE,):
+        for component_type in (SubComponentType.PREFILL, SubComponentType.DECODE):
             try:
                 worker_service = get_worker_component_from_config(
                     cfg, backend="vllm", sub_component_type=component_type
@@ -322,7 +370,11 @@ class VllmV1ConfigModifier(BaseConfigModifier):
                     exc_info=True,
                 )
                 continue
-            args = cls._apply_mamba_cache_align_token_floor(args, model_name_or_path)
+            args = cls._apply_model_context_window_ceiling(args, model_name_or_path)
+            if component_type == SubComponentType.DECODE:
+                args = cls._apply_mamba_cache_align_token_floor(
+                    args, model_name_or_path
+                )
             main_container.args = args
         return cfg.model_dump()
 
