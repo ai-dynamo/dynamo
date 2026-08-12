@@ -1082,4 +1082,3 @@ classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops
-    advisory: false

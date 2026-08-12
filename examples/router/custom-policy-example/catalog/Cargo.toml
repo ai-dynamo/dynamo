@@ -12,6 +12,7 @@ repository.workspace = true
 description = "Custom worker-selection policy catalog example for Dynamo"
 
 [dependencies]
-basic-agg-policy = { package = "dynamo-custom-policy-example-basic", path = "../basic" }
-basic-disagg-policy = { package = "dynamo-custom-policy-example-disaggregated", path = "../disaggregated" }
+simple-filter-score-pick-policy = { package = "dynamo-custom-policy-example-simple-filter-score-pick", path = "../simple-filter-score-pick" }
+disagg-filter-score-pick-policy = { package = "dynamo-custom-policy-example-disagg-filter-score-pick", path = "../disagg-filter-score-pick" }
+simple-stacked-score-pick-policy = { package = "dynamo-custom-policy-example-simple-stacked-score-pick", path = "../simple-stacked-score-pick" }
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }

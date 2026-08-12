@@ -7,7 +7,9 @@ use std::collections::HashMap;
 mod default;
 mod policy;
 
-pub use default::{DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector};
+pub use default::DefaultWorkerSelector;
+
+use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
     WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
@@ -50,6 +52,7 @@ struct LogitWeights {
 struct WorkerSelectionInput<'a> {
     request: &'a SchedulingRequest,
     has_tier_overlap_blocks: bool,
+    use_default_cache_fallbacks: bool,
     context: WorkerSelectionContext<'a>,
 }
 
@@ -80,6 +83,7 @@ impl<'a> WorkerSelectionInput<'a> {
         Self {
             request,
             has_tier_overlap_blocks,
+            use_default_cache_fallbacks: inputs.contains(WorkerInputs::DEFAULT_POLICY_CACHE),
             context: WorkerSelectionContext {
                 request,
                 request_id: request.mode.request_id().unwrap_or("-"),
@@ -124,15 +128,27 @@ impl<'a> WorkerSelectionInput<'a> {
                 .get(&worker)
                 .copied()
                 .map(|blocks| blocks as f64)
-                .unwrap_or_else(|| {
-                    if self.has_tier_overlap_blocks {
-                        0.0
-                    } else {
-                        effective_overlap_blocks
-                    }
-                });
+                .unwrap_or(0.0);
+            let shared_beyond = |device_blocks: f64| {
+                self.request.shared_cache_hits.as_ref().map_or(0, |hits| {
+                    // `hits_beyond` expects the unweighted device prefix depth.
+                    hits.hits_beyond(device_blocks.round().max(0.0) as u32)
+                })
+            };
+            let default_device_overlap_blocks = if self.has_tier_overlap_blocks {
+                device_overlap_blocks
+            } else {
+                effective_overlap_blocks
+            };
+            let (default_shared_beyond_device_blocks, shared_beyond_device_blocks) =
+                if self.use_default_cache_fallbacks {
+                    (shared_beyond(default_device_overlap_blocks), 0)
+                } else {
+                    (0, shared_beyond(device_overlap_blocks))
+                };
             WorkerCacheInput {
                 effective_overlap_blocks,
+                default_device_overlap_blocks,
                 device_overlap_blocks,
                 host_overlap_blocks: self
                     .request
@@ -150,13 +166,8 @@ impl<'a> WorkerSelectionInput<'a> {
                     .get(&worker)
                     .copied()
                     .unwrap_or(0) as f64,
-                shared_beyond_device_blocks: self.request.shared_cache_hits.as_ref().map_or(
-                    0,
-                    |hits| {
-                        // `hits_beyond` expects the unweighted device prefix depth.
-                        hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
-                    },
-                ),
+                default_shared_beyond_device_blocks,
+                shared_beyond_device_blocks,
             }
         } else {
             WorkerCacheInput::default()
@@ -316,7 +327,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     let weights = selection_weights(kv_router_config, request);
     let (inputs, needs_filtered_baseline) = match &state {
         WorkerSelectionPolicyStateRef::Default(_) => (
-            WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS,
+            WorkerInputs::ALL
+                | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+                | WorkerInputs::DEFAULT_POLICY_CACHE,
             false,
         ),
         WorkerSelectionPolicyStateRef::Custom(state) => {
@@ -486,7 +499,7 @@ mod test_support {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

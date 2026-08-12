@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -55,6 +58,31 @@ func (r *fakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr st
 }
 func (r *fakeRuntime) Close() error { return nil }
 
+// noopInjector is a no-op Mounter used in tests that do not exercise
+// the injection path. It prevents a nil-pointer panic if runRestore is ever
+// reached by a test that was previously relying on Phase 1 failing first.
+type noopInjector struct{}
+
+func (noopInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
+type noopMountPoint struct{}
+
+func (noopMountPoint) Path(name string) (string, error) { return "/noop/" + name, nil }
+func (noopMountPoint) Unmount(_ context.Context) error  { return nil }
+func (noopMountPoint) NsFd() *os.File                   { return nil }
+
+// errorInjector always returns the wrapped error from Mount.
+type errorInjector struct{ err error }
+
+func (e errorInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	return nil, e.err
+}
+
+var _ executor.Mounter = noopInjector{}
+var _ executor.Mounter = errorInjector{}
+
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
 // The fake clientset is empty so any goroutine launched by the restore path will fail on
 // the first annotatePod call and exit cleanly.
@@ -70,6 +98,7 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 		},
 		clientset: fake.NewClientset(objs...),
 		runtime:   &fakeRuntime{},
+		injector:  noopInjector{},
 		log:       testr.New(t),
 		holderID:  "test-holder",
 		inFlight:  make(map[string]struct{}),
@@ -711,5 +740,38 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 		if ok && event.Reason == "RestoreRequested" {
 			t.Fatalf("stale resolver should not start restore while attempt key is held; actions=%#v", clientset.Actions())
 		}
+	}
+}
+
+func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
+	checkpointID := "test-checkpoint"
+	pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, true,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID}, nil)
+
+	// Write a minimal manifest so inspectRestore can load it.
+	checkpointDir := filepath.Join(t.TempDir(), checkpointID)
+	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
+		t.Fatalf("create checkpoint dir: %v", err)
+	}
+	if err := types.WriteManifest(checkpointDir, &types.CheckpointManifest{CheckpointID: checkpointID}); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	injectErr := errors.New("injector unavailable")
+	w := makeTestController(t, pod)
+	// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
+	// returns ESRCH instead of killing the test process.
+	w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
+	w.injector = errorInjector{err: injectErr}
+
+	_ = w.runRestore(
+		context.Background(), pod, "main", "ctr-abc", checkpointID,
+		checkpointLocations{HostPath: checkpointDir, ContainerPath: checkpointDir},
+		"default/test-pod/main/ctr-abc",
+		time.Time{},
+	)
+
+	if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
+		t.Fatal("expected RestoreFailed event when injector returns an error")
 	}
 }
