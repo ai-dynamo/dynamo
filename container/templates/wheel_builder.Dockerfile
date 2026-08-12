@@ -16,6 +16,30 @@ FROM --platform=linux/amd64 quay.io/pypa/manylinux_2_28_x86_64 AS manylinux_amd6
 FROM --platform=linux/arm64 quay.io/pypa/manylinux_2_28_aarch64 AS manylinux_arm64
 {% endif %}
 
+{% if device == "cuda" and make_efa == true %}
+# EFA images load libfabric from the /opt/amazon/efa prefix that the AWS EFA
+# Installer lays down in templates/aws.Dockerfile, so NIXL's LIBFABRIC plugin has
+# to be built against that same prefix. The installer is Debian-packaged, so
+# materialize it in an Ubuntu stage and copy the prefix into the AlmaLinux wheel
+# builder. Same installer invocation as templates/aws.Dockerfile.
+FROM ubuntu:24.04 AS efa_sdk
+
+ARG EFA_VERSION
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl && \
+    curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
+        https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    cd aws-efa-installer && \
+    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
+    cd .. && rm -rf aws-efa-installer* && \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 ##################################
 ##### wheel_builder_base #########
 ##################################
@@ -192,6 +216,14 @@ ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
     LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
     CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
     CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
+
+{% if make_efa == true %}
+COPY --from=efa_sdk /opt/amazon/efa /opt/amazon/efa
+# Register the prefix the way the from-source build below registers
+# /usr/local/libfabric, so loader and pkg-config lookups behave the same.
+RUN printf '%s\n' /opt/amazon/efa/lib > /etc/ld.so.conf.d/000_efa.conf && ldconfig
+ENV PKG_CONFIG_PATH="/opt/amazon/efa/lib/pkgconfig:${PKG_CONFIG_PATH}"
+{% endif %}
 {% endif %}
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
@@ -489,7 +521,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
-{% if device == "cuda" %}
+{% if device == "cuda" and make_efa != true %}
 ARG NIXL_LIBFABRIC_REPO
 ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -737,7 +769,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             -Dcudapath_lib="/usr/local/cuda/lib64" \
             -Dcudapath_inc="/usr/local/cuda/include" \
             -Ducx_path="/usr/local/ucx" \
-            -Dlibfabric_path="/usr/local/libfabric"; \
+            -Dlibfabric_path="{% if make_efa == true %}/opt/amazon/efa{% else %}/usr/local/libfabric{% endif %}"; \
     elif [ "$DEVICE" = "xpu" ]; then \
         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx"; \

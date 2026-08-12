@@ -14,7 +14,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
-#   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
+#   efa      -> all framework EFA runtime image builds (aws.Dockerfile, wheel_builder.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
@@ -350,3 +350,6 @@ benchmarks:
 
 efa:
   - 'container/templates/aws.Dockerfile'
+  # wheel_builder builds NIXL against the EFA libfabric under make_efa, so a
+  # change here can only be validated by building the EFA images.
+  - 'container/templates/wheel_builder.Dockerfile'

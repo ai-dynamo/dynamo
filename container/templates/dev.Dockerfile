@@ -197,6 +197,7 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
 # Copy NIXL SDK material for dev stage compilation.
 # cargo build needs NIXL headers plus linkable -lnixl, -lnixl_build, and -lnixl_common.
 # - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
+#   EFA builds have no from-source libfabric; the aws stage installs the EFA one on top.
 # - vLLM CUDA: Reuse upstream vLLM's Python-wheel NIXL libs and copy only headers beside them.
 # - trtllm/none: NIXL/UCX are already present in runtime (no-op).
 ARG TARGETARCH
@@ -212,8 +213,8 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
         mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
         cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
         cp -r /wheel_builder/usr/local/ucx /usr/local/; \
-        cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
-        cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
+{% if make_efa != true %}        cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
+{% endif %}        cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
         cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
         echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
 {% if framework == "vllm" and device == "cuda" %}
