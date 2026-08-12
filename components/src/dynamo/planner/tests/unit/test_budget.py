@@ -140,6 +140,34 @@ def test_clamp_pair_asymmetric_overshoot_shrinks_to_strict_ceiling():
     assert new_p >= 1 and new_d >= 1  # min_endpoint preserved when feasible
 
 
+def test_clamp_pair_ceiling_never_grows_decode():
+    # prefill 8 GPU/worker, decode 1 GPU/worker, ceiling 20. Desired (10, 1)
+    # = 81 GPUs overshoots, so the strict-shrink path runs. The proportional
+    # shrink lands new_p at 2 (16 GPUs), leaving 4 GPUs of headroom — enough
+    # for 4 decode replicas, but only 1 was asked for. A ceiling clamp must
+    # not seat replicas nobody requested.
+    new_p, new_d = proportional_clamp_pair(10, 1, 8, 1, -1, 20, 1)
+    assert new_p <= 10 and new_d <= 1
+    assert new_p * 8 + new_d * 1 <= 20
+
+
+def test_clamp_pair_ceiling_never_grows_either_pool():
+    # Same invariant across a range of asymmetric shapes: the ceiling path is
+    # a shrink, so neither pool may exceed its requested count.
+    for num_p, num_d, p_gpu, d_gpu, ceiling in [
+        (12, 1, 8, 1, 32),
+        (8, 2, 8, 1, 20),
+        (6, 1, 4, 1, 12),
+        (5, 5, 1, 1, 4),
+    ]:
+        new_p, new_d = proportional_clamp_pair(
+            num_p, num_d, p_gpu, d_gpu, -1, ceiling, 1
+        )
+        assert new_p <= num_p, (num_p, num_d, p_gpu, d_gpu, ceiling, new_p)
+        assert new_d <= num_d, (num_p, num_d, p_gpu, d_gpu, ceiling, new_d)
+        assert new_p * p_gpu + new_d * d_gpu <= ceiling
+
+
 def test_clamp_pair_asymmetric_floor_grows():
     # prefill=1, decode=2. min=max=5. desired (1,1)=3 < min=5. tol=2 → [3, 5].
     # Floor logic pushes up; result must stay at or below the strict ceiling.
