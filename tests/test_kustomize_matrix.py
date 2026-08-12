@@ -250,7 +250,8 @@ def test_unfold_materializes_template_component_with_base_and_variant_values(
         "  variant:\n"
         "    - name: instance\n"
         "      templates:\n"
-        "        - templates/provider/instance\n"
+        "        - source: templates/provider/instance\n"
+        "          path: components/provider\n"
         "      values:\n"
         "        MULTIPLIER: 3\n",
         encoding="utf-8",
@@ -261,12 +262,9 @@ def test_unfold_materializes_template_component_with_base_and_variant_values(
     assert result.returncode == 0, result.stderr
     overlay = recipe / "kustomize/overlays/instance/kustomization.yaml"
     component = (
-        recipe
-        / "kustomize/overlays/instance/generated-components/00-provider-instance/kustomization.yaml"
+        recipe / "kustomize/overlays/instance/components/provider/kustomization.yaml"
     )
-    assert '  - "generated-components/00-provider-instance"\n' in overlay.read_text(
-        encoding="utf-8"
-    )
+    assert '  - "components/provider"\n' in overlay.read_text(encoding="utf-8")
     rendered_component = component.read_text(encoding="utf-8")
     assert "# Template source: " in rendered_component
     assert rendered_component.count("# SPDX-License-Identifier") == 1
@@ -310,8 +308,106 @@ def test_template_only_and_undefined_values_fail_clearly(tmp_path):
         "      value: {{ values.NOT_DEFINED }}\n",
     )
 
+    selection = kustomize_matrix.TemplateSelection(
+        source=template, output_path=Path("components/provider")
+    )
     with pytest.raises(ValueError, match="NOT_DEFINED"):
-        kustomize_matrix.render_template_component(template, {}, {})
+        kustomize_matrix.render_template_component(selection, {}, {})
+
+
+def test_template_path_is_a_nested_overlay_component_path(tmp_path):
+    kustomize_matrix = load_matrix_module()
+    template = tmp_path / "template"
+    write_template(
+        template,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+    )
+
+    selections = kustomize_matrix.resolve_template_selections(
+        [{"source": "template", "path": "components/fabric/efa"}],
+        tmp_path / ".kustomize-matrix.yaml",
+        "templates",
+    )
+
+    assert selections[0].source == template
+    assert selections[0].output_path == Path("components/fabric/efa")
+    with pytest.raises(ValueError, match="under components"):
+        kustomize_matrix.resolve_template_selections(
+            [{"source": "template", "path": "templates/efa"}],
+            tmp_path / ".kustomize-matrix.yaml",
+            "templates",
+        )
+
+
+def test_unfold_rebases_external_component_paths(tmp_path):
+    recipe = tmp_path / "recipe"
+    base = recipe / "kustomize/base"
+    write_kustomization(base, "resources:\n  - deployment.yaml\n")
+    (base / "deployment.yaml").write_text(
+        "apiVersion: nvidia.com/v1alpha1\n"
+        "kind: DynamoGraphDeployment\n"
+        "metadata:\n"
+        "  name: app\n",
+        encoding="utf-8",
+    )
+    external = recipe / "shared-component"
+    write_kustomization(
+        external,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
+        "kind: Component\n"
+        "patches:\n"
+        "  - target:\n"
+        "      group: nvidia.com\n"
+        "      version: v1alpha1\n"
+        "      kind: DynamoGraphDeployment\n"
+        "    patch: |\n"
+        "      apiVersion: nvidia.com/v1alpha1\n"
+        "      kind: DynamoGraphDeployment\n"
+        "      metadata:\n"
+        "        name: app\n"
+        "        labels:\n"
+        "          from-external-component: applies\n",
+    )
+    template = recipe / "templates/provider/instance"
+    write_template(
+        template,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
+        "kind: Component\n"
+        "# This comment remains in the generated Component.\n"
+        "components:\n"
+        "  - ../../../shared-component\n",
+    )
+    matrix = recipe / ".kustomize-matrix.yaml"
+    matrix.write_text(
+        "source: kustomize/base\n"
+        'nameTemplate: "${variant}"\n'
+        "matrix:\n"
+        "  variant:\n"
+        "    - name: instance\n"
+        "      templates:\n"
+        "        - source: templates/provider/instance\n"
+        "          path: components/external\n",
+        encoding="utf-8",
+    )
+
+    result = run_matrix("unfold", str(matrix))
+
+    assert result.returncode == 0, result.stderr
+    component = (
+        recipe / "kustomize/overlays/instance/components/external/kustomization.yaml"
+    )
+    rendered_component = component.read_text(encoding="utf-8")
+    assert "# This comment remains in the generated Component." in rendered_component
+    parsed_component = yaml.safe_load(rendered_component)
+    assert parsed_component["components"] == ["../../../../../shared-component"]
+    build = subprocess.run(
+        ["kustomize", "build", str(recipe / "kustomize/overlays/instance")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert build.returncode == 0, build.stderr
+    assert "from-external-component: applies" in build.stdout
 
 
 def test_render_uses_leaf_component_and_preserves_source_comments(

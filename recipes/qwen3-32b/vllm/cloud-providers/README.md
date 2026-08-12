@@ -68,9 +68,10 @@ For recipe contributors, the source of truth is
 [`.kustomize-matrix.yaml`](.kustomize-matrix.yaml), `kustomize/base/`, the
 recipe-local Components, shared template sources, plus the referenced shared
 Components under `recipes/kustomize/components/`. Only contributors update
-committed derived artifacts: public overlay `kustomization.yaml` files, generated
-template Components, and `deploy-*.yaml` files are generated, committed for
-review, and must not be hand-edited. Regenerate them with:
+committed derived artifacts: public overlay `kustomization.yaml` files,
+generated Components under their local `components/` directories, and
+`deploy-*.yaml` files are generated, committed for review, and must not be
+hand-edited. Regenerate them with:
 
 ```bash
 scripts/kustomize-matrix.py unfold .kustomize-matrix.yaml

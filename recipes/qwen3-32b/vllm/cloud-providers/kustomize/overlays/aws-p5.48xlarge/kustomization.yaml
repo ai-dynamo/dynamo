@@ -12,7 +12,6 @@ sortOptions:
 resources:
   - "../../base"
 components:
-  - "../../../../../../kustomize/components/aws-efa"
+  - "components/efa"
   - "../../../../../../kustomize/components/vllm-disagg/aws-efa"
   - "../../components/vllm-efa-runtime"
-  - "generated-components/00-aws-efa-p5.48xlarge"
