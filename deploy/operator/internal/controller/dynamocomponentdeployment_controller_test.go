@@ -828,7 +828,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 
 	dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "qwen-decode-db6b6891",
+			Name:      "qwen-vllmdecodeworker-db6b6891",
 			Namespace: "default",
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
@@ -839,7 +839,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		Spec: v1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:      "decode",
+				ServiceName:      "VllmDecodeWorker",
 				ComponentType:    commonconsts.ComponentTypeWorker,
 				SubComponentType: commonconsts.ComponentTypeDecode,
 				DynamoNamespace:  ptr.To("default"),
@@ -856,7 +856,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 
 	existingDeployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "qwen-decode-db6b6891",
+			Name:      "qwen-vllmdecodeworker-db6b6891",
 			Namespace: "default",
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -917,7 +917,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWit
 
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "qwen-decode",
+			Name:      "qwen-vllmdecodeworker",
 			Namespace: "default",
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
@@ -926,7 +926,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWit
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "decode",
+				ComponentName: "VllmDecodeWorker",
 				ComponentType: v1beta1.ComponentTypeDecode,
 			},
 		},
@@ -966,7 +966,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "qwen-decode",
+			Name:      "qwen-vllmdecodeworker",
 			Namespace: "default",
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
@@ -975,7 +975,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "decode",
+				ComponentName: "VllmDecodeWorker",
 				ComponentType: v1beta1.ComponentTypeDecode,
 			},
 		},

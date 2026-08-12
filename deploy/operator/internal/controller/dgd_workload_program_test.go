@@ -595,7 +595,7 @@ func TestComponentWorkloadsReconciler_PreserveExistingBackendFramework(t *testin
 		},
 		{
 			name:          "new DCD keeps its inferred backend",
-			dcdName:       "vllm-disagg-planner-decode-2dad72b9",
+			dcdName:       "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
 			wantFramework: "vllm",
 		},
 	}

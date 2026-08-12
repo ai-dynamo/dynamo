@@ -398,7 +398,7 @@ func TestGmsRCTName(t *testing.T) {
 			name:        "uppercase",
 			serviceName: "VLLMWorker",
 			rank:        2,
-			expected:    "worker-gpu-rank-2",
+			expected:    "vllmworker-gpu-rank-2",
 		},
 		{
 			name:        "dot",
