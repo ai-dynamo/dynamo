@@ -472,8 +472,8 @@ The default model is `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-| `DYN_ENCODE_WORKER_GPU` | `1` | GPU for the encode worker; `--single-gpu` changes the default to `0`. |
-| `DYN_PD_WORKER_GPU` | `2` | GPU for the combined prefill/decode worker; `--single-gpu` changes the default to `0`. |
+| `DYN_ENCODE_WORKER_GPU` | `0` | GPU for the encode worker; `--single-gpu` also uses `0`. |
+| `DYN_PD_WORKER_GPU` | `1` | GPU for the combined prefill/decode worker; `--single-gpu` changes the default to `0`. |
 | `DYN_ENCODE_GPU_MEM` | `0.9` | Encode-worker GPU-memory fraction; `--single-gpu` changes the default to `0.1`. |
 | `DYN_PD_GPU_MEM` | `0.9` | Prefill/decode GPU-memory fraction; `--single-gpu` changes the default to `0.7`. |
 | `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
