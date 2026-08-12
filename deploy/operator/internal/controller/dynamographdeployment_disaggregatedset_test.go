@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	disaggregatedsetcontroller "sigs.k8s.io/lws/pkg/controllers/disaggregatedset"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 )
 
@@ -351,6 +352,8 @@ func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {
 		require.LessOrEqual(t, len(roleName), maxDisaggregatedSetRoleNameLength)
 		childName := disaggregatedsetutils.GenerateName(setName, roleName, strings.Repeat("a", disaggregatedSetRevisionLength))
 		require.LessOrEqual(t, len(childName), 63)
+		serviceName := disaggregatedsetcontroller.GenerateServiceName(setName, roleName, strings.Repeat("a", disaggregatedSetRevisionLength))
+		require.LessOrEqual(t, len(serviceName), 63)
 	}
 }
 
