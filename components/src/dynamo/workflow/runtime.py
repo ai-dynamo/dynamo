@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import math
 import uuid
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -268,13 +268,8 @@ def _validate_value(spec: ValueSpec, value: Any, location: str) -> None:
         raise WorkflowExecutionError(f"{location} must be text")
     if spec.type == "bytes" and not isinstance(value, (bytes, bytearray, memoryview)):
         raise WorkflowExecutionError(f"{location} must be bytes-like")
-    if spec.type == "json":
-        try:
-            json.dumps(value, allow_nan=False)
-        except (TypeError, ValueError) as error:
-            raise WorkflowExecutionError(
-                f"{location} must be JSON-serializable"
-            ) from error
+    if spec.type == "json" and not _is_json_value(value, set()):
+        raise WorkflowExecutionError(f"{location} must use the JSON data model")
     if spec.type == "tensor":
         if not isinstance(value, _TensorValue):
             raise WorkflowExecutionError(f"{location} must be tensor-like")
@@ -299,3 +294,26 @@ def _validate_value(spec: ValueSpec, value: Any, location: str) -> None:
             raise WorkflowExecutionError(
                 f"{location} has image mode {value.mode!r}, expected {spec.mode!r}"
             )
+
+
+def _is_json_value(value: Any, active_containers: set[int]) -> bool:
+    if value is None or isinstance(value, (bool, int, str)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if not isinstance(value, (list, dict)):
+        return False
+
+    container_id = id(value)
+    if container_id in active_containers:
+        return False
+    active_containers.add(container_id)
+    try:
+        if isinstance(value, list):
+            return all(_is_json_value(item, active_containers) for item in value)
+        return all(
+            isinstance(key, str) and _is_json_value(item, active_containers)
+            for key, item in value.items()
+        )
+    finally:
+        active_containers.remove(container_id)
