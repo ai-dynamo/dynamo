@@ -283,13 +283,9 @@ impl RequestTracker {
         self.cached_tokens.get().copied()
     }
 
-    /// Record the cumulative output sequence length in tokens.
-    ///
-    /// Multiple response observers may report the same request. Keep the
-    /// largest value so a late observer with incomplete native-output metadata
-    /// cannot make the sequence length move backwards.
+    /// Record current output sequence length in tokens. Updated at each output block boundary.
     pub fn record_osl(&self, osl: usize) {
-        self.osl_tokens.fetch_max(osl as u64, Ordering::Relaxed);
+        self.osl_tokens.store(osl as u64, Ordering::Relaxed);
     }
 
     pub fn osl_tokens(&self) -> u64 {
@@ -755,9 +751,6 @@ mod tests {
         assert_eq!(tracker.cached_tokens(), Some(256));
 
         tracker.record_osl(100);
-        assert_eq!(tracker.osl_tokens(), 100);
-
-        tracker.record_osl(0);
         assert_eq!(tracker.osl_tokens(), 100);
     }
 

@@ -4,10 +4,7 @@
 //! Replay-oriented request hash capture for live traces.
 
 use bytemuck::cast_slice;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, LocalBlockHash, XXH3_SEED, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
-};
+use dynamo_kv_router::protocols::{LocalBlockHash, XXH3_SEED, compute_next_seq_hash};
 use dynamo_tokens::compute_hash_v2;
 
 use crate::protocols::TokenIdType;
@@ -38,21 +35,24 @@ pub(crate) fn input_sequence_hashes(
         "request trace replay block size must be positive"
     );
 
-    // Keep this identical to the router/mocker sequence-aware hashing path so
-    // replay preserves shared-prefix identity.
-    let block_size = trace_block_size as u32;
-    let mut block_hashes =
-        compute_block_hash_for_seq(token_ids, block_size, BlockHashOptions::default());
-
-    let full_token_count = block_hashes.len() * trace_block_size;
-    if full_token_count < token_ids.len() {
-        block_hashes.push(partial_local_block_hash(&token_ids[full_token_count..]));
+    // Produce the canonical rolling sequence hashes directly. The previous
+    // implementation first materialized every local block hash and then made a
+    // second pass to chain them; request traces only retain the chained values.
+    let mut sequence_hashes = Vec::with_capacity(token_ids.len().div_ceil(trace_block_size));
+    for tokens in token_ids.chunks(trace_block_size) {
+        let block_hash = local_block_hash(tokens);
+        let sequence_hash = sequence_hashes
+            .last()
+            .copied()
+            .map_or(block_hash.0, |parent| {
+                compute_next_seq_hash(parent, block_hash)
+            });
+        sequence_hashes.push(sequence_hash);
     }
-
-    compute_seq_hash_for_block(&block_hashes)
+    sequence_hashes
 }
 
-fn partial_local_block_hash(tokens: &[TokenIdType]) -> LocalBlockHash {
+fn local_block_hash(tokens: &[TokenIdType]) -> LocalBlockHash {
     LocalBlockHash(compute_hash_v2(cast_slice(tokens), XXH3_SEED))
 }
 
@@ -60,7 +60,33 @@ fn partial_local_block_hash(tokens: &[TokenIdType]) -> LocalBlockHash {
 mod tests {
     use std::time::Instant;
 
+    use dynamo_kv_router::protocols::{
+        BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    };
+
     use super::input_sequence_hashes;
+
+    fn reference_hashes(tokens: &[u32], block_size: usize) -> Vec<u64> {
+        let mut block_hashes =
+            compute_block_hash_for_seq(tokens, block_size as u32, BlockHashOptions::default());
+        let full_token_count = block_hashes.len() * block_size;
+        if full_token_count < tokens.len() {
+            block_hashes.push(super::local_block_hash(&tokens[full_token_count..]));
+        }
+        compute_seq_hash_for_block(&block_hashes)
+    }
+
+    #[test]
+    fn direct_hashing_matches_router_reference() {
+        let tokens = (0..257_u32).collect::<Vec<_>>();
+        for block_size in [1, 2, 3, 16, 64, 256, 512] {
+            assert_eq!(
+                input_sequence_hashes(&tokens, block_size),
+                reference_hashes(&tokens, block_size),
+                "block size {block_size}"
+            );
+        }
+    }
 
     #[test]
     fn shared_prefix_has_same_leading_sequence_hashes() {
