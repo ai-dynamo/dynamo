@@ -89,6 +89,14 @@ impl AnthropicStreamConverter {
             text_block_index: 0,
             usage: AnthropicUsage {
                 input_tokens: estimated_input_tokens,
+                // Seed the cache-creation count explicitly instead of letting
+                // `Default` leave it `None`. A backend that never populates
+                // per-chunk `usage` (the `ModelInput::Text` / PushRouter path)
+                // never reaches `record_usage`, so this seed is what the client
+                // receives on every event. `skip_serializing_if` drops the key
+                // for a `None`, which would give such a backend a different set
+                // of usage keys than a reporting one.
+                cache_creation_input_tokens: Some(0),
                 ..Default::default()
             },
             saw_backend_usage: false,
@@ -1119,6 +1127,33 @@ mod tests {
         assert_eq!(serialized["usage"]["cache_read_input_tokens"], 5);
         assert_eq!(serialized["usage"]["cache_creation_input_tokens"], 0);
         assert_eq!(serialized["usage"]["output_tokens"], 3);
+    }
+
+    /// A backend that never reports usage must still produce the same usage key
+    /// set as one that does. `record_usage` never runs on that path, so the
+    /// converter's seed is what the client receives on `message_start` (which
+    /// clones `self.usage`) and on every `content_block_delta` (which
+    /// `event_json_with_usage` stamps with the whole usage struct).
+    #[test]
+    fn test_seeded_usage_carries_cache_creation_key_without_backend_usage() {
+        let conv = AnthropicStreamConverter::new("test-model".into(), 7);
+        assert!(!conv.saw_backend_usage);
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
+
+        // message_start clones this seed, so serializing it proves the key
+        // survives `skip_serializing_if`.
+        let start_usage = serde_json::to_value(&conv.usage).expect("usage serializes");
+        assert_eq!(start_usage["input_tokens"], 7);
+        assert_eq!(start_usage["cache_creation_input_tokens"], 0);
+
+        let delta = AnthropicStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: AnthropicDelta::TextDelta {
+                text: "hi".to_string(),
+            },
+        };
+        let value = event_json_with_usage(&delta, &conv.usage).expect("serialize");
+        assert_eq!(value["usage"]["cache_creation_input_tokens"], 0);
     }
 
     /// Backends that never populate per-chunk `usage` (the `ModelInput::Text`
