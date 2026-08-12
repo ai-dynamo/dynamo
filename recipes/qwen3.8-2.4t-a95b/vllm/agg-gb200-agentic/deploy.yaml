@@ -34,7 +34,6 @@ spec:
       spec:
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-GB200
-          cloud.google.com/gke-nodepool: customer-gpu-w0e
         tolerations:
         - {key: kubernetes.io/arch, operator: Equal, value: arm64,         effect: NoSchedule}
         containers:
@@ -68,7 +67,6 @@ spec:
       spec:
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-GB200
-          cloud.google.com/gke-nodepool: customer-gpu-w0e
         tolerations:
         - {key: kubernetes.io/arch, operator: Equal, value: arm64,         effect: NoSchedule}
         resourceClaims:

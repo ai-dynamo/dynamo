@@ -26,10 +26,7 @@ spec:
         spec:
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB300
-            dedicated: GoldenPrairie
-            nvidia.com/gpu.clique: "0e804531-7d0e-ce6f-a1f4-9a9854394a7f.1"
           tolerations:
-            - {key: dedicated, operator: Equal, value: GoldenPrairie, effect: NoSchedule}
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
@@ -55,10 +52,7 @@ spec:
         spec:
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB300
-            dedicated: GoldenPrairie
-            nvidia.com/gpu.clique: "0e804531-7d0e-ce6f-a1f4-9a9854394a7f.1"
           tolerations:
-            - {key: dedicated, operator: Equal, value: GoldenPrairie, effect: NoSchedule}
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
