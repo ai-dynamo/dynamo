@@ -32,7 +32,7 @@ def _default_result_adapter(result: Mapping[str, Any]) -> Mapping[str, Any]:
 
 @dataclass(frozen=True)
 class WorkflowFrontendApplication:
-    """A hydrated workflow plus its token-frontend boundary adapters."""
+    """A runtime-bound workflow plus its token-frontend boundary adapters."""
 
     executor: WorkflowExecutor
     model_path: str
