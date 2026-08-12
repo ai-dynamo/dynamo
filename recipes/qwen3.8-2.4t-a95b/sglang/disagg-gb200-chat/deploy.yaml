@@ -51,6 +51,8 @@ spec:
           - sglang
           - --reasoning-parser
           - qwen3
+          - --dyn-tool-call-parser
+          - qwen3_coder
           - --enable-streaming-reasoning-dispatch
           - --router-mode
           - kv
