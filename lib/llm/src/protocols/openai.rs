@@ -329,6 +329,7 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage;
 
     /// Returns the request tracker if available, for accessing worker timing metrics.
+    /// Implementors that own request timing data must override this method.
     fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {
         None
     }
