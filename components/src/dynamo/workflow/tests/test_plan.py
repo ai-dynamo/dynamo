@@ -54,6 +54,13 @@ def test_execution_plan_contains_only_in_memory_decisions() -> None:
     )
 
 
+def test_compilation_defaults_to_stage_id_local_bindings() -> None:
+    plan = compile_workflow(_workflow())
+
+    assert plan.bindings == {"normalize": LocalBinding(runner_key="normalize")}
+    assert all(edge.carrier == "local" for edge in plan.edges)
+
+
 def test_execution_plan_rejects_invalid_physical_edges() -> None:
     plan = compile_workflow(_workflow(), DeploymentSpec.local(normalize="normalizer"))
 
