@@ -180,11 +180,12 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         &mut self,
         now_ms: f64,
         cluster_in_flight: usize,
+        limit: usize,
     ) -> Result<Vec<ReadyArrival<ReplayRequestPayload, Metadata>>> {
         match (&self.mode, &mut self.source) {
             (ReplayMode::Trace, AdmissionSource::Requests(pending)) => {
                 let mut ready = Vec::new();
-                loop {
+                while ready.len() < limit {
                     let arrival_ms = pending
                         .front()
                         .and_then(|request| request.arrival_timestamp_ms)
@@ -208,7 +209,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 Ok(ready)
             }
             (ReplayMode::Trace, AdmissionSource::Workload(driver)) => Ok(driver
-                .pop_ready_compact(now_ms, usize::MAX)
+                .pop_ready_compact(now_ms, limit)
                 .into_iter()
                 .map(|ready| {
                     let session_id = ready.emit_session_metadata.then_some(ready.session_id);
@@ -225,7 +226,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 })
                 .collect()),
             (ReplayMode::Trace, AdmissionSource::OpenAgentic(driver)) => Ok(driver
-                .pop_ready_compact(now_ms, usize::MAX)
+                .pop_ready_compact(now_ms, limit)
                 .into_iter()
                 .map(|ready| {
                     let session_id = ready.emit_session_metadata.then_some(ready.session_id);
@@ -244,7 +245,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
             (ReplayMode::Concurrency { max_in_flight }, AdmissionSource::Requests(pending)) => {
                 let mut ready = Vec::new();
                 let mut simulated_in_flight = cluster_in_flight;
-                while simulated_in_flight < *max_in_flight {
+                while simulated_in_flight < *max_in_flight && ready.len() < limit {
                     let Some(mut request) = pending.pop_front() else {
                         break;
                     };
@@ -263,10 +264,11 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 Ok(ready)
             }
             (ReplayMode::Concurrency { .. }, AdmissionSource::Workload(driver)) => {
-                // The driver owns the session cap and only ever holds active sessions'
-                // turns in its heap, so drain everything ready in heap (i.e. limit=usize MAX).
+                // The driver owns the session cap. Ordinary replay passes an
+                // unbounded limit; interactive placement may deliberately
+                // release one ready turn at a controller barrier.
                 Ok(driver
-                    .pop_ready_compact(now_ms, usize::MAX)
+                    .pop_ready_compact(now_ms, limit)
                     .into_iter()
                     .map(|ready| {
                         let session_id = ready.emit_session_metadata.then_some(ready.session_id);
@@ -284,7 +286,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                     .collect())
             }
             (ReplayMode::Concurrency { .. }, AdmissionSource::OpenAgentic(driver)) => Ok(driver
-                .pop_ready_compact(now_ms, usize::MAX)
+                .pop_ready_compact(now_ms, limit)
                 .into_iter()
                 .map(|ready| {
                     let session_id = ready.emit_session_metadata.then_some(ready.session_id);
@@ -370,7 +372,16 @@ impl<Metadata: ReplayAdmissionMetadata> CoreAdmissionSource for AdmissionQueue<M
         now_ms: f64,
         cluster_in_flight: usize,
     ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
-        AdmissionQueue::drain_ready_compact(self, now_ms, cluster_in_flight)
+        AdmissionQueue::drain_ready_compact(self, now_ms, cluster_in_flight, usize::MAX)
+    }
+
+    fn drain_ready_up_to(
+        &mut self,
+        now_ms: f64,
+        cluster_in_flight: usize,
+        limit: usize,
+    ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
+        AdmissionQueue::drain_ready_compact(self, now_ms, cluster_in_flight, limit)
     }
 
     fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> Result<()> {

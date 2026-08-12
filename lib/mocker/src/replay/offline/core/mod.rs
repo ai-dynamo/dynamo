@@ -52,6 +52,21 @@ pub(crate) trait AdmissionSource {
         now_ms: f64,
         cluster_in_flight: usize,
     ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>>;
+    /// Drain at most `limit` source arrivals. Interactive external placement
+    /// uses a limit of one so admission itself cannot cross a controller
+    /// barrier. Sources that do not support bounded draining fail closed.
+    fn drain_ready_up_to(
+        &mut self,
+        now_ms: f64,
+        cluster_in_flight: usize,
+        limit: usize,
+    ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
+        anyhow::ensure!(
+            limit == usize::MAX,
+            "this offline replay admission source does not support bounded draining"
+        );
+        self.drain_ready(now_ms, cluster_in_flight)
+    }
     fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> Result<()>;
     /// Resolve a terminal request and return authored descendants canceled by
     /// dependency failure. Sources without an internal DAG return an empty
@@ -76,7 +91,12 @@ pub(crate) struct PlannerCacheSample {
 pub(crate) struct Placement {
     pub(in crate::replay::offline) request_id: Uuid,
     pub(in crate::replay::offline) scheduler_id: usize,
-    pub(in crate::replay::offline) reported_overlap_tokens: usize,
+    /// Scheduler-visible prefix overlap used by the placement policy.
+    ///
+    /// `None` means that the policy/backend did not calculate this fact. It
+    /// must not be replaced with zero: zero is an authoritative observation
+    /// that the selected worker has no committed prefix overlap.
+    pub(in crate::replay::offline) reported_overlap_tokens: Option<usize>,
     pub(in crate::replay::offline) planner_cache_sample: Option<PlannerCacheSample>,
 }
 
@@ -129,6 +149,11 @@ pub(crate) trait PlacementPolicy<Request> {
     }
     fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>>;
     fn pending_count(&self) -> usize;
+    /// Oldest controller-owned placement boundary, if this policy exposes
+    /// placements externally. Native policies return `None`.
+    fn next_pending_request_id(&self) -> Option<Uuid> {
+        None
+    }
     fn worker_ready(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>>;
     fn worker_draining(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>>;
     fn worker_removed(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>>;

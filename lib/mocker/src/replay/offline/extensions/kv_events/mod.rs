@@ -190,8 +190,18 @@ impl
             false,
             true,
             true,
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
+            |args, topology| {
+                Ok(PoolRoundRobinPlacement::with_taints(
+                    topology,
+                    &args.worker_taints,
+                ))
+            },
+            |args, topology| {
+                Ok(PoolRoundRobinPlacement::with_taints(
+                    topology,
+                    &args.worker_taints,
+                ))
+            },
         )
     }
 }

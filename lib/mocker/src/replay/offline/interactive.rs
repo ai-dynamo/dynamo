@@ -3,7 +3,7 @@
 
 //! Public, polling-based control surface for causal offline replay.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use anyhow::{Context, Result, bail};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -20,8 +20,8 @@ use crate::replay::offline::extensions::kv_router::AggRuntime as KvAggRuntime;
 use crate::replay::offline::topology::DEFAULT_REPLAY_POOL_ID;
 use crate::replay::offline::topology::{PoolSpec, ResolvedPoolTopology, WorkerTarget};
 use crate::replay::{
-    ReplayDeterminism, ReplayRouterMode, ReplayTerminalStatus, TraceSimulationReport,
-    with_replay_determinism,
+    ReplayDeterminism, ReplayRouterMode, ReplayTerminalStatus, ReplayWorkerLifecycleStatus,
+    TraceSimulationReport, with_replay_determinism,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -142,6 +142,13 @@ pub struct ReplayPendingPlacement {
     pub session_id: String,
     pub authored_turn_index: usize,
     pub ready_at_ms: f64,
+    /// Prompt work visible when the request becomes placeable. The recorded
+    /// output length and every future timing value are deliberately absent.
+    pub input_length: usize,
+    pub priority: i32,
+    pub strict_priority: u32,
+    pub policy_class: Option<String>,
+    pub routing_constraints: ReplayRoutingConstraints,
     pub eligible_pool_ids: Vec<String>,
     pub candidates: Vec<ReplayPlacementCandidate>,
 }
@@ -151,6 +158,10 @@ pub struct ReplayWorkerSnapshot {
     pub pool_id: String,
     pub worker_id: usize,
     pub dp_rank: usize,
+    pub lifecycle_status: ReplayWorkerLifecycleStatus,
+    /// Whether this worker is physically provisioned and therefore billed.
+    /// Static-inactive, starting, and draining workers remain provisioned.
+    pub provisioned: bool,
     pub active: bool,
     pub draining: bool,
     pub in_flight_requests: usize,
@@ -167,6 +178,9 @@ pub struct ReplayWorkerSnapshot {
     /// Configured finite runnable-sequence capacity; `None` is unbounded or
     /// unsupported depending on whether the other scheduler fields exist.
     pub max_num_seqs: Option<usize>,
+    /// Exact cumulative worker/rank preemptions. Unsupported schedulers expose
+    /// `None`; zero is reserved for a supported scheduler with no preemption.
+    pub preemption_count: Option<u64>,
     /// Physical G1 KV capacity and occupancy, in engine blocks.
     pub kv_capacity_blocks: Option<usize>,
     pub kv_occupied_blocks: Option<usize>,
@@ -191,6 +205,7 @@ pub struct ReplayPlacementCandidate {
     pub queued_tokens: Option<usize>,
     pub running_tokens: Option<usize>,
     pub max_num_seqs: Option<usize>,
+    pub preemption_count: Option<u64>,
     pub kv_prefix_overlap_tokens: Option<usize>,
     pub kv_capacity_blocks: Option<usize>,
     pub kv_occupied_blocks: Option<usize>,
@@ -240,6 +255,11 @@ pub(crate) struct InteractiveCapture {
     logical_to_uuid: FxHashMap<String, Uuid>,
     session_turn_to_uuid: FxHashMap<(String, usize), Uuid>,
     events: VecDeque<ReplayEvent>,
+    /// Exactly one externally controlled request may have a policy-visible
+    /// observation at a time. Clearing this after assignment forces the next
+    /// same-time request to observe the scheduler state changed by its
+    /// predecessor.
+    announced_placement: Option<Uuid>,
 }
 
 impl InteractiveCapture {
@@ -300,6 +320,9 @@ impl InteractiveCapture {
     }
 
     pub(crate) fn unregister(&mut self, uuid: Uuid) {
+        if self.announced_placement == Some(uuid) {
+            self.announced_placement = None;
+        }
         if let Some(identity) = self.identities.remove(&uuid) {
             self.logical_to_uuid.remove(&identity.logical_request_id);
             self.session_turn_to_uuid
@@ -382,7 +405,47 @@ impl InteractiveCapture {
         Ok(())
     }
 
-    pub(crate) fn emit_placement_needed(
+    pub(crate) fn placement_needed_event(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+        candidates: Vec<ReplayPlacementCandidate>,
+    ) -> anyhow::Result<ReplayEvent> {
+        self.mark_placement_observed(uuid);
+        let mut data = self.event_data(uuid, now_ms, false)?;
+        data.eligible_pool_ids = eligible_pool_ids(&candidates);
+        data.candidates = candidates;
+        Ok(ReplayEvent::PlacementNeeded(data))
+    }
+
+    pub(crate) fn mark_placement_observed(&mut self, uuid: Uuid) {
+        self.announced_placement = Some(uuid);
+    }
+
+    pub(crate) fn placement_is_announced(&self, uuid: Uuid) -> bool {
+        self.announced_placement == Some(uuid)
+    }
+
+    pub(crate) fn validate_placement_assignment(&self, uuid: Uuid) -> anyhow::Result<()> {
+        if self.announced_placement == Some(uuid) {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "interactive replay request {uuid} has no current policy observation; drain events or refresh pending placements before assignment"
+        )
+    }
+
+    pub(crate) fn complete_placement_assignment(&mut self, uuid: Uuid) -> anyhow::Result<()> {
+        if self.announced_placement != Some(uuid) {
+            anyhow::bail!(
+                "interactive replay request {uuid} is not the current placement boundary"
+            );
+        }
+        self.announced_placement = None;
+        Ok(())
+    }
+
+    pub(crate) fn emit_routed(
         &mut self,
         uuid: Uuid,
         now_ms: f64,
@@ -391,12 +454,6 @@ impl InteractiveCapture {
         let mut data = self.event_data(uuid, now_ms, false)?;
         data.eligible_pool_ids = eligible_pool_ids(&candidates);
         data.candidates = candidates;
-        self.events.push_back(ReplayEvent::PlacementNeeded(data));
-        Ok(())
-    }
-
-    pub(crate) fn emit_routed(&mut self, uuid: Uuid, now_ms: f64) -> anyhow::Result<()> {
-        let data = self.event_data(uuid, now_ms, false)?;
         self.events.push_back(ReplayEvent::Routed(data));
         Ok(())
     }
@@ -475,6 +532,11 @@ impl InteractiveCapture {
                     session_id: identity.session_id.clone(),
                     authored_turn_index: identity.authored_turn_index,
                     ready_at_ms: identity.ready_at_ms.unwrap_or_default(),
+                    input_length: identity.input_length,
+                    priority: identity.priority,
+                    strict_priority: identity.strict_priority,
+                    policy_class: identity.policy_class.clone(),
+                    routing_constraints: identity.routing_constraints.clone(),
                     eligible_pool_ids: self.eligible_pool_ids.clone(),
                     candidates: Vec::new(),
                 })
@@ -497,6 +559,13 @@ enum InteractiveRuntime {
     External(ExternalAggRuntime),
     RoundRobin(RoundRobinAggRuntime),
     KvRouter(Box<KvAggRuntime>),
+}
+
+#[derive(Debug, Clone)]
+struct StaticRoutingWorker {
+    target: WorkerTarget,
+    taints: BTreeSet<String>,
+    is_eligible: bool,
 }
 
 impl InteractiveRuntime {
@@ -618,7 +687,7 @@ impl InteractiveRuntime {
         }
     }
 
-    fn pending_placements(&self) -> Vec<ReplayPendingPlacement> {
+    fn pending_placements(&mut self) -> Vec<ReplayPendingPlacement> {
         match self {
             Self::External(runtime) => runtime.pending_interactive_placements(),
             Self::RoundRobin(_) | Self::KvRouter(_) => Vec::new(),
@@ -685,6 +754,7 @@ pub struct OfflineReplaySession {
     determinism: ReplayDeterminism,
     trace_block_size: usize,
     admission_closed: bool,
+    static_routing_workers: Vec<StaticRoutingWorker>,
 }
 
 impl OfflineReplaySession {
@@ -767,6 +837,11 @@ impl OfflineReplaySession {
         if args.resolved_g1_backend() != G1Backend::Native {
             bail!("interactive replay milestone does not support KVBM/offload");
         }
+        if args.startup_time.is_some_and(|seconds| seconds != 0.0) {
+            bail!(
+                "interactive replay P0 topology is static; default pool must not configure startup_time"
+            );
+        }
 
         let engine_block_size = args.block_size;
         if trace_block_size != engine_block_size {
@@ -774,6 +849,17 @@ impl OfflineReplaySession {
                 "authoritative interactive replay trace_block_size {trace_block_size} does not match engine block_size {engine_block_size}"
             );
         }
+        let static_routing_workers = (0..num_workers)
+            .map(|worker_id| StaticRoutingWorker {
+                target: WorkerTarget::default_pool(worker_id, 0),
+                taints: args
+                    .worker_taints
+                    .get(worker_id)
+                    .map(|taints| taints.iter().cloned().collect())
+                    .unwrap_or_default(),
+                is_eligible: true,
+            })
+            .collect();
         let mut runtime = with_replay_determinism(determinism, || -> Result<_> {
             Ok(match router {
                 ReplaySessionRouter::External => {
@@ -831,6 +917,7 @@ impl OfflineReplaySession {
             determinism,
             trace_block_size,
             admission_closed: false,
+            static_routing_workers,
         })
     }
 
@@ -879,6 +966,15 @@ impl OfflineReplaySession {
         options: ReplaySessionOptions,
     ) -> Result<Self> {
         let topology = ResolvedPoolTopology::resolve(pools, trace_block_size)?;
+        let static_routing_workers = topology
+            .workers
+            .iter()
+            .map(|worker| StaticRoutingWorker {
+                target: worker.target.clone(),
+                taints: worker.taints.clone(),
+                is_eligible: worker.active && !worker.draining,
+            })
+            .collect();
         let engine_block_size = topology
             .workers
             .first()
@@ -903,6 +999,7 @@ impl OfflineReplaySession {
             determinism,
             trace_block_size,
             admission_closed: false,
+            static_routing_workers,
         })
     }
 
@@ -990,6 +1087,105 @@ impl OfflineReplaySession {
             bail!(
                 "interactive replay request {} supplies a WorkerTarget for native routing",
                 request.logical_request_id
+            );
+        }
+        let mut required_taints = FxHashSet::default();
+        for taint in &request.routing_constraints.required_taints {
+            if taint.is_empty() || taint.trim() != taint {
+                bail!(
+                    "interactive replay request {} has an empty or untrimmed required taint {:?}",
+                    request.logical_request_id,
+                    taint
+                );
+            }
+            if !required_taints.insert(taint.as_str()) {
+                bail!(
+                    "interactive replay request {} duplicates required taint {:?}",
+                    request.logical_request_id,
+                    taint
+                );
+            }
+        }
+        for (taint, weight) in &request.routing_constraints.preferred_taints {
+            if taint.is_empty() || taint.trim() != taint {
+                bail!(
+                    "interactive replay request {} has an empty or untrimmed preferred taint {:?}",
+                    request.logical_request_id,
+                    taint
+                );
+            }
+            if !weight.is_finite() {
+                bail!(
+                    "interactive replay request {} has non-finite preferred-taint weight {} for {:?}",
+                    request.logical_request_id,
+                    weight,
+                    taint
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_static_routing(&self, request: &ReplayRequestSpec) -> Result<()> {
+        let required_taints = request
+            .routing_constraints
+            .required_taints
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !self.static_routing_workers.iter().any(|worker| {
+            worker.is_eligible
+                && required_taints
+                    .iter()
+                    .all(|required| worker.taints.contains(required))
+        }) {
+            bail!(
+                "interactive replay request {} has no static active worker satisfying required taints {:?}",
+                request.logical_request_id,
+                required_taints
+            );
+        }
+
+        let Some(target) = request.target.as_ref() else {
+            return Ok(());
+        };
+        let worker = self
+            .static_routing_workers
+            .iter()
+            .find(|worker| {
+                worker.target.pool_id == target.pool_id
+                    && worker.target.worker_id == target.worker_id
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "interactive replay worker {} is not a member of pool {:?}",
+                    target.worker_id,
+                    target.pool_id
+                )
+            })?;
+        if target.dp_rank != 0 {
+            bail!(
+                "interactive replay worker {} has no active DP rank {} (active ranks: 1)",
+                target.worker_id,
+                target.dp_rank
+            );
+        }
+        if !worker.is_eligible {
+            bail!(
+                "interactive replay worker {} in pool {:?} is unavailable",
+                target.worker_id,
+                target.pool_id
+            );
+        }
+        if !required_taints
+            .iter()
+            .all(|required| worker.taints.contains(required))
+        {
+            bail!(
+                "interactive replay worker {} in pool {:?} does not satisfy required taints {:?}",
+                target.worker_id,
+                target.pool_id,
+                required_taints
             );
         }
         Ok(())
@@ -1095,6 +1291,49 @@ mod tests {
         }
     }
 
+    fn assert_invalid_workflow_rolls_back(
+        constraints: ReplayRoutingConstraints,
+        prefix_reset: bool,
+        expected_error: &str,
+    ) -> Result<()> {
+        let mut replay = session(ReplaySessionRouter::RoundRobin, 1, false);
+        let mut first = request("rollback-first", "rollback-first-session", 0, 4, &[1], 1);
+        first.internal_uuid = Some(Uuid::from_u128(0x501));
+        let mut invalid = request(
+            "rollback-invalid",
+            "rollback-invalid-session",
+            0,
+            4,
+            &[2],
+            1,
+        );
+        invalid.routing_constraints = constraints;
+        let mut invalid_authored = agentic_request(invalid, &[], 0.0);
+        invalid_authored.prefix_reset = prefix_reset;
+        let workflow = ReplayAgenticWorkflow {
+            trace_block_size: TRACE_BLOCK_SIZE,
+            requests: vec![agentic_request(first.clone(), &[], 0.0), invalid_authored],
+        };
+        let error = replay
+            .append_agentic_workflow(workflow, 0.0)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(expected_error),
+            "expected {expected_error:?} in {error:?}"
+        );
+        assert_eq!(replay.snapshot()?.pending_request_count, 0);
+
+        // Reusing the exact authored logical/session/turn/UUID proves that the
+        // failed public append did not leak a partially registered identity.
+        replay.submit_request(first)?;
+        replay.close_admission()?;
+        let events = drive_to_drained(&mut replay)?;
+        assert_eq!(terminal_count(&events), 1);
+        replay.finalize()?;
+        Ok(())
+    }
+
     fn terminal_count(events: &[ReplayEvent]) -> usize {
         events
             .iter()
@@ -1120,6 +1359,15 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing routed event for {logical_id}"))
+    }
+
+    fn routed_event_count(events: &[ReplayEvent], logical_id: &str) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(event, ReplayEvent::Routed(data) if data.logical_request_id == logical_id)
+            })
+            .count()
     }
 
     fn admitted_reuse(events: &[ReplayEvent], logical_id: &str) -> usize {
@@ -1577,15 +1825,142 @@ mod tests {
     }
 
     #[test]
+    fn routing_constraints_and_prefix_reset_fail_before_identity_registration() -> Result<()> {
+        for required_taints in [
+            vec!["".to_string()],
+            vec![" untrimmed".to_string()],
+            vec!["duplicate".to_string(), "duplicate".to_string()],
+        ] {
+            let expected = if required_taints.len() == 2 {
+                "duplicates required taint"
+            } else {
+                "empty or untrimmed required taint"
+            };
+            assert_invalid_workflow_rolls_back(
+                ReplayRoutingConstraints {
+                    required_taints,
+                    preferred_taints: Default::default(),
+                },
+                false,
+                expected,
+            )?;
+        }
+
+        let mut blank_preferred = std::collections::BTreeMap::new();
+        blank_preferred.insert(" ".to_string(), 1.0);
+        assert_invalid_workflow_rolls_back(
+            ReplayRoutingConstraints {
+                required_taints: Vec::new(),
+                preferred_taints: blank_preferred,
+            },
+            false,
+            "empty or untrimmed preferred taint",
+        )?;
+
+        let mut nan_preferred = std::collections::BTreeMap::new();
+        nan_preferred.insert("finite-name".to_string(), f32::NAN);
+        assert_invalid_workflow_rolls_back(
+            ReplayRoutingConstraints {
+                required_taints: Vec::new(),
+                preferred_taints: nan_preferred,
+            },
+            false,
+            "non-finite preferred-taint weight",
+        )?;
+
+        assert_invalid_workflow_rolls_back(
+            ReplayRoutingConstraints::default(),
+            true,
+            "unsupported prefix_reset=true",
+        )?;
+
+        let mut replay = session(ReplaySessionRouter::RoundRobin, 1, false);
+        let mut negative = request("negative-weight", "negative-weight", 0, 4, &[3], 1);
+        negative
+            .routing_constraints
+            .preferred_taints
+            .insert("avoid-if-possible".to_string(), -1.0);
+        replay.submit_request(negative)?;
+        replay.close_admission()?;
+        assert_eq!(terminal_count(&drive_to_drained(&mut replay)?), 1);
+        replay.finalize()?;
+        Ok(())
+    }
+
+    #[test]
+    fn non_pooled_static_config_rejects_startup_and_taint_cardinality() {
+        let mut startup = replay_args(false);
+        startup.startup_time = Some(1.0);
+        let error =
+            OfflineReplaySession::new(&startup, 2, TRACE_BLOCK_SIZE, ReplaySessionRouter::External)
+                .err()
+                .expect("nonzero startup must fail")
+                .to_string();
+        assert!(error.contains("must not configure startup_time"));
+
+        for taint_count in [1, 3] {
+            let mut args = replay_args(false);
+            args.worker_taints = (0..taint_count)
+                .map(|index| std::collections::HashSet::from([format!("taint-{index}")]))
+                .collect();
+            let error = OfflineReplaySession::new(
+                &args,
+                2,
+                TRACE_BLOCK_SIZE,
+                ReplaySessionRouter::External,
+            )
+            .err()
+            .expect("wrong worker_taints cardinality must fail")
+            .to_string();
+            assert!(error.contains("worker_taints must be empty or contain exactly"));
+        }
+
+        let mut untrimmed = replay_args(false);
+        untrimmed.worker_taints = vec![
+            std::collections::HashSet::from([" secure ".to_string()]),
+            std::collections::HashSet::new(),
+        ];
+        let error = OfflineReplaySession::new(
+            &untrimmed,
+            2,
+            TRACE_BLOCK_SIZE,
+            ReplaySessionRouter::External,
+        )
+        .err()
+        .expect("untrimmed worker taint must fail")
+        .to_string();
+        assert!(error.contains("empty or untrimmed taint"));
+    }
+
+    #[test]
     fn external_placement_needed_assign_validates_worker_and_rank() -> Result<()> {
         let mut replay = session(ReplaySessionRouter::External, 2, false);
         settle_empty_open(&mut replay)?;
-        replay.submit_request(request("external", "external-session", 0, 4, &[10], 2))?;
+        let mut external = request("external", "external-session", 0, 4, &[10], 2);
+        external.priority = -4;
+        external.strict_priority = 9;
+        external.policy_class = Some("latency-sensitive".to_string());
+        external
+            .routing_constraints
+            .preferred_taints
+            .insert("near".to_string(), 0.5);
+        replay.submit_request(external)?;
 
         let mut events = drive_to_pending_placement(&mut replay)?;
         let pending = replay.pending_placements()?;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].logical_request_id, "external");
+        assert_eq!(pending[0].input_length, 4);
+        assert_eq!(pending[0].priority, -4);
+        assert_eq!(pending[0].strict_priority, 9);
+        assert_eq!(
+            pending[0].policy_class.as_deref(),
+            Some("latency-sensitive")
+        );
+        assert_eq!(
+            pending[0].routing_constraints.preferred_taints.get("near"),
+            Some(&0.5)
+        );
         assert!(events.iter().any(|event| {
             matches!(event, ReplayEvent::PlacementNeeded(data)
                 if data.logical_request_id == "external"
@@ -1692,6 +2067,60 @@ mod tests {
     }
 
     #[test]
+    fn outstanding_external_placement_blocks_same_time_appended_preassignment() -> Result<()> {
+        let mut replay = session(ReplaySessionRouter::External, 2, false);
+        replay.submit_request(request("barrier", "barrier", 0, 4, &[18], 2))?;
+        let mut events = drive_to_pending_placement(&mut replay)?;
+        let barrier_time = replay.now_ms()?;
+        assert_eq!(routed_event_count(&events, "barrier"), 0);
+
+        let mut preassigned = request("preassigned", "preassigned", 0, 4, &[19], 2);
+        preassigned.ready_time_ms = barrier_time;
+        preassigned.target = Some(WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 1, 0));
+        replay.submit_request(preassigned)?;
+        let before = replay.snapshot()?;
+        assert_eq!(before.pending_request_count, 2);
+        assert_eq!(before.pending_placement_count, 1);
+        assert!(
+            before
+                .workers
+                .iter()
+                .all(|worker| worker.in_flight_requests == 0)
+        );
+
+        assert!(matches!(
+            replay.settle_current_time()?,
+            ReplayStepStatus::Quiescent { now_ms } if now_ms == barrier_time
+        ));
+        assert!(matches!(
+            replay.advance_to(barrier_time)?,
+            ReplayStepStatus::Quiescent { now_ms } if now_ms == barrier_time
+        ));
+        assert!(replay.drain_events()?.is_empty());
+        let blocked = replay.snapshot()?;
+        assert_eq!(blocked.pending_request_count, 2);
+        assert_eq!(blocked.pending_placement_count, 1);
+        assert!(
+            blocked
+                .workers
+                .iter()
+                .all(|worker| worker.in_flight_requests == 0)
+        );
+
+        replay.assign("barrier", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0))?;
+        let released = replay.drain_events()?;
+        assert_eq!(routed_event_count(&released, "barrier"), 1);
+        assert_eq!(routed_event_count(&released, "preassigned"), 1);
+        events.extend(released);
+
+        replay.close_admission()?;
+        events.extend(drive_to_drained(&mut replay)?);
+        assert_eq!(terminal_count(&events), 2);
+        replay.finalize()?;
+        Ok(())
+    }
+
+    #[test]
     fn pinned_target_emits_exactly_once_terminal_and_preserves_final_identity() -> Result<()> {
         let mut replay = session(ReplaySessionRouter::External, 2, false);
         settle_empty_open(&mut replay)?;
@@ -1752,6 +2181,86 @@ mod tests {
         assert_eq!(record.requested_output_length, 3);
         assert_eq!(record.output_length, 3);
         assert_eq!(record.terminal_status, ReplayTerminalStatus::Completed);
+        let route = record
+            .routing_history
+            .last()
+            .expect("authored exact placement must retain routing evidence");
+        assert_eq!(route.pool_id.as_deref(), Some(DEFAULT_REPLAY_POOL_ID));
+        assert_eq!(route.worker_id, Some(1));
+        assert_eq!(route.dp_rank, Some(0));
+        assert_eq!(route.logical_worker_id, Some(1));
+        assert!(route.scheduler_id.is_some());
+        assert!(route.routed_at_ms.is_some());
+        assert_eq!(record.admission_history.len(), 1);
+        assert!(record.first_admit_ms.is_some());
+        assert!(record.terminal_time_ms >= record.first_admit_ms.unwrap());
+        Ok(())
+    }
+
+    #[test]
+    fn non_pooled_external_placement_uses_engine_worker_taints_consistently() -> Result<()> {
+        let mut args = replay_args(false);
+        args.worker_taints = vec![
+            std::collections::HashSet::from(["plain".to_string()]),
+            std::collections::HashSet::from(["secure".to_string()]),
+        ];
+        let mut replay =
+            OfflineReplaySession::new(&args, 2, TRACE_BLOCK_SIZE, ReplaySessionRouter::External)?;
+
+        let mut pinned = request("nonpool-pinned", "nonpool-pinned", 0, 4, &[24], 1);
+        pinned.routing_constraints.required_taints = vec!["secure".to_string()];
+        pinned.target = Some(WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0));
+        assert!(
+            replay
+                .submit_request(pinned.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("does not satisfy required taints")
+        );
+        assert_eq!(replay.snapshot()?.pending_request_count, 0);
+
+        pinned.target = Some(WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 1, 0));
+        replay.submit_request(pinned)?;
+        let mut live = request("nonpool-live", "nonpool-live", 0, 4, &[25], 1);
+        live.routing_constraints.required_taints = vec!["secure".to_string()];
+        replay.submit_request(live)?;
+        let mut events = drive_to_pending_placement(&mut replay)?;
+        let pending = &replay.pending_placements()?[0];
+        assert_eq!(pending.logical_request_id, "nonpool-live");
+        assert_eq!(
+            pending
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.target.worker_id, candidate.eligible))
+                .collect::<Vec<_>>(),
+            vec![(0, false), (1, true)]
+        );
+
+        assert!(
+            replay
+                .assign(
+                    "nonpool-live",
+                    WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0)
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("does not satisfy required taints")
+        );
+        assert_eq!(replay.pending_placements()?.len(), 1);
+        replay.assign(
+            "nonpool-live",
+            WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 1, 0),
+        )?;
+        replay.close_admission()?;
+        events.extend(drive_to_drained(&mut replay)?);
+        assert_eq!(terminal_count(&events), 2);
+        let report = replay.finalize()?;
+        assert!(
+            report
+                .per_request
+                .iter()
+                .all(|record| record.worker_id == Some(1))
+        );
         Ok(())
     }
 
@@ -1832,6 +2341,167 @@ mod tests {
         assert_eq!(terminal_count(&events), 2);
         let report = replay.finalize()?;
         assert_eq!(report.request_counts.completed_requests, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn native_round_robin_enforces_required_worker_taints() -> Result<()> {
+        let mut args = replay_args(false);
+        args.worker_taints = vec![
+            std::collections::HashSet::from(["general".to_string()]),
+            std::collections::HashSet::from(["secure".to_string()]),
+        ];
+        let mut replay =
+            OfflineReplaySession::new(&args, 2, TRACE_BLOCK_SIZE, ReplaySessionRouter::RoundRobin)?;
+        let mut constrained = request("native-secure", "native-secure", 0, 4, &[27], 1);
+        constrained.routing_constraints.required_taints = vec!["secure".to_string()];
+        replay.submit_request(constrained)?;
+        replay.close_admission()?;
+        let events = drive_to_drained(&mut replay)?;
+        assert_eq!(terminal_count(&events), 1);
+        let report = replay.finalize()?;
+        let record = report
+            .per_request
+            .iter()
+            .find(|record| record.logical_request_id.as_deref() == Some("native-secure"))
+            .unwrap();
+        assert_eq!(record.worker_id, Some(1));
+        assert!(
+            record
+                .routing_history
+                .iter()
+                .all(|route| route.routed_at_ms.is_some()),
+            "native round-robin final evidence must carry route time"
+        );
+        assert_eq!(
+            record
+                .routing_history
+                .iter()
+                .filter_map(|route| route.reported_overlap_tokens)
+                .next(),
+            None,
+            "round-robin does not fabricate an unobserved KV overlap"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsatisfiable_static_taints_reject_before_mutation_for_every_router() -> Result<()> {
+        for router in [
+            ReplaySessionRouter::External,
+            ReplaySessionRouter::RoundRobin,
+            ReplaySessionRouter::KvRouter,
+        ] {
+            let mut args = replay_args(false);
+            args.worker_taints = vec![std::collections::HashSet::from(["plain".to_string()])];
+            let mut replay = OfflineReplaySession::new(&args, 1, TRACE_BLOCK_SIZE, router)?;
+            let mut authored = request("no-eligible", "no-eligible", 0, 4, &[28], 1);
+            authored.internal_uuid = Some(Uuid::from_u128(0x601));
+            authored.routing_constraints.required_taints = vec!["secure".to_string()];
+            if router == ReplaySessionRouter::External {
+                authored.target = Some(WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0));
+            }
+
+            let error = replay.submit_request(authored.clone()).unwrap_err();
+            assert!(error.to_string().contains("no static active worker"));
+            assert_eq!(replay.snapshot()?.pending_request_count, 0);
+            assert!(replay.pending_placements()?.is_empty());
+            assert!(replay.drain_events()?.is_empty());
+
+            authored.routing_constraints = ReplayRoutingConstraints::default();
+            replay.submit_request(authored)?;
+            let mut events = Vec::new();
+            replay.close_admission()?;
+            events.extend(drive_to_drained(&mut replay)?);
+            assert_eq!(terminal_count(&events), 1);
+            let report = replay.finalize()?;
+            assert_eq!(report.request_counts.num_requests, 1);
+            assert_eq!(report.request_counts.completed_requests, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsatisfiable_child_rolls_back_the_complete_workflow() -> Result<()> {
+        let mut args = replay_args(false);
+        args.worker_taints = vec![std::collections::HashSet::from(["plain".to_string()])];
+        let mut replay =
+            OfflineReplaySession::new(&args, 1, TRACE_BLOCK_SIZE, ReplaySessionRouter::RoundRobin)?;
+        let mut root = request("rollback-root", "rollback-root", 0, 4, &[29], 1);
+        root.internal_uuid = Some(Uuid::from_u128(0x602));
+        let mut child = request("rollback-child", "rollback-child", 0, 4, &[30], 1);
+        child.internal_uuid = Some(Uuid::from_u128(0x603));
+        child.routing_constraints.required_taints = vec!["secure".to_string()];
+        let workflow = ReplayAgenticWorkflow {
+            trace_block_size: TRACE_BLOCK_SIZE,
+            requests: vec![
+                agentic_request(root.clone(), &[], 0.0),
+                agentic_request(child.clone(), &["rollback-root"], 0.0),
+            ],
+        };
+
+        let error = replay.append_agentic_workflow(workflow, 0.0).unwrap_err();
+        assert!(error.to_string().contains("no static active worker"));
+        assert_eq!(replay.snapshot()?.pending_request_count, 0);
+        assert!(replay.drain_events()?.is_empty());
+
+        child.routing_constraints = ReplayRoutingConstraints::default();
+        replay.append_agentic_workflow(
+            ReplayAgenticWorkflow {
+                trace_block_size: TRACE_BLOCK_SIZE,
+                requests: vec![
+                    agentic_request(root, &[], 0.0),
+                    agentic_request(child, &["rollback-root"], 0.0),
+                ],
+            },
+            0.0,
+        )?;
+        replay.close_admission()?;
+        let events = drive_to_drained(&mut replay)?;
+        assert_eq!(terminal_count(&events), 2);
+        let report = replay.finalize()?;
+        assert_eq!(report.request_counts.completed_requests, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn pool_assignment_without_an_eligible_worker_is_recoverable() -> Result<()> {
+        let mut plain = WorkerSpec::active(10);
+        plain.taints = vec!["plain".to_string()];
+        let mut secure = WorkerSpec::active(20);
+        secure.taints = vec!["secure".to_string()];
+        let mut replay = OfflineReplaySession::new_pooled(
+            vec![
+                PoolSpec {
+                    pool_id: "plain".to_string(),
+                    engine_args: replay_args(false),
+                    workers: vec![plain],
+                    router: PoolRouter::RoundRobin,
+                },
+                PoolSpec {
+                    pool_id: "secure".to_string(),
+                    engine_args: replay_args(false),
+                    workers: vec![secure],
+                    router: PoolRouter::RoundRobin,
+                },
+            ],
+            TRACE_BLOCK_SIZE,
+        )?;
+        let mut constrained = request("pool-secure", "pool-secure", 0, 4, &[31], 1);
+        constrained.routing_constraints.required_taints = vec!["secure".to_string()];
+        replay.submit_request(constrained)?;
+        let mut events = drive_to_pending_placement(&mut replay)?;
+
+        let error = replay.assign_pool("pool-secure", "plain").unwrap_err();
+        assert!(error.to_string().contains("no worker eligible"));
+        assert_eq!(replay.pending_placements()?.len(), 1);
+        replay.assign_pool("pool-secure", "secure")?;
+        replay.close_admission()?;
+        events.extend(drive_to_drained(&mut replay)?);
+        assert_eq!(terminal_count(&events), 1);
+        let report = replay.finalize()?;
+        assert_eq!(report.per_request[0].pool_id.as_deref(), Some("secure"));
+        assert_eq!(report.per_request[0].worker_id, Some(20));
         Ok(())
     }
 
@@ -1936,19 +2606,31 @@ mod tests {
         };
         replay.append_agentic_workflow(workflow, 0.0)?;
         let mut events = drive_to_pending_placement(&mut replay)?;
-        assert_eq!(replay.pending_placements()?.len(), 2);
+        assert_eq!(replay.pending_placements()?[0].logical_request_id, "root-a");
         replay.assign("root-a", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0))?;
+        events.extend(replay.drain_events()?);
+        assert_eq!(replay.pending_placements()?[0].logical_request_id, "root-b");
         replay.assign("root-b", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 1, 0))?;
 
         for _ in 0..MAX_STEPS {
             replay.settle_current_time()?;
             events.extend(replay.drain_events()?);
-            if replay.pending_placements()?.len() == 2 {
+            if !replay.pending_placements()?.is_empty() {
                 break;
             }
             replay.advance_next()?;
             events.extend(replay.drain_events()?);
         }
+        assert_eq!(
+            replay.pending_placements()?[0].logical_request_id,
+            "child-a"
+        );
+        replay.assign("child-a", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0))?;
+        events.extend(replay.drain_events()?);
+        assert_eq!(
+            replay.pending_placements()?[0].logical_request_id,
+            "child-b"
+        );
         let child_placements = events
             .iter()
             .enumerate()
@@ -1995,7 +2677,6 @@ mod tests {
             "every terminal at t must be visible before any dependent placement at t"
         );
 
-        replay.assign("child-a", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0))?;
         replay.assign("child-b", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 1, 0))?;
         replay.close_admission()?;
         events.extend(drive_to_drained(&mut replay)?);
@@ -2146,6 +2827,7 @@ mod tests {
         replay.submit_request(request("contend-b", "contend-b", 0, 8, &[3, 4], 24))?;
         drive_to_pending_placement(&mut replay)?;
         replay.assign("contend-a", WorkerTarget::new("left", 0, 0))?;
+        replay.drain_events()?;
         replay.assign(
             "contend-b",
             WorkerTarget::new(if split { "right" } else { "left" }, 0, 0),
@@ -2251,7 +2933,7 @@ mod tests {
         cached_probe.ready_time_ms = replay.now_ms()?;
         replay.submit_request(cached_probe)?;
         drive_to_pending_placement(&mut replay)?;
-        replay.assign("cached-probe", WorkerTarget::new("cached", 7, 0))?;
+        replay.assign_pool("cached-probe", "cached")?;
         let cached_events = drive_to_terminal(&mut replay, "cached-probe")?;
         assert_eq!(
             admitted_reuse(&cached_events, "cached-probe"),
@@ -2262,12 +2944,102 @@ mod tests {
         drive_to_drained(&mut replay)?;
         let report = replay.finalize()?;
         assert_eq!(report.request_counts.completed_requests, 3);
+        let cached_record = report
+            .per_request
+            .iter()
+            .find(|record| record.logical_request_id.as_deref() == Some("cached-probe"))
+            .unwrap();
+        assert_eq!(
+            cached_record
+                .routing_history
+                .iter()
+                .filter_map(|route| route.reported_overlap_tokens)
+                .max(),
+            Some(8),
+            "pool-only assignment reports the selected worker's committed overlap"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn external_pool_assignment_round_robins_eligible_workers_and_recovers() -> Result<()> {
+        let mut trusted = WorkerSpec::active(10);
+        trusted.taints.push("trusted".to_string());
+        let mut replay = OfflineReplaySession::new_pooled(
+            vec![
+                PoolSpec {
+                    pool_id: "rotate".to_string(),
+                    engine_args: replay_args(false),
+                    workers: vec![WorkerSpec::active(10), WorkerSpec::active(20)],
+                    router: PoolRouter::RoundRobin,
+                },
+                PoolSpec {
+                    pool_id: "trusted".to_string(),
+                    engine_args: replay_args(false),
+                    workers: vec![trusted],
+                    router: PoolRouter::RoundRobin,
+                },
+            ],
+            TRACE_BLOCK_SIZE,
+        )?;
+
+        for index in 0..3 {
+            replay.submit_request(request(
+                &format!("rotate-{index}"),
+                &format!("rotate-session-{index}"),
+                0,
+                4,
+                &[100 + index],
+                1,
+            ))?;
+        }
+        let mut events = drive_to_pending_placement(&mut replay)?;
+        for index in 0..3 {
+            let logical_id = format!("rotate-{index}");
+            assert_eq!(
+                replay.pending_placements()?[0].logical_request_id,
+                logical_id
+            );
+            replay.assign_pool(&logical_id, "rotate")?;
+            events.extend(replay.drain_events()?);
+        }
+        let routed_workers = (0..3)
+            .map(|index| routed_event(&events, &format!("rotate-{index}")).worker_id)
+            .collect::<Vec<_>>();
+        assert_eq!(routed_workers, vec![Some(10), Some(20), Some(10)]);
+
+        let mut constrained = request("pool-recovery", "pool-recovery", 0, 4, &[200], 1);
+        constrained.routing_constraints.required_taints = vec!["trusted".to_string()];
+        replay.submit_request(constrained)?;
+        events.extend(drive_to_pending_placement(&mut replay)?);
+        let error = replay
+            .assign_pool("pool-recovery", "rotate")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("required taints") || error.contains("eligible"));
+        assert_eq!(
+            replay.pending_placements()?[0].logical_request_id,
+            "pool-recovery"
+        );
+        replay.assign_pool("pool-recovery", "trusted")?;
+
+        replay.close_admission()?;
+        events.extend(drive_to_drained(&mut replay)?);
+        assert_eq!(terminal_count(&events), 4);
+        let report = replay.finalize()?;
+        let recovered = report
+            .per_request
+            .iter()
+            .find(|record| record.logical_request_id.as_deref() == Some("pool-recovery"))
+            .unwrap();
+        assert_eq!(recovered.pool_id.as_deref(), Some("trusted"));
+        assert_eq!(recovered.worker_id, Some(10));
         Ok(())
     }
 
     fn seed_then_probe_overlap(router: ReplaySessionRouter) -> Result<(usize, usize)> {
         let mut replay = session(router, 1, true);
-        replay.submit_request(request("overlap-seed", "overlap-seed", 0, 8, &[60, 61], 1))?;
+        replay.submit_request(request("overlap-seed", "overlap-seed", 0, 6, &[60, 61], 1))?;
         let mut events = Vec::new();
         if router == ReplaySessionRouter::External {
             events.extend(drive_to_pending_placement(&mut replay)?);
@@ -2278,7 +3050,7 @@ mod tests {
         }
         events.extend(drive_to_terminal(&mut replay, "overlap-seed")?);
 
-        let mut probe = request("overlap-probe", "overlap-probe", 0, 8, &[60, 61], 1);
+        let mut probe = request("overlap-probe", "overlap-probe", 0, 6, &[60, 61], 1);
         probe.ready_time_ms = replay.now_ms()?;
         replay.submit_request(probe)?;
         let external_overlap = if router == ReplaySessionRouter::External {
@@ -2320,6 +3092,29 @@ mod tests {
             .filter_map(|route| route.reported_overlap_tokens)
             .max()
             .unwrap();
+        assert!(
+            probe_record
+                .routing_history
+                .iter()
+                .all(|route| route.routed_at_ms.is_some()),
+            "every effective external/native KV route must carry route time"
+        );
+        if router == ReplaySessionRouter::KvRouter {
+            let routed = routed_event(&events, "overlap-probe");
+            assert_eq!(routed.requested_output_length, None);
+            assert_eq!(routed.ttft_ms, None);
+            assert_eq!(routed.e2e_latency_ms, None);
+            assert_eq!(routed.candidates.len(), 1);
+            assert_eq!(
+                routed.candidates[0].kv_prefix_overlap_tokens,
+                Some(routed_overlap),
+                "native KV Routed must retain the actual shared pre-dispatch candidate view"
+            );
+            assert_eq!(
+                routed.candidates[0].in_flight_requests, 0,
+                "candidate load must be captured before physical dispatch"
+            );
+        }
         Ok((external_overlap, routed_overlap))
     }
 
@@ -2328,12 +3123,73 @@ mod tests {
         let (external_overlap, external_route_fact) =
             seed_then_probe_overlap(ReplaySessionRouter::External)?;
         let (_, native_route_fact) = seed_then_probe_overlap(ReplaySessionRouter::KvRouter)?;
-        assert_eq!(external_overlap, 8);
-        assert_eq!(
-            external_route_fact, 0,
-            "external placement is controller-authored"
-        );
+        assert_eq!(external_overlap, TRACE_BLOCK_SIZE);
+        assert_eq!(external_route_fact, external_overlap);
         assert_eq!(external_overlap, native_route_fact);
+        Ok(())
+    }
+
+    #[test]
+    fn simultaneous_external_placements_observe_each_prior_assignment() -> Result<()> {
+        let mut replay = session(ReplaySessionRouter::External, 2, false);
+        for ordinal in 0..3 {
+            replay.submit_request(request(
+                &format!("fresh-{ordinal}"),
+                &format!("fresh-session-{ordinal}"),
+                0,
+                8,
+                &[700 + ordinal as u32, 800 + ordinal as u32],
+                4,
+            ))?;
+        }
+
+        let mut boundary_events = drive_to_pending_placement(&mut replay)?;
+        let mut chosen_workers = Vec::new();
+        let mut observed_loads = Vec::new();
+        for ordinal in 0..3 {
+            let placement_events = boundary_events
+                .iter()
+                .filter_map(|event| match event {
+                    ReplayEvent::PlacementNeeded(data) => Some(data),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                placement_events.len(),
+                1,
+                "each drain exposes exactly one controller placement boundary"
+            );
+            let placement = placement_events[0];
+            assert_eq!(placement.logical_request_id, format!("fresh-{ordinal}"));
+            let loads = placement
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.target.worker_id, candidate.in_flight_requests))
+                .collect::<Vec<_>>();
+            observed_loads.push(loads);
+            let selected = placement
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.eligible)
+                .min_by_key(|candidate| (candidate.in_flight_requests, candidate.target.worker_id))
+                .expect("two active candidates")
+                .target
+                .clone();
+            chosen_workers.push(selected.worker_id);
+            let logical_id = placement.logical_request_id.clone();
+            replay.assign(&logical_id, selected)?;
+            boundary_events = replay.drain_events()?;
+        }
+
+        assert_eq!(chosen_workers, vec![0, 1, 0]);
+        assert_eq!(observed_loads[0], vec![(0, 0), (1, 0)]);
+        assert_eq!(observed_loads[1], vec![(0, 1), (1, 0)]);
+        assert_eq!(observed_loads[2], vec![(0, 1), (1, 1)]);
+
+        replay.close_admission()?;
+        let events = drive_to_drained(&mut replay)?;
+        assert_eq!(terminal_count(&events), 3);
+        replay.finalize()?;
         Ok(())
     }
 
@@ -2347,6 +3203,7 @@ mod tests {
         replay.submit_request(request("account-b", "account-b", 0, 8, &[12, 13], 8))?;
         let mut events = drive_to_pending_placement(&mut replay)?;
         replay.assign("account-a", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0))?;
+        events.extend(replay.drain_events()?);
         replay.assign("account-b", WorkerTarget::new(DEFAULT_REPLAY_POOL_ID, 0, 0))?;
         replay.settle_current_time()?;
         events.extend(replay.drain_events()?);
@@ -2465,8 +3322,8 @@ impl OfflineReplaySession {
         Ok(self.runtime_mut()?.drain_events())
     }
 
-    pub fn pending_placements(&self) -> Result<Vec<ReplayPendingPlacement>> {
-        Ok(self.runtime()?.pending_placements())
+    pub fn pending_placements(&mut self) -> Result<Vec<ReplayPendingPlacement>> {
+        Ok(self.runtime_mut()?.pending_placements())
     }
 
     pub fn assign(&mut self, logical_request_id: &str, target: WorkerTarget) -> Result<()> {
@@ -2586,6 +3443,13 @@ impl OfflineReplaySession {
         let mut preassignments = Vec::new();
         for authored in workflow.requests {
             self.validate_request(&authored.request)?;
+            if authored.prefix_reset {
+                bail!(
+                    "interactive replay request {} sets unsupported prefix_reset=true",
+                    authored.request.logical_request_id
+                );
+            }
+            self.validate_static_routing(&authored.request)?;
             if !authored.dependency_delay_ms.is_finite() || authored.dependency_delay_ms < 0.0 {
                 bail!(
                     "interactive replay request {} has invalid dependency delay {}",

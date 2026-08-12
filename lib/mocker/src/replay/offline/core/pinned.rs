@@ -39,14 +39,21 @@ pub(in crate::replay) struct ExternalPlacement<Events: EngineEventBatch> {
 }
 
 impl<Events: EngineEventBatch> ExternalPlacement<Events> {
-    pub(in crate::replay) fn new(workers: Vec<WorkerTopology>) -> Self {
+    pub(in crate::replay) fn new(
+        workers: Vec<WorkerTopology>,
+        worker_taints: &[std::collections::HashSet<String>],
+    ) -> Self {
         let resolved = workers
             .iter()
-            .map(|worker| ResolvedPoolWorker {
+            .enumerate()
+            .map(|(worker_idx, worker)| ResolvedPoolWorker {
                 target: WorkerTarget::default_pool(worker.worker_id, 0),
                 engine_args: crate::common::protocols::MockEngineArgs::default(),
                 tags: Default::default(),
-                taints: Default::default(),
+                taints: worker_taints
+                    .get(worker_idx)
+                    .map(|taints| taints.iter().cloned().collect())
+                    .unwrap_or_default(),
                 capabilities: Default::default(),
                 active: true,
                 draining: false,
@@ -198,7 +205,9 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         Ok(Placement {
             request_id,
             scheduler_id,
-            reported_overlap_tokens: 0,
+            // The runtime decorates external placements from the selected
+            // worker's committed scheduler state immediately before dispatch.
+            reported_overlap_tokens: None,
             planner_cache_sample: None,
         })
     }
@@ -236,6 +245,10 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
 
     pub(in crate::replay) fn pending_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
         self.pending_order.iter().copied()
+    }
+
+    pub(in crate::replay) fn is_pending(&self, request_id: Uuid) -> bool {
+        self.pending.contains(&request_id)
     }
 
     pub(in crate::replay) fn cancel(&mut self, request_id: Uuid) -> bool {
@@ -289,7 +302,9 @@ where
             PlacementDecision::Immediate(Placement {
                 request_id,
                 scheduler_id,
-                reported_overlap_tokens: 0,
+                // The runtime decorates authored preassignments from the
+                // selected worker's committed scheduler state.
+                reported_overlap_tokens: None,
                 planner_cache_sample: None,
             })
         } else {
@@ -324,6 +339,10 @@ where
 
     fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    fn next_pending_request_id(&self) -> Option<Uuid> {
+        self.pending_order.front().copied()
     }
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {

@@ -257,7 +257,11 @@ impl ConfiguredAggregatedPlacement<RouterEventBatch, KvReplayMetadata> for Adapt
     ) -> Result<Self> {
         match router_mode {
             ReplayRouterMode::RoundRobin => Ok(Self::RoundRobin(
-                AggregatedRoundRobinPlacement::new(args.dp_size, topology),
+                AggregatedRoundRobinPlacement::with_taints(
+                    args.dp_size,
+                    topology,
+                    &args.worker_taints,
+                ),
             )),
             ReplayRouterMode::KvRouter => Ok(Self::Kv(KvRouterPlacement::new(
                 args,

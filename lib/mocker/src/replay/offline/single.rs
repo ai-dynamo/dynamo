@@ -185,7 +185,7 @@ impl SingleRuntime {
             .on_arrival(uuid, arrival_ms, input_length, output_length);
         self.collector.on_decode_assigned(uuid, 0);
         self.collector
-            .on_route_immediate(uuid, ReplayRequestPool::Agg, 0, 0, 0, 0);
+            .on_route_immediate(uuid, ReplayRequestPool::Agg, arrival_ms, 0, 0, 0, None);
         uuid
     }
 

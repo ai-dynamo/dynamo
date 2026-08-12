@@ -447,6 +447,7 @@ impl OfflineWorkerState {
             queued_tokens: current.queued_tokens,
             running_tokens: committed.running_tokens,
             max_num_seqs: committed.max_num_seqs,
+            preemption_count: committed.preemption_count,
             kv_capacity_blocks: committed.kv_capacity_blocks,
             kv_occupied_blocks: committed.kv_occupied_blocks,
             kv_free_blocks: committed.kv_free_blocks,

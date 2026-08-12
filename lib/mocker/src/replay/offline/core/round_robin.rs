@@ -1,17 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::marker::PhantomData;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use super::{
     EngineEventBatch, Placement, PlacementDecision, PlacementEffects, PlacementPolicy,
-    RequestIdentity, WorkerTopology,
+    PlacementRequest, WorkerTopology,
 };
+
+#[derive(Debug)]
+struct RoundRobinWorker {
+    scheduler_ids: Vec<usize>,
+    taints: BTreeSet<String>,
+}
 
 #[derive(Debug)]
 pub(in crate::replay::offline) struct AggregatedRoundRobin {
@@ -23,22 +29,41 @@ pub(in crate::replay::offline) struct AggregatedRoundRobin {
 #[derive(Debug)]
 pub(in crate::replay) struct AggregatedRoundRobinPlacement<Events: EngineEventBatch> {
     counter: AggregatedRoundRobin,
-    workers: BTreeMap<usize, Vec<usize>>,
+    workers: BTreeMap<usize, RoundRobinWorker>,
+    configured_taints: BTreeMap<usize, BTreeSet<String>>,
     events: PhantomData<Events>,
 }
 
 impl<Events: EngineEventBatch> AggregatedRoundRobinPlacement<Events> {
-    pub(in crate::replay) fn new(dp_size: u32, workers: Vec<WorkerTopology>) -> Self {
+    pub(in crate::replay) fn with_taints(
+        dp_size: u32,
+        workers: Vec<WorkerTopology>,
+        worker_taints: &[HashSet<String>],
+    ) -> Self {
         let mut counter = AggregatedRoundRobin::new(dp_size);
         for worker in &workers {
             counter.worker_ready(worker.worker_id);
         }
+        let configured_taints = configured_taints(worker_taints);
         Self {
             counter,
             workers: workers
                 .into_iter()
-                .map(|worker| (worker.worker_id, worker.scheduler_ids))
+                .map(|worker| {
+                    let taints = configured_taints
+                        .get(&worker.worker_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    (
+                        worker.worker_id,
+                        RoundRobinWorker {
+                            scheduler_ids: worker.scheduler_ids,
+                            taints,
+                        },
+                    )
+                })
                 .collect(),
+            configured_taints,
             events: PhantomData,
         }
     }
@@ -51,7 +76,7 @@ impl<Events: EngineEventBatch> AggregatedRoundRobinPlacement<Events> {
 
 impl<Request, Events> PlacementPolicy<Request> for AggregatedRoundRobinPlacement<Events>
 where
-    Request: RequestIdentity,
+    Request: PlacementRequest,
     Events: EngineEventBatch,
 {
     type Metadata = ();
@@ -68,19 +93,35 @@ where
         let request_id = request
             .request_id()
             .ok_or_else(|| anyhow!("round-robin placement requires a request UUID"))?;
+        let required_taints = request.required_taints();
+        let eligible_workers = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                required_taints
+                    .iter()
+                    .all(|required| worker.taints.contains(required))
+            })
+            .map(|(&worker_id, _)| worker_id)
+            .collect::<Vec<_>>();
+        if eligible_workers.is_empty() {
+            bail!(
+                "round-robin placement has no active worker satisfying required taints {required_taints:?}"
+            );
+        }
         let scheduler_id = self
             .counter
-            .next(self.workers.keys().copied(), |worker_id, rank| {
+            .next(eligible_workers.into_iter(), |worker_id, rank| {
                 self.workers
                     .get(&worker_id)
-                    .and_then(|ranks| ranks.get(rank as usize))
+                    .and_then(|worker| worker.scheduler_ids.get(rank as usize))
                     .copied()
             });
         Ok(PlacementEffects {
             decision: PlacementDecision::Immediate(Placement {
                 request_id,
                 scheduler_id,
-                reported_overlap_tokens: 0,
+                reported_overlap_tokens: None,
                 planner_cache_sample: None,
             }),
             released: Vec::new(),
@@ -113,7 +154,18 @@ where
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
         self.counter.worker_ready(worker.worker_id);
-        self.workers.insert(worker.worker_id, worker.scheduler_ids);
+        let taints = self
+            .configured_taints
+            .get(&worker.worker_id)
+            .cloned()
+            .unwrap_or_default();
+        self.workers.insert(
+            worker.worker_id,
+            RoundRobinWorker {
+                scheduler_ids: worker.scheduler_ids,
+                taints,
+            },
+        );
         Ok(Vec::new())
     }
 
@@ -137,18 +189,36 @@ where
 #[derive(Debug)]
 pub(in crate::replay) struct PoolRoundRobinPlacement<Events: EngineEventBatch> {
     next: usize,
-    workers: BTreeMap<usize, Vec<usize>>,
+    workers: BTreeMap<usize, RoundRobinWorker>,
+    configured_taints: BTreeMap<usize, BTreeSet<String>>,
     events: PhantomData<Events>,
 }
 
 impl<Events: EngineEventBatch> PoolRoundRobinPlacement<Events> {
-    pub(in crate::replay) fn new(workers: Vec<WorkerTopology>) -> Self {
+    pub(in crate::replay) fn with_taints(
+        workers: Vec<WorkerTopology>,
+        worker_taints: &[HashSet<String>],
+    ) -> Self {
+        let configured_taints = configured_taints(worker_taints);
         Self {
             next: 0,
             workers: workers
                 .into_iter()
-                .map(|worker| (worker.worker_id, worker.scheduler_ids))
+                .map(|worker| {
+                    let taints = configured_taints
+                        .get(&worker.worker_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    (
+                        worker.worker_id,
+                        RoundRobinWorker {
+                            scheduler_ids: worker.scheduler_ids,
+                            taints,
+                        },
+                    )
+                })
                 .collect(),
+            configured_taints,
             events: PhantomData,
         }
     }
@@ -156,7 +226,7 @@ impl<Events: EngineEventBatch> PoolRoundRobinPlacement<Events> {
 
 impl<Request, Events> PlacementPolicy<Request> for PoolRoundRobinPlacement<Events>
 where
-    Request: RequestIdentity,
+    Request: PlacementRequest,
     Events: EngineEventBatch,
 {
     type Metadata = ();
@@ -172,20 +242,33 @@ where
         let request_id = request
             .request_id()
             .ok_or_else(|| anyhow!("round-robin placement requires a request UUID"))?;
-        let active_count = self.workers.values().map(Vec::len).sum::<usize>();
-        let index = self.next % active_count;
-        let scheduler_id = self
+        let required_taints = request.required_taints();
+        let eligible_schedulers = self
             .workers
             .values()
-            .flat_map(|ranks| ranks.iter().copied())
+            .filter(|worker| {
+                required_taints
+                    .iter()
+                    .all(|required| worker.taints.contains(required))
+            })
+            .flat_map(|worker| worker.scheduler_ids.iter().copied())
+            .collect::<Vec<_>>();
+        if eligible_schedulers.is_empty() {
+            bail!(
+                "round-robin placement has no active worker satisfying required taints {required_taints:?}"
+            );
+        }
+        let index = self.next % eligible_schedulers.len();
+        let scheduler_id = eligible_schedulers
+            .into_iter()
             .nth(index)
-            .expect("active round-robin pool must contain a scheduler");
+            .expect("validated eligible round-robin pool must contain a scheduler");
         self.next = index + 1;
         Ok(PlacementEffects {
             decision: PlacementDecision::Immediate(Placement {
                 request_id,
                 scheduler_id,
-                reported_overlap_tokens: 0,
+                reported_overlap_tokens: None,
                 planner_cache_sample: None,
             }),
             released: Vec::new(),
@@ -213,7 +296,18 @@ where
     }
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.workers.insert(worker.worker_id, worker.scheduler_ids);
+        let taints = self
+            .configured_taints
+            .get(&worker.worker_id)
+            .cloned()
+            .unwrap_or_default();
+        self.workers.insert(
+            worker.worker_id,
+            RoundRobinWorker {
+                scheduler_ids: worker.scheduler_ids,
+                taints,
+            },
+        );
         Ok(Vec::new())
     }
 
@@ -230,6 +324,14 @@ where
     fn topology_settled(&mut self, _now_ms: f64) -> Result<Vec<Placement>> {
         Ok(Vec::new())
     }
+}
+
+fn configured_taints(worker_taints: &[HashSet<String>]) -> BTreeMap<usize, BTreeSet<String>> {
+    worker_taints
+        .iter()
+        .enumerate()
+        .map(|(worker_id, taints)| (worker_id, taints.iter().cloned().collect()))
+        .collect()
 }
 
 impl AggregatedRoundRobin {
@@ -278,6 +380,7 @@ impl AggregatedRoundRobin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::replay::offline::core::RequestIdentity;
 
     #[derive(Debug)]
     struct TestRequest(Uuid);
@@ -285,6 +388,30 @@ mod tests {
     impl RequestIdentity for TestRequest {
         fn request_id(&self) -> Option<Uuid> {
             Some(self.0)
+        }
+    }
+
+    impl PlacementRequest for TestRequest {
+        fn required_taints(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+    }
+
+    #[derive(Debug)]
+    struct ConstrainedTestRequest {
+        id: Uuid,
+        required_taints: BTreeSet<String>,
+    }
+
+    impl RequestIdentity for ConstrainedTestRequest {
+        fn request_id(&self) -> Option<Uuid> {
+            Some(self.id)
+        }
+    }
+
+    impl PlacementRequest for ConstrainedTestRequest {
+        fn required_taints(&self) -> BTreeSet<String> {
+            self.required_taints.clone()
         }
     }
 
@@ -305,20 +432,23 @@ mod tests {
 
     #[test]
     fn pool_rotation_preserves_position_after_topology_change() {
-        let mut policy = PoolRoundRobinPlacement::<()>::new(vec![
-            WorkerTopology {
-                worker_id: 0,
-                scheduler_ids: vec![10],
-            },
-            WorkerTopology {
-                worker_id: 1,
-                scheduler_ids: vec![11],
-            },
-            WorkerTopology {
-                worker_id: 2,
-                scheduler_ids: vec![12],
-            },
-        ]);
+        let mut policy = PoolRoundRobinPlacement::<()>::with_taints(
+            vec![
+                WorkerTopology {
+                    worker_id: 0,
+                    scheduler_ids: vec![10],
+                },
+                WorkerTopology {
+                    worker_id: 1,
+                    scheduler_ids: vec![11],
+                },
+                WorkerTopology {
+                    worker_id: 2,
+                    scheduler_ids: vec![12],
+                },
+            ],
+            &[],
+        );
 
         assert_eq!(
             (1..=4)
@@ -337,5 +467,88 @@ mod tests {
         .unwrap();
 
         assert_eq!(scheduler_id(&mut policy, 5), 11);
+    }
+
+    fn constrained_request(ordinal: u128, taint: &str) -> ConstrainedTestRequest {
+        ConstrainedTestRequest {
+            id: Uuid::from_u128(ordinal),
+            required_taints: BTreeSet::from([taint.to_string()]),
+        }
+    }
+
+    fn immediate_scheduler<Policy>(
+        policy: &mut Policy,
+        request: &ConstrainedTestRequest,
+    ) -> Result<usize>
+    where
+        Policy: PlacementPolicy<ConstrainedTestRequest, Metadata = (), Observation = ()>,
+    {
+        let effects = policy.place(request, (), None, 0.0)?;
+        let PlacementDecision::Immediate(placement) = effects.decision else {
+            panic!("round-robin placement must be immediate");
+        };
+        Ok(placement.scheduler_id)
+    }
+
+    #[test]
+    fn aggregated_round_robin_enforces_taints_without_advancing_on_failure() -> Result<()> {
+        let workers = vec![
+            WorkerTopology {
+                worker_id: 0,
+                scheduler_ids: vec![10],
+            },
+            WorkerTopology {
+                worker_id: 1,
+                scheduler_ids: vec![11],
+            },
+        ];
+        let taints = vec![
+            HashSet::from(["general".to_string()]),
+            HashSet::from(["trusted".to_string()]),
+        ];
+        let mut policy = AggregatedRoundRobinPlacement::<()>::with_taints(1, workers, &taints);
+
+        let missing = constrained_request(10, "missing");
+        assert!(
+            immediate_scheduler(&mut policy, &missing)
+                .unwrap_err()
+                .to_string()
+                .contains("no active worker")
+        );
+        // A failed placement is recoverable and does not advance RR state.
+        assert!(immediate_scheduler(&mut policy, &missing).is_err());
+        assert_eq!(
+            immediate_scheduler(&mut policy, &constrained_request(11, "trusted"))?,
+            11
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pool_round_robin_enforces_taints_and_keeps_request_recoverable() -> Result<()> {
+        let workers = vec![
+            WorkerTopology {
+                worker_id: 0,
+                scheduler_ids: vec![10],
+            },
+            WorkerTopology {
+                worker_id: 1,
+                scheduler_ids: vec![11],
+            },
+        ];
+        let taints = vec![
+            HashSet::from(["general".to_string()]),
+            HashSet::from(["trusted".to_string()]),
+        ];
+        let mut policy = PoolRoundRobinPlacement::<()>::with_taints(workers, &taints);
+
+        let missing = constrained_request(20, "missing");
+        assert!(immediate_scheduler(&mut policy, &missing).is_err());
+        assert!(immediate_scheduler(&mut policy, &missing).is_err());
+        assert_eq!(
+            immediate_scheduler(&mut policy, &constrained_request(21, "trusted"))?,
+            11
+        );
+        Ok(())
     }
 }

@@ -218,9 +218,9 @@ impl ConfiguredPoolPlacement<RouterEventBatch, KvReplayMetadata> for AdaptivePoo
         topology: Vec<WorkerTopology>,
     ) -> Result<Self> {
         match router_mode {
-            ReplayRouterMode::RoundRobin => {
-                Ok(Self::RoundRobin(PoolRoundRobinPlacement::new(topology)))
-            }
+            ReplayRouterMode::RoundRobin => Ok(Self::RoundRobin(
+                PoolRoundRobinPlacement::with_taints(topology, &args.worker_taints),
+            )),
             ReplayRouterMode::KvRouter => Ok(Self::Kv(KvRouterPlacement::new(
                 args,
                 router_config,

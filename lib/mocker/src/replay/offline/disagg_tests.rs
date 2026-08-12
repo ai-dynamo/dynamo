@@ -1576,7 +1576,10 @@ fn prefill_router_pending_workload_keeps_prompt_compact() {
         .into_iter()
         .find(|pending| pending.uuid == queued_uuid)
         .expect("queued request should remain in the prefill router");
-    assert_eq!(queued_router_request.expected_output_tokens, Some(1));
+    assert_eq!(
+        queued_router_request.expected_output_tokens, None,
+        "policy-facing offline scheduling observations redact output work"
+    );
 
     runtime.apply_scaling(2, 1).unwrap();
 

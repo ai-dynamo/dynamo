@@ -207,7 +207,11 @@ where
         (),
         ControlledAdmission<'_, Source, ()>,
     >::new_composed(args, admission, num_workers, |args, topology| {
-        Ok(AggregatedRoundRobinPlacement::new(args.dp_size, topology))
+        Ok(AggregatedRoundRobinPlacement::with_taints(
+            args.dp_size,
+            topology,
+            &args.worker_taints,
+        ))
     })?
     .with_per_request_records(options.capture_per_request);
     let (collector, _) = runtime.run()?;

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use dynamo_kv_router::LocalBlockHash;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
@@ -147,6 +147,9 @@ pub fn canonical_router_metadata(
 pub(crate) struct WorkerAdmission {
     uuid: Uuid,
     worker_idx: usize,
+    /// Exact cached prompt tokens, capped to ISL so a final partial block does
+    /// not fabricate padding tokens in policy/routing evidence.
+    overlap_tokens: usize,
     overlap_blocks: u32,
     isl_blocks: u32,
 }
@@ -162,6 +165,7 @@ pub(crate) struct RouterEffects {
 #[derive(Debug, Clone, Copy)]
 struct AdmitOutcome {
     worker_idx: usize,
+    overlap_tokens: usize,
     overlap_blocks: u32,
     isl_blocks: u32,
 }
@@ -356,8 +360,7 @@ impl KvRouterPlacement {
         Placement {
             request_id: admission.uuid,
             scheduler_id: admission.worker_idx,
-            reported_overlap_tokens: admission.overlap_blocks as usize
-                * self.router.block_size as usize,
+            reported_overlap_tokens: Some(admission.overlap_tokens),
             planner_cache_sample: Some(PlannerCacheSample {
                 overlap_blocks: admission.overlap_blocks,
                 isl_blocks: admission.isl_blocks,
@@ -536,6 +539,19 @@ impl OfflineReplayRouter {
             num_workers,
         );
         let config = replay_router_config(args, router_config);
+        if config
+            .worker_selection_config()
+            .map_err(anyhow::Error::from)?
+            .is_some()
+            || config
+                .selected_worker_selection_policy_instance()
+                .map_err(anyhow::Error::from)?
+                .is_some()
+        {
+            bail!(
+                "offline KV replay does not support configured custom worker_selection; use the built-in selector or external interactive placement"
+            );
+        }
         let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -653,6 +669,7 @@ impl OfflineReplayRouter {
             admissions: vec![WorkerAdmission {
                 uuid,
                 worker_idx: outcome.worker_idx,
+                overlap_tokens: outcome.overlap_tokens,
                 overlap_blocks: outcome.overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             }],
@@ -837,7 +854,7 @@ impl OfflineReplayRouter {
     fn build_pending_request<Request: PlacementRequestView>(
         &self,
         request_view: &Request,
-        max_output_tokens: usize,
+        _max_output_tokens: usize,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
     ) -> Result<PendingRequest> {
@@ -895,10 +912,9 @@ impl OfflineReplayRouter {
             isl_tokens: input_length,
             overlaps,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
-            expected_output_tokens: Some(
-                u32::try_from(max_output_tokens)
-                    .context("max_output_tokens does not fit into u32")?,
-            ),
+            // Recorded/effective output work remains an engine execution fact.
+            // It is never exposed to the policy-facing SchedulingRequest.
+            expected_output_tokens: None,
             priority_jump,
             strict_priority,
             policy_class: request.policy_class.clone(),
@@ -948,6 +964,7 @@ impl OfflineReplayRouter {
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
         let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
+        let overlap_tokens = selection.cached_tokens.min(request.isl_tokens);
 
         self.slots
             .add_request(
@@ -966,6 +983,7 @@ impl OfflineReplayRouter {
 
         Ok(AdmitOutcome {
             worker_idx,
+            overlap_tokens,
             overlap_blocks,
             isl_blocks,
         })
@@ -987,6 +1005,7 @@ impl OfflineReplayRouter {
             admissions.push(WorkerAdmission {
                 uuid,
                 worker_idx: outcome.worker_idx,
+                overlap_tokens: outcome.overlap_tokens,
                 overlap_blocks: outcome.overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             });
@@ -1226,6 +1245,36 @@ mod tests {
                 .map(|context| context.session_id()),
             Some("session-a")
         );
+        assert_eq!(
+            scheduling_request.expected_output_tokens, None,
+            "recorded output work must not reach policy-facing scheduling"
+        );
+    }
+
+    #[test]
+    fn offline_kv_rejects_configured_custom_worker_selection() {
+        let mut policy_file = NamedTempFile::new().unwrap();
+        policy_file
+            .write_all(
+                br#"
+worker_selection:
+  default: replay-custom
+  instances:
+    - name: replay-custom
+      type: linked-policy
+      parameters: {}
+"#,
+            )
+            .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let error = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1)
+            .err()
+            .expect("custom worker selection must fail closed")
+            .to_string();
+        assert!(error.contains("does not support configured custom worker_selection"));
     }
 
     #[test]
@@ -1384,6 +1433,7 @@ mod tests {
             vec![WorkerAdmission {
                 uuid: Uuid::from_u128(1),
                 worker_idx: 1,
+                overlap_tokens: 64,
                 overlap_blocks: 1,
                 isl_blocks: 1,
             }]
@@ -1769,6 +1819,7 @@ policy_classes:
             vec![WorkerAdmission {
                 uuid: Uuid::from_u128(1),
                 worker_idx: 3,
+                overlap_tokens: 0,
                 overlap_blocks: 0,
                 isl_blocks: 1,
             }]
@@ -1866,6 +1917,7 @@ policy_classes:
             vec![WorkerAdmission {
                 uuid: Uuid::from_u128(2),
                 worker_idx: 1,
+                overlap_tokens: 0,
                 overlap_blocks: 0,
                 isl_blocks: 1,
             }]

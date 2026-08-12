@@ -376,11 +376,13 @@ impl DisaggFlowState {
         if let Some(sample) = placement.planner_cache_sample {
             traffic.on_admission(sample.overlap_blocks, sample.isl_blocks);
         }
-        let input_tokens = self.state(placement.request_id)?.input_length()?;
-        collector.on_prefill_route_overlap(
-            placement.request_id,
-            placement.reported_overlap_tokens.min(input_tokens),
-        );
+        if let Some(reported_overlap_tokens) = placement.reported_overlap_tokens {
+            let input_tokens = self.state(placement.request_id)?.input_length()?;
+            collector.on_prefill_route_overlap(
+                placement.request_id,
+                reported_overlap_tokens.min(input_tokens),
+            );
+        }
         Ok(())
     }
 
@@ -390,11 +392,13 @@ impl DisaggFlowState {
         placement: Placement,
         collector: &mut TraceCollector,
     ) -> Result<()> {
-        let input_tokens = self.state(placement.request_id)?.input_length()?;
-        collector.on_decode_route_overlap(
-            placement.request_id,
-            placement.reported_overlap_tokens.min(input_tokens),
-        );
+        if let Some(reported_overlap_tokens) = placement.reported_overlap_tokens {
+            let input_tokens = self.state(placement.request_id)?.input_length()?;
+            collector.on_decode_route_overlap(
+                placement.request_id,
+                reported_overlap_tokens.min(input_tokens),
+            );
+        }
         Ok(())
     }
 
@@ -943,8 +947,18 @@ impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMeta
             false,
             false,
             false,
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
+            |args, topology| {
+                Ok(PoolRoundRobinPlacement::with_taints(
+                    topology,
+                    &args.worker_taints,
+                ))
+            },
+            |args, topology| {
+                Ok(PoolRoundRobinPlacement::with_taints(
+                    topology,
+                    &args.worker_taints,
+                ))
+            },
         )
     }
 
@@ -959,8 +973,18 @@ impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMeta
             false,
             false,
             false,
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
+            |args, topology| {
+                Ok(PoolRoundRobinPlacement::with_taints(
+                    topology,
+                    &args.worker_taints,
+                ))
+            },
+            |args, topology| {
+                Ok(PoolRoundRobinPlacement::with_taints(
+                    topology,
+                    &args.worker_taints,
+                ))
+            },
         )
     }
 }
@@ -1350,6 +1374,7 @@ where
                 self.collector.on_route_immediate(
                     uuid,
                     ReplayRequestPool::Prefill,
+                    self.now_ms,
                     logical_worker_id,
                     placement.scheduler_id,
                     dp_rank,
@@ -1403,6 +1428,7 @@ where
                 self.collector.on_route_immediate(
                     uuid,
                     ReplayRequestPool::Decode,
+                    self.now_ms,
                     logical_worker_id,
                     placement.scheduler_id,
                     dp_rank,

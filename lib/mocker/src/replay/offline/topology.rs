@@ -13,6 +13,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::common::protocols::{EngineType, G1Backend, MockEngineArgs, WorkerType};
+use crate::replay::ReplayWorkerLifecycleStatus;
 
 pub const DEFAULT_REPLAY_POOL_ID: &str = "default";
 
@@ -55,6 +56,9 @@ pub struct WorkerSpec {
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default = "default_true")]
+    /// Serving eligibility at session start. `false` with `draining=false`
+    /// means static-inactive: provisioned and billed, but never starts and is
+    /// never eligible for placement.
     pub active: bool,
     #[serde(default)]
     pub draining: bool,
@@ -100,6 +104,18 @@ pub(in crate::replay::offline) struct ResolvedPoolWorker {
     pub capabilities: BTreeSet<String>,
     pub active: bool,
     pub draining: bool,
+}
+
+impl ResolvedPoolWorker {
+    pub fn lifecycle_status(&self) -> ReplayWorkerLifecycleStatus {
+        if self.draining {
+            ReplayWorkerLifecycleStatus::Draining
+        } else if self.active {
+            ReplayWorkerLifecycleStatus::Active
+        } else {
+            ReplayWorkerLifecycleStatus::StaticInactive
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -238,8 +254,10 @@ fn validate_labels(
 ) -> Result<BTreeSet<String>> {
     let mut labels = BTreeSet::new();
     for value in values {
-        if value.trim().is_empty() {
-            bail!("interactive replay pool {pool_id:?} worker {worker_id} has an empty {kind}");
+        if value.is_empty() || value.trim() != value {
+            bail!(
+                "interactive replay pool {pool_id:?} worker {worker_id} has an empty or untrimmed {kind}"
+            );
         }
         if !labels.insert(value.clone()) {
             bail!(
@@ -330,6 +348,15 @@ mod tests {
         )
         .unwrap();
         assert!(!resolved.workers[0].active);
+        assert!(!resolved.workers[0].draining);
+        assert_eq!(
+            resolved.workers[0].lifecycle_status(),
+            ReplayWorkerLifecycleStatus::StaticInactive
+        );
         assert!(resolved.workers[2].active);
+        assert_eq!(
+            resolved.workers[2].lifecycle_status(),
+            ReplayWorkerLifecycleStatus::Active
+        );
     }
 }
