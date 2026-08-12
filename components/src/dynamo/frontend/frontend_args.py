@@ -475,7 +475,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_WORKFLOW_PROVIDER",
             default=None,
             help=(
-                "Trusted 'module:callable' that authors and hydrates a workflow "
+                "Trusted 'module:callable' that authors and binds a workflow "
                 "for in-process token execution."
             ),
         )
