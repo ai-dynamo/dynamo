@@ -153,7 +153,11 @@ pub async fn spawn_system_status_server(
     // descriptor for the life of the process. Nothing here is specific to
     // CRIU; a checkpoint/restore is just the case that motivated it, and the
     // one where re-binding also lands the server in the restored network
-    // namespace.
+    // namespace. That last part holds for the default `DYN_SYSTEM_HOST` of
+    // `0.0.0.0`, which any namespace can bind. A deployment that sets a
+    // concrete address the restored namespace does not have gets a rebind that
+    // fails with `EADDRNOTAVAIL` and a loop that retries it once a second —
+    // no worse than the stock listener, which never recovers either.
     let listener =
         RebindingTcpListener::new(listener, actual_address, SYSTEM_STATUS_REBIND_BACKOFF);
     let observer = cancel_token.child_token();
@@ -260,8 +264,8 @@ fn build_system_status_router(server_state: Arc<SystemStatusState>) -> Router {
             move |path| metadata_file_handler(State(state), path)
         }),
     )
-    .fallback(|| async {
-        tracing::info!("[fallback handler] called");
+    .fallback(|uri: axum::http::Uri| async move {
+        tracing::debug!(%uri, "system status server has no route for this request");
         (StatusCode::NOT_FOUND, "Route not found").into_response()
     })
     .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span))
@@ -344,8 +348,18 @@ impl Listener for RebindingTcpListener {
                 Ok(accepted) => return accepted,
                 // A connection that died between the SYN and our accept says
                 // nothing about the listener; take the next one immediately.
-                Err(error) if is_transient_accept_error(&error) => {
+                Err(error) if is_dead_connection_error(&error) => {
                     tracing::trace!("system status connection dropped before accept: {error}");
+                }
+                // The socket still works, the process has run out of
+                // something. Keep the socket and wait, exactly as axum does.
+                Err(error) if is_resource_exhaustion_error(&error) => {
+                    tracing::error!(
+                        "System status listener cannot accept on {} for want of a process resource; retrying the same socket after {:?}: {error}",
+                        self.address,
+                        self.rebind_backoff
+                    );
+                    tokio::time::sleep(self.rebind_backoff).await;
                 }
                 Err(error) => {
                     tracing::error!(
@@ -369,13 +383,51 @@ impl Listener for RebindingTcpListener {
     }
 }
 
-fn is_transient_accept_error(error: &io::Error) -> bool {
+/// A connection that died between the SYN and our `accept` — the client hung
+/// up, or the kernel reset it. It says nothing about the listener, so the next
+/// `accept` runs straight away. These are the three kinds axum's own listener
+/// singles out for the same treatment.
+fn is_dead_connection_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::ConnectionReset
     )
+}
+
+/// The process has run out of file descriptors, socket buffers or memory. That
+/// is a property of the process, not of the socket, so the listener is still
+/// good and rebinding would be the wrong move twice over: it closes a working
+/// socket and discards its accept backlog, and the `bind` that follows needs a
+/// descriptor, which is the thing the process may have none of. axum sleeps
+/// and retries the same descriptor here, and so does this listener.
+///
+/// The standard library decodes `ENOMEM` as [`io::ErrorKind::OutOfMemory`],
+/// but it has no kind for `EMFILE`, `ENFILE` or `ENOBUFS` — all three arrive
+/// as `Uncategorized`, which cannot be matched on — so match their raw codes.
+fn is_resource_exhaustion_error(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::OutOfMemory {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        // `ENFILE` and `EMFILE` carry these numbers on every Unix. `ENOBUFS`
+        // is 105 on Linux and 55 on the BSDs, macOS among them.
+        const ENFILE: i32 = 23;
+        const EMFILE: i32 = 24;
+        #[cfg(target_os = "linux")]
+        const ENOBUFS: i32 = 105;
+        #[cfg(not(target_os = "linux"))]
+        const ENOBUFS: i32 = 55;
+
+        if let Some(code) = error.raw_os_error() {
+            return matches!(code, ENFILE | EMFILE | ENOBUFS);
+        }
+    }
+
+    false
 }
 
 /// Health handler with optional active health checking
@@ -911,6 +963,91 @@ mod tests {
             client.local_addr().unwrap(),
             "accepted connection should be the one we opened"
         );
+    }
+
+    /// A rebind can fail — the address may be taken, or absent from the
+    /// network namespace the process was restored into. The listener has to
+    /// keep trying rather than give up, and it has to succeed once the
+    /// obstacle clears.
+    ///
+    /// The test arranges exactly that: the wrapper's address is a port a
+    /// second socket already holds, so the first rebind fails with
+    /// `EADDRINUSE`; dropping that holder part-way through lets a later one
+    /// through. Without the retry loop the connection below is never accepted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_rebinding_listener_keeps_trying_after_a_rebind_fails() {
+        // The address the wrapper will try to rebind, held by a listener the
+        // test owns and will drop.
+        let holder = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let contested_address = holder.local_addr().unwrap();
+
+        // A separate socket, broken the way CRIU breaks one, so that the very
+        // first accept sends the wrapper down the rebind path.
+        let broken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shutdown_result = socket2::SockRef::from(&broken).shutdown(std::net::Shutdown::Both);
+
+        let mut rebinding =
+            RebindingTcpListener::new(broken, contested_address, Duration::from_millis(10));
+
+        if let Err(error) = shutdown_result {
+            eprintln!("skipping: this platform refused shutdown on a listening socket: {error}");
+            return;
+        }
+
+        let accepted = tokio::spawn(async move { rebinding.accept().await });
+
+        // Let the rebind fail against the holder a few times over, then let go.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(holder);
+
+        let client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(stream) = tokio::net::TcpStream::connect(contested_address).await {
+                    return stream;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("listener should rebind once the address is free again");
+
+        let (_io, peer) = tokio::time::timeout(Duration::from_secs(5), accepted)
+            .await
+            .expect("accept should return once a later rebind succeeds")
+            .expect("accept task should not panic");
+
+        assert_eq!(
+            peer,
+            client.local_addr().unwrap(),
+            "accepted connection should be the one we opened"
+        );
+    }
+
+    /// A descriptor or buffer shortage is about the process, not the socket.
+    /// Classifying one as a dead listener would close a socket that still
+    /// works and then need a descriptor to bind its replacement.
+    #[cfg(unix)]
+    #[test]
+    fn test_resource_exhaustion_does_not_look_like_a_dead_listener() {
+        for code in [23 /* ENFILE */, 24 /* EMFILE */] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                is_resource_exhaustion_error(&error),
+                "errno {code} should be treated as a process resource shortage, got {:?}",
+                error.kind()
+            );
+            assert!(
+                !is_dead_connection_error(&error),
+                "errno {code} is not a dead connection"
+            );
+        }
+
+        // The error the listener-shutdown test provokes must still rebind, so
+        // it must fall through both predicates.
+        let dead_listener = io::Error::from(io::ErrorKind::InvalidInput);
+        assert!(!is_resource_exhaustion_error(&dead_listener));
+        assert!(!is_dead_connection_error(&dead_listener));
     }
 
     #[tokio::test]
