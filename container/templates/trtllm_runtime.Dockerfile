@@ -258,6 +258,34 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
 
+# Align the base image's aiohttp with the floor requirements.common.txt sets for
+# the other Dynamo images. The base ships an older release and the --no-deps
+# installs above deliberately leave upstream's solve alone, so this one package is
+# raised explicitly. Narrow by design: a single named package, not a re-solve.
+#
+# System interpreter for the same reason as the opencv removal and the DALI
+# upgrade above: with VIRTUAL_ENV set, plain pip targets /opt/dynamo/venv and
+# leaves the system-site copy in place. The venv is --system-site-packages, so a
+# venv-only install would shadow the old version at import time while leaving it
+# on disk under dist-packages, where the image inventory reads it. The guard
+# checks the system interpreter specifically, so a venv-only install fails here.
+#
+# Mirrored by the pre_runtime whiteout below. An upgrade renames the metadata
+# directory (aiohttp-3.13.5.dist-info -> aiohttp-3.14.3.dist-info) and the squash
+# COPY only replaces paths that match, so without dropping the old tree first the
+# base image's dist-info would ship alongside the new one.
+#
+# Checked against the base's own constraints (datasets, fsspec), which cap nothing
+# here. cp312 manylinux_2_28 wheels exist for x86_64 and aarch64, so neither
+# architecture builds from source.
+# The guards assert on the dist-info directory rather than a version string,
+# because that directory is what an image inventory reads: no pre-3.14 metadata
+# may survive, and a 3.14+ one must be present in system site.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3" && \
+    /usr/bin/python3 -c 'import aiohttp; print("aiohttp in system site:", aiohttp.__version__)' && \
+    [ -z "$(ls -d /usr/local/lib/python3.12/dist-packages/aiohttp-3.1[0-3].*.dist-info 2>/dev/null)" ] && \
+    [ -n "$(ls -d /usr/local/lib/python3.12/dist-packages/aiohttp-3.1[4-9]*.dist-info 2>/dev/null)" ]
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -296,11 +324,19 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # replaces paths that match, so without dropping the old tree first, the base
 # image's 2.1.0 libraries — the ones carrying h264/hevc/aac — would ship
 # alongside the upgraded ones and the upgrade would buy nothing.
+#
+# aiohttp is here for the DALI reason, not the opencv one: runtime_full upgrades
+# it in system site, and the version-stamped metadata directory is renamed by the
+# upgrade (aiohttp-3.13.5.dist-info -> aiohttp-3.14.3.dist-info). The overlay COPY
+# would leave the base image's dist-info beside the new one, and the inventory
+# reads that directory, so the upgrade would not show.
 RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
     /usr/local/lib/python3.12/dist-packages/cv2 \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
-    /usr/local/lib/python3.12/dist-packages/nvidia_dali_* && \
+    /usr/local/lib/python3.12/dist-packages/nvidia_dali_* \
+    /usr/local/lib/python3.12/dist-packages/aiohttp \
+    /usr/local/lib/python3.12/dist-packages/aiohttp-* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null
 COPY --from=runtime_full / /
 
