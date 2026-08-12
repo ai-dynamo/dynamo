@@ -349,9 +349,9 @@ impl
         );
         self.validate_interactive_assignment_boundary(request_id)?;
         let placement = self.placement.assign(request_id, target)?;
-        let placement = self.decorate_external_overlap(placement)?;
-        self.complete_interactive_assignment_boundary(request_id)?;
-        self.dispatch_placements(vec![placement])?;
+        let candidates = self.complete_interactive_assignment_boundary(request_id)?;
+        let placement = self.decorate_external_overlap(placement, &candidates)?;
+        self.dispatch_placement(placement, Some(candidates))?;
         // The controller action releases the barrier. Settle until either the
         // next external placement boundary or the same-time fixed point so the
         // next observation is both fresh and immediately available.
@@ -373,9 +373,9 @@ impl
         // Pool-only placement first selects the worker through the pool's
         // internal router. Only then can the runtime inspect that selected
         // scheduler's committed KV state.
-        let placement = self.decorate_external_overlap(placement)?;
-        self.complete_interactive_assignment_boundary(request_id)?;
-        self.dispatch_placements(vec![placement])?;
+        let candidates = self.complete_interactive_assignment_boundary(request_id)?;
+        let placement = self.decorate_external_overlap(placement, &candidates)?;
+        self.dispatch_placement(placement, Some(candidates))?;
         self.drain_current_timestamp()?;
         Ok(())
     }
@@ -383,19 +383,52 @@ impl
     pub(in crate::replay::offline) fn pending_interactive_placements(
         &mut self,
     ) -> Vec<ReplayPendingPlacement> {
-        let pending = self.placement.pending_ids().next();
-        let placements = self.interactive_pending_placements(pending.into_iter());
-        if let Some(request_id) = pending
-            && !placements.is_empty()
-            && let Some(capture) = self.interactive.as_mut()
+        let Some(request_id) = self.placement.pending_ids().next() else {
+            return Vec::new();
+        };
+        let mut placements = self
+            .interactive
+            .as_ref()
+            .map(|capture| capture.pending(std::iter::once(request_id)))
+            .unwrap_or_default();
+        if placements.is_empty() {
+            return placements;
+        }
+        let candidates = self
+            .interactive
+            .as_ref()
+            .and_then(|capture| capture.announced_placement_candidates(request_id))
+            .map(|candidates| candidates.to_vec())
+            .or_else(|| {
+                self.requests
+                    .get(&request_id)
+                    .and_then(AggRequestState::queued_request)
+                    .map(|request| self.interactive_placement_candidates(request))
+            })
+            .unwrap_or_default();
+        if let Some(capture) = self.interactive.as_mut()
+            && !capture.placement_is_announced(request_id)
         {
-            capture.mark_placement_observed(request_id);
+            capture.mark_placement_observed(request_id, candidates.clone());
+        }
+        if let Some(placement) = placements.first_mut() {
+            placement.eligible_pool_ids = candidates
+                .iter()
+                .filter(|candidate| candidate.eligible)
+                .map(|candidate| candidate.target.pool_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            placement.candidates = candidates;
         }
         placements
     }
 
     pub(in crate::replay::offline) fn cancel_interactive_placement(&mut self, request_id: Uuid) {
         self.placement.cancel(request_id);
+        if let Some(capture) = self.interactive.as_mut() {
+            capture.cancel_placement_observation(request_id);
+        }
     }
 }
 
@@ -873,31 +906,37 @@ where
             .collect()
     }
 
-    /// Attach the selected worker's scheduler-safe, committed KV overlap to
-    /// an externally authored placement. Unsupported schedulers return
-    /// `None`; that is distinct from an authoritative zero-token overlap.
-    fn external_overlap_for_request(
+    /// Attach the selected worker's scheduler-safe, committed KV overlap from
+    /// the exact policy observation that authorized this external placement.
+    /// The controller barrier freezes scheduler state until assignment, so a
+    /// second native prefix query would be redundant and could not be fresher.
+    fn decorate_external_overlap(
         &self,
-        scheduler_id: usize,
-        request: &ReplayRequestPayload,
-    ) -> Option<usize> {
-        self.engine
-            .native_prefix_overlap_tokens(scheduler_id, &request.prompt_tokens())
-    }
-
-    fn decorate_external_overlap(&self, mut placement: Placement) -> anyhow::Result<Placement> {
-        let request = self
-            .requests
-            .get(&placement.request_id)
-            .and_then(AggRequestState::queued_request)
+        mut placement: Placement,
+        candidates: &[ReplayPlacementCandidate],
+    ) -> anyhow::Result<Placement> {
+        let (engine_worker_id, dp_rank) = self
+            .engine
+            .rank_identity(placement.scheduler_id)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "interactive replay request {} has no queued request state for KV observation",
+                    "interactive replay placement references unknown scheduler {}",
+                    placement.scheduler_id
+                )
+            })?;
+        let mut target = self.accounting_target(engine_worker_id);
+        target.dp_rank = dp_rank as usize;
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.target == target)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "interactive replay selected target {:?} was absent from the announced observation for request {}",
+                    target,
                     placement.request_id
                 )
             })?;
-        placement.reported_overlap_tokens =
-            self.external_overlap_for_request(placement.scheduler_id, request);
+        placement.reported_overlap_tokens = candidate.kv_prefix_overlap_tokens;
         Ok(placement)
     }
 
@@ -908,59 +947,75 @@ where
             .validate_placement_assignment(request_id)
     }
 
-    fn complete_interactive_assignment_boundary(&mut self, request_id: Uuid) -> anyhow::Result<()> {
+    fn complete_interactive_assignment_boundary(
+        &mut self,
+        request_id: Uuid,
+    ) -> anyhow::Result<Vec<ReplayPlacementCandidate>> {
         self.interactive
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("offline replay interactive capture is disabled"))?
             .complete_placement_assignment(request_id)
     }
 
-    /// Materialize policy-released admissions into concrete worker dispatches.
-    fn dispatch_placements(&mut self, placements: Vec<Placement>) -> anyhow::Result<()> {
-        for placement in placements {
-            self.record_placement(placement);
-            let uuid = placement.request_id;
-            let (logical_worker_id, dp_rank) = self
-                .engine
-                .rank_identity(placement.scheduler_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "offline replay placement references unknown scheduler {}",
-                        placement.scheduler_id
-                    )
-                })?;
-            self.collector.on_route_released(
-                uuid,
-                ReplayRequestPool::Agg,
-                self.now_ms,
-                logical_worker_id,
-                placement.scheduler_id,
-                dp_rank,
-                placement.reported_overlap_tokens,
-            );
-            let mut authored_target = self.accounting_target(logical_worker_id);
-            authored_target.dp_rank = dp_rank as usize;
-            self.collector.on_route_static_target(
-                uuid,
-                ReplayRequestPool::Agg,
-                authored_target.pool_id,
-                authored_target.worker_id,
-                authored_target.dp_rank,
-            );
-            let route_candidates = self
-                .requests
+    /// Materialize one policy-released admission into a concrete worker
+    /// dispatch. External controllers pass the exact observation that
+    /// authorized the assignment; native policies construct their route view
+    /// at their existing pre-dispatch boundary.
+    fn dispatch_placement(
+        &mut self,
+        placement: Placement,
+        route_candidates: Option<Vec<ReplayPlacementCandidate>>,
+    ) -> anyhow::Result<()> {
+        self.record_placement(placement);
+        let uuid = placement.request_id;
+        let (logical_worker_id, dp_rank) = self
+            .engine
+            .rank_identity(placement.scheduler_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "offline replay placement references unknown scheduler {}",
+                    placement.scheduler_id
+                )
+            })?;
+        self.collector.on_route_released(
+            uuid,
+            ReplayRequestPool::Agg,
+            self.now_ms,
+            logical_worker_id,
+            placement.scheduler_id,
+            dp_rank,
+            placement.reported_overlap_tokens,
+        );
+        let mut authored_target = self.accounting_target(logical_worker_id);
+        authored_target.dp_rank = dp_rank as usize;
+        self.collector.on_route_static_target(
+            uuid,
+            ReplayRequestPool::Agg,
+            authored_target.pool_id,
+            authored_target.worker_id,
+            authored_target.dp_rank,
+        );
+        let route_candidates = route_candidates.unwrap_or_else(|| {
+            self.requests
                 .get(&uuid)
                 .and_then(AggRequestState::queued_request)
                 .map(|request| self.interactive_placement_candidates(request))
-                .unwrap_or_default();
-            let request = self
-                .requests
-                .get_mut(&uuid)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("offline replay missing queued request state for {uuid}")
-                })?
-                .take_queued_request(uuid)?;
-            self.dispatch_to_worker(request, uuid, placement.scheduler_id, route_candidates)?;
+                .unwrap_or_default()
+        });
+        let request = self
+            .requests
+            .get_mut(&uuid)
+            .ok_or_else(|| {
+                anyhow::anyhow!("offline replay missing queued request state for {uuid}")
+            })?
+            .take_queued_request(uuid)?;
+        self.dispatch_to_worker(request, uuid, placement.scheduler_id, route_candidates)
+    }
+
+    /// Materialize policy-released admissions into concrete worker dispatches.
+    fn dispatch_placements(&mut self, placements: Vec<Placement>) -> anyhow::Result<()> {
+        for placement in placements {
+            self.dispatch_placement(placement, None)?;
         }
         Ok(())
     }
@@ -1008,14 +1063,19 @@ where
         } else {
             session_id
         };
-        // Build the shared, scheduler-safe candidate view before native
-        // selection or physical dispatch. A native Routed event publishes this
-        // exact view rather than synthesizing a post-route snapshot.
-        let policy_candidates = self
+        let uses_external_placement = self
             .interactive
             .as_ref()
-            .map(|_| self.interactive_placement_candidates(&request))
-            .unwrap_or_default();
+            .is_some_and(InteractiveCapture::uses_external_placement);
+        // Native policies capture their shared, scheduler-safe candidate view
+        // before selection. External policy observations are constructed only
+        // at the later, causally fresh controller boundary; building one here
+        // would both be stale and discarded for an ordinary queued request.
+        let native_policy_candidates = self
+            .interactive
+            .as_ref()
+            .filter(|_| !uses_external_placement)
+            .map(|_| self.interactive_placement_candidates(&request));
         let effects =
             self.placement
                 .place(&request, metadata, placement_session_id, self.now_ms)?;
@@ -1027,14 +1087,18 @@ where
                         placement.request_id
                     );
                 }
-                if self
-                    .interactive
-                    .as_ref()
-                    .is_some_and(InteractiveCapture::uses_external_placement)
-                {
-                    placement.reported_overlap_tokens =
-                        self.external_overlap_for_request(placement.scheduler_id, &request);
-                }
+                let policy_candidates = if uses_external_placement {
+                    // Authored preassignment routes immediately and therefore
+                    // has no announced controller boundary. Build its one
+                    // pre-dispatch observation after policy resolution (which
+                    // cannot mutate engine state), then reuse it for overlap
+                    // and the Routed event.
+                    let candidates = self.interactive_placement_candidates(&request);
+                    placement = self.decorate_external_overlap(placement, &candidates)?;
+                    candidates
+                } else {
+                    native_policy_candidates.unwrap_or_default()
+                };
                 self.record_placement(placement);
                 let (logical_worker_id, dp_rank) = self
                     .engine
@@ -1285,7 +1349,11 @@ where
                     terminal.request_uuid
                 );
             }
-            self.placement.cancel_pending(terminal.request_uuid);
+            if self.placement.cancel_pending(terminal.request_uuid)
+                && let Some(capture) = self.interactive.as_mut()
+            {
+                capture.cancel_placement_observation(terminal.request_uuid);
+            }
             self.collector
                 .on_cascaded_terminal(&terminal, self.now_ms)?;
             if let Some(identity) = self
@@ -2216,36 +2284,6 @@ where
         self.interactive
             .as_ref()
             .and_then(|capture| capture.uuid_for_logical_id(logical_id))
-    }
-
-    pub(in crate::replay::offline) fn interactive_pending_placements(
-        &self,
-        uuids: impl Iterator<Item = Uuid>,
-    ) -> Vec<ReplayPendingPlacement> {
-        let mut placements = self
-            .interactive
-            .as_ref()
-            .map(|capture| capture.pending(uuids))
-            .unwrap_or_default();
-        for placement in &mut placements {
-            let Some(request) = self
-                .requests
-                .get(&placement.internal_uuid)
-                .and_then(AggRequestState::queued_request)
-            else {
-                continue;
-            };
-            placement.candidates = self.interactive_placement_candidates(request);
-            placement.eligible_pool_ids = placement
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.eligible)
-                .map(|candidate| candidate.target.pool_id.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-        }
-        placements
     }
 
     pub(in crate::replay::offline) fn interactive_close_admission(&mut self) -> anyhow::Result<()>

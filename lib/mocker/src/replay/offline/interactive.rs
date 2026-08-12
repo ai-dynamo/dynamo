@@ -258,8 +258,16 @@ pub(crate) struct InteractiveCapture {
     /// Exactly one externally controlled request may have a policy-visible
     /// observation at a time. Clearing this after assignment forces the next
     /// same-time request to observe the scheduler state changed by its
-    /// predecessor.
-    announced_placement: Option<Uuid>,
+    /// predecessor. Retaining the candidates also makes PlacementNeeded,
+    /// selected overlap, and Routed refer to one causally frozen observation
+    /// instead of rebuilding equivalent scheduler views at each API boundary.
+    announced_placement: Option<AnnouncedPlacementObservation>,
+}
+
+#[derive(Debug)]
+struct AnnouncedPlacementObservation {
+    request_id: Uuid,
+    candidates: Vec<ReplayPlacementCandidate>,
 }
 
 impl InteractiveCapture {
@@ -320,7 +328,11 @@ impl InteractiveCapture {
     }
 
     pub(crate) fn unregister(&mut self, uuid: Uuid) {
-        if self.announced_placement == Some(uuid) {
+        if self
+            .announced_placement
+            .as_ref()
+            .is_some_and(|observation| observation.request_id == uuid)
+        {
             self.announced_placement = None;
         }
         if let Some(identity) = self.identities.remove(&uuid) {
@@ -411,23 +423,42 @@ impl InteractiveCapture {
         now_ms: f64,
         candidates: Vec<ReplayPlacementCandidate>,
     ) -> anyhow::Result<ReplayEvent> {
-        self.mark_placement_observed(uuid);
+        self.mark_placement_observed(uuid, candidates.clone());
         let mut data = self.event_data(uuid, now_ms, false)?;
         data.eligible_pool_ids = eligible_pool_ids(&candidates);
         data.candidates = candidates;
         Ok(ReplayEvent::PlacementNeeded(data))
     }
 
-    pub(crate) fn mark_placement_observed(&mut self, uuid: Uuid) {
-        self.announced_placement = Some(uuid);
+    pub(crate) fn mark_placement_observed(
+        &mut self,
+        uuid: Uuid,
+        candidates: Vec<ReplayPlacementCandidate>,
+    ) {
+        self.announced_placement = Some(AnnouncedPlacementObservation {
+            request_id: uuid,
+            candidates,
+        });
     }
 
     pub(crate) fn placement_is_announced(&self, uuid: Uuid) -> bool {
-        self.announced_placement == Some(uuid)
+        self.announced_placement
+            .as_ref()
+            .is_some_and(|observation| observation.request_id == uuid)
+    }
+
+    pub(crate) fn announced_placement_candidates(
+        &self,
+        uuid: Uuid,
+    ) -> Option<&[ReplayPlacementCandidate]> {
+        self.announced_placement
+            .as_ref()
+            .filter(|observation| observation.request_id == uuid)
+            .map(|observation| observation.candidates.as_slice())
     }
 
     pub(crate) fn validate_placement_assignment(&self, uuid: Uuid) -> anyhow::Result<()> {
-        if self.announced_placement == Some(uuid) {
+        if self.placement_is_announced(uuid) {
             return Ok(());
         }
         anyhow::bail!(
@@ -435,14 +466,26 @@ impl InteractiveCapture {
         )
     }
 
-    pub(crate) fn complete_placement_assignment(&mut self, uuid: Uuid) -> anyhow::Result<()> {
-        if self.announced_placement != Some(uuid) {
+    pub(crate) fn complete_placement_assignment(
+        &mut self,
+        uuid: Uuid,
+    ) -> anyhow::Result<Vec<ReplayPlacementCandidate>> {
+        if !self.placement_is_announced(uuid) {
             anyhow::bail!(
                 "interactive replay request {uuid} is not the current placement boundary"
             );
         }
-        self.announced_placement = None;
-        Ok(())
+        Ok(self
+            .announced_placement
+            .take()
+            .expect("placement observation was validated before consumption")
+            .candidates)
+    }
+
+    pub(crate) fn cancel_placement_observation(&mut self, uuid: Uuid) {
+        if self.placement_is_announced(uuid) {
+            self.announced_placement = None;
+        }
     }
 
     pub(crate) fn emit_routed(
@@ -2318,6 +2361,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.target.worker_id == 20)
             .unwrap();
+        let announced_candidates = placement.candidates.clone();
         assert!(!plain.eligible);
         assert!(
             plain
@@ -2334,10 +2378,20 @@ mod tests {
                 .to_string()
                 .contains("does not satisfy required taints")
         );
-        assert_eq!(replay.pending_placements()?.len(), 1);
+        let pending_after_rejection = replay.pending_placements()?;
+        assert_eq!(pending_after_rejection.len(), 1);
+        assert_eq!(
+            pending_after_rejection[0].candidates, announced_candidates,
+            "a rejected assignment must retain its causally frozen observation"
+        );
         replay.assign("live-secure", WorkerTarget::new("pool", 20, 0))?;
         replay.close_admission()?;
         events.extend(drive_to_drained(&mut replay)?);
+        assert_eq!(
+            routed_event(&events, "live-secure").candidates,
+            announced_candidates,
+            "the successful retry must publish the original observation"
+        );
         assert_eq!(terminal_count(&events), 2);
         let report = replay.finalize()?;
         assert_eq!(report.request_counts.completed_requests, 2);
@@ -3175,10 +3229,25 @@ mod tests {
                 .expect("two active candidates")
                 .target
                 .clone();
+            let observed_candidates = placement.candidates.clone();
             chosen_workers.push(selected.worker_id);
             let logical_id = placement.logical_request_id.clone();
             replay.assign(&logical_id, selected)?;
-            boundary_events = replay.drain_events()?;
+            let next_events = replay.drain_events()?;
+            let routed_candidates = next_events
+                .iter()
+                .find_map(|event| match event {
+                    ReplayEvent::Routed(data) if data.logical_request_id == logical_id => {
+                        Some(&data.candidates)
+                    }
+                    _ => None,
+                })
+                .expect("assignment must publish its routed observation");
+            assert_eq!(
+                routed_candidates, &observed_candidates,
+                "Routed must reuse the exact causally frozen PlacementNeeded observation"
+            );
+            boundary_events = next_events;
         }
 
         assert_eq!(chosen_workers, vec![0, 1, 0]);
