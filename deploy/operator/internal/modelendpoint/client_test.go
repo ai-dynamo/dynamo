@@ -547,7 +547,7 @@ func TestUnloadLoRA(t *testing.T) {
 				{Address: failingServer.URL, PodName: "pod-2"},
 			},
 			modelName:   "test-model",
-			expectError: true, // workerpool returns error on any failure
+			expectError: true,
 		},
 		{
 			name: "legacy unavailable worker uses cleanup fallback",
