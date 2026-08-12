@@ -89,6 +89,7 @@ func newDynPrefillScorer(cfg DynPrefillScorerConfig) *DynPrefillScorer {
 		beginPrefill:                dynscorer.CallBeginPrefillReservation,
 		reservePrefill:              dynscorer.CallRoutePrefillRequestWithReservation,
 		cancelPrefill:               dynscorer.CallCancelPrefillReservation,
+		releasePrefill:              dynscorer.CallReleasePrefillReservation,
 		freeBooking:                 dynscorer.CallFreeRequest,
 		reservationAdmissionTimeout: reservationTimeout,
 		reservationSlots:            make(chan struct{}, maxReservations),
@@ -101,6 +102,7 @@ type DynPrefillScorer struct {
 	beginPrefill                func(string) error
 	reservePrefill              func(string, string, string) (*dynscorer.RoutingResult, error)
 	cancelPrefill               func(string) error
+	releasePrefill              func(string) error
 	freeBooking                 func(string) error
 	reservationAdmissionTimeout time.Duration
 	reservationSlots            chan struct{}
@@ -135,6 +137,13 @@ func (s *DynPrefillScorer) beginReservation(bookingID string) error {
 		return nil
 	}
 	return s.beginPrefill(bookingID)
+}
+
+func (s *DynPrefillScorer) releaseLatePrefillReservation(bookingID string) error {
+	if s.releasePrefill == nil {
+		return fmt.Errorf("prefill reservation release is not configured")
+	}
+	return s.releasePrefill(bookingID)
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -226,7 +235,7 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 			if outcome.err != nil {
 				return
 			}
-			if cleanupErr := s.freeBooking(bookingID); cleanupErr != nil {
+			if cleanupErr := s.releaseLatePrefillReservation(bookingID); cleanupErr != nil {
 				logger.V(logutil.DEFAULT).Error(cleanupErr, "DynPrefillScorer: failed to release late prefill reservation",
 					"bookingID", bookingID)
 			}

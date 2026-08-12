@@ -157,28 +157,6 @@ func TestResponseBodyFreesWithoutMarkingEmptyTerminalResponse(t *testing.T) {
 	}
 }
 
-func TestPreRequestCancellationCleansBooking(t *testing.T) {
-	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
-	freeCalls := 0
-	scorer := &DynDecodeScorer{
-		freeBooking: func(got string) error {
-			if got != bookingID {
-				t.Fatalf("free booking ID = %q, want %q", got, bookingID)
-			}
-			freeCalls++
-			return nil
-		},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	scorer.PreRequest(ctx, requestWithBooking("external-request", bookingID), nil)
-
-	if freeCalls != 1 {
-		t.Fatalf("free calls = %d, want 1", freeCalls)
-	}
-}
-
 func TestPrefillScoreCancelsPendingReservation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -186,7 +164,8 @@ func TestPrefillScoreCancelsPendingReservation(t *testing.T) {
 	reserveStarted := make(chan struct{})
 	allowReserveReturn := make(chan struct{})
 	cancelCalls := make(chan string, 1)
-	freeCalls := make(chan string, 1)
+	releaseCalls := make(chan string, 1)
+	combinedFreeCalls := 0
 	scorer := &DynPrefillScorer{
 		reservePrefill: func(string, string, string) (*dynscorer.RoutingResult, error) {
 			close(reserveStarted)
@@ -198,8 +177,12 @@ func TestPrefillScoreCancelsPendingReservation(t *testing.T) {
 			close(allowReserveReturn)
 			return nil
 		},
-		freeBooking: func(bookingID string) error {
-			freeCalls <- bookingID
+		releasePrefill: func(bookingID string) error {
+			releaseCalls <- bookingID
+			return nil
+		},
+		freeBooking: func(string) error {
+			combinedFreeCalls++
 			return nil
 		},
 	}
@@ -228,12 +211,15 @@ func TestPrefillScoreCancelsPendingReservation(t *testing.T) {
 		t.Fatalf("cancel booking ID = %q, want %q", got, bookingID)
 	}
 	select {
-	case got := <-freeCalls:
+	case got := <-releaseCalls:
 		if got != bookingID {
 			t.Fatalf("late release booking ID = %q, want %q", got, bookingID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("late successful reservation was not released")
+	}
+	if combinedFreeCalls != 0 {
+		t.Fatalf("combined free_request calls = %d, want 0", combinedFreeCalls)
 	}
 	if readPrefillEnabled(cycleState) {
 		t.Fatal("prefill remained enabled after reservation cancellation")
@@ -398,5 +384,169 @@ func TestPrefillScoreBoundsConcurrentReservations(t *testing.T) {
 	case <-lifecycle.cleanupComplete():
 	case <-time.After(time.Second):
 		t.Fatal("first reservation cleanup did not finish")
+	}
+}
+
+func newDecodeRequest() *schedtypes.InferenceRequest {
+	return &schedtypes.InferenceRequest{
+		TargetModel: "model",
+		Headers:     map[string]string{},
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{"model": "model", "prompt": "hello"},
+		},
+	}
+}
+
+func TestDecodeScoreCancellationWaitsForRegistration(t *testing.T) {
+	cycleState := schedtypes.NewCycleState()
+	booking := ensureBookingState(cycleState)
+	request := newDecodeRequest()
+	addStarted := make(chan struct{})
+	allowAddReturn := make(chan struct{})
+	freeCalls := make(chan string, 1)
+	scorer := &DynDecodeScorer{
+		routeDecode: func(string, string, bool) (*dynscorer.RoutingResult, error) {
+			return &dynscorer.RoutingResult{WorkerID: 7, DpRank: 1, TokenData: []int64{1}}, nil
+		},
+		addRequest: func(string, []int64, uint64, uint32, string) error {
+			close(addStarted)
+			<-allowAddReturn
+			return nil
+		},
+		freeBooking: func(bookingID string) error {
+			freeCalls <- bookingID
+			return nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	scoresDone := make(chan map[schedtypes.Endpoint]float64, 1)
+	go func() {
+		scoresDone <- scorer.Score(ctx, cycleState, request, nil)
+	}()
+	<-addStarted
+	lifecycle := findBookingLifecycle(booking.ID)
+	if lifecycle == nil {
+		t.Fatal("expected lifecycle while decode registration is in flight")
+	}
+	cancel()
+	select {
+	case got := <-freeCalls:
+		t.Fatalf("booking %q was freed before decode registration returned", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowAddReturn)
+	<-scoresDone
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("booking cleanup did not finish after registration returned")
+	}
+	select {
+	case got := <-freeCalls:
+		if got != booking.ID {
+			t.Fatalf("freed booking ID = %q, want %q", got, booking.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("booking was not cleaned up after cancellation")
+	}
+}
+
+func TestDecodeScoreRegistrationFailureRedirectsAggregate(t *testing.T) {
+	cycleState := schedtypes.NewCycleState()
+	booking := ensureBookingState(cycleState)
+	request := newDecodeRequest()
+	freeStarted := make(chan struct{})
+	allowFreeReturn := make(chan struct{})
+	scorer := &DynDecodeScorer{
+		routeDecode: func(string, string, bool) (*dynscorer.RoutingResult, error) {
+			return &dynscorer.RoutingResult{WorkerID: 7, DpRank: 1, TokenData: []int64{1}}, nil
+		},
+		addRequest: func(string, []int64, uint64, uint32, string) error {
+			return errors.New("decode booking failed")
+		},
+		freeBooking: func(string) error {
+			close(freeStarted)
+			<-allowFreeReturn
+			return nil
+		},
+	}
+
+	scorer.Score(context.Background(), cycleState, request, nil)
+	lifecycle := findBookingLifecycle(booking.ID)
+	if lifecycle == nil {
+		t.Fatal("expected lifecycle after decode booking failure")
+	}
+	select {
+	case <-freeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("failed decode booking was not cleaned up")
+	}
+	if got := request.Headers[RoutingModeHeader]; got != "aggregated" {
+		t.Fatalf("routing mode = %q, want aggregated fallback", got)
+	}
+	for _, header := range []string{WorkerIDHeader, DpRankHeader, PrefillWorkerIDHeader, PrefillDpRankHeader} {
+		if _, ok := request.Headers[header]; ok {
+			t.Fatalf("redirect retained %s header", header)
+		}
+	}
+	close(allowFreeReturn)
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("failed decode booking cleanup did not finish")
+	}
+}
+
+func TestBookingLifecycleRetriesCleanup(t *testing.T) {
+	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
+	calls := 0
+	lifecycle := registerBookingLifecycle(bookingID, func(string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("transient cleanup failure")
+		}
+		return nil
+	})
+	if !lifecycle.cleanup(context.Background(), "test retry") {
+		t.Fatal("initial cleanup did not start")
+	}
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("cleanup retry did not finish")
+	}
+	if calls != 2 {
+		t.Fatalf("cleanup calls = %d, want 2", calls)
+	}
+	if findBookingLifecycle(bookingID) != nil {
+		t.Fatal("successful cleanup retained a lifecycle")
+	}
+}
+
+func TestBookingLifecycleRetainsTombstoneAfterCleanupExhaustion(t *testing.T) {
+	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
+	defer bookingLifecycles.Delete(bookingID)
+	calls := 0
+	lifecycle := registerBookingLifecycle(bookingID, func(string) error {
+		calls++
+		return errors.New("persistent cleanup failure")
+	})
+	if !lifecycle.cleanup(context.Background(), "test exhaustion") {
+		t.Fatal("initial cleanup did not start")
+	}
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("cleanup retries did not finish")
+	}
+	if calls != cleanupMaxAttempts {
+		t.Fatalf("cleanup calls = %d, want %d", calls, cleanupMaxAttempts)
+	}
+	if got := findBookingLifecycle(bookingID); got != lifecycle {
+		t.Fatal("exhausted cleanup did not retain its lifecycle tombstone")
+	}
+	if lifecycle.cleanup(context.Background(), "duplicate cleanup") {
+		t.Fatal("exhausted cleanup started a second owner")
 	}
 }
