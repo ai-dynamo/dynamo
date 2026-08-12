@@ -58,7 +58,9 @@ WORKDIR /workspace
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
 # tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
-# carries a single copy of each tool, and symlink system libstdc++ to a stable
+# carries a single copy of each tool, drop the unused wandb developer tooling
+# the DLFW base carries (upstream removes it on main, Dockerfile.multi), and
+# symlink system libstdc++ to a stable
 # path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
 # NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
 # older copy.
@@ -84,6 +86,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         /usr/local/bin/etcd \
         /usr/local/bin/etcdctl \
         /usr/local/bin/etcdutl && \
+    (pip3 uninstall -y wandb || true) && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
