@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
@@ -26,6 +27,13 @@ def load_matrix_module():
 def write_kustomization(path: Path, content: str) -> None:
     path.mkdir(parents=True)
     (path / "kustomization.yaml").write_text(content, encoding="utf-8")
+
+
+def write_template(path: Path, content: str, values: str = "") -> None:
+    path.mkdir(parents=True)
+    (path / "kustomization.yaml.j2").write_text(content, encoding="utf-8")
+    if values:
+        (path / "values.yaml").write_text(values, encoding="utf-8")
 
 
 def run_matrix(
@@ -154,7 +162,8 @@ def test_unfold_expands_matrix_and_check_detects_stale_overlay(tmp_path):
     assert overlay.read_text(encoding="utf-8") == (
         "# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
         "# SPDX-License-Identifier: Apache-2.0\n\n"
-        "# Generated file. Do not edit this checked-in copy.\n"
+        "# Generated file. For repository contributors, do not edit this checked-in copy.\n"
+        "# Regenerate this matrix's public overlays and template Components from the repository root:\n"
         f"# Regenerate: scripts/kustomize-matrix.py unfold {matrix}\n\n"
         "apiVersion: kustomize.config.k8s.io/v1beta1\n"
         "kind: Kustomization\n"
@@ -173,6 +182,136 @@ def test_unfold_expands_matrix_and_check_detects_stale_overlay(tmp_path):
 
     assert result.returncode == 1
     assert "Generated Kustomize overlays are stale" in result.stderr
+
+
+def test_unfold_materializes_template_component_with_base_and_variant_values(
+    tmp_path,
+):
+    recipe = tmp_path / "recipe"
+    base = recipe / "kustomize/base"
+    write_kustomization(base, "resources:\n  - resources.yaml\n")
+    (base / "resources.yaml").write_text(
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata:\n"
+        "  name: app-config\n"
+        "data:\n"
+        "  setting: from-base\n"
+        "---\n"
+        "apiVersion: nvidia.com/v1alpha1\n"
+        "kind: DynamoGraphDeployment\n"
+        "metadata:\n"
+        "  name: app\n"
+        "spec:\n"
+        "  replicas: 2\n",
+        encoding="utf-8",
+    )
+    template = recipe / "templates/provider/instance"
+    write_template(
+        template,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
+        "kind: Component\n"
+        "patches:\n"
+        "  # This comment is copied into the generated Component.\n"
+        "  - target:\n"
+        "      group: nvidia.com\n"
+        "      version: v1alpha1\n"
+        "      kind: DynamoGraphDeployment\n"
+        "    patch: |\n"
+        "      {% set dgd = base.dynamographdeployment | only %}\n"
+        "      apiVersion: nvidia.com/v1alpha1\n"
+        "      kind: DynamoGraphDeployment\n"
+        "      metadata:\n"
+        "        name: {{ dgd.metadata.name }}\n"
+        "        labels:\n"
+        "          setting: {{ base.configmap[values.CONFIG_MAP].data.setting }}\n"
+        '          replicas: "{{ dgd.spec.replicas * values.MULTIPLIER }}"\n'
+        "  - target:\n"
+        "      group: nvidia.com\n"
+        "      version: v1alpha1\n"
+        "      kind: DynamoGraphDeployment\n"
+        "    path: patch.yaml\n",
+        "CONFIG_MAP: app-config\nMULTIPLIER: 2\n",
+    )
+    (template / "patch.yaml").write_text(
+        "apiVersion: nvidia.com/v1alpha1\n"
+        "kind: DynamoGraphDeployment\n"
+        "metadata:\n"
+        "  name: app\n"
+        "  labels:\n"
+        "    static-patch: applies\n",
+        encoding="utf-8",
+    )
+    matrix = recipe / ".kustomize-matrix.yaml"
+    matrix.write_text(
+        "source: kustomize/base\n"
+        'nameTemplate: "${variant}"\n'
+        "matrix:\n"
+        "  variant:\n"
+        "    - name: instance\n"
+        "      templates:\n"
+        "        - templates/provider/instance\n"
+        "      values:\n"
+        "        MULTIPLIER: 3\n",
+        encoding="utf-8",
+    )
+
+    result = run_matrix("unfold", str(matrix))
+
+    assert result.returncode == 0, result.stderr
+    overlay = recipe / "kustomize/overlays/instance/kustomization.yaml"
+    component = (
+        recipe
+        / "kustomize/overlays/instance/generated-components/00-provider-instance/kustomization.yaml"
+    )
+    assert '  - "generated-components/00-provider-instance"\n' in overlay.read_text(
+        encoding="utf-8"
+    )
+    rendered_component = component.read_text(encoding="utf-8")
+    assert "# Template source: " in rendered_component
+    assert rendered_component.count("# SPDX-License-Identifier") == 1
+    assert (
+        "# This comment is copied into the generated Component." in rendered_component
+    )
+    parsed_component = yaml.safe_load(rendered_component)
+    assert "setting: from-base" in parsed_component["patches"][0]["patch"]
+    assert 'replicas: "6"' in parsed_component["patches"][0]["patch"]
+    assert parsed_component["patches"][1]["path"] == "patch.yaml"
+    assert (component.parent / "patch.yaml").read_text(encoding="utf-8") == (
+        template / "patch.yaml"
+    ).read_text(encoding="utf-8")
+    build = subprocess.run(
+        ["kustomize", "build", str(overlay.parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert build.returncode == 0, build.stderr
+    assert "static-patch: applies" in build.stdout
+    assert run_matrix("unfold", "--check", str(matrix)).returncode == 0
+
+
+def test_template_only_and_undefined_values_fail_clearly(tmp_path):
+    kustomize_matrix = load_matrix_module()
+    resources = kustomize_matrix.ResourceCollection("ConfigMap")
+    resources["first"] = {}
+    resources["second"] = {}
+
+    with pytest.raises(ValueError, match="exactly one ConfigMap resource"):
+        kustomize_matrix.only(resources)
+
+    template = tmp_path / "template"
+    write_template(
+        template,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
+        "kind: Component\n"
+        "patches:\n"
+        "  - patch: |\n"
+        "      value: {{ values.NOT_DEFINED }}\n",
+    )
+
+    with pytest.raises(ValueError, match="NOT_DEFINED"):
+        kustomize_matrix.render_template_component(template, {}, {})
 
 
 def test_render_uses_leaf_component_and_preserves_source_comments(
