@@ -592,6 +592,9 @@ jobs:
     with:
       target_tag_plain: ${{ format('{0}-nightly', needs.vllm-efa-build.outputs.target_tag_plain) }}
       cuda_version: '["13.0"]'
+      # Matches the sibling runtime copies; the shared-copy default of 10 is not
+      # enough for a multi-arch runtime image.
+      copy_timeout_minutes: 20
     secrets: inherit
 
   deploy-operator:
@@ -738,6 +741,7 @@ jobs:
         with:
           vcluster_name: nightly-efa-${{ github.run_id }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -768,6 +772,15 @@ jobs:
       - name: Teardown vCluster
         if: always() && steps.setup.outputs.vcluster_name != ''
         uses: ./.github/actions/teardown-dynamo-operator
+        env:
+          # The dynamo-deploy-test action exports KUBECONFIG=<workspace>/.kubeconfig
+          # (the vCluster) into $GITHUB_ENV, and that persists for the rest of the
+          # job. Teardown takes no kubeconfig here, so without this override it
+          # would run against the vCluster, find no dynamo-deploy-test namespace,
+          # report "nothing to delete" and leave the vCluster -- and its GPUs --
+          # running on the host. Every other teardown in this file is a separate
+          # job with a fresh environment, which is why they do not need this.
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig-aws-dev-02.yaml
         with:
           vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
           vcluster_namespace: ${{ steps.setup.outputs.namespace }}

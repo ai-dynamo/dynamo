@@ -25,17 +25,12 @@ is the functional one.
 """
 
 import logging
-import os
-from typing import Optional
+from pathlib import Path
 
 import pytest
 
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.managed_deployment import (
-    DeploymentSpec,
-    ManagedDeployment,
-    _get_workspace_dir,
-)
+from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +128,7 @@ def _read_pod_logs(pod) -> str:
             if c.get("name"):
                 container_names.append(c["name"])
     except Exception as e:  # noqa: BLE001 - diagnostics only
-        logger.debug(f"Failed to resolve containers for {pod.name}: {e}")
+        logger.debug("Failed to resolve containers for %s: %s", pod.name, e)
 
     if not container_names:
         container_names = [""]
@@ -208,7 +203,7 @@ def assert_nixl_used_libfabric(deployment: ManagedDeployment) -> None:
     logger.info("EFA path confirmed: NIXL registered memory regions via LIBFABRIC/EFA")
 
 
-def _read_nixl_rx_bytes(pod) -> Optional[float]:
+def _read_nixl_rx_bytes(pod) -> float | None:
     """Return the summed NIXL ``agent_rx_bytes`` counter from a worker pod.
 
     Scrapes the in-pod NIXL Prometheus endpoint via ``pod.exec`` and sums every
@@ -225,7 +220,7 @@ def _read_nixl_rx_bytes(pod) -> Optional[float]:
         result = pod.exec(["python3", "-c", snippet])
         text = result.stdout.decode()
     except Exception as e:  # noqa: BLE001 - telemetry may not be up yet
-        logger.warning(f"Could not scrape NIXL telemetry from {pod.name}: {e}")
+        logger.warning("Could not scrape NIXL telemetry from %s: %s", pod.name, e)
         return None
 
     total = 0.0
@@ -245,9 +240,7 @@ def _read_nixl_rx_bytes(pod) -> Optional[float]:
     return total if found else None
 
 
-def assert_efa_rdma_traffic(
-    rx_before: Optional[float], rx_after: Optional[float]
-) -> None:
+def assert_efa_rdma_traffic(rx_before: float | None, rx_after: float | None) -> None:
     """Assert the decode worker's NIXL rx-bytes counter grew across the request.
 
     This is the direct "traffic actually went over EFA RDMA" proof. Combined with
@@ -314,9 +307,9 @@ async def test_efa_deployment(
     assert image, "--image is required for the EFA deploy test"
     assert namespace, "--namespace is required for the EFA deploy test"
 
-    workspace = _get_workspace_dir()
-    manifest_path = os.path.join(workspace, "tests", "deploy", "efa", "disagg-efa.yaml")
-    assert os.path.exists(manifest_path), f"EFA manifest not found: {manifest_path}"
+    # Resolved from this file rather than the workspace root, so the test does
+    # not depend on a private helper or on where pytest was invoked from.
+    manifest_path = Path(__file__).parent / "efa" / "disagg-efa.yaml"
 
     deployment_spec = DeploymentSpec(manifest_path)
     deployment_spec.namespace = namespace
@@ -347,7 +340,7 @@ async def test_efa_deployment(
         frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
         assert frontend_pod_list, "No frontend pods found for EFA deployment"
         frontend_pod = frontend_pod_list[0]
-        logger.info(f"Found frontend pod: {frontend_pod.name}")
+        logger.info("Found frontend pod: %s", frontend_pod.name)
 
         port = deployment_spec.port
         port_forward = deployment.port_forward(frontend_pod, port)
@@ -355,7 +348,7 @@ async def test_efa_deployment(
             port_forward is not None
         ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
         base_url = f"http://localhost:{port_forward.local_port}"
-        logger.info(f"Port forwarding established: {base_url}")
+        logger.info("Port forwarding established: %s", base_url)
 
         endpoint = deployment_spec.endpoint
         model_ready = wait_for_model_availability(
@@ -372,7 +365,7 @@ async def test_efa_deployment(
         # Baseline the decode worker's NIXL rx-bytes counter before the request,
         # so we can prove the completion below makes it grow (KV pulled over EFA).
         rx_before = _read_nixl_rx_bytes(decode_pod)
-        logger.info(f"NIXL {NIXL_RX_BYTES_METRIC} before request: {rx_before}")
+        logger.info("NIXL %s before request: %s", NIXL_RX_BYTES_METRIC, rx_before)
 
         url = f"{base_url}{endpoint}"
         payload = {
@@ -388,7 +381,7 @@ async def test_efa_deployment(
         validate_completion(response, expected_model=EFA_MODEL_NAME)
 
         rx_after = _read_nixl_rx_bytes(decode_pod)
-        logger.info(f"NIXL {NIXL_RX_BYTES_METRIC} after request: {rx_after}")
+        logger.info("NIXL %s after request: %s", NIXL_RX_BYTES_METRIC, rx_after)
 
         # A successful disagg completion means KV moved prefill->decode. Prove it
         # (1) rode the LIBFABRIC/EFA backend rather than falling back to UCX, and
