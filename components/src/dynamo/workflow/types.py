@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Portable value and stage contracts for Dynamo workflows."""
+"""Logical value and stage contracts for Dynamo workflows."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Mapping, Optional, Tuple, Union
+from typing import Mapping, Optional, Tuple, Union
 
 
 class WorkflowValidationError(ValueError):
@@ -33,18 +33,6 @@ _TENSOR_DTYPES = frozenset(
         "float64",
     }
 )
-
-
-def _check_keys(
-    data: Mapping[str, Any], required: set[str], optional: set[str]
-) -> None:
-    keys = set(data)
-    missing = required - keys
-    unknown = keys - required - optional
-    if missing:
-        raise WorkflowValidationError(f"missing fields: {sorted(missing)}")
-    if unknown:
-        raise WorkflowValidationError(f"unknown fields: {sorted(unknown)}")
 
 
 def validate_name(name: str, kind: str) -> None:
@@ -73,7 +61,7 @@ def _validate_utf8(value: str, kind: str) -> None:
 
 @dataclass(frozen=True)
 class ValueSpec:
-    """A small, serializable description of a value crossing a workflow port."""
+    """A small logical description of a value crossing a workflow port."""
 
     type: str
     dtype: Optional[str] = None
@@ -155,40 +143,6 @@ class ValueSpec:
                     "tensor shape dimensions must be non-negative integers or 'dynamic'"
                 )
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return the canonical JSON-ready representation."""
-
-        data: dict[str, Any] = {"type": self.type}
-        if self.dtype is not None:
-            data["dtype"] = self.dtype
-        if self.shape is not None:
-            data["shape"] = list(self.shape)
-        if self.mode is not None:
-            data["mode"] = self.mode
-        if self.class_id is not None:
-            data["class_id"] = self.class_id
-        return data
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ValueSpec":
-        """Parse a value description while rejecting unknown fields."""
-
-        if not isinstance(data, Mapping):
-            raise WorkflowValidationError("value spec must be an object")
-        _check_keys(data, {"type"}, {"dtype", "shape", "mode", "class_id"})
-        shape = data.get("shape")
-        if shape is not None and (
-            not isinstance(shape, list) or isinstance(shape, (str, bytes))
-        ):
-            raise WorkflowValidationError("tensor shape must be a JSON array")
-        return cls(
-            type=data["type"],
-            dtype=data.get("dtype"),
-            shape=None if shape is None else tuple(shape),
-            mode=data.get("mode"),
-            class_id=data.get("class_id"),
-        )
-
 
 def compatibility_error(producer: ValueSpec, consumer: ValueSpec) -> Optional[str]:
     """Explain why a producer cannot satisfy a consumer, or return ``None``."""
@@ -261,32 +215,6 @@ class StageContract:
             frozen[name] = spec
         return MappingProxyType(frozen)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return the canonical JSON-ready representation."""
-
-        return {
-            "id": self.id,
-            "inputs": {name: spec.to_dict() for name, spec in self.inputs.items()},
-            "outputs": {name: spec.to_dict() for name, spec in self.outputs.items()},
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "StageContract":
-        """Parse a stage contract while rejecting unknown fields."""
-
-        if not isinstance(data, Mapping):
-            raise WorkflowValidationError("stage contract must be an object")
-        _check_keys(data, {"id", "inputs", "outputs"}, set())
-        inputs = data["inputs"]
-        outputs = data["outputs"]
-        if not isinstance(inputs, Mapping) or not isinstance(outputs, Mapping):
-            raise WorkflowValidationError("contract inputs and outputs must be objects")
-        return cls(
-            id=data["id"],
-            inputs={name: ValueSpec.from_dict(spec) for name, spec in inputs.items()},
-            outputs={name: ValueSpec.from_dict(spec) for name, spec in outputs.items()},
-        )
-
 
 @dataclass(frozen=True)
 class ValueRef:
@@ -327,24 +255,3 @@ class ValueRef:
         """Create a stage-output reference."""
 
         return cls(stage_id=stage_id, output_name=output_name, _owner=owner)
-
-    def to_dict(self) -> dict[str, str]:
-        """Return the canonical JSON-ready representation."""
-
-        if self.input_name is not None:
-            return {"input": self.input_name}
-        return {"stage": self.stage_id, "output": self.output_name}  # type: ignore[dict-item]
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ValueRef":
-        """Parse a structured reference."""
-
-        if not isinstance(data, Mapping):
-            raise WorkflowValidationError("value reference must be an object")
-        if set(data) == {"input"}:
-            return cls.for_input(data["input"])
-        if set(data) == {"stage", "output"}:
-            return cls.for_stage_output(data["stage"], data["output"])
-        raise WorkflowValidationError(
-            "value reference must contain either 'input' or both 'stage' and 'output'"
-        )

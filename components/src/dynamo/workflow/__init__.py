@@ -9,7 +9,7 @@ from dynamo.workflow.builder import (
     Workflow,
     WorkflowBuilder,
 )
-from dynamo.workflow.ir import WORKFLOW_SCHEMA, WORKFLOW_VERSION, StageIR, WorkflowIR
+from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.types import (
     StageContract,
     ValueRef,
@@ -18,8 +18,6 @@ from dynamo.workflow.types import (
 )
 
 __all__ = [
-    "WORKFLOW_SCHEMA",
-    "WORKFLOW_VERSION",
     "StageContract",
     "StageDefinition",
     "StageHandle",
