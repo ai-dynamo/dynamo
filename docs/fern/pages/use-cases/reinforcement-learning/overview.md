@@ -19,7 +19,7 @@ A typical RL setup has three planes:
 | Rollout serving | Dynamo | Routes generation requests, exposes token and log probability data, discovers live workers, and provides engine control surfaces. |
 | Operations | Platform stack | Scales capacity, observes health, handles failures, and manages deployment lifecycle. |
 
-Dynamo sits between the RL orchestrator and inference backends such as vLLM, SGLang, and TensorRT-LLM. For SGLang rollouts, use Dynamo's SGLang-compatible `POST /generate` or `PUT /generate` API. This API routes token-input requests through Dynamo and preserves SGLang's native streaming response objects. The OpenAI-compatible frontend remains available for cross-backend integrations. Use backend-specific control surfaces to pause generation, update weights, resume workers, or inspect live worker capabilities.
+Dynamo sits between the RL orchestrator and inference backends such as vLLM, SGLang, and TensorRT-LLM. For SGLang rollouts, use Dynamo's SGLang-compatible `POST /generate` or `PUT /generate` API. This API routes token-input requests through Dynamo. It preserves SGLang's native streaming response objects. The OpenAI-compatible frontend remains available for cross-backend integrations. Use backend-specific control surfaces to manage workers.
 
 ## What Dynamo Adds
 
@@ -34,12 +34,13 @@ Dynamo sits between the RL orchestrator and inference backends such as vLLM, SGL
 ## Integration Pattern
 
 1. Deploy Dynamo with the inference backend you want to use for rollouts.
-2. For SGLang, enable the SGLang-compatible `/generate` API and send native token-input requests through the Dynamo frontend.
-3. For cross-backend clients, use the OpenAI-compatible completion or chat routes.
-4. Request the token and log probability fields through NVIDIA request extensions when you use the OpenAI-compatible routes.
-5. Discover live rollout workers when the orchestrator needs direct worker administration.
-6. Pause selected workers, refresh weights, validate the update, and resume generation.
-7. Use Dynamo's routing, autoscaling, and fault-tolerance features to keep rollout serving aligned with training demand.
+2. For SGLang, enable the SGLang-compatible `/generate` API.
+3. Send native token-input requests through the Dynamo frontend.
+4. For cross-backend clients, use the OpenAI-compatible completion or chat routes.
+5. When you use the OpenAI-compatible routes, request token and log probability fields through NVIDIA request extensions.
+6. Discover live rollout workers when the orchestrator needs direct worker administration.
+7. Pause selected workers, refresh weights, validate the update, and resume generation.
+8. Use Dynamo's routing, autoscaling, and fault-tolerance features to keep rollout serving aligned with training demand.
 
 For the concrete API shapes, environment variables, and command examples, see the [RL Implementation Guide](implementation-guide.md).
 
