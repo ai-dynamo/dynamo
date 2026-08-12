@@ -50,6 +50,7 @@ fn bs_event_with_cache_namespace(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     }
 }
 

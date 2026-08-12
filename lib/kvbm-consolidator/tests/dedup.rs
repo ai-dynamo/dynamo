@@ -56,6 +56,7 @@ fn bs_event(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn br_event(hashes: Vec<u64>) -> RawKvEvent {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     }
 }
 
