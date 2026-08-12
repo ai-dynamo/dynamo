@@ -30,13 +30,6 @@ from typing import Optional
 
 import pytest
 
-from tests.deploy.test_deploy import (
-    DEFAULT_REQUEST_TIMEOUT,
-    DEFAULT_TEMPERATURE,
-    MIN_RESPONSE_CONTENT_LENGTH,
-    TEST_PROMPT,
-    validate_chat_response,
-)
 from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.managed_deployment import (
     DeploymentSpec,
@@ -49,6 +42,52 @@ logger = logging.getLogger(__name__)
 EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
 PREFILL_SERVICE = "VllmPrefillWorker"
 DECODE_SERVICE = "VllmDecodeWorker"
+
+# Deliberately self-contained rather than imported from test_deploy.py. Importing
+# one test module from another breaks the pre-commit marker report, which
+# collects only the changed files and cannot resolve the sibling module, and it
+# would couple this test's pass/fail to edits in the deploy-matrix test.
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_REQUEST_TIMEOUT = 120
+MIN_RESPONSE_CONTENT_LENGTH = 100
+
+# A long prompt on purpose: the point of this test is that KV moves from prefill
+# to decode, so there needs to be enough of it to register and transfer.
+TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
+lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
+beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
+known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
+the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
+and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
+
+
+def validate_completion(response, expected_model: str) -> None:
+    """Assert the chat completion is a well-formed, non-trivial answer."""
+    assert response.status_code == 200, (
+        f"Expected status 200, got {response.status_code}. "
+        f"Response: {response.text[:500]}"
+    )
+    try:
+        data = response.json()
+    except ValueError as e:
+        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
+
+    choices = data.get("choices") or []
+    assert choices, f"Response has no choices: {data}"
+    content = (choices[0].get("message") or {}).get("content") or ""
+    assert (
+        data.get("model") == expected_model
+    ), f"Expected model {expected_model!r}, got {data.get('model')!r}"
+    assert len(content) >= MIN_RESPONSE_CONTENT_LENGTH, (
+        f"Response content is {len(content)} chars, expected at least "
+        f"{MIN_RESPONSE_CONTENT_LENGTH}: {content!r}"
+    )
+    logger.info(
+        "Response validation passed: model=%s, content_length=%d",
+        expected_model,
+        len(content),
+    )
+
 
 # Generate enough tokens to clear MIN_RESPONSE_CONTENT_LENGTH with margin.
 # The shared DEFAULT_MAX_TOKENS=30 leaves a thin cushion above the 100-char
@@ -346,11 +385,7 @@ async def test_efa_deployment(
         response = send_request(
             url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
         )
-        validate_chat_response(
-            response=response,
-            expected_model=EFA_MODEL_NAME,
-            min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-        )
+        validate_completion(response, expected_model=EFA_MODEL_NAME)
 
         rx_after = _read_nixl_rx_bytes(decode_pod)
         logger.info(f"NIXL {NIXL_RX_BYTES_METRIC} after request: {rx_after}")
