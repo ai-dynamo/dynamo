@@ -457,6 +457,9 @@ where
             .client()
             .await?
             .with_admitted_instances_and_cancellation(admitted_ids, cancellation.clone());
+        // `cancellation` is moved into the WorkerSet below, above the KvWorkerMonitor
+        // construction, so take the monitor's handle on it here.
+        let monitor_cancellation = cancellation.clone();
         let instance_watcher = client.instance_avail_watcher();
         tracing::debug!(
             model_name = card.name(),
@@ -611,6 +614,7 @@ where
                 Some(KvWorkerMonitor::new(
                     monitor_client,
                     router_config.load_threshold_config.clone(),
+                    monitor_cancellation,
                 ))
             } else {
                 None
