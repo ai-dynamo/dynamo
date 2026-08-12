@@ -56,8 +56,9 @@ WORKDIR /workspace
 
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
-# for shells, not K8s python3 launches), swap upstream's single-binary etcd
-# for dynamo_base's directory, and symlink system libstdc++ to a stable
+# for shells, not K8s python3 launches), swap upstream's standalone etcd
+# tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
+# carries a single copy of each tool, and symlink system libstdc++ to a stable
 # path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
 # NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
 # older copy.
