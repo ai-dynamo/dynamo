@@ -129,8 +129,6 @@ spec:
           - '32'
           - --async-scheduling
           - --no-enable-flashinfer-autotune
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -148,7 +146,6 @@ spec:
           - nemotron_nano
           - --reasoning-parser
           - nemotron_v3
-          - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --disaggregation-mode
@@ -170,11 +167,6 @@ spec:
             value: /tmp/vllm-config
           - name: VLLM_CACHE_ROOT
             value: /tmp/vllm-cache
-          - name: SPECULATIVE_CONFIG
-            valueFrom:
-              configMapKeyRef:
-                name: vllm-disagg-b200-dspark-config
-                key: speculative-config # speculative-config-synthetic for benchmarking
           - name: VLLM_DISABLED_KERNELS
             value: FlashInferFP8ScaledMMLinearKernel
           - name: NCCL_IB_DISABLE
@@ -268,8 +260,6 @@ spec:
           - '32'
           - --async-scheduling
           - --no-enable-flashinfer-autotune
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
