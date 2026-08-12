@@ -2515,7 +2515,6 @@ mod tests {
     /// critically, never the zero delay that made the loop spin. Reverting to
     /// the old immediate `continue` yields all-zero delays and fails the first
     /// assertion.
-    #[cfg(unix)]
     #[test]
     fn accept_backoff_delay_grows_and_saturates() {
         let mut backoff = AcceptBackoff::default();
@@ -2565,7 +2564,6 @@ mod tests {
     /// A successful accept ends the episode: the next exhaustion failure starts
     /// over at the initial delay rather than resuming from the grown one.
     /// Deleting the reset inside `record_success` makes this fail.
-    #[cfg(unix)]
     #[test]
     fn accept_backoff_resets_after_successful_accept() {
         let mut backoff = AcceptBackoff::default();
@@ -2597,7 +2595,6 @@ mod tests {
     /// an unbounded stream of `warn!`s -- reinstating the exact log storm this
     /// policy exists to bound. Deleting the window check inside `record_success`
     /// makes the third assertion fail.
-    #[cfg(unix)]
     #[test]
     fn accept_backoff_rate_limits_recovery_notice() {
         let mut backoff = AcceptBackoff::default();
@@ -2658,7 +2655,6 @@ mod tests {
     /// emission per interval, carrying the count of failures suppressed since
     /// the previous one, and a fresh emission once the interval elapses.
     /// Removing the rate limit makes every failure emit and fails the count.
-    #[cfg(unix)]
     #[test]
     fn accept_backoff_rate_limits_summary_and_reports_suppressed_count() {
         let mut backoff = AcceptBackoff::default();
