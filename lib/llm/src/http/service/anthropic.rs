@@ -61,8 +61,7 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClassifiedHttpError, HttpErrorKind, INTERNAL_ERROR_MESSAGE, drain_converted_stream_events,
-    invalid_argument,
+    ClassifiedHttpError, HttpErrorKind, drain_converted_stream_events, invalid_argument,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
@@ -245,10 +244,9 @@ async fn handler_anthropic_messages(
     )
     .await
     .map_err(|e| {
-        anthropic_problem(ClassifiedHttpError::internal(
-            "Internal server error",
-            format!("Failed to await Anthropic messages task: {e:?}"),
-        ))
+        anthropic_problem(ClassifiedHttpError::internal(format!(
+            "Failed to await Anthropic messages task: {e:?}"
+        )))
         .0
     })?;
 
@@ -917,7 +915,7 @@ fn anthropic_error_from_anyhow(
 
 fn classify_anthropic_anyhow(err: anyhow::Error, context: &str) -> ClassifiedHttpError {
     let err = err.context(context.to_string());
-    ClassifiedHttpError::from_error(err.as_ref(), INTERNAL_ERROR_MESSAGE)
+    ClassifiedHttpError::from_error(err.as_ref())
 }
 
 fn anthropic_problem(problem: ClassifiedHttpError) -> (Response, super::metrics::ErrorType) {
@@ -990,6 +988,7 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
 
 #[cfg(test)]
 mod tests {
+    use super::super::error::INTERNAL_ERROR_MESSAGE;
     use super::*;
     use crate::protocols::common::extensions::parse_nvext;
 

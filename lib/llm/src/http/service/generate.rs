@@ -449,7 +449,7 @@ async fn generate_dispatch(
                     .metrics_clone()
                     .inc_rejection(&model, super::metrics::Endpoint::Generate);
             }
-            let problem = ClassifiedHttpError::from_error(error.as_ref(), "internal server error");
+            let problem = ClassifiedHttpError::from_error(error.as_ref());
             inflight_guard.mark_error(problem.metric_type());
             return generate_problem(problem);
         }
@@ -491,7 +491,7 @@ async fn generate_dispatch(
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
             }
-            let problem = ClassifiedHttpError::from_error(error.as_ref(), "internal server error");
+            let problem = ClassifiedHttpError::from_error(error.as_ref());
             inflight_guard.mark_error(problem.metric_type());
             generate_problem(problem)
         }

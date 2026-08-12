@@ -299,10 +299,7 @@ fn monitor_for_disconnects_impl(
                                 .and_then(|source| source.downcast_ref::<ClassifiedHttpError>())
                                 .cloned()
                                 .unwrap_or_else(|| {
-                                    ClassifiedHttpError::internal(
-                                        "Internal server error",
-                                        err.to_string(),
-                                    )
+                                    ClassifiedHttpError::internal(err.to_string())
                                 });
                             inflight_guard.mark_error(problem.metric_type());
                             // A terminal stream error abandons the source stream, so explicitly
@@ -782,7 +779,7 @@ mod tests {
             .get("error")
             .and_then(|v| v.as_object())
             .unwrap_or_else(|| panic!("[{case}] `error` field is not an object. Body:\n{text}"));
-        let expected = ClassifiedHttpError::internal("Internal server error", "test diagnostic");
+        let expected = ClassifiedHttpError::internal("test diagnostic");
         let expected_message = expected.message().to_string();
         assert_eq!(
             error.get("message").and_then(|v| v.as_str()),

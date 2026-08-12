@@ -366,16 +366,14 @@ impl ErrorMessage {
     }
 
     /// Convert an engine error into an OpenAI error envelope.
-    pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
-        Self::from_problem(ClassifiedHttpError::from_error(err.as_ref(), alt_msg))
+    pub fn from_anyhow(err: anyhow::Error, context: &str) -> ErrorResponse {
+        let err = err.context(context.to_string());
+        Self::from_problem(ClassifiedHttpError::from_error(err.as_ref()))
     }
 
     /// Implementers may explicitly return safe 4xx errors.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
-        Self::from_problem(ClassifiedHttpError::from_error(
-            &err,
-            "Internal server error",
-        ))
+        Self::from_problem(ClassifiedHttpError::from_error(&err))
     }
 }
 
@@ -4046,7 +4044,7 @@ pub fn audios_router(
 
 #[cfg(test)]
 mod tests {
-
+    use super::super::error::INTERNAL_ERROR_MESSAGE;
     use super::*;
     use crate::discovery::ModelManagerError;
     use crate::protocols::common::StopConditionsProvider;
@@ -4586,13 +4584,13 @@ mod tests {
 
     #[test]
     fn test_other_error_response_from_anyhow() {
-        // Non-HttpError anyhow chains must NOT be exposed to the client; only
-        // the static backup message should appear in the response.
+        // Non-HttpError anyhow chains and caller context must remain diagnostic-only.
         let err = other_error_from_engine().unwrap_err();
         let leaked_chain = format!("{err:#}");
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.1.message, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.1.message, INTERNAL_ERROR_MESSAGE);
+        assert!(!response.1.message.contains(BACKUP_ERROR_MESSAGE));
         assert!(
             !response.1.message.contains(&leaked_chain),
             "client response must not contain the anyhow error chain"

@@ -79,10 +79,9 @@ pub(crate) fn drain_converted_stream_events<'a, T>(
 ) -> impl Iterator<Item = Result<T, ClassifiedHttpError>> + 'a {
     events.drain(..).map(move |event| {
         event.map_err(|error| {
-            ClassifiedHttpError::internal(
-                INTERNAL_ERROR_MESSAGE,
-                format!("{protocol} stream event conversion failed: {error:#}"),
-            )
+            ClassifiedHttpError::internal(format!(
+                "{protocol} stream event conversion failed: {error:#}"
+            ))
         })
     })
 }
@@ -106,16 +105,12 @@ impl ClassifiedHttpError {
     /// Classify an arbitrary error through the same logical nested-error flow
     /// used by `from_annotated`; generic callers retain chain-wide validation
     /// lookup because untyped context wrappers may surround the typed failure.
-    pub(crate) fn from_error(
-        err: &(dyn std::error::Error + 'static),
-        internal_message: &str,
-    ) -> Self {
-        Self::from_error_with_validation_scope(err, internal_message, ValidationScope::Chain)
+    pub(crate) fn from_error(err: &(dyn std::error::Error + 'static)) -> Self {
+        Self::from_error_with_validation_scope(err, ValidationScope::Chain)
     }
 
     fn from_error_with_validation_scope(
         err: &(dyn std::error::Error + 'static),
-        internal_message: &str,
         validation_scope: ValidationScope,
     ) -> Self {
         let diagnostic = format_error_chain(err);
@@ -136,14 +131,14 @@ impl ClassifiedHttpError {
         }
 
         if let Some(dynamo_error) = select_dynamo_error_in_chain(err, validation_scope) {
-            return Self::from_dynamo_error(dynamo_error, internal_message, diagnostic);
+            return Self::from_dynamo_error(dynamo_error, diagnostic);
         }
 
         // All other typed failures retain outermost-error classification.
         let mut current = Some(err);
         while let Some(error) = current {
             if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
-                return Self::from_dynamo_error(dynamo_error, internal_message, diagnostic);
+                return Self::from_dynamo_error(dynamo_error, diagnostic);
             }
             if let Some(http_error) = error.downcast_ref::<HttpError>() {
                 return Self::from_explicit_http_error(http_error, diagnostic);
@@ -151,7 +146,7 @@ impl ClassifiedHttpError {
             current = error.source();
         }
 
-        Self::internal(internal_message, diagnostic)
+        Self::internal(diagnostic)
     }
 
     /// Classify a backend stream event through the same logical nested-error
@@ -164,7 +159,6 @@ impl ClassifiedHttpError {
             if let Some(error) = event.error.as_ref() {
                 return Some(Self::from_error_with_validation_scope(
                     error,
-                    INTERNAL_ERROR_MESSAGE,
                     ValidationScope::Outermost,
                 ));
             }
@@ -176,7 +170,7 @@ impl ClassifiedHttpError {
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or_else(|| "unspecified error".to_string());
 
-            return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
+            return Some(Self::internal(diagnostic));
         }
 
         None
@@ -194,7 +188,7 @@ impl ClassifiedHttpError {
             && !comments.is_empty()
         {
             let diagnostic = comments.join(", ");
-            return Some(Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic));
+            return Some(Self::internal(diagnostic));
         }
 
         None
@@ -227,26 +221,26 @@ impl ClassifiedHttpError {
                 INTERNAL_ERROR_MESSAGE,
                 diagnostic,
             ),
-            _ => Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic),
+            _ => Self::internal(diagnostic),
         }
     }
 
-    pub(crate) fn internal(message: impl Into<String>, diagnostic: impl Into<String>) -> Self {
+    pub(crate) fn internal(diagnostic: impl Into<String>) -> Self {
         Self {
             kind: HttpErrorKind::Internal,
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: message.into(),
+            message: INTERNAL_ERROR_MESSAGE.to_string(),
             diagnostic: diagnostic.into(),
             details: None,
         }
     }
 
-    fn from_dynamo_error(error: &DynamoError, internal_message: &str, diagnostic: String) -> Self {
+    fn from_dynamo_error(error: &DynamoError, diagnostic: String) -> Self {
         if let Some((status, message)) = backend_http_metadata(error) {
             return Self::from_backend_status(status, message, diagnostic);
         }
         if error.http_error().is_some() {
-            return Self::internal(internal_message, diagnostic);
+            return Self::internal(diagnostic);
         }
 
         match error.error_type() {
@@ -280,13 +274,13 @@ impl ClassifiedHttpError {
                     diagnostic,
                 )
             }
-            _ => Self::internal(internal_message, diagnostic),
+            _ => Self::internal(diagnostic),
         }
     }
 
     fn from_explicit_http_error(error: &HttpError, diagnostic: String) -> Self {
         let Ok(status) = StatusCode::from_u16(error.code) else {
-            return Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic);
+            return Self::internal(diagnostic);
         };
         if status.as_u16() == 499 {
             Self::classified(
@@ -304,7 +298,7 @@ impl ClassifiedHttpError {
                 details: None,
             }
         } else {
-            Self::internal(INTERNAL_ERROR_MESSAGE, diagnostic)
+            Self::internal(diagnostic)
         }
     }
 
@@ -520,7 +514,7 @@ mod tests {
                 .error_type(error_type)
                 .message("temperature must be between 0 and 2")
                 .build();
-            let classified = ClassifiedHttpError::from_error(&error, "request failed");
+            let classified = ClassifiedHttpError::from_error(&error);
             assert_eq!(classified.kind(), HttpErrorKind::Validation);
             assert_eq!(classified.status(), StatusCode::BAD_REQUEST);
             assert_eq!(classified.message(), "temperature must be between 0 and 2");
@@ -530,10 +524,10 @@ mod tests {
             .error_type(DynamoErrorType::Backend(BackendError::Unknown))
             .message("panic at /srv/worker.py:42")
             .build();
-        let classified = ClassifiedHttpError::from_error(&error, "request failed");
+        let classified = ClassifiedHttpError::from_error(&error);
         assert_eq!(classified.kind(), HttpErrorKind::Internal);
         assert_eq!(classified.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(classified.message(), "request failed");
+        assert_eq!(classified.message(), INTERNAL_ERROR_MESSAGE);
         assert!(!classified.message().contains("/srv/worker.py"));
     }
 
@@ -600,7 +594,7 @@ mod tests {
                 )
                 .build();
 
-            let classified = ClassifiedHttpError::from_error(&error, "request failed");
+            let classified = ClassifiedHttpError::from_error(&error);
             assert_eq!(classified.kind(), expected_kind);
             assert_eq!(classified.status(), expected_status);
 
@@ -624,7 +618,7 @@ mod tests {
             )
             .build();
 
-        let classified = ClassifiedHttpError::from_error(&error, "request failed");
+        let classified = ClassifiedHttpError::from_error(&error);
         assert_eq!(classified.kind(), HttpErrorKind::Overloaded);
         assert_eq!(classified.status(), overload_status_code());
     }
@@ -648,7 +642,7 @@ mod tests {
                     .build()
             };
 
-            let classified = ClassifiedHttpError::from_error(&wrapped_invalid(), "request failed");
+            let classified = ClassifiedHttpError::from_error(&wrapped_invalid());
             assert_eq!(classified.kind(), HttpErrorKind::Validation);
             assert_eq!(classified.status(), StatusCode::BAD_REQUEST);
             assert_eq!(classified.message(), "nested invalid argument");
@@ -710,7 +704,6 @@ mod tests {
                 .error_type(DynamoErrorType::ResourceExhausted)
                 .message("busy")
                 .build(),
-            INTERNAL_ERROR_MESSAGE,
             "busy".to_string(),
         );
         assert_eq!(overloaded.status(), overload_status_code());
@@ -720,7 +713,6 @@ mod tests {
                 .error_type(DynamoErrorType::Unavailable)
                 .message("down")
                 .build(),
-            INTERNAL_ERROR_MESSAGE,
             "down".to_string(),
         );
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
