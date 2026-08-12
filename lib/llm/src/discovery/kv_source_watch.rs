@@ -281,7 +281,9 @@ fn reconcile_discovery_event(
             }
             membership.remove_publisher(publisher_id);
         }
-        Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
+        Ok(DiscoveryEvent::Added(_))
+        | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+        | Ok(DiscoveryEvent::Removed(_)) => {}
         Err(error) => {
             tracing::error!(%error, "KV event-source discovery stream failed; rebinding");
             *membership = KvSourceMembership::new();
@@ -351,6 +353,7 @@ mod tests {
                 instance_id: publisher_id,
                 transport: TransportType::Tcp("tcp://127.0.0.1:1234".to_string()),
                 device_type: None,
+                request_plane_codec: None,
             }),
             ..source(endpoint, worker_id, publisher_id)
         }

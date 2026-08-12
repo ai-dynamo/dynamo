@@ -11,7 +11,7 @@ pub(super) use super::components::ReplayMode;
 use super::components::TrafficStats;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
-    ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator,
+    ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator, WorkerScaleDelta,
 };
 use super::core::round_robin::PoolRoundRobinPlacement;
 use super::core::{
@@ -19,6 +19,11 @@ use super::core::{
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage, WorkerCompletionPayload};
+use super::evidence::{
+    KvIngestBoundary, WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool,
+    WorkerPoolState, attach_pressure_references, drain_origin, lifecycle_capture_active,
+    record_lifecycle_operation, startup_origin,
+};
 #[cfg(test)]
 use super::extensions::kv_router::{
     DisaggRuntime, ReplayKvRouterConfig, derive_decode_router_config, derive_prefill_router_config,
@@ -44,10 +49,17 @@ use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, Output
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
-use crate::replay::{OfflineDisaggReplayConfig, ReplayTerminalStatus, TraceCollector};
+use crate::replay::{
+    OfflineDisaggReplayConfig, ReplayRequestPool, ReplayTerminalStatus, TraceCollector,
+};
 use crate::scheduler::{
     AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
 };
+
+fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
+    let first = origins.next()?;
+    origins.all(|origin| origin == first).then_some(first)
+}
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -600,7 +612,7 @@ impl DisaggFlowState {
     ) -> Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         let input_length = request.input_length();
-        let output_length = request.metadata().max_output_tokens;
+        let output_length = request.metadata().effective_max_output_tokens();
         request.metadata_mut().uuid = Some(uuid);
         request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
@@ -789,7 +801,10 @@ impl DisaggFlowState {
             let (input_tokens, requested_output_tokens) = {
                 let state = self.state(signal.uuid)?;
                 let original = state.original_request()?;
-                (original.tokens.len(), original.max_output_tokens)
+                (
+                    original.tokens.len(),
+                    original.effective_max_output_tokens(),
+                )
             };
             let actual_output_tokens =
                 collector.actual_output_length(signal.uuid).ok_or_else(|| {
@@ -886,6 +901,7 @@ where
 {
     now_ms: f64,
     next_event_seq: u64,
+    next_scaling_tick_ordinal: u64,
     admission: AdmissionQueue<Metadata>,
     prefill_engine: EngineComponent<Observation>,
     decode_engine: EngineComponent<Observation>,
@@ -1029,6 +1045,7 @@ where
         Ok(Self {
             now_ms: 0.0,
             next_event_seq: 0,
+            next_scaling_tick_ordinal: 0,
             admission,
             prefill_engine,
             decode_engine,
@@ -1244,6 +1261,24 @@ where
 
     fn dispatch_prefill_placements(&mut self, placements: Vec<Placement>) -> Result<()> {
         for placement in placements {
+            let (logical_worker_id, dp_rank) = self
+                .prefill_engine
+                .rank_identity(placement.scheduler_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "offline prefill placement references unknown scheduler {}",
+                        placement.scheduler_id
+                    )
+                })?;
+            self.collector.on_route_released(
+                placement.request_id,
+                ReplayRequestPool::Prefill,
+                self.now_ms,
+                logical_worker_id,
+                placement.scheduler_id,
+                dp_rank,
+                placement.reported_overlap_tokens,
+            );
             let (uuid, worker_idx, action) = self.flow.take_prefill_placement(
                 placement,
                 &mut self.traffic,
@@ -1261,6 +1296,24 @@ where
 
     fn dispatch_decode_placements(&mut self, placements: Vec<Placement>) -> Result<()> {
         for placement in placements {
+            let (logical_worker_id, dp_rank) = self
+                .decode_engine
+                .rank_identity(placement.scheduler_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "offline decode placement references unknown scheduler {}",
+                        placement.scheduler_id
+                    )
+                })?;
+            self.collector.on_route_released(
+                placement.request_id,
+                ReplayRequestPool::Decode,
+                self.now_ms,
+                logical_worker_id,
+                placement.scheduler_id,
+                dp_rank,
+                placement.reported_overlap_tokens,
+            );
             let (uuid, worker_idx, action) = self
                 .flow
                 .take_decode_placement(placement, &mut self.collector)?;
@@ -1283,10 +1336,29 @@ where
             PlacementDecision::Immediate(placement) => {
                 let routed = self.prefill_placement.is_router();
                 self.state_mut(uuid)?.prefill_routed = routed;
+                let (logical_worker_id, dp_rank) = self
+                    .prefill_engine
+                    .rank_identity(placement.scheduler_id)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "offline prefill placement references unknown scheduler {}",
+                            placement.scheduler_id
+                        )
+                    })?;
+                self.collector.on_route_immediate(
+                    uuid,
+                    ReplayRequestPool::Prefill,
+                    logical_worker_id,
+                    placement.scheduler_id,
+                    dp_rank,
+                    placement.reported_overlap_tokens,
+                );
                 self.record_prefill_placement(placement)?;
                 self.dispatch_prefill(uuid, placement.scheduler_id, action)?;
             }
             PlacementDecision::Queued => {
+                self.collector
+                    .on_route_queued(uuid, ReplayRequestPool::Prefill, self.now_ms);
                 let state = self.state_mut(uuid)?;
                 state.pending_prefill_action = Some(action);
                 state.prefill_routed = true;
@@ -1317,10 +1389,29 @@ where
             PlacementDecision::Immediate(placement) => {
                 let routed = self.decode_placement.is_router();
                 self.state_mut(uuid)?.destination_routed = routed;
+                let (logical_worker_id, dp_rank) = self
+                    .decode_engine
+                    .rank_identity(placement.scheduler_id)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "offline decode placement references unknown scheduler {}",
+                            placement.scheduler_id
+                        )
+                    })?;
+                self.collector.on_route_immediate(
+                    uuid,
+                    ReplayRequestPool::Decode,
+                    logical_worker_id,
+                    placement.scheduler_id,
+                    dp_rank,
+                    placement.reported_overlap_tokens,
+                );
                 self.record_decode_placement(placement)?;
                 self.reserve_destination(uuid, placement.scheduler_id, action)?;
             }
             PlacementDecision::Queued => {
+                self.collector
+                    .on_route_queued(uuid, ReplayRequestPool::Decode, self.now_ms);
                 let state = self.state_mut(uuid)?;
                 state.pending_destination_action = Some(action);
                 state.destination_routed = true;
@@ -1469,7 +1560,10 @@ where
                     _ => bail!("source release returned an unexpected result"),
                 };
                 self.flow.record_source_release(uuid, &mut self.stats);
-                self.apply_prefill_observations(effects.engine_events)?;
+                self.apply_prefill_observations(
+                    effects.engine_events,
+                    KvIngestBoundary::SchedulerCommand,
+                )?;
                 self.flow.finish_source_release(
                     uuid,
                     issued,
@@ -1497,7 +1591,10 @@ where
                     .prefill_engine
                     .apply_command(worker_idx, SchedulerCommand::CancelSource { handoff_id })?;
                 let outcome = command_cleanup_outcome(effects.result)?;
-                self.apply_prefill_observations(effects.engine_events)?;
+                self.apply_prefill_observations(
+                    effects.engine_events,
+                    KvIngestBoundary::SchedulerCommand,
+                )?;
                 self.acknowledge_action(uuid, issued, outcome)?;
                 self.process_lifecycle_events(effects.lifecycle_events)?;
             }
@@ -1699,9 +1796,27 @@ where
         }
     }
 
-    fn apply_prefill_observations(&mut self, events: Observation::Batch) -> Result<()> {
+    fn apply_prefill_observations(
+        &mut self,
+        events: Observation::Batch,
+        boundary: KvIngestBoundary,
+    ) -> Result<()> {
+        Observation::record_ingestion(&events, WorkerPool::Prefill, boundary, self.now_ms)?;
         let placements = self.prefill_placement.observe(events, self.now_ms)?;
         self.dispatch_prefill_placements(placements)
+    }
+
+    fn apply_decode_observations(
+        &mut self,
+        events: Observation::Batch,
+        boundary: KvIngestBoundary,
+    ) -> Result<()> {
+        if let Some(capture) = self.flow.conformance_capture.as_mut() {
+            capture.record_after_activation(&Observation::stored_hashes(&events));
+        }
+        Observation::record_ingestion(&events, WorkerPool::Decode, boundary, self.now_ms)?;
+        let placements = self.decode_placement.observe(events, self.now_ms)?;
+        self.dispatch_decode_placements(placements)
     }
 
     #[cfg(feature = "kvbm-offload")]
@@ -1712,7 +1827,7 @@ where
             || decode.progress.made_progress
             || !prefill.lifecycle_events.is_empty()
             || !decode.lifecycle_events.is_empty();
-        self.apply_prefill_observations(prefill.engine_events)?;
+        self.apply_prefill_observations(prefill.engine_events, KvIngestBoundary::OffloadTick)?;
         if !decode.engine_events.is_empty() {
             tracing::debug!("offline disagg replay dropping decode-side offload router events");
         }
@@ -1793,7 +1908,7 @@ where
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
         engine_events: Observation::Batch,
     ) -> Result<()> {
-        self.apply_prefill_observations(engine_events)?;
+        self.apply_prefill_observations(engine_events, KvIngestBoundary::PassEnd)?;
         for signal in output_signals {
             self.process_prefill_signal(signal)?;
         }
@@ -1810,11 +1925,7 @@ where
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     ) -> Result<()> {
-        if let Some(capture) = self.flow.conformance_capture.as_mut() {
-            capture.record_after_activation(&Observation::stored_hashes(&engine_events));
-        }
-        let placements = self.decode_placement.observe(engine_events, self.now_ms)?;
-        self.dispatch_decode_placements(placements)?;
+        self.apply_decode_observations(engine_events, KvIngestBoundary::PassEnd)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
@@ -1935,7 +2046,10 @@ where
     fn drive_prefill_workers(&mut self) -> Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self.prefill_engine.drive_ready(self.now_ms, None)?;
+            let effects = self
+                .prefill_engine
+                .drive_ready(self.now_ms, &mut self.collector)?;
+            attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 return Ok(changed);
             }
@@ -1950,7 +2064,8 @@ where
         loop {
             let effects = self
                 .decode_engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+                .drive_ready(self.now_ms, &mut self.collector)?;
+            attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 #[cfg(test)]
                 self.stats
@@ -1968,7 +2083,7 @@ where
         effects: EngineEffects<Observation::Batch>,
     ) -> Result<()> {
         self.record_prefill_admissions(effects.admissions);
-        self.apply_prefill_observations(effects.pass_start_events)?;
+        self.apply_prefill_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
         for payload in effects.immediate_completions {
             self.apply_worker_completion(payload)?;
         }
@@ -1980,7 +2095,7 @@ where
 
     fn record_prefill_admissions(&mut self, admissions: Vec<AdmissionEvent>) {
         for admission in admissions {
-            self.collector.on_prefill_admit(
+            self.collector.on_prefill_pool_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,
@@ -1990,7 +2105,7 @@ where
 
     fn record_decode_admissions(&mut self, admissions: Vec<AdmissionEvent>) -> Result<()> {
         for admission in admissions {
-            self.collector.on_decode_admit(
+            self.collector.on_decode_pool_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,
@@ -2053,9 +2168,32 @@ where
                                 })?;
                         let placements =
                             self.prefill_placement.worker_ready(topology, self.now_ms)?;
+                        let mut released = placements
+                            .iter()
+                            .map(|placement| placement.request_id)
+                            .collect::<Vec<_>>();
                         self.dispatch_prefill_placements(placements)?;
                         let placements = self.prefill_placement.topology_settled(self.now_ms)?;
+                        released.extend(placements.iter().map(|placement| placement.request_id));
                         self.dispatch_prefill_placements(placements)?;
+                        let origin = startup_origin(WorkerPool::Prefill, worker_id);
+                        record_lifecycle_operation(
+                            self.now_ms,
+                            WorkerPool::Prefill,
+                            "worker_ready_event",
+                            None,
+                            origin,
+                            vec![WorkerLifecycleTransition {
+                                worker_id,
+                                transition: WorkerLifecycleTransitionKind::WorkerReady,
+                                prior_state: Some("starting"),
+                                state: "active",
+                                reason: None,
+                                origin_operation_ordinal: origin,
+                            }],
+                            self.prefill_lifecycle_state(),
+                            released,
+                        );
                         self.wake_worker_waiters(SimulationWorkerStage::Prefill);
                         changed = true;
                     }
@@ -2079,9 +2217,32 @@ where
                                 })?;
                         let placements =
                             self.decode_placement.worker_ready(topology, self.now_ms)?;
+                        let mut released = placements
+                            .iter()
+                            .map(|placement| placement.request_id)
+                            .collect::<Vec<_>>();
                         self.dispatch_decode_placements(placements)?;
                         let placements = self.decode_placement.topology_settled(self.now_ms)?;
+                        released.extend(placements.iter().map(|placement| placement.request_id));
                         self.dispatch_decode_placements(placements)?;
+                        let origin = startup_origin(WorkerPool::Decode, worker_id);
+                        record_lifecycle_operation(
+                            self.now_ms,
+                            WorkerPool::Decode,
+                            "worker_ready_event",
+                            None,
+                            origin,
+                            vec![WorkerLifecycleTransition {
+                                worker_id,
+                                transition: WorkerLifecycleTransitionKind::WorkerReady,
+                                prior_state: Some("starting"),
+                                state: "active",
+                                reason: None,
+                                origin_operation_ordinal: origin,
+                            }],
+                            self.decode_lifecycle_state(),
+                            released,
+                        );
                         self.wake_worker_waiters(SimulationWorkerStage::Decode);
                         changed = true;
                     }
@@ -2111,6 +2272,7 @@ where
             changed |= self.drive_prefill_workers()?;
             changed |= self.drive_decode_workers()?;
             let removed_prefill = self.prefill_engine.try_remove_drained();
+            let mut prefill_releases = Vec::new();
             for worker_id in &removed_prefill {
                 let placements = self.prefill_placement.worker_removed(
                     WorkerTopology {
@@ -2119,10 +2281,39 @@ where
                     },
                     self.now_ms,
                 )?;
+                prefill_releases.extend(placements.iter().map(|placement| placement.request_id));
                 self.dispatch_prefill_placements(placements)?;
+            }
+            if !removed_prefill.is_empty() {
+                let origin = common_origin(
+                    removed_prefill
+                        .iter()
+                        .filter_map(|worker_id| drain_origin(WorkerPool::Prefill, *worker_id)),
+                );
+                record_lifecycle_operation(
+                    self.now_ms,
+                    WorkerPool::Prefill,
+                    "drain_settlement",
+                    None,
+                    origin,
+                    removed_prefill
+                        .iter()
+                        .map(|worker_id| WorkerLifecycleTransition {
+                            worker_id: *worker_id,
+                            transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                            prior_state: Some("draining"),
+                            state: "removed",
+                            reason: None,
+                            origin_operation_ordinal: drain_origin(WorkerPool::Prefill, *worker_id),
+                        })
+                        .collect(),
+                    self.prefill_lifecycle_state(),
+                    prefill_releases,
+                );
             }
             changed |= !removed_prefill.is_empty();
             let removed_decode = self.decode_engine.try_remove_drained();
+            let mut decode_releases = Vec::new();
             for worker_id in &removed_decode {
                 let placements = self.decode_placement.worker_removed(
                     WorkerTopology {
@@ -2131,7 +2322,35 @@ where
                     },
                     self.now_ms,
                 )?;
+                decode_releases.extend(placements.iter().map(|placement| placement.request_id));
                 self.dispatch_decode_placements(placements)?;
+            }
+            if !removed_decode.is_empty() {
+                let origin = common_origin(
+                    removed_decode
+                        .iter()
+                        .filter_map(|worker_id| drain_origin(WorkerPool::Decode, *worker_id)),
+                );
+                record_lifecycle_operation(
+                    self.now_ms,
+                    WorkerPool::Decode,
+                    "drain_settlement",
+                    None,
+                    origin,
+                    removed_decode
+                        .iter()
+                        .map(|worker_id| WorkerLifecycleTransition {
+                            worker_id: *worker_id,
+                            transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                            prior_state: Some("draining"),
+                            state: "removed",
+                            reason: None,
+                            origin_operation_ordinal: drain_origin(WorkerPool::Decode, *worker_id),
+                        })
+                        .collect(),
+                    self.decode_lifecycle_state(),
+                    decode_releases,
+                );
             }
             changed |= !removed_decode.is_empty();
             // Scaling ticks fire last so the policy observes a settled timestamp.
@@ -2220,7 +2439,9 @@ where
                 self.decode_engine.dp_size(),
                 self.now_ms,
             );
+            let tick_ordinal = self.next_scaling_tick_ordinal;
             let snapshot = ReplayScalingSnapshot {
+                tick_ordinal,
                 now_ms: self.now_ms,
                 prefill_fpm: self.prefill_fpm_buffer.take(),
                 decode_fpm: self.decode_fpm_buffer.take(),
@@ -2232,6 +2453,10 @@ where
                 draining_prefill_ids: self.prefill_engine.draining_group_ids(),
                 draining_decode_ids: self.decode_engine.draining_group_ids(),
             };
+            self.next_scaling_tick_ordinal = self
+                .next_scaling_tick_ordinal
+                .checked_add(1)
+                .expect("replay scaling tick ordinal overflow");
             // Borrow the policy out so the runtime stays mutably available for
             // apply_scaling; restore it before propagating any error.
             let mut policy = self
@@ -2249,7 +2474,7 @@ where
                 let target_decode = decision
                     .target_decode
                     .unwrap_or_else(|| self.decode_engine.non_draining_group_count());
-                self.apply_scaling(target_prefill, target_decode)?;
+                self.apply_scaling_with_tick(target_prefill, target_decode, Some(tick_ordinal))?;
             }
 
             // Re-arm only into the strict, finite future and only while work
@@ -2341,10 +2566,20 @@ where
     ///
     /// Scale-down: the worker is removed from the router immediately so no
     /// new requests land on it while it drains in-flight work.
+    #[cfg(test)]
     pub(in crate::replay) fn apply_scaling(
         &mut self,
         target_prefill: usize,
         target_decode: usize,
+    ) -> Result<()> {
+        self.apply_scaling_with_tick(target_prefill, target_decode, None)
+    }
+
+    fn apply_scaling_with_tick(
+        &mut self,
+        target_prefill: usize,
+        target_decode: usize,
+        planner_tick_ordinal: Option<u64>,
     ) -> Result<()> {
         if target_prefill != self.prefill_engine.non_draining_group_count()
             || target_decode != self.decode_engine.non_draining_group_count()
@@ -2352,9 +2587,10 @@ where
             self.collector.clear_static_worker_count();
         }
         // -- prefill --
-        let (added, newly_marked, removed) = self.prefill_engine.apply_target_count(target_prefill);
+        let delta = self.prefill_engine.apply_target_count(target_prefill);
         let prefill_delay = self.prefill_engine.startup_time_ms();
-        for &id in &added {
+        let mut prefill_releases = Vec::new();
+        for &id in &delta.added {
             match prefill_delay {
                 Some(delay) => {
                     push_worker_ready(
@@ -2378,11 +2614,13 @@ where
                         .worker_topology(id)
                         .ok_or_else(|| anyhow!("new prefill worker {id} has no engine topology"))?;
                     let placements = self.prefill_placement.worker_ready(topology, self.now_ms)?;
+                    prefill_releases
+                        .extend(placements.iter().map(|placement| placement.request_id));
                     self.dispatch_prefill_placements(placements)?;
                 }
             }
         }
-        for id in newly_marked {
+        for &id in &delta.newly_draining {
             let topology = self
                 .prefill_engine
                 .worker_topology(id)
@@ -2393,9 +2631,10 @@ where
             let placements = self
                 .prefill_placement
                 .worker_draining(topology, self.now_ms)?;
+            prefill_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_prefill_placements(placements)?;
         }
-        for id in removed {
+        for &id in &delta.removed {
             let placements = self.prefill_placement.worker_removed(
                 WorkerTopology {
                     worker_id: id,
@@ -2403,18 +2642,28 @@ where
                 },
                 self.now_ms,
             )?;
+            prefill_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_prefill_placements(placements)?;
         }
         let placements = self.prefill_placement.topology_settled(self.now_ms)?;
+        prefill_releases.extend(placements.iter().map(|placement| placement.request_id));
         self.dispatch_prefill_placements(placements)?;
-        if !added.is_empty() && prefill_delay.is_none() {
+        self.record_scale_lifecycle(
+            WorkerPool::Prefill,
+            &delta,
+            prefill_delay.is_some(),
+            planner_tick_ordinal,
+            prefill_releases,
+        );
+        if !delta.added.is_empty() && prefill_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Prefill);
         }
 
         // -- decode --
-        let (added, newly_marked, removed) = self.decode_engine.apply_target_count(target_decode);
+        let delta = self.decode_engine.apply_target_count(target_decode);
         let decode_delay = self.decode_engine.startup_time_ms();
-        for &id in &added {
+        let mut decode_releases = Vec::new();
+        for &id in &delta.added {
             match decode_delay {
                 Some(delay) => {
                     push_worker_ready(
@@ -2438,11 +2687,12 @@ where
                         .worker_topology(id)
                         .ok_or_else(|| anyhow!("new decode worker {id} has no engine topology"))?;
                     let placements = self.decode_placement.worker_ready(topology, self.now_ms)?;
+                    decode_releases.extend(placements.iter().map(|placement| placement.request_id));
                     self.dispatch_decode_placements(placements)?;
                 }
             }
         }
-        for id in newly_marked {
+        for &id in &delta.newly_draining {
             let topology = self
                 .decode_engine
                 .worker_topology(id)
@@ -2453,9 +2703,10 @@ where
             let placements = self
                 .decode_placement
                 .worker_draining(topology, self.now_ms)?;
+            decode_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_decode_placements(placements)?;
         }
-        for id in removed {
+        for &id in &delta.removed {
             let placements = self.decode_placement.worker_removed(
                 WorkerTopology {
                     worker_id: id,
@@ -2463,15 +2714,133 @@ where
                 },
                 self.now_ms,
             )?;
+            decode_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_decode_placements(placements)?;
         }
         let placements = self.decode_placement.topology_settled(self.now_ms)?;
+        decode_releases.extend(placements.iter().map(|placement| placement.request_id));
         self.dispatch_decode_placements(placements)?;
-        if !added.is_empty() && decode_delay.is_none() {
+        self.record_scale_lifecycle(
+            WorkerPool::Decode,
+            &delta,
+            decode_delay.is_some(),
+            planner_tick_ordinal,
+            decode_releases,
+        );
+        if !delta.added.is_empty() && decode_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Decode);
         }
         self.record_router_pending();
         Ok(())
+    }
+
+    fn prefill_lifecycle_state(&self) -> WorkerPoolState {
+        WorkerPoolState {
+            active: self.prefill_engine.active_group_ids(),
+            starting: self.prefill_engine.starting_group_ids(),
+            draining: self.prefill_engine.draining_group_ids(),
+        }
+    }
+
+    fn decode_lifecycle_state(&self) -> WorkerPoolState {
+        WorkerPoolState {
+            active: self.decode_engine.active_group_ids(),
+            starting: self.decode_engine.starting_group_ids(),
+            draining: self.decode_engine.draining_group_ids(),
+        }
+    }
+
+    fn record_scale_lifecycle(
+        &self,
+        pool: WorkerPool,
+        delta: &WorkerScaleDelta,
+        delayed_startup: bool,
+        planner_tick_ordinal: Option<u64>,
+        released: Vec<Uuid>,
+    ) {
+        if !lifecycle_capture_active() {
+            return;
+        }
+        let mut transitions = Vec::new();
+        transitions.extend(
+            delta
+                .added
+                .iter()
+                .map(|worker_id| WorkerLifecycleTransition {
+                    worker_id: *worker_id,
+                    transition: if delayed_startup {
+                        WorkerLifecycleTransitionKind::WorkerStarting
+                    } else {
+                        WorkerLifecycleTransitionKind::WorkerReady
+                    },
+                    prior_state: None,
+                    state: if delayed_startup {
+                        "starting"
+                    } else {
+                        "active"
+                    },
+                    reason: None,
+                    origin_operation_ordinal: None,
+                }),
+        );
+        transitions.extend(delta.cancelled_startups.iter().map(|worker_id| {
+            WorkerLifecycleTransition {
+                worker_id: *worker_id,
+                transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                prior_state: Some("starting"),
+                state: "removed",
+                reason: Some("startup_cancelled"),
+                origin_operation_ordinal: startup_origin(pool, *worker_id),
+            }
+        }));
+        transitions.extend(delta.newly_draining.iter().map(|worker_id| {
+            WorkerLifecycleTransition {
+                worker_id: *worker_id,
+                transition: WorkerLifecycleTransitionKind::WorkerDraining,
+                prior_state: Some("active"),
+                state: "draining",
+                reason: None,
+                origin_operation_ordinal: None,
+            }
+        }));
+        transitions.extend(
+            delta
+                .removed
+                .iter()
+                .map(|worker_id| WorkerLifecycleTransition {
+                    worker_id: *worker_id,
+                    transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                    prior_state: Some("draining"),
+                    state: "removed",
+                    reason: None,
+                    origin_operation_ordinal: drain_origin(pool, *worker_id),
+                }),
+        );
+        let state_after_batch = match pool {
+            WorkerPool::Prefill => self.prefill_lifecycle_state(),
+            WorkerPool::Decode => self.decode_lifecycle_state(),
+            WorkerPool::Agg => unreachable!("disagg replay cannot mutate the agg pool"),
+        };
+        let origin = common_origin(
+            delta
+                .cancelled_startups
+                .iter()
+                .filter_map(|worker_id| startup_origin(pool, *worker_id)),
+        );
+        record_lifecycle_operation(
+            self.now_ms,
+            pool,
+            if planner_tick_ordinal.is_some() {
+                "planner_scale"
+            } else {
+                "manual_scale"
+            },
+            planner_tick_ordinal,
+            origin,
+            transitions,
+            state_after_batch,
+            released,
+        );
     }
 
     // ------------------------------------------------------------------
