@@ -666,12 +666,12 @@ async fn engine_route_handler(
         }
     };
 
-    let method_allowed = match route.method() {
+    let is_method_allowed = match route.method() {
         None => true,
         Some(EngineRouteMethod::Get) => method == Method::GET,
         Some(EngineRouteMethod::Post) => method == Method::POST,
     };
-    if !method_allowed {
+    if !is_method_allowed {
         tracing::debug!(%method, "method not allowed for /engine/{path}");
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -708,7 +708,6 @@ async fn engine_route_handler(
         }
     };
 
-    // Call callback (it's async, so await it)
     match callback(body_json).await {
         Ok(response) => {
             tracing::trace!("Engine route handler succeeded for /engine/{path}");

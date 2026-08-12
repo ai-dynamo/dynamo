@@ -48,7 +48,10 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
 
 /// Check whether an error chain indicates that no backend worker is available.
 pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
-    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const UNAVAILABLE: &[DynamoErrorType] = &[
+        DynamoErrorType::Unavailable,
+        DynamoErrorType::WorkerDraining,
+    ];
     const AVAILABLE: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
 }

@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::RwLock;
 
 /// Callback type for engine routes (async)
 /// Takes JSON body, returns JSON response (or error) wrapped in a Future
@@ -28,6 +31,7 @@ pub enum EngineRouteMethod {
 pub struct EngineRoute {
     callback: EngineRouteCallback,
     method: Option<EngineRouteMethod>,
+    registration_id: u64,
 }
 
 impl EngineRoute {
@@ -44,9 +48,32 @@ impl EngineRoute {
 ///
 /// This registry stores callbacks that handle requests to `/engine/*` routes.
 /// Routes are registered from Python via `runtime.register_engine_route()`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EngineRouteRegistry {
     routes: Arc<RwLock<HashMap<String, EngineRoute>>>,
+    next_registration_id: Arc<AtomicU64>,
+}
+
+impl Default for EngineRouteRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Removes a scoped route when its owner goes away without deleting a newer
+/// registration that reused the same path.
+#[must_use = "dropping the registration removes the engine route"]
+pub struct EngineRouteRegistration {
+    registry: EngineRouteRegistry,
+    route: String,
+    registration_id: u64,
+}
+
+impl Drop for EngineRouteRegistration {
+    fn drop(&mut self) {
+        self.registry
+            .remove_if_current(&self.route, self.registration_id);
+    }
 }
 
 impl EngineRouteRegistry {
@@ -54,6 +81,7 @@ impl EngineRouteRegistry {
     pub fn new() -> Self {
         Self {
             routes: Arc::new(RwLock::new(HashMap::new())),
+            next_registration_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -77,36 +105,69 @@ impl EngineRouteRegistry {
         self.register_inner(route, Some(method), callback);
     }
 
+    /// Register a method-restricted route whose lifetime is owned by the
+    /// returned guard.
+    pub fn register_scoped_method(
+        &self,
+        route: &str,
+        method: EngineRouteMethod,
+        callback: EngineRouteCallback,
+    ) -> EngineRouteRegistration {
+        let registration_id = self.register_inner(route, Some(method), callback);
+        EngineRouteRegistration {
+            registry: self.clone(),
+            route: route.to_string(),
+            registration_id,
+        }
+    }
+
     fn register_inner(
         &self,
         route: &str,
         method: Option<EngineRouteMethod>,
         callback: EngineRouteCallback,
-    ) {
-        let mut routes = self.routes.write().unwrap();
-        let entry = EngineRoute { callback, method };
+    ) -> u64 {
+        let registration_id = self.next_registration_id.fetch_add(1, Ordering::Relaxed);
+        let mut routes = self.routes.write();
+        let entry = EngineRoute {
+            callback,
+            method,
+            registration_id,
+        };
         if routes.insert(route.to_string(), entry).is_some() {
             tracing::warn!("Overwriting already-registered engine route: /engine/{route}");
         } else {
             tracing::debug!("Registered engine route: /engine/{route}");
         }
+        registration_id
+    }
+
+    fn remove_if_current(&self, route: &str, registration_id: u64) {
+        let mut routes = self.routes.write();
+        if routes
+            .get(route)
+            .is_some_and(|entry| entry.registration_id == registration_id)
+        {
+            routes.remove(route);
+            tracing::debug!("Unregistered engine route: /engine/{route}");
+        }
     }
 
     /// Get callback for a route
     pub fn get(&self, route: &str) -> Option<EngineRouteCallback> {
-        let routes = self.routes.read().unwrap();
+        let routes = self.routes.read();
         routes.get(route).map(EngineRoute::callback)
     }
 
     /// Get a route together with its method restriction.
     pub fn get_route(&self, route: &str) -> Option<EngineRoute> {
-        let routes = self.routes.read().unwrap();
+        let routes = self.routes.read();
         routes.get(route).cloned()
     }
 
     /// List all registered routes
     pub fn routes(&self) -> Vec<String> {
-        let routes = self.routes.read().unwrap();
+        let routes = self.routes.read();
         routes.keys().cloned().collect()
     }
 }
@@ -192,5 +253,36 @@ mod tests {
         let route = registry.get_route("drain").unwrap();
         assert_eq!(route.method(), Some(EngineRouteMethod::Post));
         assert!(registry.get("drain").is_some());
+    }
+
+    #[test]
+    fn scoped_registration_is_removed_on_drop() {
+        let registry = EngineRouteRegistry::new();
+        let callback: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({})) }));
+
+        let registration =
+            registry.register_scoped_method("drain", EngineRouteMethod::Post, callback);
+        assert!(registry.get("drain").is_some());
+
+        drop(registration);
+        assert!(registry.get("drain").is_none());
+    }
+
+    #[test]
+    fn stale_scoped_registration_does_not_remove_replacement() {
+        let registry = EngineRouteRegistry::new();
+        let first: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"version": 1})) }));
+        let second: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"version": 2})) }));
+
+        let stale = registry.register_scoped_method("status", EngineRouteMethod::Get, first);
+        let current = registry.register_scoped_method("status", EngineRouteMethod::Get, second);
+        drop(stale);
+
+        assert!(registry.get("status").is_some());
+        drop(current);
+        assert!(registry.get("status").is_none());
     }
 }

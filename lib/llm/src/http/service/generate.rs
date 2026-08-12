@@ -426,9 +426,10 @@ async fn generate_dispatch(
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
             inflight_guard.mark_error(if was_cancelled {
                 ErrorType::Cancelled
-            } else if was_rejected {
+            } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
             } else {
                 ErrorType::Internal
@@ -445,6 +446,18 @@ async fn generate_dispatch(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
                     "engine rejected the request".to_string(),
+                );
+            }
+            if was_unavailable {
+                tracing::warn!(
+                    %request_id,
+                    error = %format!("{error:#}"),
+                    "no backend worker is available"
+                );
+                return generate_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service_unavailable",
+                    "no backend worker is available".to_string(),
                 );
             }
             tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");

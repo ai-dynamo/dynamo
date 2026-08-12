@@ -774,7 +774,13 @@ impl Worker {
         } else {
             tracing::info!("Endpoint unregistered from discovery");
         }
-        self.run_engine_shutdown_steps().await;
+        if lifecycle.is_some() {
+            // The lifecycle controller already kept admission open for the
+            // discovery convergence grace period before closing it.
+            self.run_engine_shutdown_steps_with_grace(0.0).await;
+        } else {
+            self.run_engine_shutdown_steps().await;
+        }
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
@@ -1004,7 +1010,7 @@ impl Worker {
                 format!("serve registration: {e}"),
             )
         })?;
-        lifecycle.register_admin_routes(endpoint.drt().engine_routes());
+        let admin_routes = lifecycle.register_admin_routes(endpoint.drt().engine_routes());
 
         let serve_fut = started_endpoint.wait();
         tokio::pin!(serve_fut);
@@ -1035,6 +1041,9 @@ impl Worker {
             }
         }
 
+        // The DRT can outlive this Python worker. Remove callbacks that retain
+        // this worker's controller and engine before engine cleanup begins.
+        drop(admin_routes);
         self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
         Ok(())
     }
