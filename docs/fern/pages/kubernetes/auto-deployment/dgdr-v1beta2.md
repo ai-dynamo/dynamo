@@ -11,6 +11,10 @@ the search, Dynamo publishes a bounded set of `DynamoGraphDeploymentCandidate` (
 Each candidate contains a complete `DynamoGraphDeployment` (DGD) spec that you can inspect and
 deploy.
 
+Each accepted DGDR generation creates an immutable `DynamoGraphDeploymentRun`. The run owns the
+Sweeper Job, its DGDCs, progress, and report references. This lets one DGDR retain a history of
+independent searches without keeping completed Jobs alive.
+
 > [!WARNING]
 > **Experimental.** The `v1beta2` API and its unstructured search parameters can change in a future
 > release.
@@ -216,19 +220,26 @@ Large searches can take several hours. Inspect `status.progress` instead of trea
 Job as a short, opaque operation:
 
 ```bash
-kubectl get dgdr minimax-planner-search -n inference \
+RUN=$(kubectl get dgdr minimax-planner-search -n inference \
+  -o jsonpath='{.status.activeRunRef.name}')
+
+kubectl get dynamographdeploymentrun "$RUN" -n inference \
   -o jsonpath='{.status.progress}'
 ```
 
-While the search is active, status resembles:
+The DGDR points to the active run:
+
+```yaml
+status:
+  activeRunRef:
+    name: minimax-planner-search-run-4
+```
+
+While the search is active, the run status resembles:
 
 ```yaml
 status:
   phase: Searching
-  observedGeneration: 4
-  activeRun:
-    generation: 4
-    inputHash: 7d3a9c18e24f9468b307c21f03c4a662
   conditions:
     - type: Completed
       status: "False"
@@ -258,16 +269,54 @@ candidate is provisional and can be replaced when Sweeper finds a better result.
 most `recommendation.maxCandidates` resources even when Sweeper evaluates hundreds of internal
 configurations.
 
-## Inspect Candidates
+## Open the Search UI
 
-DGDC resources carry the DGDR UID, generation, and input hash as labels. List the candidates for a
-request:
+The Dynamo Search UI runs as a cluster service, independently of individual Sweeper Jobs. Port
+forward the service to inspect active and completed runs in a local browser:
 
 ```bash
-DGDR_UID=$(kubectl get dgdr minimax-planner-search -n inference \
+kubectl port-forward service/dynamo-search-ui \
+  -n dynamo-system 8080:8080
+```
+
+Open the local address:
+
+```text
+http://localhost:8080
+```
+
+Select the `inference` namespace, `minimax-planner-search`, and its active run. The first UI version
+shows:
+
+- completed rounds and evaluations;
+- feasible, infeasible, failed, and cached evaluations;
+- evaluated configurations across the resolved search-space dimensions;
+- the current scalar leaders or Pareto front;
+- published DGDCs and their ranks; and
+- an optional Sweeper log panel.
+
+![Mock Dynamo Search UI showing run progress, a parallel-coordinates search-space plot, the Pareto front, ranked candidates, and the Sweeper log](../../../assets/img/dgdr-search-ui-mock.svg)
+
+The UI does not run in the Sweeper Job. A Job-local server would stop when the search process exits,
+and a long-running sidecar would prevent the Job from completing. The cluster UI reads run status
+and DGDCs from Kubernetes and loads detailed evaluation points from the run's report artifacts.
+
+For an active run, the optional log panel streams the Sweeper Pod log. After the Pod is deleted, the
+log remains available only when log retention is enabled for the run. Progress, candidates, and the
+search report remain available independently of the Job.
+
+## Inspect Candidates
+
+DGDC resources carry the owning run UID, DGDR generation, and input hash as labels. List the
+candidates for the active run:
+
+```bash
+RUN=$(kubectl get dgdr minimax-planner-search -n inference \
+  -o jsonpath='{.status.activeRunRef.name}')
+RUN_UID=$(kubectl get dynamographdeploymentrun "$RUN" -n inference \
   -o jsonpath='{.metadata.uid}')
 
-kubectl get dgdc -n inference -l "nvidia.com/dgdr-uid=${DGDR_UID}"
+kubectl get dgdc -n inference -l "nvidia.com/dgdr-run-uid=${RUN_UID}"
 ```
 
 Inspect the selected candidate:
@@ -287,7 +336,12 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentCandidate
 metadata:
   name: minimax-planner-search-g4-0
+  ownerReferences:
+    - apiVersion: nvidia.com/v1beta2
+      kind: DynamoGraphDeploymentRun
+      name: minimax-planner-search-run-4
   labels:
+    nvidia.com/dgdr-run-uid: ddc22b7a-6557-4a3e-a1d7-a32da8849694
     nvidia.com/dgdr-generation: "4"
     nvidia.com/dgdr-input-hash: 7d3a9c18e24f9468b307c21f03c4a662
 spec: # exactly DynamoGraphDeployment.spec
@@ -359,9 +413,9 @@ evaluated the configuration; it does not indicate that the configuration has bee
 
 ## Start a New Search
 
-Changing a search input starts a new run for the new DGDR generation. Use `status.activeRun` to find
-the generation and input hash currently being evaluated. Candidate labels identify the input that
-produced each result.
+Changing a search input creates a new immutable run for the new DGDR generation. Use
+`status.activeRunRef` to find the run currently being evaluated. Run and candidate labels identify
+the generation and input hash that produced each result.
 
 Changes that affect the model, hardware, workload, objective, search budget, or unstructured
 parameters require new evaluations. Metadata-only changes do not change the search input.
@@ -409,7 +463,7 @@ multi-candidate `v1beta2` search.
 
 ## Clean Up
 
-Delete the request and its owned candidates:
+Delete the request and its owned runs and candidates:
 
 ```bash
 kubectl delete dgdr minimax-planner-search -n inference
