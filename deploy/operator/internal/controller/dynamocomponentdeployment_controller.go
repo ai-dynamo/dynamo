@@ -74,7 +74,7 @@ type DynamoComponentDeploymentReconciler struct {
 	Recorder              events.EventRecorder
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commonController.RuntimeConfig
-	DockerSecretRetriever dockerSecretRetriever
+	DockerSecretRetriever DockerSecretRetriever
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
