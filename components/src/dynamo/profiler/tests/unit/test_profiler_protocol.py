@@ -1487,9 +1487,7 @@ def test_materialize_dgd_shell_form_worker() -> None:
             model_name_or_path="some/model",
         )
 
-    result_args = _main_container(_components_by_name(result)["decode"])[
-        "args"
-    ]
+    result_args = _main_container(_components_by_name(result)["decode"])["args"]
     # Must still be a single-element list (shell form preserved).
     assert isinstance(result_args, list) and len(result_args) == 1
     assert result_args[0].endswith("--trust-remote-code")
@@ -1512,9 +1510,7 @@ def test_materialize_dgd_shell_form_worker() -> None:
             model_name_or_path="some/model",
         )
 
-    result2_args = _main_container(_components_by_name(result2)["decode"])[
-        "args"
-    ]
+    result2_args = _main_container(_components_by_name(result2)["decode"])["args"]
     assert len(result2_args) == 1
     assert result2_args[0].count("--trust-remote-code") == 1
 
@@ -1563,9 +1559,7 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
             model_name_or_path="some/model",
         )
 
-    result_args = _main_container(_components_by_name(result)["decode"])[
-        "args"
-    ]
+    result_args = _main_container(_components_by_name(result)["decode"])["args"]
     assert len(result_args) == 1
     # The original shell syntax (&&, export) must be preserved verbatim.
     assert result_args[0] == original_cmd + " --trust-remote-code"
