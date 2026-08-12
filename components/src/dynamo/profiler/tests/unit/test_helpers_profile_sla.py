@@ -46,6 +46,7 @@ try:
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         HardwareSpec,
+        KVRouterSpec,
         MockerSpec,
         ModelCacheSpec,
         SLASpec,
@@ -581,6 +582,62 @@ class TestAssembleFinalConfig:
         )
 
         assert result is None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_configures_complete_frontend_args(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {"spec": {"containers": [{"name": "main"}]}},
+                    }
+                ]
+            },
+        }
+
+        result = assemble_final_config(dgdr, ops, dgd_config)
+
+        args = result["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
+            "args"
+        ]
+        assert args == ["-m", "dynamo.frontend", "--router-mode", "kv"]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_disabled_kv_router_preserves_frontend_args(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=False)))
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "main", "args": ["--custom-arg"]}
+                                ]
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+
+        result = assemble_final_config(dgdr, ops, dgd_config)
+
+        assert result is dgd_config
+        assert result["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
+            "args"
+        ] == ["--custom-arg"]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

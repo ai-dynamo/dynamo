@@ -2372,6 +2372,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner contains the raw Planner configuration passed to the Planner service.<br />Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.<br />See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.<br />DGDR passes this object through without field-level validation; the Planner<br />service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
+| `kvRouter` _[KVRouterSpec](#kvrouterspec)_ | KVRouter configures KV-cache-aware routing for the generated deployment. |  | Optional: \{\} <br /> |
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
@@ -2507,6 +2508,20 @@ _Appears in:_
 | `rdma` _boolean_ | RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.<br />Semantics / usage:<br />  - This is capability metadata used for profiling, planning, and deployment decisions.<br />  - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,<br />    GPUDirect settings). It only expresses availability/intent.<br />  - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating<br />    RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery<br />    is unavailable, it may remain unset.<br />Impact of wrong / missing values:<br />  - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or<br />    deployments to assume RDMA is available; depending on the runtime transport selection and<br />    fallback behavior, this can lead to connection/setup failures or performance regressions.<br />  - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and<br />    fall back to non-RDMA transports, usually remaining functional but potentially slower.<br />  - If unset and undiscovered, consumers should treat RDMA availability as unknown and use<br />    conservative defaults / fallback transports. |  | Optional: \{\} <br /> |
 
 
+#### KVRouterSpec
+
+
+
+KVRouterSpec configures KV-cache-aware routing.
+
+
+
+_Appears in:_
+- [FeaturesSpec](#featuresspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.<br />KV routing optimizes request scheduling based on KV cache locality. |  | Optional: \{\} <br /> |
 
 
 #### KvTransferEnforcement

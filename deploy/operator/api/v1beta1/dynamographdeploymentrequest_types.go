@@ -356,8 +356,9 @@ type FeaturesSpec struct {
 	// +kubebuilder:validation:Type=object
 	Planner *runtime.RawExtension `json:"planner,omitempty"`
 
-	// TODO: KVRouter support is not yet implemented in the operator.
-	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
+	// KVRouter configures KV-cache-aware routing for the generated deployment.
+	// +optional
+	KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
 
 	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
