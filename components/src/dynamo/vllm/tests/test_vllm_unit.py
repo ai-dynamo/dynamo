@@ -1466,6 +1466,14 @@ def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
     sp = build_sampling_params(make({}), {}, model_max_len)
     assert sp.max_tokens == remaining
 
+    sp = build_sampling_params(
+        make({}),
+        defaults,
+        model_max_len,
+        prompt_token_count_override=90,
+    )
+    assert sp.max_tokens == 10
+
 
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
