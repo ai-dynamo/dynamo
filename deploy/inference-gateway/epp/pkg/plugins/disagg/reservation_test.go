@@ -68,6 +68,7 @@ func TestBookingStateDoesNotTrustExternalRequestID(t *testing.T) {
 func TestResponseBodyRetriesPrefillMarkAndFreesTerminalResponse(t *testing.T) {
 	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
 	request := requestWithBooking("external-request", bookingID)
+	request.Headers[RoutingModeHeader] = "disaggregated"
 	markCalls := 0
 	freeCalls := 0
 	scorer := &DynDecodeScorer{
@@ -89,6 +90,7 @@ func TestResponseBodyRetriesPrefillMarkAndFreesTerminalResponse(t *testing.T) {
 			return nil
 		},
 	}
+	registerBookingLifecycle(bookingID, scorer.freeBooking)
 
 	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
 	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
@@ -132,6 +134,7 @@ func TestResponseBodyFreesWithoutMarkingEmptyTerminalResponse(t *testing.T) {
 			return nil
 		},
 	}
+	registerBookingLifecycle(bookingID, scorer.freeBooking)
 
 	scorer.ResponseBody(
 		context.Background(),
@@ -241,6 +244,8 @@ func TestResponseBodyBoundsPersistentPrefillMarkRetries(t *testing.T) {
 		},
 	}
 	request := requestWithBooking("external-request", bookingID)
+	request.Headers[RoutingModeHeader] = "disaggregated"
+	registerBookingLifecycle(bookingID, scorer.freeBooking)
 
 	for range 10 {
 		scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
@@ -286,6 +291,8 @@ func TestResponseBodyEOSDoesNotWaitForInFlightPrefillMark(t *testing.T) {
 		},
 	}
 	request := requestWithBooking("external-request", bookingID)
+	request.Headers[RoutingModeHeader] = "disaggregated"
+	registerBookingLifecycle(bookingID, scorer.freeBooking)
 	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
 	<-markStarted
 	lifecycle := findBookingLifecycle(bookingID)
@@ -293,10 +300,16 @@ func TestResponseBodyEOSDoesNotWaitForInFlightPrefillMark(t *testing.T) {
 		t.Fatal("expected booking lifecycle after first response chunk")
 	}
 
-	started := time.Now()
-	scorer.ResponseBody(context.Background(), request, &rc.Response{EndOfStream: true}, nil)
-	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
-		t.Fatalf("EOS callback blocked for %s waiting on prefill mark", elapsed)
+	responseDone := make(chan struct{})
+	go func() {
+		scorer.ResponseBody(context.Background(), request, &rc.Response{EndOfStream: true}, nil)
+		close(responseDone)
+	}()
+	select {
+	case <-responseDone:
+	case <-time.After(time.Second):
+		close(allowMarkReturn)
+		t.Fatal("EOS callback blocked waiting on prefill mark")
 	}
 	close(allowMarkReturn)
 	select {
@@ -548,5 +561,68 @@ func TestBookingLifecycleRetainsTombstoneAfterCleanupExhaustion(t *testing.T) {
 	}
 	if lifecycle.cleanup(context.Background(), "duplicate cleanup") {
 		t.Fatal("exhausted cleanup started a second owner")
+	}
+}
+
+func TestResponseBodySkipsMarkForAggregatedRequest(t *testing.T) {
+	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
+	markCalled := make(chan struct{}, 1)
+	freeCalls := 0
+	scorer := &DynDecodeScorer{
+		markPrefillComplete: func(string) error {
+			markCalled <- struct{}{}
+			return nil
+		},
+		freeBooking: func(string) error {
+			freeCalls++
+			return nil
+		},
+	}
+	request := requestWithBooking("external-request", bookingID)
+	request.Headers[RoutingModeHeader] = "aggregated"
+	lifecycle := registerBookingLifecycle(bookingID, scorer.freeBooking)
+
+	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
+	select {
+	case <-markCalled:
+		t.Fatal("aggregated response marked prefill complete")
+	case <-time.After(100 * time.Millisecond):
+	}
+	scorer.ResponseBody(context.Background(), request, &rc.Response{EndOfStream: true}, nil)
+	select {
+	case <-lifecycle.cleanupComplete():
+	case <-time.After(time.Second):
+		t.Fatal("aggregated response cleanup did not finish")
+	}
+	if freeCalls != 1 {
+		t.Fatalf("free calls = %d, want 1", freeCalls)
+	}
+}
+
+func TestResponseBodyIgnoresUntrackedBookingHeader(t *testing.T) {
+	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
+	markCalled := make(chan struct{}, 1)
+	freeCalled := make(chan struct{}, 1)
+	scorer := &DynDecodeScorer{
+		markPrefillComplete: func(string) error {
+			markCalled <- struct{}{}
+			return nil
+		},
+		freeBooking: func(string) error {
+			freeCalled <- struct{}{}
+			return nil
+		},
+	}
+	request := requestWithBooking("client-request", bookingID)
+	request.Headers[RoutingModeHeader] = "disaggregated"
+
+	scorer.ResponseBody(context.Background(), request, &rc.Response{}, nil)
+	scorer.ResponseBody(context.Background(), request, &rc.Response{EndOfStream: true}, nil)
+	select {
+	case <-markCalled:
+		t.Fatal("untracked booking header marked prefill complete")
+	case <-freeCalled:
+		t.Fatal("untracked booking header freed router bookkeeping")
+	case <-time.After(100 * time.Millisecond):
 	}
 }

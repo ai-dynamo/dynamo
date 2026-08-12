@@ -29,6 +29,7 @@ const PREFILL_SCHEDULER_ID_PREFIX: &str = "epp-prefill/";
 const RESERVATION_EXPIRY_GRACE: Duration = Duration::from_secs(60);
 const CANCELLED_RESERVATION_RETENTION: Duration = Duration::from_secs(60);
 const RESERVATION_REAPER_INTERVAL: Duration = Duration::from_secs(30);
+const RESERVATION_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct ActivePrefillReservation<Sel>
 where
@@ -62,6 +63,8 @@ where
     /// lifecycle-tracked scheduler future and retracts any queued admission.
     Pending {
         cancellation: CancellationToken,
+        created_at: Instant,
+        claimed: bool,
     },
     Active(ActivePrefillReservation<Sel>),
     /// A cancellation can arrive from Go before the blocking reserve call
@@ -76,6 +79,12 @@ enum BeginReservation {
     Pending(CancellationToken),
     Cancelled,
     AlreadyExists,
+}
+
+enum Activation {
+    Active,
+    Cancelled,
+    Lost,
 }
 
 /// EPP-owned prefill reservation state.
@@ -119,6 +128,8 @@ where
                 let cancellation = CancellationToken::new();
                 entry.insert(PrefillReservationEntry::Pending {
                     cancellation: cancellation.clone(),
+                    created_at: Instant::now(),
+                    claimed: false,
                 });
                 BeginReservation::Pending(cancellation)
             }
@@ -127,7 +138,7 @@ where
                     entry.remove();
                     BeginReservation::Cancelled
                 }
-                PrefillReservationEntry::Pending { cancellation } => {
+                PrefillReservationEntry::Pending { cancellation, .. } => {
                     BeginReservation::Pending(cancellation.clone())
                 }
                 PrefillReservationEntry::Active(_) => BeginReservation::AlreadyExists,
@@ -135,34 +146,119 @@ where
         }
     }
 
-    fn activate(&self, reservation_id: &str, reservation: ActivePrefillReservation<Sel>) -> bool {
+    // Claim the one scheduler-admission attempt for this reservation. `begin` remains
+    // idempotent while preprocessing runs, but only one `reserve` may turn its Pending
+    // state into an admission future.
+    fn claim_pending(&self, reservation_id: &str) -> BeginReservation {
+        let mut entries = self.entries.lock();
+        match entries.entry(reservation_id.to_string()) {
+            Entry::Vacant(entry) => {
+                let cancellation = CancellationToken::new();
+                entry.insert(PrefillReservationEntry::Pending {
+                    cancellation: cancellation.clone(),
+                    created_at: Instant::now(),
+                    claimed: true,
+                });
+                BeginReservation::Pending(cancellation)
+            }
+            Entry::Occupied(mut entry) => {
+                if matches!(entry.get(), PrefillReservationEntry::Cancelled { .. }) {
+                    entry.remove();
+                    return BeginReservation::Cancelled;
+                }
+
+                match entry.get_mut() {
+                    PrefillReservationEntry::Pending {
+                        cancellation,
+                        claimed,
+                        ..
+                    } => {
+                        if *claimed {
+                            BeginReservation::AlreadyExists
+                        } else {
+                            *claimed = true;
+                            BeginReservation::Pending(cancellation.clone())
+                        }
+                    }
+                    PrefillReservationEntry::Active(_) => BeginReservation::AlreadyExists,
+                    PrefillReservationEntry::Cancelled { .. } => unreachable!("handled above"),
+                }
+            }
+        }
+    }
+
+    fn activate(
+        &self,
+        reservation_id: &str,
+        reservation: ActivePrefillReservation<Sel>,
+    ) -> Activation {
         let mut entries = self.entries.lock();
         let Some(entry) = entries.get(reservation_id) else {
-            return false;
+            return Activation::Lost;
         };
 
-        let PrefillReservationEntry::Pending { cancellation } = entry else {
-            return false;
+        let cancelled = match entry {
+            PrefillReservationEntry::Pending {
+                cancellation,
+                claimed: true,
+                ..
+            } => cancellation.is_cancelled(),
+            // A reaped pending entry retains a cancellation tombstone. If its admission
+            // won just before cancellation, retain the active booking so release/reaper
+            // can retry cleanup rather than leaking it until scheduler expiry.
+            PrefillReservationEntry::Cancelled { .. } => true,
+            PrefillReservationEntry::Pending { .. } | PrefillReservationEntry::Active(_) => {
+                return Activation::Lost;
+            }
         };
-        if cancellation.is_cancelled() {
-            entries.remove(reservation_id);
-            return false;
-        }
 
         entries.insert(
             reservation_id.to_string(),
             PrefillReservationEntry::Active(reservation),
         );
-        true
+        if cancelled {
+            Activation::Cancelled
+        } else {
+            Activation::Active
+        }
     }
 
     fn remove_pending(&self, reservation_id: &str) {
         let mut entries = self.entries.lock();
         if matches!(
             entries.get(reservation_id),
-            Some(PrefillReservationEntry::Pending { .. })
+            Some(PrefillReservationEntry::Pending { claimed: true, .. })
         ) {
             entries.remove(reservation_id);
+        }
+    }
+
+    // Preprocessing happens before reserve claims the entry. Never let a duplicate
+    // caller's preprocessing failure remove an admission another caller already owns.
+    fn abort_unclaimed(&self, reservation_id: &str) {
+        let mut entries = self.entries.lock();
+        let state = match entries.get(reservation_id) {
+            Some(PrefillReservationEntry::Pending {
+                cancellation,
+                claimed: false,
+                ..
+            }) if cancellation.is_cancelled() => Some(true),
+            Some(PrefillReservationEntry::Pending { claimed: false, .. }) => Some(false),
+            _ => None,
+        };
+        match state {
+            Some(true) => {
+                entries.insert(
+                    reservation_id.to_string(),
+                    PrefillReservationEntry::Cancelled {
+                        created_at: Instant::now(),
+                    },
+                );
+            }
+            Some(false) => {
+                entries.remove(reservation_id);
+            }
+            None => {}
         }
     }
 
@@ -170,7 +266,7 @@ where
         let mut entries = self.entries.lock();
         match entries.entry(reservation_id.to_string()) {
             Entry::Occupied(entry) => {
-                if let PrefillReservationEntry::Pending { cancellation } = entry.get() {
+                if let PrefillReservationEntry::Pending { cancellation, .. } = entry.get() {
                     cancellation.cancel();
                 }
             }
@@ -178,6 +274,26 @@ where
                 entry.insert(PrefillReservationEntry::Cancelled {
                     created_at: Instant::now(),
                 });
+            }
+        }
+    }
+
+    fn expire_pending(&self, now: Instant, retention: Duration) {
+        let mut entries = self.entries.lock();
+        for entry in entries.values_mut() {
+            let cancellation = match entry {
+                PrefillReservationEntry::Pending {
+                    cancellation,
+                    created_at,
+                    ..
+                } if now.saturating_duration_since(*created_at) >= retention => {
+                    Some(cancellation.clone())
+                }
+                _ => None,
+            };
+            if let Some(cancellation) = cancellation {
+                cancellation.cancel();
+                *entry = PrefillReservationEntry::Cancelled { created_at: now };
             }
         }
     }
@@ -272,9 +388,9 @@ where
         }
     }
 
-    /// Drop a pending reservation when preprocessing fails before scheduler admission.
+    /// Drop an unclaimed pending reservation when preprocessing fails before scheduler admission.
     pub fn abort(&self, reservation_id: &str) {
-        self.remove_pending(reservation_id);
+        self.abort_unclaimed(reservation_id);
     }
 
     /// Atomically select and reserve a prefill worker for an externally dispatched request.
@@ -298,7 +414,7 @@ where
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
-        let cancellation = match self.begin_entry(reservation_id) {
+        let cancellation = match self.claim_pending(reservation_id) {
             BeginReservation::Pending(cancellation) => cancellation,
             BeginReservation::Cancelled => {
                 anyhow::bail!("prefill reservation {reservation_id:?} was cancelled")
@@ -362,14 +478,34 @@ where
                     worker,
                     created_at: Instant::now(),
                 };
-                if !self.activate(reservation_id, reservation) {
-                    ignore_missing_request(chooser.free_if_worker(&scheduler_id, worker).await)?;
-                    anyhow::bail!("prefill reservation {reservation_id:?} was cancelled");
+                match self.activate(reservation_id, reservation) {
+                    Activation::Active => Ok(PrefillQueryOutcome::Routed {
+                        worker_id: worker.worker_id,
+                        dp_rank: Some(worker.dp_rank),
+                    }),
+                    Activation::Cancelled => {
+                        if let Err(error) = self.release(reservation_id).await {
+                            tracing::warn!(
+                                %reservation_id,
+                                %error,
+                                "Failed to release cancelled EPP prefill reservation; retaining it for reaper retry"
+                            );
+                        }
+                        anyhow::bail!("prefill reservation {reservation_id:?} was cancelled");
+                    }
+                    Activation::Lost => {
+                        if let Err(error) = ignore_missing_request(
+                            chooser.free_if_worker(&scheduler_id, worker).await,
+                        ) {
+                            tracing::warn!(
+                                %reservation_id,
+                                %error,
+                                "Failed to release EPP prefill reservation with lost ownership"
+                            );
+                        }
+                        anyhow::bail!("prefill reservation {reservation_id:?} lost ownership");
+                    }
                 }
-                Ok(PrefillQueryOutcome::Routed {
-                    worker_id: worker.worker_id,
-                    dp_rank: Some(worker.dp_rank),
-                })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
                 self.remove_pending(reservation_id);
@@ -427,15 +563,31 @@ where
                     return;
                 };
                 let now = Instant::now();
+                manager.expire_pending(now, retention);
                 manager.remove_expired_cancellations(now, CANCELLED_RESERVATION_RETENTION);
                 let expired = manager.expired_active_ids(now, retention);
                 for reservation_id in expired {
-                    if let Err(error) = manager.release(&reservation_id).await {
-                        tracing::warn!(
-                            %reservation_id,
-                            %error,
-                            "Failed to expire stale EPP prefill reservation"
-                        );
+                    match tokio::time::timeout(
+                        RESERVATION_RELEASE_TIMEOUT,
+                        manager.release(&reservation_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                %reservation_id,
+                                %error,
+                                "Failed to expire stale EPP prefill reservation"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                %reservation_id,
+                                timeout_secs = RESERVATION_RELEASE_TIMEOUT.as_secs(),
+                                "Timed out expiring stale EPP prefill reservation"
+                            );
+                        }
                     }
                 }
             }
@@ -568,7 +720,7 @@ mod tests {
                 .reserve(
                     router,
                     id,
-                    &vec![1; 64],
+                    &[1u32; 64],
                     None,
                     None,
                     None,
@@ -677,6 +829,69 @@ mod tests {
             panic!("expected pending reservation to remain registered");
         };
         assert!(existing.is_cancelled());
+    }
+
+    #[test]
+    fn only_one_reserve_claims_pending_reservation() {
+        let registry = EppReservationManager::<DefaultWorkerSelector>::default();
+        assert!(matches!(
+            registry.begin_entry("reservation-1"),
+            BeginReservation::Pending(_)
+        ));
+        assert!(matches!(
+            registry.claim_pending("reservation-1"),
+            BeginReservation::Pending(_)
+        ));
+        assert!(matches!(
+            registry.claim_pending("reservation-1"),
+            BeginReservation::AlreadyExists
+        ));
+    }
+
+    #[test]
+    fn expired_pending_reservation_becomes_cancelled_tombstone() {
+        let registry = EppReservationManager::<DefaultWorkerSelector>::default();
+        let BeginReservation::Pending(cancellation) = registry.begin_entry("reservation-1") else {
+            panic!("expected pending reservation");
+        };
+
+        registry.expire_pending(
+            Instant::now() + Duration::from_secs(61),
+            Duration::from_secs(60),
+        );
+
+        assert!(cancellation.is_cancelled());
+        assert!(matches!(
+            registry.claim_pending("reservation-1"),
+            BeginReservation::Cancelled
+        ));
+        assert!(matches!(
+            registry.begin_entry("reservation-1"),
+            BeginReservation::Pending(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_activation_retains_active_reservation_for_retry() {
+        let (_, chooser) = tracked_prefill_router().await;
+        let registry = EppReservationManager::default();
+        let BeginReservation::Pending(cancellation) = registry.claim_pending("reservation-1")
+        else {
+            panic!("expected claimed pending reservation");
+        };
+        cancellation.cancel();
+
+        let activation = registry.activate(
+            "reservation-1",
+            ActivePrefillReservation {
+                chooser,
+                scheduler_id: scheduler_id("reservation-1"),
+                worker: WorkerWithDpRank::new(7, 0),
+                created_at: Instant::now(),
+            },
+        );
+        assert!(matches!(activation, Activation::Cancelled));
+        assert!(registry.get_active("reservation-1").is_some());
     }
 
     #[test]

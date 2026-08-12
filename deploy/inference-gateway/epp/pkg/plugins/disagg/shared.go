@@ -398,8 +398,8 @@ func (l *bookingLifecycle) cleanup(ctx context.Context, reason string) bool {
 				l.mu.Unlock()
 				logger.V(logutil.VERBOSE).Info("Dynamo EPP booking cleaned up",
 					"bookingID", l.bookingID, "reason", reason, "attempt", attempt)
-				close(cleanupDone)
 				bookingLifecycles.Delete(l.bookingID)
+				close(cleanupDone)
 				return
 			}
 
