@@ -76,6 +76,22 @@ class StageRunner(Protocol):
 
 
 @runtime_checkable
+class TensorCarrier(Protocol):
+    """Tensor transport used when a NIXL edge touches this process."""
+
+    async def export_tensor(self, tensor: Any, transfer_id: str) -> Mapping[str, Any]:
+        ...
+
+    async def export_tensor_fanout(
+        self, tensor: Any, transfer_ids: tuple[str, ...]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        ...
+
+    async def import_tensor(self, reference: Mapping[str, Any]) -> Any:
+        ...
+
+
+@runtime_checkable
 class _TensorValue(Protocol):
     shape: Any
     dtype: Any

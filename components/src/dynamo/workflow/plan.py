@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping, Tuple, Union
+from typing import Mapping, Optional, Tuple, Union
 
 from dynamo.workflow.ir import WorkflowIR
 from dynamo.workflow.types import (
@@ -20,6 +20,7 @@ from dynamo.workflow.types import (
 
 IN_PROCESS_CARRIER = "in_process"
 INLINE_CARRIER = "inline"
+NIXL_CARRIER = "nixl"
 INLINE_VALUE_TYPES = frozenset({"bytes", "json", "text"})
 
 
@@ -51,6 +52,7 @@ class RemoteBinding:
 
     endpoint_id: str
     routing_policy: str = "round_robin"
+    tensor_carrier: Optional[str] = None
 
     def __post_init__(self) -> None:
         _validate_endpoint_id(self.endpoint_id)
@@ -58,9 +60,38 @@ class RemoteBinding:
             raise WorkflowValidationError(
                 f"unsupported remote routing policy {self.routing_policy!r}"
             )
-
+        if self.tensor_carrier not in {None, NIXL_CARRIER}:
+            raise WorkflowValidationError(
+                f"unsupported remote tensor carrier {self.tensor_carrier!r}"
+            )
 
 Binding = Union[InlineBinding, RemoteBinding]
+
+
+def select_edge_carrier(
+    source_binding: Optional[Binding],
+    target_binding: Binding,
+    value_type: str,
+) -> str:
+    """Select one declared carrier for a physical producer-consumer edge."""
+
+    if isinstance(target_binding, InlineBinding) and (
+        source_binding is None or isinstance(source_binding, InlineBinding)
+    ):
+        return IN_PROCESS_CARRIER
+    if value_type in INLINE_VALUE_TYPES:
+        return INLINE_CARRIER
+    if value_type == "tensor":
+        if (
+            isinstance(source_binding, RemoteBinding)
+            and isinstance(target_binding, RemoteBinding)
+            and source_binding.tensor_carrier == NIXL_CARRIER
+            and target_binding.tensor_carrier == NIXL_CARRIER
+        ):
+            return NIXL_CARRIER
+    raise WorkflowValidationError(
+        f"cross-process value type {value_type!r} has no common declared carrier"
+    )
 
 
 @dataclass(frozen=True)
@@ -77,8 +108,18 @@ class EdgePlan:
             raise WorkflowValidationError("edge source must use ValueRef")
         validate_name(self.target_stage, "edge target stage")
         validate_name(self.target_port, "edge target port")
-        if self.carrier not in {INLINE_CARRIER, IN_PROCESS_CARRIER}:
+        if self.carrier not in {
+            INLINE_CARRIER,
+            IN_PROCESS_CARRIER,
+            NIXL_CARRIER,
+        }:
             raise WorkflowValidationError(f"unsupported edge carrier {self.carrier!r}")
+
+    @property
+    def transfer_id(self) -> str:
+        """Return the stable per-consumer identity derived from the target port."""
+
+        return f"{self.target_stage}.{self.target_port}"
 
 
 @dataclass(frozen=True)
@@ -145,28 +186,46 @@ class ExecutionPlan:
                     f"edge targeting stage {key[0]!r} port {key[1]!r} "
                     "does not match the workflow definition"
                 )
-            source_binding = (
-                None if source.stage_id is None else bindings[source.stage_id]
-            )
             target_binding = bindings[key[0]]
-            crosses_process = isinstance(source_binding, RemoteBinding) or isinstance(
-                target_binding, RemoteBinding
+            if source.input_name is not None:
+                upstream_binding = None
+            else:
+                source_stage_id = source.stage_id
+                assert source_stage_id is not None
+                upstream_binding = bindings[source_stage_id]
+            value_spec = _require_value_spec(
+                stages_by_id[key[0]].contract.inputs[key[1]],
+                f"stage {key[0]!r} input {key[1]!r}",
             )
-            expected_carrier = INLINE_CARRIER if crosses_process else IN_PROCESS_CARRIER
+            expected_carrier = select_edge_carrier(
+                upstream_binding, target_binding, value_spec.type
+            )
             if edge.carrier != expected_carrier:
                 raise WorkflowValidationError(
                     f"stage {key[0]!r} port {key[1]!r} requires "
                     f"{expected_carrier!r} carrier"
                 )
-            value_spec = _require_value_spec(
-                stages_by_id[key[0]].contract.inputs[key[1]],
-                f"stage {key[0]!r} input {key[1]!r}",
-            )
-            if crosses_process and value_spec.type not in INLINE_VALUE_TYPES:
-                raise WorkflowValidationError(
-                    f"cross-process edge targeting stage {key[0]!r} port {key[1]!r} "
-                    f"cannot carry value type {value_spec.type!r} inline"
+        outgoing_nixl = {
+            (edge.source.stage_id, edge.source.output_name)
+            for edge in edges
+            if edge.carrier == NIXL_CARRIER and edge.source.stage_id is not None
+        }
+        for stage in self.workflow.stages:
+            if not isinstance(bindings[stage.id], RemoteBinding):
+                continue
+            for output_name, port_spec in stage.contract.outputs.items():
+                value_spec = _require_value_spec(
+                    port_spec,
+                    f"stage {stage.id!r} output {output_name!r}",
                 )
+                if (
+                    value_spec.type == "tensor"
+                    and (stage.id, output_name) not in outgoing_nixl
+                ):
+                    raise WorkflowValidationError(
+                        f"remote tensor output {stage.id!r}.{output_name!r} has "
+                        "no NIXL consumer edge"
+                    )
 
         for output_name, source in self.workflow.outputs.items():
             if source.stage_id is None or not isinstance(

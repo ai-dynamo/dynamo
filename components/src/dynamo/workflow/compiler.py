@@ -12,18 +12,16 @@ from typing import Mapping, Optional, Union
 from dynamo.workflow.builder import Workflow
 from dynamo.workflow.ir import WorkflowIR
 from dynamo.workflow.plan import (
-    IN_PROCESS_CARRIER,
-    INLINE_CARRIER,
     INLINE_VALUE_TYPES,
     Binding,
     EdgePlan,
     ExecutionPlan,
     InlineBinding,
     RemoteBinding,
+    select_edge_carrier,
 )
 from dynamo.workflow.types import (
     StreamSpec,
-    ValueRef,
     WorkflowValidationError,
     _require_value_spec,
     validate_name,
@@ -61,12 +59,14 @@ class DeploymentSpec:
         )
 
     @classmethod
-    def remote(cls, **endpoint_ids: str) -> "DeploymentSpec":
+    def remote(
+        cls, *, tensor_carrier: str | None = None, **endpoint_ids: str
+    ) -> "DeploymentSpec":
         """Build round-robin bindings to discovered Dynamo endpoints."""
 
         return cls(
             bindings={
-                stage_id: RemoteBinding(endpoint_id)
+                stage_id: RemoteBinding(endpoint_id, tensor_carrier=tensor_carrier)
                 for stage_id, endpoint_id in endpoint_ids.items()
             }
         )
@@ -130,43 +130,29 @@ def compile_workflow(
                 f"{value_spec.type!r} inline"
             )
 
-    edges = tuple(
-        EdgePlan(
-            source=source,
-            target_stage=stage.id,
-            target_port=port,
-            carrier=_select_edge_carrier(source, stage.id, deployment.bindings),
-        )
-        for stage in workflow_ir.stages
-        for port, source in stage.inputs.items()
-    )
-    for edge in edges:
-        if edge.carrier == IN_PROCESS_CARRIER:
-            continue
-        value_spec = _require_value_spec(
-            stages_by_id[edge.target_stage].contract.inputs[edge.target_port],
-            f"stage {edge.target_stage!r} input {edge.target_port!r}",
-        )
-        if value_spec.type not in INLINE_VALUE_TYPES:
-            raise WorkflowValidationError(
-                f"cross-process edge targeting stage {edge.target_stage!r} port "
-                f"{edge.target_port!r} cannot carry value type "
-                f"{value_spec.type!r} inline"
+    edges = []
+    for stage in workflow_ir.stages:
+        target_binding = deployment.bindings[stage.id]
+        for port, source in stage.inputs.items():
+            if source.input_name is not None:
+                source_binding = None
+            else:
+                stage_id = source.stage_id
+                assert stage_id is not None
+                source_binding = deployment.bindings[stage_id]
+            value_spec = _require_value_spec(
+                stage.contract.inputs[port],
+                f"stage {stage.id!r} input {port!r}",
             )
-    return ExecutionPlan(workflow_ir, deployment.bindings, edges)
-
-
-def _select_edge_carrier(
-    source: ValueRef,
-    target_stage: str,
-    bindings: Mapping[str, Binding],
-) -> str:
-    """Use object identity only when both ends execute in the orchestrator."""
-
-    source_stage = getattr(source, "stage_id", None)
-    source_binding = None if source_stage is None else bindings[source_stage]
-    if isinstance(source_binding, RemoteBinding) or isinstance(
-        bindings[target_stage], RemoteBinding
-    ):
-        return INLINE_CARRIER
-    return IN_PROCESS_CARRIER
+            carrier = select_edge_carrier(
+                source_binding, target_binding, value_spec.type
+            )
+            edges.append(
+                EdgePlan(
+                    source=source,
+                    target_stage=stage.id,
+                    target_port=port,
+                    carrier=carrier,
+                )
+            )
+    return ExecutionPlan(workflow_ir, deployment.bindings, tuple(edges))
