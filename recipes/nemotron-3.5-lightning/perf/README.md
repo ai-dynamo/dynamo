@@ -50,7 +50,7 @@ aiperf profile --custom-dataset-type mooncake_trace --num-requests <Requests> \
 | `vllm/agg-h200-dspark/deploy.yaml` | vLLM | agg | H200 | Single worker | DSpark | 7 | 3.69 | 20 | 3541 | 3411 | 130 | 243.97 | 2193.59 | 109.68 |
 | `vllm/agg-h200-dspark-kv-router/deploy.yaml` | vLLM | agg | H200 | KV router | DSpark | 7 | 3.69 | 80 | 3541 | 3411 | 130 | 286.67 | 2171.00 | 108.55 |
 | `vllm/agg-h200-mtp/deploy.yaml` | vLLM | agg | H200 | Single worker | MTP | 7 | 3.687 | 12 | 3541 | 3411 | 130 | 250.66 | 1478.67 | 123.22 |
-| `vllm/disagg-b200-dspark/deploy.yaml` | vLLM | disagg | B200 | 1P1D | DSpark | 1 | 1.83 | 8 | 500 | 489 | 11 | 236.43 | 904.03 | 226.01 |
+| `vllm/disagg-b200-dspark/deploy.yaml` | vLLM | disagg | B200 | 1P1D | DSpark | 1 | 1.83 | 8 | 3541 | 3410 | 131 | 235.95 | 984.09 | 246.02 |
 | `vllm/disagg-gb200-dflash/deploy.yaml` | vLLM | disagg | GB200 | 1P1D | DFlash | 7 | 3.41 | 4 | 3541 | 3411 | 130 | 491.40 | 584.85 | 292.43 |
 | `vllm/disagg-gb200-dspark/deploy.yaml` | vLLM | disagg | GB200 | 1P1D | DSpark | 1 | 1.83 | 8 | 3541 | 3411 | 130 | 599.17 | 939.28 | 234.82 |
 | `vllm/disagg-h100-dflash/deploy.yaml` | vLLM | disagg | H100 | 1P1D | DFlash | 3 | 2.73 | 12 | 3541 | 3404 | 137 | 542.71 | 1117.29 | 186.21 |
@@ -59,9 +59,9 @@ aiperf profile --custom-dataset-type mooncake_trace --num-requests <Requests> \
 | `vllm/disagg-h200-dflash/deploy.yaml` | vLLM | disagg | H200 | 1P1D | DFlash | 3 | 2.73 | 12 | 3541 | 3401 | 140 | 408.30 | 1277.86 | 212.98 |
 | `vllm/disagg-h200-dspark/deploy.yaml` | vLLM | disagg | H200 | 1P1D | DSpark | 1 | 1.83 | 24 | 3541 | 3411 | 130 | 834.80 | 1656.90 | 138.08 |
 | `vllm/disagg-h200-mtp/deploy.yaml` | vLLM | disagg | H200 | 1P1D | MTP | 5 | 3.421 | 12 | 3541 | 3342 | 199 | 424.66 | 1203.97 | 200.66 |
-| `trtllm/agg-b200/deploy.yaml` | TensorRT-LLM | agg | B200 | Single worker | None | 0 | 0.0 | 18 | 500 | 489 | 11 | 377.68 | 386.998 | 21.50 |
-| `trtllm/agg-b200-mtp/deploy.yaml` | TensorRT-LLM | agg | B200 | Single worker | MTP | 3 | 2.874 | 18 | 500 | 489 | 11 | 446.88 | 427.82 | 23.77 |
+| `trtllm/agg-b200/deploy.yaml` | TensorRT-LLM | agg | B200 | Single worker | None | 0 | 0.0 | 18 | 3541 | 3411 | 130 | 378.04 | 378.27 | 21.01 |
+| `trtllm/agg-b200-mtp/deploy.yaml` | TensorRT-LLM | agg | B200 | Single worker | MTP | 3 | 2.874 | 18 | 3541 | 3411 | 130 | 448.71 | 490.28 | 27.24 |
 | `trtllm/agg-gb200/deploy.yaml` | TensorRT-LLM | agg | GB200 | Single worker | None | 0 | 0.0 | 18 | 500 | 499 | 1 | 318.88 | 280.10 | 15.56 |
 | `trtllm/agg-gb200-mtp/deploy.yaml` | TensorRT-LLM | agg | GB200 | Single worker | MTP | 3 | 2.874 | 18 | 500 | 499 | 1 | 400.88 | 580.09 | 32.23 |
 | `trtllm/agg-h100-mtp/deploy.yaml` | TensorRT-LLM | agg | H100 | Single worker | MTP | 7 | 3.687 | 12 | 500 | 499 | 1 | 1757.00 | 264.87 | 22.07 |
-| `trtllm/agg-h200-mtp/deploy.yaml` | TensorRT-LLM | agg | H200 | Single worker | MTP | 7 | 3.687 | 12 | 500 | 499 | 1 | 1630.96 | 269.26 | 22.44 |
+| `trtllm/agg-h200-mtp/deploy.yaml` | TensorRT-LLM | agg | H200 | Single worker | MTP | 7 | 3.687 | 12 | 3541 | 3527 | 14 | 1692.98 | 250.05 | 20.84 |

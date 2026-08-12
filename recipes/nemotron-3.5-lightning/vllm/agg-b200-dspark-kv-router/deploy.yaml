@@ -141,8 +141,6 @@ spec:
                 - "64"
                 - --async-scheduling
                 - --no-enable-flashinfer-autotune
-                - --quantization
-                - modelopt_fp4
                 - --mamba-backend
                 - flashinfer
                 - --mamba-ssm-cache-dtype
