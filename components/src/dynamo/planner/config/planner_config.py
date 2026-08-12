@@ -19,7 +19,7 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Protocol
 from urllib.parse import parse_qsl
 
 import yaml
@@ -39,6 +39,31 @@ from dynamo.planner.plugins.registry.config import PluginRegistrationConfig
 from dynamo.planner.plugins.types import HoldPolicy
 
 logger = logging.getLogger(__name__)
+
+
+class MinimumEndpointConfig(Protocol):
+    """Configuration fields used to resolve component endpoint floors."""
+
+    min_endpoint: int
+    prefill_min_endpoint: Optional[int]
+    decode_min_endpoint: Optional[int]
+
+
+def resolve_min_endpoint(
+    config: MinimumEndpointConfig, component: Literal["prefill", "decode"]
+) -> int:
+    """Return the configured minimum for one planner role.
+
+    ``min_endpoint`` supplies a role's value when its role-specific value is
+    unset.
+    """
+
+    value = (
+        config.prefill_min_endpoint
+        if component == "prefill"
+        else config.decode_min_endpoint
+    )
+    return config.min_endpoint if value is None else value
 
 
 def _prometheus_ssl_verify_default() -> bool:
@@ -405,7 +430,42 @@ class PlannerConfig(BaseModel):
     ``min_total_gpus`` flag for cross-DGD enforcement; the two are
     orthogonal and can both be set.
     """
-    min_endpoint: int = SLAPlannerDefaults.min_endpoint
+    min_endpoint: int = Field(
+        default=SLAPlannerDefaults.min_endpoint,
+        ge=0,
+        description=(
+            "Minimum endpoints for aggregated mode. In disaggregated mode, this "
+            "value applies to both prefill and decode unless a role-specific "
+            "value is set. In prefill-only or decode-only mode, it supplies the "
+            "active role when the corresponding role-specific value is unset. "
+            "Must be nonnegative; 0 permits scale-to-zero."
+        ),
+    )
+    prefill_min_endpoint: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_min_endpoint,
+        ge=1,
+        description=(
+            "Minimum prefill endpoints in disagg and prefill modes. When set, "
+            "replaces the prefill value supplied by min_endpoint."
+        ),
+    )
+    decode_min_endpoint: Optional[int] = Field(
+        default=SLAPlannerDefaults.decode_min_endpoint,
+        ge=1,
+        description=(
+            "Minimum decode endpoints in disagg and decode modes. When set, "
+            "replaces the decode value supplied by min_endpoint."
+        ),
+    )
+    control_api_port: int = Field(
+        default=SLAPlannerDefaults.control_api_port,
+        ge=0,
+        le=65535,
+        description=(
+            "Port for the localhost-only runtime minimum-endpoint API. "
+            "Set to 0 to disable the API."
+        ),
+    )
 
     decode_engine_num_gpu: Optional[int] = None
     prefill_engine_num_gpu: Optional[int] = None
@@ -774,6 +834,19 @@ class PlannerConfig(BaseModel):
         if self.ttft_ms <= 0:
             raise ValueError(f"ttft_ms must be > 0, got {self.ttft_ms}")
 
+        if self.mode == "prefill" and self.decode_min_endpoint is not None:
+            raise ValueError("decode_min_endpoint is not supported when mode='prefill'")
+        if self.mode == "decode" and self.prefill_min_endpoint is not None:
+            raise ValueError("prefill_min_endpoint is not supported when mode='decode'")
+        if self.mode == "agg" and (
+            self.prefill_min_endpoint is not None
+            or self.decode_min_endpoint is not None
+        ):
+            raise ValueError(
+                "prefill_min_endpoint and decode_min_endpoint are not supported "
+                "when mode='agg'; use min_endpoint"
+            )
+
         if self.report_interval_hours is not None:
             if (
                 not math.isfinite(self.report_interval_hours)
@@ -1008,6 +1081,30 @@ class PlannerConfig(BaseModel):
 
     def scaling_enabled(self) -> bool:
         return self.enable_throughput_scaling or self.enable_load_scaling
+
+    @property
+    def effective_prefill_min_endpoint(self) -> int:
+        """Return the effective prefill endpoint minimum."""
+
+        return resolve_min_endpoint(self, "prefill")
+
+    @property
+    def effective_decode_min_endpoint(self) -> int:
+        """Return the effective decode endpoint minimum."""
+
+        return resolve_min_endpoint(self, "decode")
+
+    def active_min_endpoints(self) -> tuple[Optional[int], Optional[int]]:
+        """Return effective ``(prefill, decode)`` floors for the active mode."""
+
+        if self.mode == "prefill":
+            return self.effective_prefill_min_endpoint, None
+        if self.mode in ("decode", "agg"):
+            return None, self.effective_decode_min_endpoint
+        return (
+            self.effective_prefill_min_endpoint,
+            self.effective_decode_min_endpoint,
+        )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,11 @@ const (
 	dataParallelSizeLocalFlag = "--data-parallel-size-local"
 	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
+	dataParallelBackendFlag   = "--data-parallel-backend"
+	// dataParallelBackendShortFlag is vLLM's documented short alias for
+	// --data-parallel-backend (see the v0.26.0 `vllm serve` CLI reference).
+	dataParallelBackendShortFlag = "-dpb"
+	dataParallelBackendRay       = "ray"
 )
 
 type VLLMBackend struct {
@@ -70,6 +75,38 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.LivenessProbe = nil
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
+		}
+	} else if role == RoleMain && IsElasticEPRayLaunch(container) {
+		// A single-pod elastic-EP component still needs a Ray head, so that
+		// follower pods created later have a cluster to join. Only the leader
+		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer) {
+			// Bind both addresses only when a Ray head was actually injected.
+			//
+			// Both resolve from status.podIP, which is the point: the Ray head
+			// registers under that address and vLLM searches for that address, so
+			// the two cannot disagree. POD_IP is what the launch command
+			// interpolates into --node-ip-address; VLLM_DP_MASTER_IP is what the
+			// engine reads.
+			//
+			// The engine needs telling because at --data-parallel-size 1 vLLM
+			// discards the DP master IP it derives from the Ray node and falls back
+			// to VLLM_DP_MASTER_IP, which defaults to 127.0.0.1 — so it looks for a
+			// node that does not exist and aborts with "The DP master node (ip:
+			// 127.0.0.1) is missing or dead". Neither VLLM_HOST_IP nor
+			// --data-parallel-address survives that overwrite; this env var is the
+			// only value the fallback reads.
+			podIPRef := func() *corev1.EnvVarSource {
+				return &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "status.podIP",
+					},
+				}
+			}
+			container.Env = append(container.Env,
+				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
+				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
+			)
 		}
 	}
 
@@ -410,30 +447,74 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
 // naturally places all --data-parallel-size workers on the leader node.
 //
-// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
+// Leader (or a single-pod RoleMain): ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
-func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+// injectElasticEPRayLaunchFlags returns true when it rewrote the container to
+// front the engine with a Ray head, and false when it deliberately left the
+// container untouched (see the empty-Command case below), so callers can gate
+// side effects such as the VLLM_DP_MASTER_IP injection on whether a Ray head was
+// actually set up.
+func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) bool {
 	switch role {
-	case RoleLeader:
+	// RoleMain is a component deployed as a single pod; it heads the Ray
+	// cluster exactly as a multi-node leader does.
+	case RoleLeader, RoleMain:
+		// The Ray-head wrapper has to run a concrete executable once the head is
+		// up, but an empty Command means the real entrypoint is the image
+		// ENTRYPOINT, which the operator cannot see or reconstruct. Rewriting here
+		// would emit a shell command with no executable (e.g. `exec --model ...`)
+		// and break a pod that Kubernetes would otherwise start from its
+		// ENTRYPOINT. Leave that invocation intact and skip the Ray head; a
+		// single-pod Ray head needs an explicit Command.
+		if len(container.Command) == 0 {
+			log.Log.WithName("vllm-backend").Info(
+				"elastic-EP Ray head not injected: container has no explicit Command; "+
+					"set an explicit command to start the single-pod Ray head",
+				"service", serviceName, "role", role)
+			return false
+		}
 		quotedCmd := make([]string, len(container.Command))
 		for i, tok := range container.Command {
-			quotedCmd[i] = shellQuoteForBashC(tok)
+			quotedCmd[i] = shellQuotePOSIX(tok)
 		}
 		quotedArgs := make([]string, len(container.Args))
 		for i, arg := range container.Args {
-			quotedArgs[i] = shellQuoteForBashC(arg)
+			quotedArgs[i] = shellQuotePOSIX(arg)
+		}
+		vllmCommand := strings.TrimSpace(strings.Join(quotedCmd, " ") + " " + strings.Join(quotedArgs, " "))
+		// A single-pod RoleMain leader is an ordinary serving pod that Kubernetes
+		// rolls, evicts, and deletes, so exec the engine: it then runs as the
+		// container's main process (PID 1) and receives SIGTERM directly for a
+		// graceful shutdown, instead of being killed after the grace period with
+		// in-flight requests dropped. The backgrounded Ray head continues as its
+		// child. The multinode RoleLeader keeps its historical no-exec form so
+		// this stays scoped to the new single-pod path.
+		if role == RoleMain {
+			vllmCommand = "exec " + vllmCommand
+		}
+		// Name the head's address on the single-pod path instead of letting Ray
+		// pick one. vLLM is told the DP master is at status.podIP (see the caller)
+		// and then looks for the Ray node registered under that exact address.
+		// Ray left to itself chooses an interface by its own heuristic, so on a
+		// pod with more than one network the two disagree and the engine aborts
+		// with the same "DP master node is missing or dead" the env var exists to
+		// prevent. The multinode leader keeps auto-detection: neither side of that
+		// pair is pinned, so both run the same heuristic and agree with each other.
+		nodeIPFlag := ""
+		if role == RoleMain {
+			nodeIPFlag = fmt.Sprintf(` --node-ip-address="$%s"`, commonconsts.PodIPEnvVar)
 		}
 		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
 		// An unbounded `until` loop would spin forever if `ray start --head` crashes
 		// silently or the port never opens.
 		container.Args = []string{fmt.Sprintf(
-			`ray start --head --port=%s --block & `+
+			`ray start --head --port=%s%s --block & `+
 				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
-				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s %s`,
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s`,
 			VLLMPort,
+			nodeIPFlag,
 			VLLMPort,
-			strings.Join(quotedCmd, " "),
-			strings.Join(quotedArgs, " "),
+			vllmCommand,
 		)}
 	case RoleWorker:
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
@@ -462,6 +543,42 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
+	return true
+}
+
+// IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
+// topology.
+//
+// Elastic EP only works on the Ray data-parallel backend: vLLM's Ray executor is
+// what grows and shrinks workers at runtime, and the engine refuses a scale
+// request on any other backend. Requiring both flags keeps a Ray head off pods
+// that pass --enable-elastic-ep while running the default backend, where it
+// would launch a process nothing ever talks to.
+//
+// Detection scans the full command line (Command + Args) so the flags are found
+// whether the manifest carries them in Command or Args, and it accepts vLLM's
+// long --data-parallel-backend flag and its documented -dpb alias in both the
+// "flag value" and "flag=value" spellings — vLLM's argparse treats all of these
+// as equivalent, so any of them must trigger Ray-head injection.
+func IsElasticEPRayLaunch(container *corev1.Container) bool {
+	expanded := getExpandedCommandLine(container)
+	return hasFlag(expanded, enableElasticEPFlag) &&
+		(hasArg(expanded, dataParallelBackendFlag, dataParallelBackendRay) ||
+			hasArg(expanded, dataParallelBackendShortFlag, dataParallelBackendRay))
+}
+
+// getExpandedCommandLine flattens Command and Args and splits any space-joined
+// tokens, so flag detection works whether the manifest puts flags in Command or
+// Args and whether they are separate list items or a single combined string.
+func getExpandedCommandLine(container *corev1.Container) []string {
+	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
+	commandLine = append(commandLine, container.Command...)
+	commandLine = append(commandLine, container.Args...)
+	expanded := make([]string, 0, len(commandLine))
+	for _, arg := range commandLine {
+		expanded = append(expanded, strings.Fields(arg)...)
+	}
+	return expanded
 }
 
 // hasFlag returns true if flag exists in expandedArgs.
