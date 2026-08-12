@@ -373,8 +373,6 @@ def _dead_patterns(model: ResolvedModel, tree: list[str]) -> list[str]:
     patterns = [
         *model.owned_patterns(),
         *(anchor(rule["glob"]) for rule in model.required_owners),
-        *(anchor(rule["glob"]) for rule in model.advisory),
-        *(rule["pattern"] for rule in model.filetype_advisory),
     ]
     return [
         pattern

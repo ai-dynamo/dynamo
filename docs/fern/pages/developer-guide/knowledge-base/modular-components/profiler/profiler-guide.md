@@ -491,7 +491,9 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    min_endpoint: 2                            # Minimum endpoints to maintain
+    # Minimum for agg, both roles in disagg, or the active single role when
+    # its role-specific field is unset
+    min_endpoint: 2
     load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
     throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
     load_predictor: arima                      # Load prediction method
@@ -761,4 +763,4 @@ Ensure image pull secrets are configured in your namespace for the container reg
 - [Profiler README](overview.md) — Quick overview and feature matrix
 - [Profiler Examples](profiler-examples.md) — Complete DGDR YAML examples
 - [Planner Guide](../planner/planner-guide.md) — PlannerConfig reference and scaling modes
-- [DGDR API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) — Full DGDR specification
+- [DGDR API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx) — Full DGDR specification

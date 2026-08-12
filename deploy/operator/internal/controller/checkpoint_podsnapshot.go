@@ -95,7 +95,7 @@ func (r *CheckpointReconciler) findOwnedPodSnapshot(ctx context.Context, ckpt *n
 	default:
 		err := fmt.Errorf("multiple PodSnapshots owned by checkpoint %q (e.g. %q and %q); expected at most one",
 			ckpt.Name, owned[0].Name, owned[1].Name)
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "PodSnapshotLookupAmbiguous", err.Error())
+		r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "PodSnapshotLookupAmbiguous", "Get", "%s", err.Error())
 		return nil, err
 	}
 }
@@ -106,7 +106,7 @@ func (r *CheckpointReconciler) findOwnedPodSnapshot(ctx context.Context, ckpt *n
 func (r *CheckpointReconciler) createPodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID string, pod *corev1.Pod) (*nvidiacomv1alpha1.PodSnapshot, error) {
 	snap, err := buildPodSnapshot(ckpt, checkpointID, pod)
 	if err != nil {
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "PodSnapshotBuildFailed", err.Error())
+		r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "PodSnapshotBuildFailed", "Create", "%s", err.Error())
 		return nil, err
 	}
 	if err := ctrl.SetControllerReference(ckpt, snap, r.Scheme()); err != nil {
@@ -116,10 +116,10 @@ func (r *CheckpointReconciler) createPodSnapshot(ctx context.Context, ckpt *nvid
 		if apierrors.IsAlreadyExists(err) {
 			return r.classifyExistingPodSnapshot(ctx, ckpt, snap.Name, err)
 		}
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "PodSnapshotCreateFailed", err.Error())
+		r.Recorder.Eventf(ckpt, snap, corev1.EventTypeWarning, "PodSnapshotCreateFailed", "Create", "%s", err.Error())
 		return nil, fmt.Errorf("create PodSnapshot %q: %w", snap.Name, err)
 	}
-	r.Recorder.Eventf(ckpt, corev1.EventTypeNormal, "PodSnapshotCreated", "Created PodSnapshot %s", snap.Name)
+	r.Recorder.Eventf(ckpt, snap, corev1.EventTypeNormal, "PodSnapshotCreated", "Create", "Created PodSnapshot %s", snap.Name)
 	return snap, nil
 }
 

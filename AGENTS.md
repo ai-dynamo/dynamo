@@ -40,6 +40,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `fern-components` — Fern MDX component library and usage guidance
 - `fern-navigation` — Fern navigation and site-structure configuration guidance
 - `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
+- `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
 - `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing

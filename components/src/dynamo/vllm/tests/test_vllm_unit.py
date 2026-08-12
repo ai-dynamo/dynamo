@@ -78,6 +78,11 @@ def _load_vllm_main() -> ModuleType:
         (True, dynamo_llm.ModelType.Prefill, 3),
         (True, dynamo_llm.ModelType.Chat, 3),
         (True, dynamo_llm.ModelType.Embedding, None),
+        (
+            True,
+            dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
+            None,
+        ),
         (False, dynamo_llm.ModelType.Prefill, None),
     ],
 )
@@ -1138,6 +1143,169 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
+def test_build_sampling_params_allowlists_router_hint_extra_args():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "extra_args": {
+            "kv_transfer_params": {
+                "router_hint": router_hint,
+                "untrusted_connector_param": "dropped",
+            },
+        },
+    }
+
+    default_sampling_params = {
+        "extra_args": {
+            "kv_transfer_params": {"internal": "kept"},
+            "other_internal": "kept",
+        }
+    }
+
+    sp = build_sampling_params(request, default_sampling_params=default_sampling_params)
+
+    assert default_sampling_params == {
+        "extra_args": {
+            "kv_transfer_params": {"internal": "kept"},
+            "other_internal": "kept",
+        }
+    }
+    assert sp.extra_args == {
+        "kv_transfer_params": {
+            "internal": "kept",
+            "router_hint": router_hint,
+        },
+        "other_internal": "kept",
+    }
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_params",
+    [
+        {"do_remote_decode": False, "transfer_id": "prefill-1"},
+        {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
+    ],
+)
+def test_update_kv_transfer_params_preserves_router_hint_only(kv_transfer_params):
+    from dynamo.vllm.handlers import _update_kv_transfer_params
+
+    request_router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    stale_router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23281",
+        "block_hashes": [33, 44],
+    }
+    sampling_params = SimpleNamespace(
+        extra_args={
+            "kv_transfer_params": {
+                "router_hint": request_router_hint,
+                "untrusted_connector_param": "dropped",
+            }
+        }
+    )
+    kv_transfer_params = {**kv_transfer_params, "router_hint": stale_router_hint}
+
+    _update_kv_transfer_params(
+        sampling_params, kv_transfer_params, preserve_router_hint=True
+    )
+
+    assert sampling_params.extra_args["kv_transfer_params"] == {
+        **{
+            key: value
+            for key, value in kv_transfer_params.items()
+            if key != "router_hint"
+        },
+        "router_hint": request_router_hint,
+    }
+
+
+def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
+    from dynamo.vllm.handlers import _update_kv_transfer_params
+
+    router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    sampling_params = SimpleNamespace(
+        extra_args={"kv_transfer_params": {"router_hint": router_hint}}
+    )
+
+    _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
+
+    assert sampling_params.extra_args["kv_transfer_params"] == {
+        "transfer_id": "prefill-1"
+    }
+
+
+def test_update_kv_transfer_params_drops_replacement_router_hint():
+    from dynamo.vllm.handlers import _update_kv_transfer_params
+
+    stale_router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23281",
+        "block_hashes": [33, 44],
+    }
+    sampling_params = SimpleNamespace(extra_args={})
+
+    _update_kv_transfer_params(
+        sampling_params,
+        {
+            "transfer_id": "prefill-1",
+            "router_hint": stale_router_hint,
+        },
+    )
+
+    assert sampling_params.extra_args["kv_transfer_params"] == {
+        "transfer_id": "prefill-1"
+    }
+
+
+def test_update_kv_transfer_params_copies_extra_args_before_mutating():
+    from dynamo.vllm.handlers import _update_kv_transfer_params
+
+    router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    shared_extra_args = {
+        "kv_transfer_params": {
+            "router_hint": router_hint,
+            "internal": "kept-in-default",
+        },
+        "other_internal": "kept",
+    }
+    sampling_params = SimpleNamespace(extra_args=shared_extra_args)
+
+    _update_kv_transfer_params(
+        sampling_params, {"transfer_id": "prefill-1"}, preserve_router_hint=True
+    )
+
+    assert shared_extra_args == {
+        "kv_transfer_params": {
+            "router_hint": router_hint,
+            "internal": "kept-in-default",
+        },
+        "other_internal": "kept",
+    }
+    assert sampling_params.extra_args is not shared_extra_args
+    assert sampling_params.extra_args == {
+        "kv_transfer_params": {
+            "transfer_id": "prefill-1",
+            "router_hint": router_hint,
+        },
+        "other_internal": "kept",
+    }
+
+
 def test_build_sampling_params_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params
 
@@ -1306,6 +1474,7 @@ def _make_dynamo_config(**overrides):
         "use_kv_events": False,
         "enable_local_indexer": True,
         "embedding_worker": False,
+        "classify_worker": False,
         "headless": False,
         "enable_multimodal": False,
         "fpm_trace": False,
@@ -1338,6 +1507,44 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+class TestPoolingWorkerPrefixCachingDefault:
+    """Pooling-family workers must not default prefix caching on: pooling
+    engines never decode, and force-enabling it crashes hybrid-attention
+    models (e.g. ModernBERT: "HybridKVCacheCoordinator requires at least two
+    attention groups") that bare `vllm serve` runs fine.
+    """
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_pooling_family_defaults_to_disabled(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=None
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is False
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_explicit_enable_is_preserved(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=True
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
+
+    def test_generative_worker_still_defaults_to_enabled(self):
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
 
 
 class TestRunnerPreservation:
@@ -1505,6 +1712,7 @@ class TestForwardPassMetricsActivation:
         ("overrides", "role"),
         [
             ({"embedding_worker": True}, "embedding"),
+            ({"classify_worker": True}, "classify"),
             ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},

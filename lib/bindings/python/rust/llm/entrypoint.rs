@@ -22,7 +22,7 @@ use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
-use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
+use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
 use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
@@ -972,7 +972,43 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     let frontend_route_extensions =
         super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
+    let worker_selection_policy_factory = crate::worker_selection_policy_factory(
+        &engine_config
+            .inner
+            .local_model()
+            .router_config()
+            .kv_router_config,
+    )
+    .map_err(to_pyerr)?;
+    if worker_selection_policy_factory.is_some()
+        && !engine_config
+            .inner
+            .local_model()
+            .router_config()
+            .router_mode
+            .is_kv_routing()
+    {
+        return Err(PyValueError::new_err(
+            "linked worker-selection policies require --router-mode kv",
+        ));
+    }
+    if worker_selection_policy_factory.is_some() && !matches!(&input_enum, Input::Http) {
+        return Err(PyValueError::new_err(
+            "linked worker-selection policies require HTTP frontend input",
+        ));
+    }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        if let Some(factory) = worker_selection_policy_factory {
+            HttpFrontend::default()
+                .frontend_route_extensions(frontend_route_extensions)
+                .worker_selection_policy_factory(move |config, worker_type, partition| {
+                    factory(config, worker_type, partition)
+                })
+                .run(distributed_runtime.inner.clone(), engine_config.inner)
+                .await
+                .map_err(to_pyerr)?;
+            return Ok(());
+        }
         dynamo_llm::entrypoint::input::run_input_with_frontend_route_extensions(
             distributed_runtime.inner.clone(),
             input_enum,

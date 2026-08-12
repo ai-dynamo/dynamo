@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use xxhash_rust::xxh3;
 
 const fn default_track_prefill_tokens() -> bool {
@@ -262,6 +263,18 @@ fn compute_seq_hash_for_block_with(
     sequence_hashes
 }
 
+/// Router-hint metadata exposed by a worker config for one global DP rank.
+///
+/// This is borrowed from the underlying worker config so candidate filtering can
+/// check capability, role compatibility, and source endpoint presence without
+/// allocating. `source_control_endpoint` is optional because targets only need
+/// to consume hints, while sources must provide an endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouterHintWorkerMetadata<'a> {
+    pub worker_type: &'a str,
+    pub source_control_endpoint: Option<&'a str>,
+}
+
 /// Trait abstracting the worker configuration fields needed by the scheduling layer.
 ///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
@@ -270,6 +283,19 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+
+    /// Router-hint capability and source metadata for a specific global DP rank.
+    ///
+    /// `None` means this worker/rank does not support router hints. Backends
+    /// that support hints but cannot serve as a source may return `Some` with
+    /// `source_control_endpoint: None`. If router hints grow into a broader
+    /// multi-backend contract, move this method into a dedicated extension trait.
+    fn router_hint_metadata_for_dp_rank(
+        &self,
+        _dp_rank: DpRank,
+    ) -> Option<RouterHintWorkerMetadata<'_>> {
+        None
+    }
 
     /// Tokens retained by the backend's native KV offloading tier, if available.
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
@@ -435,6 +461,177 @@ pub enum StorageTier {
     External,
 }
 
+/// Logical lifetime that owns a cache residency independently of its physical tier.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidencyDomain {
+    #[default]
+    Worker,
+    CacheOwner,
+}
+
+/// Exact logical owner recorded inside a physical-tier index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResidencyOwner {
+    pub worker: WorkerWithDpRank,
+    pub domain: ResidencyDomain,
+}
+
+impl ResidencyOwner {
+    pub fn new(worker: WorkerWithDpRank, domain: ResidencyDomain) -> Self {
+        Self { worker, domain }
+    }
+}
+
+/// Scope of a cache-residency reset.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetScope {
+    #[default]
+    All,
+    Domain(ResidencyDomain),
+}
+
+/// Tolerant wire representation for the additive `residency_domain` field.
+///
+/// `Missing` is the legacy compatibility signal. Unsupported values stay at
+/// the wire boundary and never enter [`ResidencyDomain`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WireResidencyDomain {
+    #[default]
+    Missing,
+    Known(ResidencyDomain),
+    Unknown(Box<str>),
+    Invalid,
+}
+
+impl WireResidencyDomain {
+    pub fn explicit(domain: ResidencyDomain) -> Self {
+        Self::Known(domain)
+    }
+
+    fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+
+    pub fn parse(&self) -> Result<Option<ResidencyDomain>, UnsupportedResidencyDomain> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::Known(domain) => Ok(Some(*domain)),
+            Self::Unknown(_) | Self::Invalid => Err(UnsupportedResidencyDomain),
+        }
+    }
+}
+
+impl Serialize for WireResidencyDomain {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Missing | Self::Invalid => serializer.serialize_none(),
+            Self::Known(ResidencyDomain::Worker) => serializer.serialize_str("worker"),
+            Self::Known(ResidencyDomain::CacheOwner) => serializer.serialize_str("cache_owner"),
+            Self::Unknown(value) => serializer.serialize_str(value),
+        }
+    }
+}
+
+struct WireResidencyDomainVisitor;
+
+impl<'de> Visitor<'de> for WireResidencyDomainVisitor {
+    type Value = WireResidencyDomain;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a residency-domain string")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(match value {
+            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
+            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
+            value => WireResidencyDomain::Unknown(value.into()),
+        })
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(match value.as_str() {
+            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
+            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
+            _ => WireResidencyDomain::Unknown(value.into_boxed_str()),
+        })
+    }
+
+    fn visit_char<E>(self, _value: char) -> Result<Self::Value, E> {
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_bytes<E>(self, _value: &[u8]) -> Result<Self::Value, E> {
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_byte_buf<E>(self, _value: Vec<u8>) -> Result<Self::Value, E> {
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        // Explicit null is malformed. Only an omitted field selects legacy
+        // semantics; treating null as omission would turn a malformed clear
+        // into an all-domain reset.
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        // MessagePack nil follows the same contract as JSON null above.
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(WireResidencyDomain::Invalid)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(WireResidencyDomain::Invalid)
+    }
+}
+
+impl<'de> Deserialize<'de> for WireResidencyDomain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(WireResidencyDomainVisitor)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unsupported residency domain")]
+pub struct UnsupportedResidencyDomain;
+
 impl StorageTier {
     pub fn from_kv_medium(medium: &str) -> Option<Self> {
         match medium {
@@ -444,12 +641,6 @@ impl StorageTier {
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
             _ => None,
         }
-    }
-
-    pub fn from_kv_medium_or_default(medium: Option<&str>) -> Self {
-        medium
-            .and_then(Self::from_kv_medium)
-            .unwrap_or(Self::Device)
     }
 
     /// Canonical wire-format medium string. `None` for the default GPU tier so
@@ -478,6 +669,8 @@ pub enum PlacementOwner {
 pub struct Placement {
     pub owner: PlacementOwner,
     pub tier: StorageTier,
+    #[serde(default)]
+    pub residency_domain: ResidencyDomain,
 }
 
 impl Placement {
@@ -485,6 +678,7 @@ impl Placement {
         Self {
             owner: PlacementOwner::LocalWorker(WorkerWithDpRank::new(worker_id, dp_rank)),
             tier,
+            residency_domain: ResidencyDomain::Worker,
         }
     }
 
@@ -516,10 +710,11 @@ impl PlacementEvent {
         let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
             return None;
         };
-        Some(RouterEvent::with_storage_tier(
+        Some(RouterEvent::with_residency_domain(
             worker.worker_id,
             self.event,
             self.placement.tier,
+            self.placement.residency_domain,
         ))
     }
 }
@@ -1010,6 +1205,9 @@ pub enum KvCacheEventError {
 
     #[error("Indexer invariant violated")]
     IndexerInvariantViolation,
+
+    #[error("Unsupported residency domain")]
+    UnsupportedResidencyDomain,
 }
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
@@ -1020,6 +1218,10 @@ pub struct RouterEvent {
     /// The storage tier associated with the event.
     #[serde(default)]
     pub storage_tier: StorageTier,
+    /// Optional logical residency owner. Absence is interpreted by event kind
+    /// for compatibility with domainless publishers.
+    #[serde(default, skip_serializing_if = "WireResidencyDomain::is_missing")]
+    pub residency_domain: WireResidencyDomain,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
 }
@@ -1044,11 +1246,61 @@ impl RouterEvent {
         event: KvCacheEvent,
         storage_tier: StorageTier,
     ) -> Self {
+        // Canonical in-process events are worker-owned, including clears. A
+        // missing domain is reserved for decoding legacy wire payloads.
+        Self::with_residency_domain(worker_id, event, storage_tier, ResidencyDomain::Worker)
+    }
+
+    pub fn with_residency_domain(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+        residency_domain: ResidencyDomain,
+    ) -> Self {
         Self {
             worker_id,
             storage_tier,
+            residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
         }
+    }
+
+    /// Resolve a storage mutation to its canonical logical domain.
+    pub fn resolved_residency_domain(&self) -> Result<ResidencyDomain, UnsupportedResidencyDomain> {
+        let domain = self.residency_domain.parse()?.unwrap_or_default();
+        if domain == ResidencyDomain::CacheOwner && self.storage_tier.is_gpu() {
+            return Err(UnsupportedResidencyDomain);
+        }
+        Ok(domain)
+    }
+
+    pub fn residency_owner(&self) -> Result<ResidencyOwner, UnsupportedResidencyDomain> {
+        Ok(ResidencyOwner::new(
+            WorkerWithDpRank::new(self.worker_id, self.event.dp_rank),
+            self.resolved_residency_domain()?,
+        ))
+    }
+
+    /// Resolve `Cleared` semantics while preserving legacy all-domain clears.
+    pub fn reset_scope(&self) -> Result<Option<ResetScope>, UnsupportedResidencyDomain> {
+        if !matches!(self.event.data, KvCacheEventData::Cleared) {
+            return Ok(None);
+        }
+        Ok(Some(match self.residency_domain.parse()? {
+            Some(domain) => ResetScope::Domain(domain),
+            None => ResetScope::All,
+        }))
+    }
+
+    pub fn targets_primary(&self) -> Result<bool, UnsupportedResidencyDomain> {
+        if let Some(scope) = self.reset_scope()? {
+            return Ok(!matches!(
+                scope,
+                ResetScope::Domain(ResidencyDomain::CacheOwner)
+            ));
+        }
+        self.resolved_residency_domain()?;
+        Ok(self.storage_tier.is_gpu())
     }
 }
 
@@ -1308,6 +1560,116 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use serde_json;
+
+    // Temporary N/N-1 fixtures. Remove this module when domainless RouterEvent
+    // is outside the supported mixed-version window.
+    mod residency_domain_compat {
+        use super::*;
+
+        #[derive(Serialize, Deserialize)]
+        struct LegacyRouterEvent {
+            worker_id: WorkerId,
+            #[serde(default)]
+            storage_tier: StorageTier,
+            event: KvCacheEvent,
+        }
+
+        #[derive(Serialize)]
+        struct ExplicitDomainEvent {
+            worker_id: WorkerId,
+            storage_tier: StorageTier,
+            residency_domain: serde_json::Value,
+            event: KvCacheEvent,
+        }
+
+        fn event(event_id: u64, data: KvCacheEventData) -> KvCacheEvent {
+            KvCacheEvent {
+                event_id,
+                data,
+                dp_rank: 0,
+            }
+        }
+
+        fn stored(event_id: u64) -> KvCacheEvent {
+            event(
+                event_id,
+                KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: Vec::new(),
+                }),
+            )
+        }
+
+        #[test]
+        fn named_messagepack_keeps_worker_only_mixed_versions_operational() {
+            let legacy = vec![
+                LegacyRouterEvent {
+                    worker_id: 7,
+                    storage_tier: StorageTier::HostPinned,
+                    event: stored(1),
+                },
+                LegacyRouterEvent {
+                    worker_id: 7,
+                    storage_tier: StorageTier::Device,
+                    event: event(2, KvCacheEventData::Cleared),
+                },
+            ];
+            let decoded: Vec<RouterEvent> =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+            assert_eq!(
+                decoded[0].resolved_residency_domain(),
+                Ok(ResidencyDomain::Worker)
+            );
+            assert_eq!(decoded[1].reset_scope(), Ok(Some(ResetScope::All)));
+
+            let explicit_worker = RouterEvent::with_residency_domain(
+                7,
+                stored(3),
+                StorageTier::Disk,
+                ResidencyDomain::Worker,
+            );
+            let old_reader: LegacyRouterEvent =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
+            assert_eq!(old_reader.event.event_id, 3);
+            assert_eq!(old_reader.storage_tier, StorageTier::Disk);
+
+            let mixed = vec![
+                ExplicitDomainEvent {
+                    worker_id: 7,
+                    storage_tier: StorageTier::HostPinned,
+                    residency_domain: serde_json::json!("worker"),
+                    event: stored(4),
+                },
+                ExplicitDomainEvent {
+                    worker_id: 7,
+                    storage_tier: StorageTier::HostPinned,
+                    residency_domain: serde_json::json!("future_owner"),
+                    event: stored(5),
+                },
+                ExplicitDomainEvent {
+                    worker_id: 7,
+                    storage_tier: StorageTier::HostPinned,
+                    residency_domain: serde_json::Value::Null,
+                    event: stored(6),
+                },
+                ExplicitDomainEvent {
+                    worker_id: 7,
+                    storage_tier: StorageTier::HostPinned,
+                    residency_domain: serde_json::json!("worker"),
+                    event: stored(7),
+                },
+            ];
+            let decoded: Vec<RouterEvent> =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&mixed).unwrap()).unwrap();
+            let applied_ids: Vec<_> = decoded
+                .iter()
+                .filter(|event| event.resolved_residency_domain().is_ok())
+                .map(|event| event.event.event_id)
+                .collect();
+            assert_eq!(applied_ids, vec![4, 7]);
+        }
+    }
 
     /// Pin the sglang pad_value constants and formula against upstream
     /// `MultimodalItem._compute_pad_value`. If sglang bumps a constant, this
@@ -1868,6 +2230,7 @@ mod tests {
             "Default kv_transfer_preferred_weight() should return None"
         );
         assert!(config.native_offloading_capacity_tokens().is_none());
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]

@@ -12,99 +12,99 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::StreamExt;
-use rand::Rng;
 
 use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
+use crate::routing_policy::{
+    AdmissionKind, CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy,
+};
 use crate::traits::DistributedRuntimeProvider;
 
 /// Shared occupancy state for routing modes that track per-worker in-flight requests.
 #[derive(Debug, Default)]
 pub(crate) struct RoutingOccupancyState {
-    counts: DashMap<u64, AtomicU64>,
-    exact_selection_lock: tokio::sync::Mutex<()>,
+    counts: DashMap<u64, Arc<AtomicU64>>,
+    exact_selection_lock: parking_lot::Mutex<()>,
 }
 
 impl RoutingOccupancyState {
-    pub(crate) fn increment(&self, instance_id: u64) {
-        self.counts
+    pub(crate) fn increment(&self, instance_id: u64) -> Arc<AtomicU64> {
+        let count = self
+            .counts
             .entry(instance_id)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone();
+        count.fetch_add(1, Ordering::Relaxed);
+        count
     }
 
     pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
-        instance_ids
-            .iter()
-            .min_by_key(|&&id| self.load(id))
-            .copied()
+        RoutePicker::new(RoutePolicy::LeastLoaded)
+            .peek(
+                CandidateView::Workers(instance_ids),
+                RouteContext::default(),
+                |id| self.load(id),
+            )
+            .map(|decision| decision.target.worker_id)
     }
 
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
-        let _guard = self.exact_selection_lock.lock().await;
-
-        let mut min_load = u64::MAX;
-        let mut selected = None;
-        let mut tie_count = 0usize;
-        let mut rng = rand::rng();
-        for &id in instance_ids {
-            let load = self.load(id);
-            if load < min_load {
-                min_load = load;
-                selected = Some(id);
-                tie_count = 1;
-                continue;
-            }
-
-            if load == min_load {
-                tie_count += 1;
-                // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
-                if rng.random_range(0..tie_count) == 0 {
-                    selected = Some(id);
-                }
-            }
-        }
-
-        let id = selected?;
-        self.increment(id);
-        Some(id)
+        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
+        self.select_and_admit(
+            &picker,
+            CandidateView::Workers(instance_ids),
+            RouteContext::default(),
+        )
+        .map(|(decision, _)| decision.target.worker_id)
     }
 
     /// Least-loaded selection without the increment. Same tie-break policy as
     /// [`Self::select_exact_min_and_increment`] so peek and select share a
     /// distribution.
     pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
-        let mut min_load = u64::MAX;
-        let mut selected = None;
-        let mut tie_count = 0usize;
-        let mut rng = rand::rng();
-        for &id in instance_ids {
-            let load = self.load(id);
-            if load < min_load {
-                min_load = load;
-                selected = Some(id);
-                tie_count = 1;
-                continue;
-            }
+        RoutePicker::new(RoutePolicy::LeastLoaded)
+            .peek(
+                CandidateView::Workers(instance_ids),
+                RouteContext::default(),
+                |id| self.load(id),
+            )
+            .map(|decision| decision.target.worker_id)
+    }
 
-            if load == min_load {
-                tie_count += 1;
-                // Reservoir sampling keeps tied minima uniform; matches select_exact_min_and_increment.
-                if rng.random_range(0..tie_count) == 0 {
-                    selected = Some(id);
-                }
-            }
-        }
+    pub(crate) fn peek(
+        &self,
+        picker: &RoutePicker,
+        candidates: CandidateView<'_>,
+        context: RouteContext,
+    ) -> Option<RouteDecision> {
+        picker.peek(candidates, context, |id| self.load(id))
+    }
 
-        selected
+    pub(crate) fn select_and_admit(
+        &self,
+        picker: &RoutePicker,
+        candidates: CandidateView<'_>,
+        context: RouteContext,
+    ) -> Option<(RouteDecision, Option<Arc<AtomicU64>>)> {
+        let _guard = self.exact_selection_lock.lock();
+        let decision = picker.select(candidates, context, |id| self.load(id))?;
+        let counter = match decision.admission {
+            AdmissionKind::None => None,
+            AdmissionKind::Occupancy => Some(self.increment(decision.target.worker_id)),
+        };
+        Some((decision, counter))
+    }
+
+    pub(crate) fn decrement_counter(counter: &AtomicU64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(1))
+        });
     }
 
     pub(crate) fn decrement(&self, instance_id: u64) {
         if let Some(count) = self.counts.get(&instance_id) {
-            let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(1))
-            });
+            Self::decrement_counter(count.as_ref());
         }
     }
 
@@ -240,11 +240,15 @@ impl RoutingInstances {
     }
 
     fn from_parts(
-        discovered_ids: Vec<u64>,
-        routable_ids: Vec<u64>,
+        mut discovered_ids: Vec<u64>,
+        mut routable_ids: Vec<u64>,
         overloaded_ids: HashSet<u64>,
         availability_initialized: bool,
     ) -> Self {
+        discovered_ids.sort_unstable();
+        discovered_ids.dedup();
+        routable_ids.sort_unstable();
+        routable_ids.dedup();
         let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
         let routable_id_set = Arc::new(routable_ids.iter().copied().collect());
         Self {
@@ -607,6 +611,92 @@ impl Client {
         self.routing_instances.instance_avail_watcher()
     }
 
+    /// Create a client view whose routable instances are restricted by a caller-owned
+    /// admission set.
+    ///
+    /// Endpoint discovery remains the source of connection metadata and hard availability. The
+    /// returned client publishes only the intersection of that endpoint membership and
+    /// `admitted_ids`, allowing a higher-level controller to keep discovered-but-unvalidated
+    /// instances out of a routing group. The view has independent overload and fault-inhibition
+    /// state, just like a freshly constructed client.
+    pub fn with_admitted_instances(
+        &self,
+        admitted_ids: tokio::sync::watch::Receiver<Vec<u64>>,
+    ) -> Self {
+        self.with_admitted_instances_and_cancellation(
+            admitted_ids,
+            self.endpoint.drt().primary_token(),
+        )
+    }
+
+    /// Like [`Self::with_admitted_instances`], with a lifecycle token for construction-time
+    /// cancellation by an owning controller.
+    pub fn with_admitted_instances_and_cancellation(
+        &self,
+        mut admitted_ids: tokio::sync::watch::Receiver<Vec<u64>>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let mut endpoint_instances = self.instance_source.as_ref().clone();
+        let initial = Self::filter_admitted_instances(
+            endpoint_instances.borrow().as_slice(),
+            admitted_ids.borrow().as_slice(),
+        );
+        let initial_ids = initial.iter().map(Instance::id).collect::<Vec<_>>();
+        let (instance_tx, instance_rx) = tokio::sync::watch::channel(initial);
+        let updater_cancel = cancel_token.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = updater_cancel.cancelled() => break,
+                    _ = instance_tx.closed() => break,
+                    result = endpoint_instances.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    result = admitted_ids.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                let next = Self::filter_admitted_instances(
+                    endpoint_instances.borrow_and_update().as_slice(),
+                    admitted_ids.borrow_and_update().as_slice(),
+                );
+                let changed = *instance_tx.borrow() != next;
+                if changed && instance_tx.send(next).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let client = Self {
+            endpoint: self.endpoint.clone(),
+            endpoint_discovery_source: self.endpoint_discovery_source.clone(),
+            instance_source: Arc::new(instance_rx),
+            routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
+            reconcile_interval: self.reconcile_interval,
+        };
+        client.monitor_instance_source_with_cancellation(cancel_token, false);
+        client
+    }
+
+    fn filter_admitted_instances(instances: &[Instance], admitted_ids: &[u64]) -> Vec<Instance> {
+        if admitted_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let admitted = admitted_ids.iter().copied().collect::<HashSet<_>>();
+        instances
+            .iter()
+            .filter(|instance| admitted.contains(&instance.id()))
+            .cloned()
+            .collect()
+    }
+
     /// Subscribe to raw discovery events for this endpoint.
     ///
     /// Unlike `instance_source`, this feed does not coalesce remove→add pairs,
@@ -709,8 +799,16 @@ impl Client {
     /// `instance_source`. This ensures instances removed via `report_instance_down`
     /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
-        let reconcile_interval = self.reconcile_interval;
         let cancel_token = self.endpoint.drt().primary_token();
+        self.monitor_instance_source_with_cancellation(cancel_token, true);
+    }
+
+    fn monitor_instance_source_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+        prune_shared_occupancy: bool,
+    ) {
+        let reconcile_interval = self.reconcile_interval;
         let client = self.clone();
         let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {
@@ -725,12 +823,14 @@ impl Client {
                 let routing_instances = client.reconcile_discovered_instances(instance_ids);
 
                 // Clean up stale occupancy counters for instances that no longer exist.
-                let registry = client.endpoint.drt().routing_occupancy_states();
-                if let Ok(registry) = registry.try_lock()
-                    && let Some(weak) = registry.get(&client.endpoint)
-                    && let Some(state) = weak.upgrade()
-                {
-                    state.retain(routing_instances.discovered_ids());
+                if prune_shared_occupancy {
+                    let registry = client.endpoint.drt().routing_occupancy_states();
+                    if let Ok(registry) = registry.try_lock()
+                        && let Some(weak) = registry.get(&client.endpoint)
+                        && let Some(state) = weak.upgrade()
+                    {
+                        state.retain(routing_instances.discovered_ids());
+                    }
                 }
 
                 tokio::select! {
@@ -832,6 +932,7 @@ impl Client {
                         map.insert(instance.instance_id, instance);
                     }
                     DiscoveryEvent::Added(_) => {}
+                    DiscoveryEvent::ModelTaintsUpdated(_) => {}
                     DiscoveryEvent::Removed(id) => {
                         if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
                             map.remove(&endpoint_id.instance_id);
@@ -1262,6 +1363,41 @@ mod tests {
         // Note: We need to check if changed() was signaled
         let current = watcher.borrow().clone();
         assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn admitted_client_never_routes_unadmitted_endpoint_instances() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_admitted_client".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let endpoint_client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = endpoint_client.wait_for_instances().await.unwrap()[0].id();
+
+        let (admission_tx, admission_rx) = tokio::sync::watch::channel(Vec::new());
+        let admitted_client = endpoint_client.with_admitted_instances(admission_rx);
+        let mut admitted = admitted_client.instance_avail_watcher();
+        assert!(admitted.borrow().is_empty());
+
+        admission_tx.send_replace(vec![worker_id]);
+        tokio::time::timeout(Duration::from_secs(1), admitted.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted.borrow_and_update().clone(), vec![worker_id]);
+
+        admission_tx.send_replace(Vec::new());
+        tokio::time::timeout(Duration::from_secs(1), admitted.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(admitted.borrow_and_update().is_empty());
 
         rt.shutdown();
     }

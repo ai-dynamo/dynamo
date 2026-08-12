@@ -8,6 +8,7 @@ from typing import Awaitable, Callable
 
 import sglang as sgl
 
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import WorkerType
@@ -186,6 +187,7 @@ async def init_image_diffusion(
             "Overriding output_modalities to ['image'] for image diffusion worker"
         )
 
+    register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -261,6 +263,7 @@ async def init_video_diffusion(
 
     ready_event = asyncio.Event()
 
+    register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(

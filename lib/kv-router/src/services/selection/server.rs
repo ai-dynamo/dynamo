@@ -344,16 +344,15 @@ pub(crate) fn create_router(state: Arc<AppState>) -> Router {
 }
 
 pub async fn run_server(config: SelectionServiceConfig) -> anyhow::Result<()> {
-    tracing::info!(
-        port = config.port,
-        threads = config.threads,
-        indexer_peers = config.indexer_peers.len(),
-        replica_sync = config.replica_sync_port.is_some(),
-        "Starting Dynamo selection service"
-    );
+    let service = config.service_builder().build().await?;
+    run_server_with_service(config.port, service).await
+}
 
-    let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
-    let service = Arc::new(config.service_builder().build().await?);
+/// Serve a caller-built selection service until shutdown.
+pub async fn run_server_with_service(port: u16, service: SelectionService) -> anyhow::Result<()> {
+    tracing::info!(port, "Starting Dynamo selection service");
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    let service = Arc::new(service);
     let app = create_router(Arc::new(AppState {
         service: Arc::clone(&service),
     }));

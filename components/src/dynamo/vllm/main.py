@@ -47,6 +47,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.router_hints import enable_router_hint_support
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -58,7 +59,8 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
-from .handlers import get_dp_range_for_worker
+from .engine_generate import publish_engine_generate_capability
+from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
@@ -682,7 +684,16 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    dp_range = get_dp_range_for_worker(vllm_config)
+    apply_data_parallel_runtime_config(runtime_config, dp_range)
+    enable_router_hint_support(
+        runtime_config, config.engine_args, worker_type, dp_range
+    )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    if publish_engine_generate_capability(
+        runtime_config, model_input, model_type, worker_type
+    ):
+        logging.info("Published vLLM engine-native generate capability")
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len
@@ -695,7 +706,6 @@ async def register_vllm_model(
     runtime_values = get_engine_cache_info(engine_client)
     num_gpu_blocks = runtime_values["num_gpu_blocks"]
     # Get data_parallel_size from vllm_config (defaults to 1)
-    dp_range = get_dp_range_for_worker(vllm_config)
     if num_gpu_blocks is None:
         # TODO(upstream-vllm): remove this workaround once vLLM propagates
         # num_gpu_blocks from Ray DP workers back to the main-process vllm_config.
@@ -749,9 +759,6 @@ async def register_vllm_model(
         )
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
 
-    runtime_config.data_parallel_start_rank = dp_range[0]
-    runtime_config.data_parallel_size = dp_range[1]
-
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
@@ -778,7 +785,7 @@ async def register_vllm_model(
         model_aliases=config.served_model_aliases or None,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
-        # lifecycle registration; embeddings still do not.
+        # lifecycle registration; embeddings and classify still do not.
         max_gpu_lora_count=_base_model_lora_capacity(config, model_type),
     )
 
@@ -786,7 +793,15 @@ async def register_vllm_model(
 def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
     if not getattr(config.engine_args, "enable_lora", False):
         return None
-    if model_type == ModelType.Embedding:
+    # Pooling-family workers (embedding, classify|pooling) do not serve the
+    # LoRA load endpoints, so they must not advertise adapter capacity. Use
+    # capability checks, not identity: the classify worker registers the
+    # combined ModelType.Classify | ModelType.Pooling bits.
+    if (
+        model_type.supports_embedding()
+        or model_type.supports_classify()
+        or model_type.supports_pooling()
+    ):
         return None
     return config.engine_args.max_loras
 

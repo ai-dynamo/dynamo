@@ -15,6 +15,7 @@ use dynamo_kv_router::{
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
+    router_hint::{RouterHint, RouterHintRootCandidates},
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
@@ -71,11 +72,44 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     worker_type::WorkerType,
 };
-use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
+use route_lookup::{
+    TieredLookupOptions, TieredLookupResult, query_tiered_matches, split_retained_block_hashes,
+};
 
 pub(crate) type WorkerSelectorFactory<Sel> = Arc<
     dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
 >;
+
+pub(crate) fn to_worker_selection_session_context(
+    context: &crate::protocols::common::extensions::AgentContext,
+) -> dynamo_kv_router::SessionContext {
+    use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
+    use dynamo_kv_router::{SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints};
+
+    // Keep this exhaustive so a new wire-level field must be handled here.
+    let AgentContext {
+        session_id,
+        parent_session_id,
+        session_final,
+        kv_hints,
+        input_trigger,
+    } = context;
+    let input_trigger = input_trigger.map(|trigger| match trigger {
+        InputTrigger::UserMessage => WorkerSelectionInputTrigger::UserMessage,
+        InputTrigger::ToolResult => WorkerSelectionInputTrigger::ToolResult,
+        InputTrigger::Other => WorkerSelectionInputTrigger::Other,
+    });
+    SessionContext::new(
+        session_id.clone(),
+        parent_session_id.clone(),
+        *session_final,
+        kv_hints.as_ref().map(|hints| {
+            let KvHints { evict_session } = hints;
+            WorkerSelectionKvHints::new(*evict_session)
+        }),
+        input_trigger,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
@@ -141,6 +175,7 @@ pub enum FindBestMatchOutcome {
         cached_tokens: usize,
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
+        router_hint: Option<RouterHint>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -225,21 +260,31 @@ pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
-    // would just bounce the request around. Both remain HTTP 529 to the client.
-    let error_type = match error {
-        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => ErrorType::WorkerOverloaded,
-        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => ErrorType::ResourceExhausted,
+    // would just bounce the request around. A filter rejection is unavailable,
+    // not overload, and becomes HTTP 503.
+    let (error_type, overloaded) = match error {
+        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
+            (ErrorType::WorkerOverloaded, true)
+        }
+        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
+            (ErrorType::ResourceExhausted, true)
+        }
+        scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
 
     let message = error.to_string();
-    let cause = PipelineError::ServiceOverloaded(message.clone());
-    DynamoError::builder()
+    let error = DynamoError::builder()
         .error_type(error_type)
-        .message(message)
-        .cause(cause)
-        .build()
-        .into()
+        .message(message.clone());
+    if overloaded {
+        error
+            .cause(PipelineError::ServiceOverloaded(message))
+            .build()
+            .into()
+    } else {
+        error.build().into()
+    }
 }
 
 fn cancelled_error(context_id: &str) -> anyhow::Error {
@@ -580,6 +625,64 @@ where
         cache_hit_for_worker(cache_hit_estimates, worker)
     }
 
+    fn has_router_hint_capable_workers(&self) -> bool {
+        // Router-hint capability is worker-level metadata. Check one
+        // representative DP rank here so the coarse request-path gate does not
+        // scale with data_parallel_size. Follow-up: cache this from the runtime
+        // config watch if the per-worker scan shows up in large-fleet routing
+        // benchmarks.
+        self.workers_with_configs.borrow().values().any(|config| {
+            config
+                .router_hint_metadata_for_dp_rank(config.data_parallel_start_rank())
+                .is_some()
+        })
+    }
+
+    fn router_hint_for_selection(
+        &self,
+        target: WorkerWithDpRank,
+        target_cached_prefix_blocks: u32,
+        candidates: Option<&RouterHintRootCandidates>,
+    ) -> Option<RouterHint> {
+        let candidates = candidates?;
+
+        let (block_hashes, source_control_endpoint) = {
+            let configs = self.workers_with_configs.borrow();
+            let target_config = configs.get(&target.worker_id)?;
+            let target_metadata = target_config.router_hint_metadata_for_dp_rank(target.dp_rank)?;
+
+            let prefix_blocks_to_beat =
+                usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
+            let (source, block_hashes) =
+                candidates.best_source(prefix_blocks_to_beat, |worker| {
+                    worker != target
+                        && configs.get(&worker.worker_id).is_some_and(|config| {
+                            config
+                                .router_hint_metadata_for_dp_rank(worker.dp_rank)
+                                .is_some_and(|source_metadata| {
+                                    source_metadata.worker_type == target_metadata.worker_type
+                                        && source_metadata.source_control_endpoint.is_some()
+                                })
+                        })
+                })?;
+            let source_control_endpoint = configs
+                .get(&source.worker_id)?
+                .router_hint_metadata_for_dp_rank(source.dp_rank)?
+                .source_control_endpoint?
+                .to_string();
+            (block_hashes, source_control_endpoint)
+        };
+
+        if block_hashes.is_empty() {
+            return None;
+        }
+
+        Some(RouterHint {
+            source_control_endpoint,
+            block_hashes,
+        })
+    }
+
     pub async fn record_routing_decision(
         &self,
         mut tokens_with_hashes: TokensWithHashes,
@@ -707,7 +810,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -726,7 +829,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -757,7 +860,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -776,7 +879,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -806,7 +909,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -862,8 +965,21 @@ where
         });
         let seq_hash_elapsed = start.elapsed();
 
+        let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
+        let has_router_hint_capable_workers = self.has_router_hint_capable_workers();
+        let should_prepare_router_hint = is_admitted_routing && has_router_hint_capable_workers;
+        let retain_router_hint_chain =
+            should_prepare_router_hint && self.indexer.supports_router_hint_chain_retention();
+        if should_prepare_router_hint && !retain_router_hint_chain {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "router_hint chain retention requires a local event-driven indexer with no approximate side indexer and no remote-recorded routing decisions; proceeding without router hints"
+                );
+            });
+        }
 
         let TieredLookupResult {
             tiered_matches,
@@ -877,8 +993,11 @@ where
             tokens,
             self.block_size,
             block_hashes,
-            cache_namespace.as_deref(),
-            retain_block_hashes,
+            TieredLookupOptions {
+                cache_namespace: cache_namespace.as_deref(),
+                retain_block_hashes,
+                retain_router_hint_chain,
+            },
         )
         .await?;
 
@@ -895,6 +1014,9 @@ where
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
                 .signals();
+        let router_hint_candidates = retain_router_hint_chain
+            .then(|| tiered_matches.router_hint_root_candidates().cloned())
+            .flatten();
         drop(tiered_matches);
         let find_matches_elapsed = start.elapsed();
 
@@ -919,12 +1041,14 @@ where
             block_hashes: block_hashes_for_refresh,
             isl_tokens,
             overlap,
+            router_hint_candidates,
+            retain_router_hint_chain,
             router_config_override: router_config_override.cloned(),
             lora_name,
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -961,9 +1085,18 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
+        let router_hint = if is_admitted_routing {
+            self.router_hint_for_selection(
+                response.best_worker,
+                response.target_cached_prefix_blocks,
+                response.router_hint_candidates.as_ref(),
+            )
+        } else {
+            None
+        };
+
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
-        let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
 
         // Keep existing routing metrics scoped to requests admitted into the scheduler by this call.
         if is_admitted_routing && let Some(m) = metrics::RoutingOverheadMetrics::get() {
@@ -1010,6 +1143,7 @@ where
                     cached_tokens: response.cached_tokens,
                     potential_decode_blocks: response.potential_decode_blocks as u64,
                     routing_hashes,
+                    router_hint,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(
@@ -1553,13 +1687,57 @@ mod tests {
     use async_trait::async_trait;
     use dynamo_kv_router::{
         indexer::{LowerTierMatchDetails, MatchDetails},
-        protocols::{OverlapScores, StorageTier, compute_seq_hash_for_block},
+        protocols::{
+            ExternalSequenceBlockHash, OverlapScores, StorageTier, compute_seq_hash_for_block,
+        },
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
     use crate::kv_router::scheduler::KvSchedulerError;
     use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+    #[test]
+    fn all_filtered_workers_map_to_unavailable() {
+        let error = map_scheduler_error(KvSchedulerError::AllEligibleWorkersFiltered);
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("filtered workers should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::Unavailable);
+    }
+
+    #[test]
+    fn worker_selection_receives_complete_session_context() {
+        use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
+        use dynamo_kv_router::WorkerSelectionInputTrigger;
+
+        let context = AgentContext {
+            session_id: "child-session".into(),
+            parent_session_id: Some("root-session".into()),
+            session_final: Some(true),
+            kv_hints: Some(KvHints {
+                evict_session: true,
+            }),
+            input_trigger: Some(InputTrigger::ToolResult),
+        };
+
+        let selection_context = to_worker_selection_session_context(&context);
+
+        assert_eq!(selection_context.session_id(), "child-session");
+        assert_eq!(selection_context.parent_session_id(), Some("root-session"));
+        assert_eq!(selection_context.session_final(), Some(true));
+        assert!(
+            selection_context
+                .kv_hints()
+                .expect("KV hints")
+                .evict_session()
+        );
+        assert_eq!(
+            selection_context.input_trigger(),
+            Some(WorkerSelectionInputTrigger::ToolResult)
+        );
+    }
 
     #[test]
     fn keyed_tracking_requires_nonempty_model_name() {
@@ -1845,22 +2023,19 @@ mod tests {
         );
     }
 
-    async fn make_test_router(
+    async fn make_test_router_with_workers(
         selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
         + Send
         + Sync
         + 'static,
         shared_cache: Option<Box<dyn SharedKvCache>>,
+        workers: HashMap<WorkerId, ModelRuntimeConfig>,
     ) -> KvRouter<
         impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
     > {
         let component = make_test_component("shared-cache-router").await;
         let endpoint = component.endpoint("backend");
         let client = endpoint.client().await.unwrap();
-
-        let mut workers = HashMap::new();
-        workers.insert(0, ModelRuntimeConfig::default());
-        workers.insert(1, ModelRuntimeConfig::default());
         let (_tx, rx) = watch::channel(workers);
 
         let config = KvRouterConfig {
@@ -1891,6 +2066,249 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    async fn make_test_router(
+        selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
+        + Send
+        + Sync
+        + 'static,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+    ) -> KvRouter<
+        impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    > {
+        let mut workers = HashMap::new();
+        workers.insert(0, ModelRuntimeConfig::default());
+        workers.insert(1, ModelRuntimeConfig::default());
+        make_test_router_with_workers(selector, shared_cache, workers).await
+    }
+
+    fn router_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {
+        router_hint_runtime_config_with_worker_type(endpoint, "prefill")
+    }
+
+    fn router_hint_runtime_config_with_worker_type(
+        endpoint: Option<&str>,
+        worker_type: &str,
+    ) -> ModelRuntimeConfig {
+        let mut runtime_config = ModelRuntimeConfig::default();
+        runtime_config.runtime_data.insert(
+            dynamo_kv_router::router_hint::ROUTER_HINT_RUNTIME_CAPABILITY_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        runtime_config.runtime_data.insert(
+            dynamo_kv_router::router_hint::ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY.to_string(),
+            serde_json::Value::String(worker_type.to_string()),
+        );
+        if let Some(endpoint) = endpoint {
+            let mut endpoints = serde_json::Map::new();
+            endpoints.insert(
+                "0".to_string(),
+                serde_json::Value::String(endpoint.to_string()),
+            );
+            runtime_config.runtime_data.insert(
+                dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+                    .to_string(),
+                serde_json::Value::Object(endpoints),
+            );
+        }
+        runtime_config
+    }
+
+    fn router_hint_runtime_config_with_dp_endpoints(
+        endpoints: &[(u32, &str)],
+    ) -> ModelRuntimeConfig {
+        let mut runtime_config = router_hint_runtime_config(None);
+        runtime_config.runtime_data.insert(
+            dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+                .to_string(),
+            serde_json::Value::Object(
+                endpoints
+                    .iter()
+                    .map(|(dp_rank, endpoint)| {
+                        (
+                            dp_rank.to_string(),
+                            serde_json::Value::String(endpoint.to_string()),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        runtime_config
+    }
+
+    #[tokio::test]
+    async fn router_hint_allows_other_dp_ranks_of_selected_target_worker() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            7,
+            router_hint_runtime_config_with_dp_endpoints(&[
+                (0, "tcp://127.0.0.1:23280"),
+                (1, "tcp://127.0.0.1:23281"),
+            ]),
+        );
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::new(7, 0),
+            },
+            None,
+            workers,
+        )
+        .await;
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+            owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 1), 2)],
+        };
+
+        let hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+
+        assert_eq!(
+            hint,
+            Some(RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102)
+                ],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn router_hint_skips_sources_without_usable_endpoint() {
+        for source_endpoint in [None, Some("")] {
+            let mut workers = HashMap::new();
+            workers.insert(7, router_hint_runtime_config(Some("tcp://127.0.0.1:23280")));
+            workers.insert(8, router_hint_runtime_config(source_endpoint));
+            let router = make_test_router_with_workers(
+                InspectingSelector {
+                    expected_hits: None,
+                    selected_worker: WorkerWithDpRank::new(7, 0),
+                },
+                None,
+                workers,
+            )
+            .await;
+            let candidates = RouterHintRootCandidates {
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
+                owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
+            };
+
+            let hint =
+                router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+
+            assert_eq!(hint, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn router_hint_skips_sources_with_different_worker_type() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            7,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
+        );
+        workers.insert(
+            8,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "decode"),
+        );
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::new(7, 0),
+            },
+            None,
+            workers,
+        )
+        .await;
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+            owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
+        };
+
+        let hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+
+        assert_eq!(hint, None);
+    }
+
+    #[tokio::test]
+    async fn router_hint_selects_source_with_matching_worker_type() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            7,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
+        );
+        workers.insert(
+            8,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "prefill"),
+        );
+        workers.insert(
+            9,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23282"), "decode"),
+        );
+        workers.insert(
+            10,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23283"), "decode"),
+        );
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::new(7, 0),
+            },
+            None,
+            workers,
+        )
+        .await;
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+                ExternalSequenceBlockHash(103),
+            ],
+            owner_prefix_blocks: vec![
+                (WorkerWithDpRank::new(8, 0), 2),
+                (WorkerWithDpRank::new(9, 0), 3),
+            ],
+        };
+
+        let prefill_hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+        assert_eq!(
+            prefill_hint,
+            Some(RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
+            })
+        );
+
+        let decode_hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(10, 0), 0, Some(&candidates));
+        assert_eq!(
+            decode_hint,
+            Some(RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                    ExternalSequenceBlockHash(103),
+                ],
+            })
+        );
     }
 
     #[tokio::test]

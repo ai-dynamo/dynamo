@@ -180,6 +180,7 @@ func main() {
 	var operatorVersion string
 	var operatorImage string
 	var operatorImagePullPolicy string
+	var dgdrDefaultImage string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -191,6 +192,8 @@ func main() {
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
+	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
+		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -528,7 +531,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion, gates); err != nil {
+	if err := registerWebhookHandlers(
+		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
+	); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
 	}
@@ -693,6 +698,7 @@ func registerWebhookHandlers(
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
+	dgdrDefaultImage string,
 	gate features.Gate,
 ) error {
 	var operatorPrincipal string
@@ -707,6 +713,7 @@ func registerWebhookHandlers(
 		Config:            operatorCfg,
 		RuntimeConfig:     runtimeConfig,
 		OperatorVersion:   operatorVersion,
+		DGDRDefaultImage:  dgdrDefaultImage,
 		OperatorPrincipal: operatorPrincipal,
 		Gate:              gate,
 	}); err != nil {

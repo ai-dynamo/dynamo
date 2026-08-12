@@ -42,8 +42,14 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 | Format | Example | Description |
 |--------|---------|-------------|
-| **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
+| **HTTP/HTTPS** | `https://example.com/image.jpg` | Remote media files |
 | **file://** | `file:///tmp/test.mp4` | Local files accessible to the backend |
+
+> [!NOTE]
+> Media URLs are validated against a default-deny policy. `https://` and `data:` sources
+> pass; plain `http://` and hostnames that resolve to private or loopback addresses are
+> refused. To fetch media over the cluster's internal network, set
+> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
 
 ## Deployment Patterns
 
@@ -91,6 +97,8 @@ SGLang RadixAttention includes a per-image `pad_value` token in its prefix-cache
 5. SGLang uses the supplied hash when constructing its own `pad_value`, keeping the router and RadixAttention cache keys aligned.
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
+
+Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so image identity no longer contributes to cache overlap.
 
 Launch an aggregated deployment with multimodal KV routing:
 

@@ -102,6 +102,7 @@ mod tests {
                 token_id: Some(1),
                 completed: true,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: None,
             }],
             admissions: vec![AdmissionEvent {

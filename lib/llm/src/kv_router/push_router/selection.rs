@@ -7,6 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    router_hint::RouterHint,
     scheduling::RoutingEligibility,
     selector::WorkerSelector,
 };
@@ -26,12 +27,12 @@ use crate::{
 };
 
 pub(super) struct WorkerSelection {
-    pub(super) instance_id: u64,
-    pub(super) dp_rank: u32,
+    pub(super) worker: WorkerWithDpRank,
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
+    pub(super) router_hint: Option<RouterHint>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,7 +54,7 @@ impl<'a> RoutingRequestParts<'a> {
 pub(super) struct SelectionOptions {
     pub(super) affinity_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
-    pub(super) session_id: Option<String>,
+    pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
 }
 
 struct BestMatchArgs<'a> {
@@ -67,7 +68,7 @@ struct BestMatchArgs<'a> {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
-    session_id: Option<String>,
+    session_context: Option<dynamo_kv_router::SessionContext>,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -93,7 +94,7 @@ where
                 args.priority_jump,
                 args.strict_priority,
                 args.policy_class,
-                args.session_id,
+                args.session_context,
                 args.expected_output_tokens,
                 args.pinned_worker,
                 args.allowed_worker_ids,
@@ -117,13 +118,14 @@ where
                 cached_tokens,
                 potential_decode_blocks: _,
                 routing_hashes,
+                router_hint,
             } => Ok(WorkerSelection {
-                instance_id: worker.worker_id,
-                dp_rank: worker.dp_rank,
+                worker,
                 overlap_amount: overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
+                router_hint,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
@@ -183,7 +185,7 @@ where
         let SelectionOptions {
             affinity_worker,
             policy_class,
-            session_id,
+            session_context,
         } = options;
         let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
         let Some((pinned_worker_id, requested_dp_rank)) =
@@ -202,7 +204,7 @@ where
                     priority_jump,
                     strict_priority,
                     policy_class,
-                    session_id,
+                    session_context,
                     expected_output_tokens,
                     pinned_worker: None,
                     allowed_worker_ids,
@@ -218,13 +220,13 @@ where
                 // tests/utils/router_logs.py parses the structured fields on this event.
                 tracing::debug!(
                     request_id = %context_id,
-                    worker_id = selection.instance_id,
-                    dp_rank = selection.dp_rank,
+                    worker_id = selection.worker.worker_id,
+                    dp_rank = selection.worker.dp_rank,
                     overlap_blocks = selection.overlap_amount,
                     total_blocks,
                     "[ROUTING] Best: worker_{} dp_rank={} with {}/{} blocks overlap",
-                    selection.instance_id,
-                    selection.dp_rank,
+                    selection.worker.worker_id,
+                    selection.worker.dp_rank,
                     selection.overlap_amount,
                     total_blocks,
                 );
@@ -274,7 +276,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
