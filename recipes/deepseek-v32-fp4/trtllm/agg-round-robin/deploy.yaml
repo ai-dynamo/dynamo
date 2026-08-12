@@ -165,7 +165,6 @@ data:
       backend: TRTLLM
       use_low_precision_moe_combine: true
     moe_expert_parallel_size: 8
-    num_postprocess_workers: 8
     print_iter_log: true
     stream_interval: 10
     tensor_parallel_size: 8

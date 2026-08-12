@@ -52,8 +52,9 @@ The Rust HTTP server also reads these environment variables, which are not expos
 
 <ParamField path="DYN_HTTP_OVERLOAD_STATUS_CODE" type="integer" default="529">
   HTTP status returned for overload and admission-control rejection. Use `503` only for clients that
-  cannot handle 529. Invalid or out-of-range values fall back to 529. The value is read once and
-  cached when the HTTP service initializes.
+  cannot handle 529. Values from 200 through 999 are accepted. Informational values from 100 through
+  199, invalid values, and out-of-range values fall back to 529. The value is read and cached on
+  first use.
 </ParamField>
 
 <ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
@@ -109,8 +110,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
   Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative.
-  Values greater than `1.0` give device overlap extra credit and can make adjusted prefill cost
-  negative. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
+  Values greater than `1.0` give device overlap extra credit, but adjusted prefill cost is
+  clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
 
   Environment variable: `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`
 </ParamField>
@@ -248,7 +249,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-track-output-blocks / --no-router-track-output-blocks" type="boolean" default="false">
-  Track output blocks with fractional decay during generation.
+  Track output blocks during generation. With `nvext.agent_hints.osl`, fractional decay applies
+  to output blocks and the structurally exclusive prompt suffix; shared prompt blocks retain full weight.
 
   Environment variable: `DYN_ROUTER_TRACK_OUTPUT_BLOCKS`
 </ParamField>
@@ -293,9 +295,9 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only policy-family and cache-bucket YAML. When omitted, `--router-queue-threshold` and
-  `--router-queue-policy` define one synthetic policy class. Queueing remains disabled until a
-  threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues).
+  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
+  `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
+  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/advanced-customizations/custom-worker-selection.mdx).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>
@@ -497,9 +499,9 @@ See the [Frontend Guide](../../developer-guide/knowledge-base/modular-components
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
-  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance Rust tokenizer. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
+  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
 
   Environment variable: `DYN_TOKENIZER`
 </ParamField>

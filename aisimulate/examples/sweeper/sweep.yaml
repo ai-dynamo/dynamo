@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+search_space:
+  model_name: meta-llama/Meta-Llama-3.1-8B
+  hardware_sku: gb200
+  backend: [trtllm]
+  deployment_mode: [agg]
+  gpu_budget: 8
+
+workload:
+  isl: 1024
+  osl: 128
+  request_rate: 4
+  num_request_ratio: 10
+
+goal:
+  target: throughput
+
+sweep:
+  max_rounds: 1
+  candidates_per_round: 2
+  parallel_evals: 1

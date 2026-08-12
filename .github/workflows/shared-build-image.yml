@@ -226,14 +226,17 @@ jobs:
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
         run: |
           TAG_BUILDER=${{ inputs.framework }}-${{ inputs.target }}
           if [ "${{ inputs.make_efa }}" == "true" ]; then
@@ -256,9 +259,8 @@ jobs:
           IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}
           TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}-test
 
-          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
-          IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${IMAGE_TAG}"
-          TEST_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          TEST_IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${TEST_IMAGE_TAG}"
 
           # When a suffix is set (e.g. "-nightly"), also emit a mutable,
           # SHA-less floating ECR tag (e.g. vllm-runtime-cuda12-nightly) so
@@ -267,7 +269,7 @@ jobs:
           # SHA-keyed tag above is still the source of truth for promotions.
           MUTABLE_IMAGE_URI=""
           if [ -n "${IMAGE_TAG_SUFFIX}" ]; then
-            MUTABLE_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
+            MUTABLE_IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
           fi
 
           # cuda13 is the implicit default, so the tags above carry no cuda
@@ -277,9 +279,9 @@ jobs:
           EXPLICIT_CUDA_IMAGE_URI=""
           EXPLICIT_CUDA_MUTABLE_IMAGE_URI=""
           if [ "${CUDA_MAJOR:-}" = "13" ]; then
-            EXPLICIT_CUDA_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${SOURCE_SHA}-${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
+            EXPLICIT_CUDA_IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${SOURCE_SHA}-${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
             if [ -n "${IMAGE_TAG_SUFFIX}" ]; then
-              EXPLICIT_CUDA_MUTABLE_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
+              EXPLICIT_CUDA_MUTABLE_IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
             fi
           fi
 
@@ -306,21 +308,23 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           fresh_builder: ${{ inputs.fresh_builder }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Calculate extra tags
         id: extra-tags
         shell: bash
         env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           EXTRA_TAGS: ${{ inputs.extra_tags }}
           MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.mutable_image_uri }}
           EXPLICIT_CUDA_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_image_uri }}
           EXPLICIT_CUDA_MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_mutable_image_uri }}
         run: |
-          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           RESULT=""
           if [ -n "$EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}"$'\n'
+                RESULT+="${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
           fi
@@ -362,9 +366,9 @@ jobs:
         if: ${{ inputs.target == 'frontend' }}
         shell: bash
         env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_REPOSITORY: ai-dynamo/dynamo
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          ECR_HOSTNAME: ${{ vars.ECR_REGISTRY }}
+          IMAGE_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
         timeout-minutes: 60
         run: |
@@ -444,6 +448,7 @@ jobs:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
           arch: ${{ inputs.platform }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Generate Dockerfile
         id: gen-dockerfile
         shell: bash
@@ -493,9 +498,8 @@ jobs:
           build_target: ${{ (inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
@@ -575,6 +579,7 @@ jobs:
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Compliance extract
         if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
         uses: ./.github/actions/compliance-extract
@@ -600,7 +605,7 @@ jobs:
           # Match the build's sccache build-args so the extract reuses the warm
           # wheel_builder/pre_runtime cache instead of a cold rebuild.
           sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          sccache_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_region: ${{ vars.AWS_DEFAULT_REGION }}
           # Must match the build's render: EFA images attribute libfabric /
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}
@@ -611,15 +616,16 @@ jobs:
           # RC promotions inherit the source archive.
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Build and Push Test Image
-        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         shell: bash
         run: |
           PUSH_ARGS=""

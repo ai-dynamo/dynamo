@@ -91,7 +91,7 @@ Set `DYN_REQUEST_TRACE=1` on the frontend to capture timing, tool calls, and ses
   <Card title="Agent Tracing" icon="regular chart-line" href="agent-tracing.md">
     Request traces, inferred tool calls, and Perfetto conversion.
   </Card>
-  <Card title="Agent Simulation" icon="regular play" href="agent-simulation.mdx">
+  <Card title="Agent Trace Replay" icon="regular play" href="agent-simulation.mdx">
     Convert agent traces into replay and simulation inputs.
   </Card>
   <Card title="ThunderAgent Program Scheduler" icon="regular clock" href="thunderagent-program-scheduler.md">

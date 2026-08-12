@@ -7,6 +7,35 @@ package runtimeversion
 
 import "testing"
 
+func TestVersionCompare(t *testing.T) {
+	t.Log("define the reference runtime compatibility core")
+	reference := Version{Major: 1, Minor: 4, Patch: 1}
+
+	t.Log("define comparisons below, equal to, and above the reference")
+	tests := []struct {
+		name    string
+		version Version
+		want    int
+	}{
+		{name: "below major", version: Version{Major: 0, Minor: 9, Patch: 9}, want: -1},
+		{name: "below minor", version: Version{Major: 1, Minor: 3, Patch: 9}, want: -1},
+		{name: "below patch", version: Version{Major: 1, Minor: 4, Patch: 0}, want: -1},
+		{name: "equal", version: Version{Major: 1, Minor: 4, Patch: 1}, want: 0},
+		{name: "above patch", version: Version{Major: 1, Minor: 4, Patch: 2}, want: 1},
+		{name: "above minor", version: Version{Major: 1, Minor: 5, Patch: 0}, want: 1},
+		{name: "above major", version: Version{Major: 2, Minor: 0, Patch: 0}, want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("compare the normalized runtime compatibility cores")
+			if got := tt.version.Compare(reference); got != tt.want {
+				t.Fatalf("%s.Compare(%s) = %d, want %d", tt.version, reference, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParse(t *testing.T) {
 	tests := []struct {
 		name    string

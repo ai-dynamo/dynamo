@@ -5,7 +5,7 @@ title: Disaggregated Serving
 subtitle: Prefill and decode routing with the Dynamo router
 ---
 
-Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register prefill workers with `WorkerType.Prefill`, the frontend automatically detects them and activates an internal prefill router.
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. The frontend activates an internal prefill router when it discovers compatible typed prefill and decode services.
 
 For the high-level deployment matrix, see [Router Guide](router-guide.md). For the router flags used in this setup, see [Configuration and Tuning](configuration-and-tuning.md).
 
@@ -14,18 +14,21 @@ If prefill and decode workers span topology domains such as zones or racks, use 
 ## Automatic Prefill Router Activation
 
 The prefill router is automatically created when:
-1. A decode model is registered, for example via `register_model()` with `ModelType.Chat | ModelType.Completions`.
-2. A prefill worker is detected with the same model name and `WorkerType.Prefill`.
+1. A decode worker is registered with `WorkerType.Decode`, for example via `register_model()` with `ModelType.Chat | ModelType.Completions`.
+2. A prefill service in the same Runtime namespace is registered with the same model name and `WorkerType.Prefill`.
 
 Key characteristics of the prefill router:
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers do not perform decode.
-- **Seamlessly integrates** into the request pipeline between preprocessing and decode routing.
-- **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available.
+- **Runs between preprocessing and decode routing** and returns handoff metadata for the selected decode worker.
+- **Uses decode-only routing when no prefill router is active.** Once a request has been dispatched to prefill, a prefill or handoff failure is returned to the request; it does not retry through an aggregated decode-only path.
 
 Key characteristics of the decode routing stage in disaggregated mode:
 - **Disables overlap scoring** (`overlap_score_credit=0`) because decode routing should not chase prefix reuse.
 - **Disables KV reuse assumption** (`assume_kv_reuse=false`) unless the backend can truly deduplicate transferred blocks.
 - **Disables prefill-token tracking** (`track_prefill_tokens=false`) so decode-side load reflects decode work rather than already-completed prompt work.
+
+> [!NOTE]
+> The Rust router contains an experimental conditional bypass path for programmatic or embedded configurations. It can keep a cache-hot request on a selected decode worker instead of performing remote prefill. The standard `dynamo.frontend` and standalone Python router CLIs do not expose that configuration, so ordinary CLI deployments follow the prefill-handoff-decode flow documented below.
 
 ## Setup Example
 

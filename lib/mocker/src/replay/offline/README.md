@@ -210,9 +210,11 @@ When offline replay uses `kv_router`, workers are created with KV event capture 
 That causes each pass to return router-visible `kv_events`, which the harness applies synchronously to the offline router indexer after the pass completes.
 
 In round-robin mode, this capture is skipped because nothing consumes those events.
-In offline disagg replay, only the prefill workers capture and publish KV events; the decode workers
-run with capture disabled because the decode router is overlap-blind and does not consume router
-events.
+In offline disagg replay, both pools preserve their engine visibility boundaries
+through the observation adapter. The prefill router consumes overlap state; the
+decode router remains overlap-blind, while decode observations still support
+handoff conformance and opt-in canonical ingestion evidence. Decode-side offload
+events remain explicitly dropped rather than being reported as ingested.
 
 ## Disaggregated Harness
 
@@ -280,6 +282,29 @@ Both harnesses emit request timing into `TraceCollector` in `lib/mocker/src/repl
 - completion
 
 The harness itself does not compute final throughput/latency metrics incrementally. It records events, then `TraceCollector::finish()` derives the final `TraceSimulationReport` from `lib/mocker/src/replay/collector.rs`.
+
+## Python result model
+
+The public `dynamo.replay.run_trace_replay` and
+`run_synthetic_trace_replay` functions return `ReplayReport` in offline
+mode. Its fields are `summary`, `per_request`, `coverage`, and `planner`.
+Static replay uses `planner=None`; planner replay retains tick decisions and
+lifecycle observations under `planner`. Request records are opt-in through
+`capture_per_request=True`, so `per_request=None` is the normal summary-only
+result.
+
+This is an intentional public Python API break: offline callers that
+previously indexed the returned dictionary must read `report.summary`.
+Online replay retains its existing summary dictionary.
+
+The replay CLI follows the same model. `--report-json` writes the complete
+four-field human-readable report without enabling request capture.
+`--per-request-jsonl` enables request capture and writes one request per line.
+
+Canonical parity output is not part of the Python API or CLI. The Rust
+`offline_replay_bench` harness exposes `--canonical-reports-jsonl` when built
+with the opt-in `replay-bench` feature; its versioned schema excludes
+runtime-dependent throughput fields.
 
 ## Mental Model
 

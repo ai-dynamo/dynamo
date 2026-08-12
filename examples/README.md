@@ -19,8 +19,14 @@ limitations under the License.
 
 This directory contains practical examples demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
 
-> **Want to see a specific example?**
-> Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
+> [!IMPORTANT]
+> All DynamoGraphDeployment manifests use `nvidia.com/v1beta1`. Other custom resources that do not
+> have a `v1beta1` API, such as `DynamoModel`, continue to use their supported version.
+> To migrate an existing `v1alpha1` manifest, follow the
+> [API version converter instructions](../deploy/utils/README.md).
+
+**Want to see a specific example?**
+Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
 
 ## Basics & Tutorials
 

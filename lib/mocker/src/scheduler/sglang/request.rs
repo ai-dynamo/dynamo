@@ -26,10 +26,7 @@ pub(super) struct SglangRequest {
 impl SglangRequest {
     pub(super) fn new(req: DirectRequest, block_size: usize, output_storage_hint: usize) -> Self {
         let prompt_len = req.tokens.len();
-        let max_output_tokens = req
-            .output_token_ids
-            .as_ref()
-            .map_or(req.max_output_tokens, Vec::len);
+        let max_output_tokens = req.effective_max_output_tokens();
         let output_capacity = output_storage_hint.min(max_output_tokens);
         let mut sequence_tokens = req.tokens;
         sequence_tokens.reserve_exact(output_capacity);

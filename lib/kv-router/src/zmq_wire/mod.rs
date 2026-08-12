@@ -66,6 +66,7 @@ struct KvCacheGroupMetadata {
 pub enum ZmqEventFilterReason {
     IgnoredEvent,
     NonLocalLocality,
+    UnknownMedium,
     AmbiguousCacheNamespace,
     NonMainAttentionKind,
     UnknownKind,
@@ -78,6 +79,7 @@ impl ZmqEventFilterReason {
         match self {
             Self::IgnoredEvent => "ignored_event",
             Self::NonLocalLocality => "non_local_locality",
+            Self::UnknownMedium => "unknown_medium",
             Self::AmbiguousCacheNamespace => "ambiguous_cache_namespace",
             Self::NonMainAttentionKind => "non_main_attention_kind",
             Self::UnknownKind => "unknown_kind",
@@ -139,18 +141,25 @@ impl ZmqEventNormalizer {
             return Err(ZmqEventFilterReason::NonLocalLocality);
         }
 
-        // Hash-only lower-tier events (STORAGE -> Disk, and External) carry no
-        // extra_keys/cache_namespace and must not mutate per-group metadata or
-        // the salted-namespace propagation chain; they are also outside the
-        // SW/SSM group filter's semantics, so route them straight to conversion.
-        // Device and host-pinned events (CPU offload, #10368) stay on the
-        // normalizer path so their salted namespaces still propagate.
-        if raw
-            .medium()
-            .and_then(StorageTier::from_kv_medium)
-            .is_some_and(|tier| matches!(tier, StorageTier::Disk | StorageTier::External))
-        {
-            return Ok(raw);
+        // Classify by medium before touching normalizer state:
+        //  - Device / HostPinned (GPU, CPU offload #10368) stay on the normalizer
+        //    path so their salted namespaces still propagate.
+        //  - Disk / External (STORAGE) are hash-only lower-tier events with no
+        //    extra_keys/cache_namespace, so they must not mutate per-group
+        //    metadata or the salted-namespace chain and are outside the SW/SSM
+        //    group filter's semantics; bypass straight to conversion, which keeps
+        //    them (no event id is wasted).
+        //  - Unrecognized media (e.g. vLLM 0.26.0 FS/OBJ) fail closed here so the
+        //    listener records an intentional filter. Bypassing to conversion,
+        //    which drops them, would instead accept the event, burn a
+        //    next_event_id, and leave an id gap the event processor mistakes for
+        //    an engine drop -- the same trap the locality gate above avoids.
+        if let Some(m) = raw.medium() {
+            match StorageTier::from_kv_medium(m) {
+                Some(StorageTier::Device | StorageTier::HostPinned) => {}
+                Some(_) => return Ok(raw),
+                None => return Err(ZmqEventFilterReason::UnknownMedium),
+            }
         }
 
         let metadata = raw.metadata();

@@ -1,12 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: KV-Aware Routing with the Dynamo Frontend
-sidebar-title: Dynamo Frontend
+title: Using the Dynamo Frontend
+sidebar-title: Using the Dynamo Frontend
 subtitle: Configure the Dynamo Frontend to select the worker most likely to have the prompt prefix cached.
 ---
 
-In this topology, the Dynamo Frontend receives each request and selects the worker most likely to already hold the prompt's KV cache prefix. Use it when clients send requests directly to a Dynamo Frontend Service. If a Kubernetes Gateway receives requests first, use [Gateway API routing](gateway-api.mdx) instead.
+In this topology, the Dynamo Frontend receives each request and selects the worker most likely to already hold the prompt's KV cache prefix. Use it when clients send requests directly to a Dynamo Frontend Service. If a Kubernetes Gateway receives requests first, use [GAIE with Dynamo](gateway-api.mdx) instead.
 
 Turning it on in a DynamoGraphDeployment (DGD) takes two steps: switch the **Frontend** into KV mode, and have the **workers** publish KV cache events so the router knows what each worker has cached. This is a [how-to](../model-deployment/deploy-with-dgd.md) for an existing deployment. For the routing cost model and concepts, see [Routing Concepts](../../developer-guide/knowledge-base/modular-components/router/routing-concepts.md); for the full flag and env reference, see the [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md).
 
@@ -102,8 +102,8 @@ In a disaggregated graph, the router operates over prefill and decode workers se
 
 ## Related Pages
 
-- [KV-Aware Routing on Kubernetes](overview.md) — compare the Frontend and Gateway API topologies.
-- [Gateway API Routing](gateway-api.mdx) — place endpoint selection in the Dynamo EPP.
+- [KV-Aware Routing on Kubernetes](overview.md) — compare the Frontend and GAIE topologies.
+- [Using GAIE with Dynamo](gateway-api.mdx) — place endpoint selection in the Dynamo EPP.
 - [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) — deployment modes, full CLI and env reference.
 - [Routing Concepts](../../developer-guide/knowledge-base/modular-components/router/routing-concepts.md) — cost model and worker selection.
 - [Router with Disaggregated Serving](../../developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md) — prefill/decode routing.

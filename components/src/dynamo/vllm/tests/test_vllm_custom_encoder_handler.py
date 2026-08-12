@@ -8,10 +8,11 @@ import pytest
 import torch
 
 from dynamo.vllm.handlers import DecodeWorkerHandler
-from dynamo.vllm.multimodal_utils.custom_encoder_adapter import (
+from dynamo.vllm.multimodal_utils.custom_encoder import (
+    Qwen3VLImageEncoding,
+    VisionEncoderBackend,
     create_custom_encoder_adapter,
 )
-from dynamo.vllm.multimodal_utils.vision_encoder_backend import VisionEncoderBackend
 
 pytestmark = [
     pytest.mark.unit,
@@ -32,6 +33,10 @@ class _Backend(VisionEncoderBackend):
         raise NotImplementedError
 
 
+class _QwenBackend(_Backend):
+    image_token_id = None
+
+
 def _adapter():
     return create_custom_encoder_adapter(
         _Backend(),
@@ -41,6 +46,20 @@ def _adapter():
             is_multimodal_model=False,
         ),
         SimpleNamespace(enable_prompt_embeds=True),
+    )
+
+
+def _qwen_adapter():
+    return create_custom_encoder_adapter(
+        _QwenBackend(),
+        SimpleNamespace(
+            is_multimodal_model=lambda: True,
+            architectures=["Qwen3VLForConditionalGeneration"],
+            hf_config=SimpleNamespace(
+                vision_config=SimpleNamespace(spatial_merge_size=2),
+            ),
+        ),
+        SimpleNamespace(),
     )
 
 
@@ -87,3 +106,34 @@ async def test_custom_encoder_handler_preserves_string_error_contract():
     assert prompt is None
     assert error is not None
     assert error["finish_reason"] == "error: CustomEncoder failed: encoder failed"
+
+
+async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _qwen_adapter()
+    handler._custom_encoder = SimpleNamespace(
+        encode=AsyncMock(
+            return_value=[
+                Qwen3VLImageEncoding(
+                    torch.zeros((1, 8), dtype=torch.bfloat16), (1, 2, 2)
+                )
+            ]
+        )
+    )
+
+    prompt, error = await handler._assemble_custom_encoder_prompt(
+        {
+            "token_ids": [100, 101, 102],
+            "multi_modal_data": {
+                "image_url": [{"Url": "data:image/png;base64,unused"}]
+            },
+        },
+        "request-id",
+    )
+
+    assert error is None
+    assert prompt is not None
+    assert prompt["prompt_token_ids"] == [100, 101, 102]
+    image = prompt["multi_modal_data"]["image"]
+    assert image["image_embeds"].shape == (1, 8)
+    assert image["image_grid_thw"].tolist() == [[1, 2, 2]]

@@ -66,7 +66,9 @@ areas:
   - lib/llm/src/kv_router/publisher/
   - tests/router/
   - tests/router/configs/
+  - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
+  - examples/router/custom-policy-example/
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
@@ -215,7 +217,7 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - aisimulate/
-  - examples/aisimulate/
+  - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -432,6 +434,7 @@ areas:
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
+  - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - deploy/helm/charts/snapshot/
   - deploy/operator/internal/checkpoint/
@@ -665,14 +668,6 @@ shared:
   owners:
   - backend-trtllm
   - observability
-- glob: components/src/dynamo/vllm/logits_processing/
-  owners:
-  - backend-vllm
-  - frontend
-- glob: components/src/dynamo/sglang/logits_processing/
-  owners:
-  - backend-sglang
-  - frontend
 - glob: components/src/dynamo/trtllm/logits_processing/
   owners:
   - backend-trtllm
@@ -854,7 +849,7 @@ shared:
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/planner/connectors/kubernetes_api.py
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
   - planner
   - operator
@@ -1087,4 +1082,3 @@ classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops
-    advisory: false

@@ -54,6 +54,8 @@ invalid configuration. Production integrations should use
 `SelectionServiceBuilder` so startup recovery, readiness, and background-task
 lifecycle remain consistent with the standalone service.
 
+To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
+
 The C and Go bindings do not currently expose `SelectionService`. An EPP
 integration requires separate FFI lifecycle, error-mapping, worker, and peer
 APIs. Those bindings should wrap `SelectionService` rather than construct
@@ -103,10 +105,17 @@ Content-Type: application/json
 }
 ```
 
-`POST /workers` returns `201`. `PATCH /workers/{worker_id}` updates supplied
-fields, `DELETE /workers/{worker_id}` removes the worker, and `GET /workers`
-lists catalog state. `model_name` and `routing_group` scope all selection, indexer,
-and load state; both default to `"default"` when omitted.
+`worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
+is an upsert and returns `201`: reusing an existing ID replaces its catalog
+record. If the model or routing group changes, the worker is removed from the
+previous partition and moved to the new one, which can leave the previous
+partition not ready. Assign a unique ID to every live worker across the entire
+service.
+
+`PATCH /workers/{worker_id}` updates supplied fields, `DELETE
+/workers/{worker_id}` removes the worker, and `GET /workers` lists catalog
+state. `model_name` and `routing_group` scope selection, indexer, and load state;
+both default to `"default"` when omitted.
 
 `GET /health` is process liveness. `GET /ready` returns `200` only after at
 least one worker is schedulable, otherwise `503` with lifecycle details.
@@ -358,7 +367,7 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   reservation form is local to the selector that served the `/select`. Use
   `/select_and_reserve` for atomic local booking.
 - Reservation IDs must be globally unique. Duplicate bookings for the same ID
-  conflict (`409`); no idempotency ledger is added. An explicit booking that
+  conflict (`409`), regardless of the target worker. An explicit booking that
   carries a `selection_id` also discards that cached selection.
 
 ## Inspection APIs
