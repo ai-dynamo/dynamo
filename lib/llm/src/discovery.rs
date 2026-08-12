@@ -4,7 +4,7 @@
 mod model;
 pub(crate) mod readiness;
 pub use model::Model;
-pub(crate) use model::{GenerateEngineSelection, GenerateWorkerRuntime};
+pub(crate) use model::{GenerateEngineSelection, GenerateTraceConfig, GenerateWorkerRuntime};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{
