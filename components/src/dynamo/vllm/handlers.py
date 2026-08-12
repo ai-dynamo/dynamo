@@ -1447,13 +1447,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         parallel_config = self.engine_client.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
-        # vLLM's elastic EP does not model prefill-context parallelism: it sizes the EP
-        # world as data_parallel_size * tensor_parallel_size (vllm/distributed/elastic_ep/
-        # elastic_execute.py), and ParallelConfig rejects prefill_context_parallel_size > 1
-        # together with data_parallel_size > 1 ("PCP does not support data parallelism
-        # yet"). A PCP>1 engine can therefore only run at DP=1, where a scale is a no-op,
-        # so reject rather than admit a target elastic EP cannot honor. Absent on engines
-        # that predate PCP -> treat as 1.
+        # Elastic EP sizes the EP world as data_parallel_size * tensor_parallel_size
+        # (elastic_execute.py), excluding PCP, and vLLM rejects PCP>1 with DP>1 -- so a
+        # PCP>1 engine only runs at DP=1 where a scale is a no-op. Reject it; default 1
+        # on engines that predate PCP.
         pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
         if pcp_size > 1:
             return {
@@ -1465,9 +1462,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "support prefill-context parallelism alongside data parallelism"
                 ),
             }
-        # EPLB requires an EP world larger than a single rank. Elastic EP sizes that world
-        # as tensor_parallel_size * data_parallel_size, so reject a target that collapses
-        # it to one rank (mirrors vLLM's EPLB startup floor for the PCP==1 case).
+        # Reject a target that collapses the EP world (tensor_parallel_size *
+        # data_parallel_size) to a single rank -- EPLB needs more than one EP rank.
         if tp_size * new_dp_size <= 1:
             return {
                 "status": "error",
