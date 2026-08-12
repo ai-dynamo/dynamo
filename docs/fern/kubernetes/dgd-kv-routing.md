@@ -94,7 +94,7 @@ Most deployments should leave this at `1.0`. Lower it only when cache-rich worke
 
 ### Route on Load Only
 
-`--no-router-kv-events` (env `DYN_ROUTER_USE_KV_EVENTS=false`) disables event tracking; the router predicts cache state from its own routing decisions with TTL-based expiration instead of consuming real KV events. Use it only when you are not confident the backend emits KV events correctly. `--router-reset-states` clears cached routing state on Frontend restart.
+`--no-router-kv-events` (env `DYN_ROUTER_USE_KV_EVENTS=false`) disables event tracking; the router predicts cache state from its own routing decisions with TTL-based expiration instead of consuming real KV events. Use it only when you are not confident the backend emits KV events correctly.
 
 ## Routing with Disaggregated Serving
 
