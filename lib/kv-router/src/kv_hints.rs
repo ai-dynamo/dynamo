@@ -1,45 +1,149 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Versioned KV-cache actions attached to selected backend requests.
+//! Typed KV-cache hints attached to selected backend requests.
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::ExternalSequenceBlockHash;
+use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
-/// The selected worker can consume a `MIGRATE` hint with the v1 payload.
-pub const KV_HINT_MIGRATE_CAPABILITY_KEY: &str = "kv_hint.migrate.v1";
+/// The selected worker can consume a `TRANSFER` hint with the v1 payload.
+pub const KV_HINT_TRANSFER_CAPABILITY_KEY: &str = "kv_hint.transfer.v1";
 
-/// Worker runtime-data keys used to build migration transfer plans.
-pub const KV_HINT_MIGRATE_WORKER_TYPE_RUNTIME_KEY: &str = "kv_hint_migrate_worker_type";
-pub const KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
-    "kv_hint_migrate_source_control_endpoints";
+/// Worker runtime-data keys used to build transfer hints.
+pub const KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str = "kv_hint_transfer_worker_type";
+pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
+    "kv_hint_transfer_source_control_endpoints";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KvTransferPlan {
+pub struct TransferHint {
     pub source_control_endpoint: String,
     /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MigrateHint {
-    pub transfer_plan: KvTransferPlan,
-}
-
-/// Typed KV-cache actions for the selected backend request.
+/// Typed hints for the selected backend request.
 ///
-/// Each action has its own capability and payload version. New actions extend
+/// Each hint has its own capability and payload version. New hints extend
 /// this envelope without changing worker selection contracts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub migrate: Option<MigrateHint>,
+    pub transfer: Option<TransferHint>,
 }
 
 impl KvHints {
     pub fn is_empty(&self) -> bool {
-        self.migrate.is_none()
+        self.transfer.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvTransferCandidates {
+    pub block_hashes: Vec<ExternalSequenceBlockHash>,
+    pub owner_prefix_blocks: Vec<(WorkerWithDpRank, usize)>,
+}
+
+impl KvTransferCandidates {
+    pub fn best_source<F>(
+        &self,
+        prefix_blocks_to_beat: usize,
+        mut is_eligible_source: F,
+    ) -> Option<(WorkerWithDpRank, Vec<ExternalSequenceBlockHash>)>
+    where
+        F: FnMut(WorkerWithDpRank) -> bool,
+    {
+        let (source, prefix_blocks) = self
+            .owner_prefix_blocks
+            .iter()
+            .copied()
+            .filter(|(worker, blocks)| {
+                *blocks > prefix_blocks_to_beat && is_eligible_source(*worker)
+            })
+            .max_by(|(left_worker, left_blocks), (right_worker, right_blocks)| {
+                left_blocks
+                    .cmp(right_blocks)
+                    .then_with(|| right_worker.cmp(left_worker))
+            })?;
+
+        Some((source, self.block_hashes.get(..prefix_blocks)?.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn best_source_selects_longest_eligible_prefix() {
+        let worker_a = WorkerWithDpRank::new(7, 0);
+        let worker_b = WorkerWithDpRank::new(8, 0);
+        let excluded = WorkerWithDpRank::new(9, 0);
+        let candidates = KvTransferCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+                ExternalSequenceBlockHash(103),
+            ],
+            owner_prefix_blocks: vec![(worker_b, 2), (excluded, 3), (worker_a, 3)],
+        };
+
+        let selected = candidates.best_source(0, |worker| worker != excluded);
+
+        assert_eq!(
+            selected,
+            Some((
+                worker_a,
+                vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                    ExternalSequenceBlockHash(103),
+                ],
+            ))
+        );
+    }
+
+    #[test]
+    fn best_source_fails_closed_on_invalid_prefix_length() {
+        let candidates = KvTransferCandidates {
+            block_hashes: vec![ExternalSequenceBlockHash(101)],
+            owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 0), 2)],
+        };
+
+        assert!(candidates.best_source(0, |_| true).is_none());
+    }
+
+    #[test]
+    fn best_source_requires_prefix_longer_than_threshold() {
+        let worker_a = WorkerWithDpRank::new(7, 0);
+        let worker_b = WorkerWithDpRank::new(8, 0);
+        let candidates = KvTransferCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+                ExternalSequenceBlockHash(103),
+                ExternalSequenceBlockHash(104),
+            ],
+            owner_prefix_blocks: vec![(worker_a, 3), (worker_b, 4)],
+        };
+
+        assert!(
+            candidates
+                .best_source(3, |worker| worker == worker_a)
+                .is_none()
+        );
+        assert_eq!(
+            candidates.best_source(3, |_| true),
+            Some((
+                worker_b,
+                vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                    ExternalSequenceBlockHash(103),
+                    ExternalSequenceBlockHash(104),
+                ],
+            ))
+        );
     }
 }

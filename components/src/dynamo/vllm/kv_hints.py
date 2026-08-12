@@ -14,9 +14,9 @@ if TYPE_CHECKING:
     from vllm.engine.arg_utils import AsyncEngineArgs
 
 from dynamo.common.constants import (
-    KV_HINT_MIGRATE_CAPABILITY_KEY,
-    KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-    KV_HINT_MIGRATE_WORKER_TYPE_RUNTIME_KEY,
+    KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import ModelRuntimeConfig, WorkerType
 
@@ -39,24 +39,24 @@ def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
     return tiers
 
 
-def _supports_migrate_hint(tier: Mapping[str, Any]) -> bool:
-    """Return whether a secondary tier advertises KV MIGRATE capability."""
+def _supports_transfer_hint(tier: Mapping[str, Any]) -> bool:
+    """Return whether a secondary tier advertises TRANSFER capability."""
     capabilities = tier.get("router_capabilities")
     if not isinstance(capabilities, list):
         return False
-    return KV_HINT_MIGRATE_CAPABILITY_KEY in capabilities
+    return KV_HINT_TRANSFER_CAPABILITY_KEY in capabilities
 
 
-def _migrate_hint_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
-    """Return secondary tiers that opt in to KV MIGRATE hint support."""
-    migrate_hint_tiers: list[Mapping[str, Any]] = []
+def _transfer_hint_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
+    """Return secondary tiers that opt in to TRANSFER hint support."""
+    transfer_hint_tiers: list[Mapping[str, Any]] = []
     for tier in _secondary_tiers(engine_args):
-        if _supports_migrate_hint(tier):
-            migrate_hint_tiers.append(tier)
-    return migrate_hint_tiers
+        if _supports_transfer_hint(tier):
+            transfer_hint_tiers.append(tier)
+    return transfer_hint_tiers
 
 
-def _migrate_hint_source_host(host: str | None) -> str | None:
+def _transfer_hint_source_host(host: str | None) -> str | None:
     """Normalize an advertisable host for a tcp:// endpoint."""
     if not host:
         return None
@@ -71,7 +71,7 @@ def _migrate_hint_source_host(host: str | None) -> str | None:
     return address.compressed
 
 
-def _migrate_hint_source_control_endpoint(
+def _transfer_hint_source_control_endpoint(
     tier: Mapping[str, Any], port_offset: int = 0
 ) -> str | None:
     """Build one advertisable source-control endpoint for a tier and DP offset."""
@@ -85,7 +85,7 @@ def _migrate_hint_source_control_endpoint(
     if not 0 < control_port <= 65535:
         return None
     configured_host = tier.get("control_advertise_host") or tier.get("control_host")
-    host = _migrate_hint_source_host(
+    host = _transfer_hint_source_host(
         configured_host if isinstance(configured_host, str) else None
     )
     if host is None:
@@ -93,7 +93,7 @@ def _migrate_hint_source_control_endpoint(
     return f"tcp://{host}:{control_port}"
 
 
-def _migrate_hint_source_control_endpoints(
+def _transfer_hint_source_control_endpoints(
     tier: Mapping[str, Any], dp_range: tuple[int, int]
 ) -> dict[str, str] | None:
     """Build source-control endpoints keyed by global DP rank."""
@@ -102,15 +102,15 @@ def _migrate_hint_source_control_endpoints(
         return None
     endpoints: dict[str, str] = {}
     for local_dp_rank in range(dp_size):
-        endpoint = _migrate_hint_source_control_endpoint(tier, local_dp_rank)
+        endpoint = _transfer_hint_source_control_endpoint(tier, local_dp_rank)
         if endpoint is None:
             return None
         endpoints[str(dp_start + local_dp_rank)] = endpoint
     return endpoints
 
 
-def _migrate_hint_worker_type(worker_type: WorkerType) -> str | None:
-    """Normalize a Dynamo WorkerType value into KV MIGRATE runtime metadata."""
+def _transfer_hint_worker_type(worker_type: WorkerType) -> str | None:
+    """Normalize a Dynamo WorkerType value into TRANSFER runtime metadata."""
     role = getattr(worker_type, "value", None)
     if not isinstance(role, str):
         role = str(worker_type)
@@ -121,30 +121,32 @@ def _migrate_hint_worker_type(worker_type: WorkerType) -> str | None:
     return role
 
 
-def enable_kv_migrate_hint_support(
+def enable_kv_transfer_hint_support(
     runtime_config: ModelRuntimeConfig,
     engine_args: AsyncEngineArgs,
     worker_type: WorkerType,
     dp_range: tuple[int, int] = (0, 1),
 ) -> None:
-    """Publish KV MIGRATE runtime metadata when vLLM config supports it."""
-    migrate_hint_worker_type = _migrate_hint_worker_type(worker_type)
-    if migrate_hint_worker_type is None:
+    """Publish TRANSFER runtime metadata when vLLM config supports it."""
+    transfer_hint_worker_type = _transfer_hint_worker_type(worker_type)
+    if transfer_hint_worker_type is None:
         return
 
-    migrate_hint_tiers = _migrate_hint_tiers(engine_args)
-    if not migrate_hint_tiers:
+    transfer_hint_tiers = _transfer_hint_tiers(engine_args)
+    if not transfer_hint_tiers:
         return
-    if len(migrate_hint_tiers) > 1:
+    if len(transfer_hint_tiers) > 1:
         raise ValueError(
-            "KV MIGRATE hint support requires exactly one KV MIGRATE-capable "
-            "secondary tier; found multiple tiers advertising kv_hint.migrate.v1"
+            "TRANSFER hint support requires exactly one TRANSFER-capable "
+            "secondary tier; found multiple tiers advertising kv_hint.transfer.v1"
         )
 
-    endpoints = _migrate_hint_source_control_endpoints(migrate_hint_tiers[0], dp_range)
+    endpoints = _transfer_hint_source_control_endpoints(
+        transfer_hint_tiers[0], dp_range
+    )
     if endpoints is None:
         raise ValueError(
-            "KV MIGRATE hint support requires advertisable source control endpoints "
+            "TRANSFER hint support requires advertisable source control endpoints "
             "for all managed DP ranks"
         )
 
@@ -153,9 +155,13 @@ def enable_kv_migrate_hint_support(
     # Publish capability last so partial metadata is not capability-only if this
     # setup is ever observed before model registration completes.
     runtime_config.set_engine_specific(
-        KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, json.dumps(endpoints)
+        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps(endpoints),
     )
     runtime_config.set_engine_specific(
-        KV_HINT_MIGRATE_WORKER_TYPE_RUNTIME_KEY, json.dumps(migrate_hint_worker_type)
+        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
+        json.dumps(transfer_hint_worker_type),
     )
-    runtime_config.set_engine_specific(KV_HINT_MIGRATE_CAPABILITY_KEY, json.dumps(True))
+    runtime_config.set_engine_specific(
+        KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
+    )

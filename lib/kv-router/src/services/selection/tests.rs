@@ -982,7 +982,7 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
         device: MatchDetails {
             overlap_scores: device_scores,
             last_matched_hashes: Default::default(),
-            router_hint_root_candidates: None,
+            kv_transfer_candidates: None,
         },
         lower_tier: Default::default(),
     };

@@ -18,7 +18,6 @@ pub mod indexer;
 pub mod kv_hints;
 pub mod protocols;
 pub mod recovery;
-pub mod router_hint;
 pub mod scheduling;
 pub mod sequences;
 pub mod services;

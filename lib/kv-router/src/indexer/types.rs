@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::identity::CacheOwnerId;
+use crate::kv_hints::KvTransferCandidates;
 use crate::protocols::*;
-use crate::router_hint::RouterHintRootCandidates;
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 
@@ -289,7 +289,7 @@ impl From<WireOverlapScores> for OverlapScores {
 
 /// Wire-friendly lower-tier match payload for JSON serialization.
 ///
-/// Mirrors `LowerTierMatchDetails.hits`. `next_continuations` and router hint
+/// Mirrors `LowerTierMatchDetails.hits`. `next_continuations` and KV transfer
 /// candidates are server-side intermediate state and are not carried over the wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct WireLowerTierMatchDetails {
@@ -312,8 +312,8 @@ impl From<WireLowerTierMatchDetails> for super::lower_tier::LowerTierMatchDetail
         Self {
             hits: w.hits.into_iter().collect(),
             next_continuations: Default::default(),
-            router_hint_root_candidates: None,
-            router_hint_extensions: None,
+            kv_transfer_candidates: None,
+            kv_transfer_extensions: None,
         }
     }
 }
@@ -443,8 +443,8 @@ pub struct MatchDetails {
     pub overlap_scores: OverlapScores,
     /// Last matched device sequence hash per worker, used to seed lower-tier queries.
     pub last_matched_hashes: FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
-    /// Optional root-aligned device candidates used to build compact router hints.
-    pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
+    /// Optional root-aligned device candidates used to build compact KV transfer hints.
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
 }
 
 impl MatchDetails {
@@ -452,7 +452,7 @@ impl MatchDetails {
         Self::default()
     }
 
-    pub fn retain_router_hint_root_candidates(
+    pub fn retain_kv_transfer_candidates(
         &mut self,
         mut block_hashes: Vec<ExternalSequenceBlockHash>,
     ) {
@@ -475,7 +475,7 @@ impl MatchDetails {
             .unwrap_or(0);
         block_hashes.truncate(max_owner_prefix_blocks);
         owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
-        self.router_hint_root_candidates = Some(RouterHintRootCandidates {
+        self.kv_transfer_candidates = Some(KvTransferCandidates {
             block_hashes,
             owner_prefix_blocks,
         });
@@ -517,8 +517,8 @@ pub struct MatchDetailsRequest {
     pub sequence: Vec<LocalBlockHash>,
     /// A boolean indicating whether to exit early if a single match is found.
     pub early_exit: bool,
-    /// When true, retain the matched root-aligned external hash chain for router hints.
-    pub retain_router_hint_chain: bool,
+    /// When true, retain the matched root-aligned external hash chain for KV transfer hints.
+    pub retain_kv_transfer_chain: bool,
     /// A channel sender to send the `MatchDetails` response.
     pub resp: oneshot::Sender<MatchDetails>,
 }
@@ -527,13 +527,13 @@ impl MatchDetailsRequest {
     pub(super) fn new(
         sequence: Vec<LocalBlockHash>,
         early_exit: bool,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
         resp: oneshot::Sender<MatchDetails>,
     ) -> Self {
         Self {
             sequence,
             early_exit,
-            retain_router_hint_chain,
+            retain_kv_transfer_chain,
             resp,
         }
     }

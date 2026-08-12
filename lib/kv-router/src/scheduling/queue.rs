@@ -1310,7 +1310,7 @@ impl<
                 self.overlap_scores_refresh.as_deref(),
                 self.overlap_refresh_after,
                 queued.block_hashes.as_deref(),
-                queued.request.retain_router_hint_chain,
+                queued.request.retain_kv_transfer_chain,
                 queued.enqueue_at,
                 decay_now,
             )
@@ -1323,8 +1323,8 @@ impl<
                     "refreshed overlap scores after long queue wait"
                 );
                 queued.request.overlap = snapshot.overlap;
-                queued.request.router_hint_candidates = if queued.request.retain_router_hint_chain {
-                    snapshot.router_hint_candidates
+                queued.request.kv_transfer_candidates = if queued.request.retain_kv_transfer_chain {
+                    snapshot.kv_transfer_candidates
                 } else {
                     None
                 };
@@ -1423,7 +1423,7 @@ impl<
                 cached_tokens: selected.selection.cached_tokens,
                 selected_worker_tiers: selected.selected_worker_tiers,
                 target_cached_prefix_blocks,
-                router_hint_candidates: request.router_hint_candidates.take(),
+                kv_transfer_candidates: request.kv_transfer_candidates.take(),
                 potential_decode_blocks: selected.selection.potential_decode_blocks,
             },
         })
@@ -1458,7 +1458,7 @@ impl<
             cached_tokens: selected.selection.cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
             target_cached_prefix_blocks,
-            router_hint_candidates: request.router_hint_candidates.take(),
+            kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
@@ -1686,11 +1686,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::kv_hints::KvTransferCandidates;
     use crate::protocols::{
         ActiveLoad, ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult,
         WorkerWithDpRank,
     };
-    use crate::router_hint::RouterHintRootCandidates;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{LocalScheduler, OverlapSignals, ScheduleRequest};
     use crate::scheduling::{
@@ -2212,7 +2212,7 @@ mod tests {
 
     struct CountingRefresher {
         calls: AtomicUsize,
-        last_retain_router_hint_chain: AtomicBool,
+        last_retain_kv_transfer_chain: AtomicBool,
         response: RefreshedOverlap,
     }
 
@@ -2221,11 +2221,11 @@ mod tests {
         async fn refresh(
             &self,
             _block_hashes: &[LocalBlockHash],
-            retain_router_hint_chain: bool,
+            retain_kv_transfer_chain: bool,
         ) -> Option<RefreshedOverlap> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            self.last_retain_router_hint_chain
-                .store(retain_router_hint_chain, Ordering::Relaxed);
+            self.last_retain_kv_transfer_chain
+                .store(retain_kv_transfer_chain, Ordering::Relaxed);
             Some(self.response.clone())
         }
     }
@@ -2263,7 +2263,7 @@ mod tests {
         async fn refresh(
             &self,
             _block_hashes: &[LocalBlockHash],
-            _retain_router_hint_chain: bool,
+            _retain_kv_transfer_chain: bool,
         ) -> Option<RefreshedOverlap> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.started.notify_one();
@@ -2407,8 +2407,8 @@ mod tests {
             token_seq: None,
             isl_tokens,
             overlap: OverlapSignals::default(),
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -3944,9 +3944,9 @@ policy_classes:
         let isl = 64usize;
         let refresher = Arc::new(CountingRefresher {
             calls: AtomicUsize::new(0),
-            last_retain_router_hint_chain: AtomicBool::new(false),
+            last_retain_kv_transfer_chain: AtomicBool::new(false),
             response: RefreshedOverlap {
-                router_hint_candidates: Some(RouterHintRootCandidates {
+                kv_transfer_candidates: Some(KvTransferCandidates {
                     block_hashes: vec![
                         ExternalSequenceBlockHash(101),
                         ExternalSequenceBlockHash(102),
@@ -3992,7 +3992,7 @@ policy_classes:
         assert_eq!(resp2.best_worker, WorkerWithDpRank::new(1, 0));
 
         let (mut req3, rx3) = make_request("req-3", isl);
-        req3.retain_router_hint_chain = true;
+        req3.retain_kv_transfer_chain = true;
         req3.overlap
             .effective_overlap_blocks
             .insert(WorkerWithDpRank::new(0, 0), 8.0);
@@ -4021,7 +4021,7 @@ policy_classes:
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
         assert!(
             refresher
-                .last_retain_router_hint_chain
+                .last_retain_kv_transfer_chain
                 .load(Ordering::Relaxed)
         );
         assert_eq!(resp3.best_worker, WorkerWithDpRank::new(1, 0));
@@ -4029,7 +4029,7 @@ policy_classes:
         assert_eq!(resp3.cached_tokens, 144);
         assert_eq!(
             resp3
-                .router_hint_candidates
+                .kv_transfer_candidates
                 .as_ref()
                 .map(|candidates| candidates.owner_prefix_blocks.as_slice()),
             Some(&[(WorkerWithDpRank::new(1, 0), 2)][..])
@@ -4038,15 +4038,15 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn update_refresh_drops_router_hint_candidates_when_retention_disabled() {
+    async fn update_refresh_drops_kv_transfer_candidates_when_retention_disabled() {
         let block_size = 16u32;
         let isl = 64usize;
         let worker = WorkerWithDpRank::new(0, 0);
         let refresher = Arc::new(CountingRefresher {
             calls: AtomicUsize::new(0),
-            last_retain_router_hint_chain: AtomicBool::new(true),
+            last_retain_kv_transfer_chain: AtomicBool::new(true),
             response: RefreshedOverlap {
-                router_hint_candidates: Some(RouterHintRootCandidates {
+                kv_transfer_candidates: Some(KvTransferCandidates {
                     block_hashes: vec![ExternalSequenceBlockHash(101)],
                     owner_prefix_blocks: vec![(worker, 1)],
                 }),
@@ -4078,13 +4078,13 @@ policy_classes:
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
         assert!(
             !refresher
-                .last_retain_router_hint_chain
+                .last_retain_kv_transfer_chain
                 .load(Ordering::Relaxed)
         );
         assert_eq!(resp2.best_worker, worker);
         assert_eq!(resp2.effective_overlap_blocks, 5.0);
         assert_eq!(resp2.cached_tokens, 80);
-        assert!(resp2.router_hint_candidates.is_none());
+        assert!(resp2.kv_transfer_candidates.is_none());
         assert_eq!(queue.pending_count(), 0);
     }
 

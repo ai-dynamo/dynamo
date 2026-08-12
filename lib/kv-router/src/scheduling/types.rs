@@ -12,12 +12,12 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
+use crate::kv_hints::KvTransferCandidates;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
     WorkerWithDpRank,
 };
-use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
@@ -113,7 +113,7 @@ pub struct SchedulingResponse {
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
 }
 
@@ -344,8 +344,8 @@ pub struct ScheduleRequest {
     pub policy_class: Option<String>,
     pub session_context: Option<SessionContext>,
     pub overlap: OverlapSignals,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
-    pub retain_router_hint_chain: bool,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
 
@@ -375,8 +375,8 @@ pub struct SchedulingRequest {
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
-    pub retain_router_hint_chain: bool,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
@@ -549,8 +549,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             shared_cache_hits: None,
             worker_loads,
             resp_tx: None,

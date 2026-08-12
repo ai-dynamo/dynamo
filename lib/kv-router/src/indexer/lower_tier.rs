@@ -23,23 +23,23 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
+use crate::kv_hints::KvTransferCandidates;
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, ResetScope, ResidencyDomain,
     ResidencyOwner, ResidencyOwnerKey, ResidencyProjection, RouterEvent, WorkerWithDpRank,
 };
-use crate::router_hint::RouterHintRootCandidates;
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
 #[derive(Debug, Clone, Default)]
-pub struct RouterHintExtensions {
+pub struct KvTransferExtensions {
     pub block_hashes: Vec<(usize, ExternalSequenceBlockHash)>,
     pub owner_prefix_blocks: FxHashMap<WorkerWithDpRank, usize>,
 }
 
-impl RouterHintExtensions {
+impl KvTransferExtensions {
     fn record_match<'a>(
         &mut self,
         pos: usize,
@@ -401,8 +401,8 @@ impl LowerTierContinuation {
 pub struct LowerTierMatchDetails {
     pub hits: FxHashMap<WorkerWithDpRank, usize>,
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
-    pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
-    pub router_hint_extensions: Option<RouterHintExtensions>,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub kv_transfer_extensions: Option<KvTransferExtensions>,
 }
 
 /// Standalone lower-tier continuation index.
@@ -736,7 +736,7 @@ impl LowerTierIndexer {
         &self,
         local_hashes: &[LocalBlockHash],
         continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
-        retain_router_hint_extensions: bool,
+        retain_kv_transfer_extensions: bool,
     ) -> LowerTierMatchDetails
     where
         S: BuildHasher,
@@ -744,7 +744,7 @@ impl LowerTierIndexer {
         self.query_match_details_with_options_and_projection(
             local_hashes,
             continuations,
-            retain_router_hint_extensions,
+            retain_kv_transfer_extensions,
             &ResidencyProjection::default(),
         )
     }
@@ -753,14 +753,14 @@ impl LowerTierIndexer {
         &self,
         local_hashes: &[LocalBlockHash],
         continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
-        retain_router_hint_extensions: bool,
+        retain_kv_transfer_extensions: bool,
         projection: &ResidencyProjection,
     ) -> LowerTierMatchDetails
     where
         S: BuildHasher,
     {
-        let mut router_hint_extensions =
-            retain_router_hint_extensions.then(RouterHintExtensions::default);
+        let mut kv_transfer_extensions =
+            retain_kv_transfer_extensions.then(KvTransferExtensions::default);
 
         // Build the sorted breakpoint list. Each entry is a position in the
         // hash sequence and a set of (parent_hash -> workers) groups that start
@@ -816,7 +816,7 @@ impl LowerTierIndexer {
                     next_breakpoint,
                     &mut overflow,
                     &mut final_states,
-                    router_hint_extensions.as_mut(),
+                    kv_transfer_extensions.as_mut(),
                     projection,
                 );
             }
@@ -833,7 +833,7 @@ impl LowerTierIndexer {
         // Convert final_states into the result. Workers that never appeared in
         // final_states (e.g. empty sequence) keep their original continuation.
         let mut results = LowerTierMatchDetails {
-            router_hint_extensions,
+            kv_transfer_extensions,
             ..Default::default()
         };
         for (worker, continuation) in continuations {
@@ -1010,7 +1010,7 @@ fn advance_state_to_breakpoint(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
-    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
+    mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
     projection: &ResidencyProjection,
 ) {
     let mut cur_pos = start_pos;
@@ -1030,7 +1030,7 @@ fn advance_state_to_breakpoint(
             next_breakpoint,
             overflow,
             final_states,
-            router_hint_extensions.as_deref_mut(),
+            kv_transfer_extensions.as_deref_mut(),
             projection,
         );
         return;
@@ -1088,7 +1088,7 @@ fn advance_state_to_breakpoint(
         }
 
         let child_hash = edge.child_hash();
-        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
             extensions.record_match(cur_pos, child_hash, active.iter());
         }
         cur_hash = Some(child_hash);
@@ -1107,7 +1107,7 @@ fn advance_state_to_breakpoint(
                 next_breakpoint,
                 overflow,
                 final_states,
-                router_hint_extensions.as_deref_mut(),
+                kv_transfer_extensions.as_deref_mut(),
                 projection,
             );
             return;
@@ -1141,7 +1141,7 @@ fn advance_single_worker(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
-    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
+    mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
     projection: &ResidencyProjection,
 ) {
     while *cur_pos < next_breakpoint {
@@ -1159,7 +1159,7 @@ fn advance_single_worker(
         }
 
         let child_hash = edge.child_hash();
-        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
             extensions.record_match(*cur_pos, child_hash, std::iter::once(&worker));
         }
         *cur_hash = Some(child_hash);

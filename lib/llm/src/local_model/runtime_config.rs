@@ -12,10 +12,10 @@ use validator::{Validate, ValidationError};
 
 use dynamo_kv_router::{
     kv_hints::{
-        KV_HINT_MIGRATE_CAPABILITY_KEY, KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        KV_HINT_MIGRATE_WORKER_TYPE_RUNTIME_KEY,
+        KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
     },
-    protocols::{KvHintMigrateWorkerMetadata, KvTransferEnforcement},
+    protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
@@ -373,8 +373,8 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
-    pub(crate) fn supports_kv_hint_migrate(&self) -> bool {
-        match self.runtime_data.get(KV_HINT_MIGRATE_CAPABILITY_KEY) {
+    pub(crate) fn supports_kv_hint_transfer(&self) -> bool {
+        match self.runtime_data.get(KV_HINT_TRANSFER_CAPABILITY_KEY) {
             Some(serde_json::Value::Bool(true)) => true,
             // Python ModelRuntimeConfig.set_engine_specific currently stores
             // engine-specific values as strings.
@@ -383,11 +383,11 @@ impl ModelRuntimeConfig {
         }
     }
 
-    fn kv_hint_migrate_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+    fn kv_hint_transfer_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
         let dp_rank = dp_rank.to_string();
         let endpoint = self
             .runtime_data
-            .get(KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
             .as_object()?
             .get(&dp_rank)?
             .as_str()?;
@@ -412,25 +412,25 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
-    fn kv_hint_migrate_metadata_for_dp_rank(
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: u32,
-    ) -> Option<KvHintMigrateWorkerMetadata<'_>> {
-        if !self.supports_kv_hint_migrate() {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        if !self.supports_kv_hint_transfer() {
             return None;
         }
 
         let worker_type = self
             .runtime_data
-            .get(KV_HINT_MIGRATE_WORKER_TYPE_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY)?
             .as_str()?;
         if worker_type.is_empty() {
             return None;
         }
 
-        Some(KvHintMigrateWorkerMetadata {
+        Some(KvHintTransferWorkerMetadata {
             worker_type,
-            source_control_endpoint: self.kv_hint_migrate_endpoint_for_dp_rank(dp_rank),
+            source_control_endpoint: self.kv_hint_transfer_endpoint_for_dp_rank(dp_rank),
         })
     }
 
@@ -987,56 +987,56 @@ mod tests {
     }
 
     #[test]
-    fn kv_hint_migrate_support_requires_explicit_true() {
+    fn kv_hint_transfer_support_requires_explicit_true() {
         use dynamo_kv_router::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
-        assert!(config.kv_hint_migrate_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(KV_HINT_MIGRATE_CAPABILITY_KEY, true)
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, true)
             .unwrap();
-        assert!(config.kv_hint_migrate_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(KV_HINT_MIGRATE_WORKER_TYPE_RUNTIME_KEY, "prefill")
+            .set_engine_specific(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, "prefill")
             .unwrap();
-        let info = config.kv_hint_migrate_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert!(info.source_control_endpoint.is_none());
 
         config
             .set_engine_specific(
-                KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
                 serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
             )
             .unwrap();
-        let info = config.kv_hint_migrate_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert_eq!(info.source_control_endpoint, Some("tcp://127.0.0.1:23280"));
         assert_eq!(
             config
-                .kv_hint_migrate_metadata_for_dp_rank(1)
+                .kv_hint_transfer_metadata_for_dp_rank(1)
                 .unwrap()
                 .source_control_endpoint,
             None
         );
 
         config
-            .set_engine_specific(KV_HINT_MIGRATE_CAPABILITY_KEY, "true")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "true")
             .unwrap();
         assert_eq!(
             config
-                .kv_hint_migrate_metadata_for_dp_rank(0)
+                .kv_hint_transfer_metadata_for_dp_rank(0)
                 .unwrap()
                 .worker_type,
             "prefill"
         );
 
         config
-            .set_engine_specific(KV_HINT_MIGRATE_CAPABILITY_KEY, "false")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "false")
             .unwrap();
-        assert!(config.kv_hint_migrate_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]

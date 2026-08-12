@@ -5,9 +5,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
-pub use dynamo_kv_router::kv_hints::{
-    KV_HINT_MIGRATE_CAPABILITY_KEY, KvHints, KvTransferPlan, MigrateHint,
-};
+pub use dynamo_kv_router::kv_hints::{KV_HINT_TRANSFER_CAPABILITY_KEY, KvHints, TransferHint};
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
@@ -359,7 +357,7 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
-    /// Framework-generated KV-cache actions for the selected backend request.
+    /// Typed hints from Dynamo's routing layer for the selected backend request.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_hints: Option<KvHints>,
@@ -524,7 +522,7 @@ mod tests {
     #[test]
     fn attach_kv_hints_sets_typed_envelope() {
         use dynamo_kv_router::{
-            kv_hints::{KvHints, KvTransferPlan, MigrateHint},
+            kv_hints::{KvHints, TransferHint},
             protocols::ExternalSequenceBlockHash,
         };
 
@@ -537,14 +535,9 @@ mod tests {
             .build()
             .unwrap();
         let hints = KvHints {
-            migrate: Some(MigrateHint {
-                transfer_plan: KvTransferPlan {
-                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(11),
-                        ExternalSequenceBlockHash(22),
-                    ],
-                },
+            transfer: Some(TransferHint {
+                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
             }),
         };
 
@@ -553,11 +546,9 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&req).unwrap()["kv_hints"],
             serde_json::json!({
-                "migrate": {
-                    "transfer_plan": {
-                        "source_control_endpoint": "tcp://127.0.0.1:23280",
-                        "block_hashes": [11, 22],
-                    }
+                "transfer": {
+                    "source_control_endpoint": "tcp://127.0.0.1:23280",
+                    "block_hashes": [11, 22],
                 }
             })
         );
