@@ -65,6 +65,7 @@ class RemoteBinding:
                 f"unsupported remote tensor carrier {self.tensor_carrier!r}"
             )
 
+
 Binding = Union[InlineBinding, RemoteBinding]
 
 
