@@ -3,7 +3,7 @@
 
 """Unit tests for ``KvEventMetricsPayload`` and the Prometheus text helpers.
 
-The regression these cover is NVBug 6107289: the KV publisher's
+The regression these cover: the KV publisher's
 ``engines_dropped_events_total`` counter never reached the metrics registry
 because it declared ``worker_id`` as a variable label, colliding with the const
 label the runtime auto-injects under that name. The counter only increments when
@@ -111,7 +111,7 @@ def test_validate_passes_when_dropped_counter_registered_at_zero():
 
 
 def test_validate_fails_when_dropped_counter_absent():
-    """The NVBug 6107289 shape: ZMQ counters fine, gap counter never registered.
+    """The regression shape: ZMQ counters fine, gap counter never registered.
 
     Without the presence check this content passes, because the only signal is a
     metric that is missing rather than wrong.

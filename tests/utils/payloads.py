@@ -1486,8 +1486,8 @@ class KvEventMetricsPayload(BasePayload):
             f"event_type={self.event_type!r}, got {accepted:g}"
         )
 
-        # Regression guard for NVBug 6107289: this counter silently failed to
-        # register because it declared `worker_id` as a variable label, which
+        # Regression guard: this counter silently failed to register
+        # because it declared `worker_id` as a variable label, which
         # collides with the const label the runtime auto-injects under the same
         # name. It only increments on an event_id gap, so a healthy run leaves it
         # at zero -- assert that it is exposed at all, not that it has a value.

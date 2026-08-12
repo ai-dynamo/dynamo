@@ -1397,7 +1397,7 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
 
 #[cfg(test)]
 mod kv_publisher_registration_tests {
-    //! Regression coverage for NVBug 6107289 / DYN-2873.
+    //! Regression coverage for silently-unregistered KV publisher metrics.
     //!
     //! `engines_dropped_events_total` was once declared with `worker_id` as a
     //! *variable* label. The runtime auto-injects `worker_id` as a *const* label on
