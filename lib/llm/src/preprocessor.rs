@@ -3171,12 +3171,12 @@ impl OpenAIPreprocessor {
         } else {
             Box::pin(stream)
         };
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
-        {
-            Box::pin(Self::hold_usage_until_stream_end(stream))
-        } else {
-            stream
-        };
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if defer_reasoning_for_nonempty_content || should_strip_disabled_reasoning_start {
+                Box::pin(Self::hold_usage_until_stream_end(stream))
+            } else {
+                stream
+            };
 
         // Check if tools are present and if we should apply jail
         let has_tools = request

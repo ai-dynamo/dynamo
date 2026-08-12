@@ -1416,14 +1416,34 @@ async fn postprocessor_parsing_stream_strip_path_flushes_partial_prefix_after_us
         .expect("postprocessor_parsing_stream should build");
     let output_chunks: Vec<_> = output_stream.collect().await;
 
+    let mut content_index = None;
+    let mut usage_index = None;
     let content = output_chunks
         .iter()
-        .filter_map(|output| output.data.as_ref())
-        .flat_map(|data| data.inner.choices.iter())
-        .filter_map(|choice| choice.delta.content.as_ref())
+        .enumerate()
+        .inspect(|(index, output)| {
+            if output
+                .data
+                .as_ref()
+                .is_some_and(|data| data.inner.usage.is_some())
+            {
+                usage_index = Some(*index);
+            }
+        })
+        .filter_map(|(index, output)| output.data.as_ref().map(|data| (index, data)))
+        .flat_map(|(index, data)| data.inner.choices.iter().map(move |choice| (index, choice)))
+        .filter_map(|(index, choice)| {
+            choice.delta.content.as_ref().inspect(|_| {
+                content_index = Some(index);
+            })
+        })
         .map(get_text)
         .collect::<String>();
     assert_eq!(content, "<thi");
+    assert!(
+        content_index.expect("recovered content chunk") < usage_index.expect("usage chunk"),
+        "recovered content must precede the trailing usage-only chunk"
+    );
 }
 
 /// Same envelope defect on the `force_nonempty_content` flush. This path is the
