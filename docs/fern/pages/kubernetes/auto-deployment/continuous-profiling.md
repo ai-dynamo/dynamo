@@ -11,23 +11,16 @@ It extends the one-time [DGDR v1beta2 search workflow](dgdr-v1beta2.md) with tra
 scheduling, baseline evaluation, comparison, and retention.
 
 > [!WARNING]
-> **Experimental design sketch.** `DynamoGraphDeploymentOptimization` and the continuous tracing
-> workflow described here are not implemented. The resource shape and comparison policy can change.
+> **Experimental.** The continuous profiling API, trace settings, and comparison parameters can
+> change in a future release.
 
-## Optimization Policy
+## How Continuous Profiling Works
 
 A long-lived `DynamoGraphDeploymentOptimization` represents the recurring policy. The referenced
-DGD is the baseline for every run. The controller resolves the current DGD generation and creates an
+DGD is the baseline for every run. Dynamo resolves the current DGD generation and creates an
 immutable `DynamoGraphDeploymentRun` when a trace window closes.
 
-| Resource | Responsibility |
-| --- | --- |
-| `DynamoGraphDeploymentOptimization` | Select the active DGD, DGDR, trace window, schedule, and comparison policy |
-| `DynamoGraphDeploymentRun` | Snapshot one baseline, trace artifact, and resolved search configuration |
-| `DynamoGraphDeploymentCandidate` | Store the evaluated baseline or one candidate DGD spec and its simulation results |
-| `DynamoGraphDeploymentRequest` | Define the reusable search and run it directly without continuous tracing or scheduling |
-
-The higher-level resource and a manually created DGDR share the same run and candidate machinery:
+Continuous profiling uses the same run and candidate resources as a manually created DGDR:
 
 ```mermaid
 flowchart TD
@@ -57,9 +50,16 @@ flowchart TD
     I --> N
 ```
 
-## Proposed Resource
+## Create an Optimization
 
-The following sketch runs a daily Pareto search against the preceding 24 hours of traffic:
+Create a `v1beta2` DGDR that defines the model, hardware bounds, objective, search budget,
+unstructured Sweeper parameters, candidate limit, and DGD overrides. Set a trace workload; the
+optimization replaces its trace source with each completed trace window. You can run the same DGDR
+manually for an ad hoc search. See [Auto Deploy with DGDR v1beta2](dgdr-v1beta2.md) for a complete
+request.
+
+Create an optimization that references the DGDR and the active DGD. The following manifest runs a
+daily Pareto search against the preceding 24 hours of traffic:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -96,35 +96,33 @@ spec:
   comparison:
     parameters: # unstructured
       minimumRelativeImprovement: 0.10
-
-  promotion:
-    mode: Manual
 ```
 
-Create `qwen-search` as a regular [DGDR v1beta2](dgdr-v1beta2.md) resource. It defines the model,
-hardware bounds, objective, search budget, unstructured Sweeper parameters, candidate limit, and DGD
-overrides. You can still run that DGDR manually for an ad hoc search.
+Apply the optimization:
 
-The optimization controller does not own or mutate the referenced DGDR. For each scheduled run, it
+```bash
+kubectl apply -f qwen-daily.yaml
+kubectl get dynamographdeploymentoptimization qwen-daily -n inference -w
+```
+
+The optimization does not own or mutate the referenced DGDR. For each scheduled run, Dynamo
 snapshots the DGDR UID, generation, and spec. The captured trace artifact replaces the concrete
-trace source in that snapshot while preserving the DGDR's trace format and Replay controls. A
-referenced DGDR therefore uses a trace workload rather than a static workload.
+trace source in that snapshot while preserving the DGDR's trace format and Replay controls.
 
 Updating the DGDR does not modify or cancel an active run. The next scheduled run uses the new DGDR
 generation. Multiple optimization resources can reference one DGDR when they intentionally share
 the same search definition.
 
-Keep collector-specific tracing settings and evolving comparison knobs unstructured until their
-semantics stabilize. Keep the trace contents outside Kubernetes objects; the CRD and run status
-store only artifact references, digests, time ranges, and summary statistics.
+`trace.parameters` and `comparison.parameters` are unstructured. Use them for collector-specific
+settings and comparison knobs supported by the installed version. Trace contents remain outside
+Kubernetes objects; the optimization and run status store only artifact references, digests, time
+ranges, and summary statistics.
 
 ## Run Scheduling
 
-One optimization resource has at most one active run. This is a fixed invariant rather than a
-configurable concurrency policy. Parallel runs could evaluate overlapping trace windows, consume
-the same simulation capacity, and produce competing recommendations for one baseline.
+One optimization resource has at most one active run. This behavior is not configurable.
 
-When another interval expires during an active run, the controller skips that occurrence instead of
+When another interval expires during an active run, Dynamo skips that occurrence instead of
 queueing it. The next regular interval can create a run after the active run reaches a terminal
 state. Status records skipped occurrences:
 
@@ -135,33 +133,32 @@ status:
   lastSkippedScheduleTime: "2026-08-13T00:00:00Z"
 ```
 
-A manual restart first cancels the active run and then creates a new run. It does not allow two runs
+To restart immediately, cancel the active run and start a new one. Dynamo does not allow two runs
 for the same optimization resource to overlap.
 
 ## Baseline Evaluation
 
-Resolve `targetRef` for every run instead of comparing new candidates with results from an older
-trace window. Store these inputs in the immutable run:
+Dynamo resolves `targetRef` for every run instead of comparing new candidates with results from an
+older trace window. The immutable run records:
 
 - the baseline DGD name, UID, generation, and complete spec snapshot;
 - the trace artifact reference, digest, start time, and end time;
 - the referenced DGDR name, UID, generation, and resolved spec snapshot; and
 - the versions of Sweeper, Replay, and their performance data.
 
-Evaluate the baseline with the same trace and Replay implementation as every alternative. Comparing
-new simulated candidates with live baseline metrics would mix different measurement methods and
-could report an improvement caused only by model bias.
+Dynamo evaluates the baseline with the same trace and Replay implementation as every alternative.
+It does not compare simulated candidates with live baseline metrics because the two measurement
+methods are not equivalent.
 
-Represent the baseline evaluation as a DGDC with `role: Baseline`. It contains the copied DGD spec
-and simulation metrics, remains visible with the other run results, and does not count against
-`recommendation.maxCandidates`. If Replay cannot represent the active DGD, report the baseline as
-unsupported and leave the improvement condition unknown.
+The baseline evaluation appears as a DGDC with `role: Baseline`. It contains the copied DGD spec and
+simulation metrics, remains visible with the other run results, and does not count against
+`recommendation.maxCandidates`. If Replay cannot represent the active DGD, the baseline is
+`Unsupported` and the improvement condition remains `Unknown`.
 
 ## Improvement Semantics
 
-Sweeper currently ranks scalar candidates or returns the non-dominated candidate set for a Pareto
-search. It does not accept a baseline. The continuous profiling controller adds the baseline
-comparison after Sweeper evaluates the candidates.
+Sweeper ranks scalar candidates or returns the non-dominated candidate set for a Pareto search.
+Continuous profiling compares those results with the evaluated baseline.
 
 For a scalar objective, compare each candidate score with the baseline score. Sweeper normalizes
 scores so a larger value is always better, including objectives such as end-to-end latency that are
@@ -178,15 +175,14 @@ For a Pareto objective, classify every published candidate relative to the basel
 
 This comparison is component-wise; it is not the minimum score across the candidates. Several
 candidates can dominate the baseline while representing different positions on the Pareto front.
-The candidate selection step should preserve a bounded, diverse set so the user can choose the
-preferred tradeoff.
+Dynamo publishes at most the referenced DGDR's `recommendation.maxCandidates` limit. Inspect the
+published tradeoffs before selecting a replacement deployment.
 
 Strict dominance treats any measurable difference as an improvement. Apply an explicit comparison
-margin before notifying the user so simulation noise does not create recommendations. The first
-version can keep this policy unstructured while the project determines whether thresholds belong to
-individual objectives, one primary objective, or confidence intervals.
+margin to prevent simulation noise from creating recommendations. Set the supported threshold keys
+under `comparison.parameters`.
 
-Report the comparison on the run rather than on the persistent optimization policy alone:
+Inspect the comparison on the run:
 
 ```yaml
 status:
@@ -208,26 +204,34 @@ status:
 policy. It does not mean that the search failed. Use the run's `Completed` condition to report
 execution success or failure separately.
 
+Resolve the active run from the optimization and inspect its status:
+
+```bash
+RUN=$(kubectl get dynamographdeploymentoptimization qwen-daily -n inference \
+  -o jsonpath='{.status.activeRunRef.name}')
+
+kubectl get dynamographdeploymentrun "$RUN" -n inference -o yaml
+```
+
 ## Promotion
 
-Keep promotion manual for the first version. A candidate contains a complete DGD spec, but not every
-DGD change is safe to apply in place. Create a new DGD from the selected candidate, review it, move
-traffic to it, and retain the old DGD for rollback.
+Promotion is manual. A candidate contains a complete DGD spec, but not every DGD change is safe to
+apply in place. Create a new DGD from the selected candidate, review it, move traffic to it, and
+retain the old DGD for rollback.
 
 After the new deployment becomes the production baseline, update `targetRef` to its name. The next
 run snapshots and evaluates that DGD rather than continuing to compare with the retired deployment.
-A future promotion controller can classify in-place changes, replacement-required changes, and
-traffic migration, but that behavior is outside Sweeper.
+Continuous profiling does not modify or replace the active DGD automatically.
 
 ## Trace Lifecycle
 
-Capture only the request metadata needed by Replay by default. Prompt and response payloads are not
-required for length, timing, and cache-reuse simulation and introduce additional privacy and storage
-requirements.
+Configure the collector to capture only the request metadata needed by Replay. Prompt and response
+payloads are not required for length, timing, and cache-reuse simulation and introduce additional
+privacy and storage requirements.
 
 Store completed trace windows on a persistent volume or in object storage. Delete an artifact only
-after no retained run references it. The optimization controller can garbage-collect run metadata
-and trace artifacts according to their configured retention periods.
+after no retained run references it. Dynamo garbage-collects run metadata and trace artifacts
+according to their configured retention periods.
 
 See [Sweeper Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
 for workload and trace semantics and [Sweeper Optimization
