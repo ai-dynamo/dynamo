@@ -17,8 +17,9 @@ scheduling, baseline evaluation, comparison, and retention.
 ## How Continuous Profiling Works
 
 A long-lived `DynamoGraphDeploymentOptimization` represents the recurring policy. The referenced
-DGD is the baseline for every run. Dynamo resolves the current DGD generation and creates an
-immutable `DynamoGraphDeploymentRun` when a trace window closes.
+DGD is the baseline for every run. When a trace window closes, Dynamo stores it at a new location
+and updates the referenced DGDR's trace source. The resulting DGDR generation creates an immutable
+`DynamoGraphDeploymentRun` with a complete copy of the request.
 
 Continuous profiling uses the same run and candidate resources as a manually created DGDR:
 
@@ -39,10 +40,10 @@ flowchart TD
     O --> Q
     D --> T
     T --> A
-    O -->|"schedule reached"| R
+    O -->|"schedule reached"| T
+    A -->|"update trace source"| Q
     D -->|"spec snapshot"| R
-    Q -->|"search snapshot"| R
-    A --> R
+    Q -->|"complete request copy"| R
     R --> B
     R --> C
     B --> I
@@ -54,9 +55,10 @@ flowchart TD
 
 Create a `v1beta2` DGDR that defines the model, hardware bounds, objective, search budget,
 unstructured Sweeper parameters, candidate limit, and DGD overrides. Set a trace workload; the
-optimization replaces its trace source with each completed trace window. You can run the same DGDR
-manually for an ad hoc search. See [Auto Deploy with DGDR v1beta2](dgdr-v1beta2.md) for a complete
-request.
+optimization updates its trace source to the location of each completed trace window. This normal
+DGDR spec change starts the search; the optimization does not use `spec.rerun.reason` for scheduled
+runs. You can run the same DGDR manually for an ad hoc search. See [Auto Deploy with DGDR
+v1beta2](dgdr-v1beta2.md) for a complete request.
 
 Create an optimization that references the DGDR and the active DGD. The following manifest runs a
 daily Pareto search against the preceding 24 hours of traffic:
@@ -105,18 +107,20 @@ kubectl apply -f qwen-daily.yaml
 kubectl get dynamographdeploymentoptimization qwen-daily -n inference -w
 ```
 
-The optimization does not own or mutate the referenced DGDR. For each scheduled run, Dynamo
-snapshots the DGDR UID, generation, and spec. The captured trace artifact replaces the concrete
-trace source in that snapshot while preserving the DGDR's trace format and Replay controls.
+At the end of a trace window, the optimization writes the completed trace to a unique URI or PVC
+path and updates the referenced DGDR's trace source. The DGDR controller then creates a run whose
+spec contains the complete updated DGDR request. The request's trace format and Replay controls
+remain unchanged.
 
 Updating the DGDR does not modify or cancel an active run. The next scheduled run uses the new DGDR
-generation. Multiple optimization resources can reference one DGDR when they intentionally share
-the same search definition.
+generation. Use a dedicated DGDR for each optimization because the optimization changes its trace
+source. Share common search parameters through manifest generation instead of allowing multiple
+optimizations to write one request.
 
 `trace.parameters` and `comparison.parameters` are unstructured. Use them for collector-specific
 settings and comparison knobs supported by the installed version. Trace contents remain outside
-Kubernetes objects; the optimization and run status store only artifact references, digests, time
-ranges, and summary statistics.
+Kubernetes objects; the optimization and run status store only artifact references, time ranges,
+and summary statistics.
 
 ## Run Scheduling
 
@@ -124,7 +128,8 @@ One optimization resource has at most one active run. This behavior is not confi
 
 When another interval expires during an active run, Dynamo skips that occurrence instead of
 queueing it. The next regular interval can create a run after the active run reaches a terminal
-state. Status records skipped occurrences:
+state. For an accepted occurrence, Dynamo closes the window, writes it to a new S3 URI or PVC path,
+and updates `workload.trace.source` in the referenced DGDR. Status records skipped occurrences:
 
 ```yaml
 status:
@@ -133,8 +138,9 @@ status:
   lastSkippedScheduleTime: "2026-08-13T00:00:00Z"
 ```
 
-To restart immediately, cancel the active run and start a new one. Dynamo does not allow two runs
-for the same optimization resource to overlap.
+To restart immediately with unchanged inputs, cancel the active run and change the referenced
+DGDR's `spec.rerun.reason`. Dynamo does not allow two runs for the same optimization resource to
+overlap.
 
 ## Baseline Evaluation
 
@@ -142,8 +148,8 @@ Dynamo resolves `targetRef` for every run instead of comparing new candidates wi
 older trace window. The immutable run records:
 
 - the baseline DGD name, UID, generation, and complete spec snapshot;
-- the trace artifact reference, digest, start time, and end time;
-- the referenced DGDR name, UID, generation, and resolved spec snapshot; and
+- the trace artifact reference, start time, and end time;
+- the referenced DGDR name, UID, generation, and complete request copy; and
 - the versions of Sweeper, Replay, and their performance data.
 
 Dynamo evaluates the baseline with the same trace and Replay implementation as every alternative.
@@ -229,9 +235,10 @@ Configure the collector to capture only the request metadata needed by Replay. P
 payloads are not required for length, timing, and cache-reuse simulation and introduce additional
 privacy and storage requirements.
 
-Store completed trace windows on a persistent volume or in object storage. Delete an artifact only
-after no retained run references it. Dynamo garbage-collects run metadata and trace artifacts
-according to their configured retention periods.
+Store completed trace windows at distinct PVC paths or object-storage URIs. DGDR treats each
+location as immutable and uses a changed location as the trigger for the next run. Delete an
+artifact only after no retained run references it. Dynamo garbage-collects run metadata and trace
+artifacts according to their configured retention periods.
 
 See [Sweeper Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
 for workload and trace semantics and [Sweeper Optimization
