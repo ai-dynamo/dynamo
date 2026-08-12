@@ -4864,7 +4864,7 @@ mod strip_tests {
 mod tests {
     use super::*;
     use crate::protocols::common::extensions::{
-        AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext, CODEX_COMPACTION_CONTEXT_KEY,
+        AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext,
     };
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -6158,31 +6158,30 @@ mod tests {
     }
 
     #[test]
-    fn attach_agent_context_does_not_forward_compaction() {
+    fn attach_agent_context_forwards_compaction() {
         let agent_context = AgentContext {
             session_id: "codex-thread".to_string(),
             parent_session_id: None,
             session_final: None,
+            compaction: Some(AgentCompaction {
+                trigger: Some("manual".to_string()),
+                ..Default::default()
+            }),
             kv_hints: None,
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());
         context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
-        context.insert(
-            CODEX_COMPACTION_CONTEXT_KEY,
-            AgentCompaction {
-                trigger: Some("manual".to_string()),
-                ..Default::default()
-            },
-        );
         let mut request = preprocessed_budget_request(None);
 
         attach_agent_context_from_context(&mut request, &context);
 
         assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
         let wire = serde_json::to_value(&request).unwrap();
-        assert!(wire["agent_context"].get("compaction").is_none());
-        assert!(wire.get("codex_compaction").is_none());
+        assert_eq!(
+            wire["agent_context"]["compaction"]["trigger"],
+            serde_json::json!("manual")
+        );
     }
 
     #[test]

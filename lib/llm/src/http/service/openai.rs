@@ -48,9 +48,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext, CODEX_COMPACTION_CONTEXT_KEY,
-    InputTrigger, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
-    agent_context_and_compaction_from_headers, apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, SESSION_AFFINITY_CONTEXT_KEY,
+    SessionAffinityId, agent_context_from_headers, apply_header_routing_overrides,
     session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::{
@@ -623,14 +622,9 @@ where
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some((mut agent_context, compaction)) =
-        agent_context_and_compaction_from_headers(headers)
-    {
+    if let Some(mut agent_context) = agent_context_from_headers(headers) {
         agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
-        if let Some(compaction) = compaction {
-            request.insert(CODEX_COMPACTION_CONTEXT_KEY, compaction);
-        }
     }
     if let Some(session_affinity) = session_affinity_from_headers(headers) {
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
@@ -654,9 +648,6 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 
     if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
         target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
-    }
-    if let Ok(compaction) = source.get::<AgentCompaction>(CODEX_COMPACTION_CONTEXT_KEY) {
-        target.insert(CODEX_COMPACTION_CONTEXT_KEY, compaction.as_ref().clone());
     }
     if let Ok(session_affinity) = source.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
         target.insert(
@@ -4405,7 +4396,7 @@ mod tests {
     use super::*;
     use crate::discovery::ModelManagerError;
     use crate::protocols::common::StopConditionsProvider;
-    use crate::protocols::common::extensions::NvExt;
+    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -4801,15 +4792,12 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
+                compaction: Some(AgentCompaction {
+                    trigger: Some("automatic".to_string()),
+                    ..Default::default()
+                }),
                 kv_hints: None,
                 input_trigger: None,
-            },
-        );
-        source.insert(
-            CODEX_COMPACTION_CONTEXT_KEY,
-            AgentCompaction {
-                trigger: Some("automatic".to_string()),
-                ..Default::default()
             },
         );
 
@@ -4825,10 +4813,13 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
-        let compaction = target
-            .get::<AgentCompaction>(CODEX_COMPACTION_CONTEXT_KEY)
-            .expect("compaction copied");
-        assert_eq!(compaction.trigger.as_deref(), Some("automatic"));
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.trigger.as_deref()),
+            Some("automatic")
+        );
     }
 
     #[test]
@@ -4847,10 +4838,13 @@ mod tests {
             .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
             .expect("agent context attached");
         assert_eq!(agent_context.session_id, "codex-thread");
-        let compaction = context
-            .get::<AgentCompaction>(CODEX_COMPACTION_CONTEXT_KEY)
-            .expect("compaction attached");
-        assert_eq!(compaction.implementation.as_deref(), Some("local"));
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.implementation.as_deref()),
+            Some("local")
+        );
     }
 
     #[test]

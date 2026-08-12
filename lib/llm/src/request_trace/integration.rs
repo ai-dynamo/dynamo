@@ -210,9 +210,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::protocols::common::extensions::{
-        AgentCompaction, AgentContext, CODEX_COMPACTION_CONTEXT_KEY, InputTrigger,
-    };
+    use crate::protocols::common::extensions::{AgentCompaction, AgentContext, InputTrigger};
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
@@ -370,20 +368,17 @@ mod tests {
             session_id: "root".to_string(),
             parent_session_id: None,
             session_final: None,
-            kv_hints: None,
-            input_trigger: Some(InputTrigger::ToolResult),
-        });
-        let mut context = Context::new(());
-        context.insert(
-            CODEX_COMPACTION_CONTEXT_KEY,
-            AgentCompaction {
+            compaction: Some(AgentCompaction {
                 trigger: Some("manual".to_string()),
                 reason: Some("user_requested".to_string()),
                 implementation: Some("responses_compact".to_string()),
                 phase: Some("standalone_turn".to_string()),
                 strategy: Some("memento".to_string()),
-            },
-        );
+            }),
+            kv_hints: None,
+            input_trigger: Some(InputTrigger::ToolResult),
+        });
+        let mut context = Context::new(());
         context.insert(
             crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             "llm-call-1".to_string(),
@@ -455,6 +450,7 @@ mod tests {
             session_id: "root".to_string(),
             parent_session_id: None,
             session_final: None,
+            compaction: None,
             kv_hints: None,
             input_trigger: None,
         });

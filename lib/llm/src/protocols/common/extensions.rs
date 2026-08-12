@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::protocols::TokenIdType;
-use crate::protocols::agents::{agent_context_header_values, session_affinity_header_value};
+use crate::protocols::agents::{
+    AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
+};
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::TimingInfo;
 
@@ -122,6 +124,11 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_final: Option<bool>,
+
+    /// Present when the current inference creates a compacted session summary.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<AgentCompaction>,
 
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -297,8 +304,23 @@ pub const HEADER_DATA_PARALLEL_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK_ALIAS: &str = "x-prefill-dp-rank";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
+impl From<AgentContextHeaderValues> for AgentContext {
+    fn from(values: AgentContextHeaderValues) -> Self {
+        let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
+            evict_session: true,
+        });
+        Self {
+            session_id: values.session_id,
+            parent_session_id: values.parent_session_id,
+            session_final: values.session_final,
+            compaction: values.compaction,
+            kv_hints,
+            input_trigger: None,
+        }
+    }
+}
+
 pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
-pub const CODEX_COMPACTION_CONTEXT_KEY: &str = "dynamo.llm.codex_compaction";
 
 pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
 
@@ -316,24 +338,7 @@ impl SessionAffinityId {
 }
 
 pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
-    agent_context_and_compaction_from_headers(headers).map(|(agent_context, _)| agent_context)
-}
-
-pub(crate) fn agent_context_and_compaction_from_headers(
-    headers: &HeaderMap,
-) -> Option<(AgentContext, Option<AgentCompaction>)> {
-    let values = agent_context_header_values(headers)?;
-    let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
-        evict_session: true,
-    });
-    let agent_context = AgentContext {
-        session_id: values.session_id,
-        parent_session_id: values.parent_session_id,
-        session_final: values.session_final,
-        kv_hints,
-        input_trigger: None,
-    };
-    Some((agent_context, values.compaction))
+    agent_context_header_values(headers).map(AgentContext::from)
 }
 
 pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
@@ -775,12 +780,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_ignores_nested_compaction() {
+    fn agent_context_accepts_nested_compaction() {
         let context = serde_json::from_str::<AgentContext>(
             r#"{"session_id":"root","compaction":{"trigger":"manual"}}"#,
         )
         .unwrap();
-        assert_eq!(context.session_id, "root");
+        assert_eq!(
+            context.compaction.and_then(|compaction| compaction.trigger),
+            Some("manual".to_string())
+        );
     }
 
     #[test]
@@ -1134,10 +1142,9 @@ mod tests {
                 .unwrap(),
         );
 
-        let (_agent_context, compaction) =
-            agent_context_and_compaction_from_headers(&headers).unwrap();
+        let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(
-            compaction,
+            agent_context.compaction,
             Some(AgentCompaction {
                 trigger: Some("manual".to_string()),
                 reason: Some("user_requested".to_string()),
@@ -1148,11 +1155,12 @@ mod tests {
         );
 
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
-        let (agent_context, compaction) =
-            agent_context_and_compaction_from_headers(&headers).unwrap();
+        let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "canonical");
         assert_eq!(
-            compaction.and_then(|compaction| compaction.strategy),
+            agent_context
+                .compaction
+                .and_then(|compaction| compaction.strategy),
             Some("memento".to_string())
         );
     }
@@ -1163,9 +1171,7 @@ mod tests {
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
         headers.insert(HEADER_CODEX_TURN_METADATA, "{".parse().unwrap());
         assert_eq!(
-            agent_context_and_compaction_from_headers(&headers)
-                .unwrap()
-                .1,
+            agent_context_from_headers(&headers).unwrap().compaction,
             None
         );
 
@@ -1176,9 +1182,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(
-            agent_context_and_compaction_from_headers(&headers)
-                .unwrap()
-                .1,
+            agent_context_from_headers(&headers).unwrap().compaction,
             None
         );
 
@@ -1187,9 +1191,7 @@ mod tests {
             r#"{"request_kind":"compaction"}"#.parse().unwrap(),
         );
         assert_eq!(
-            agent_context_and_compaction_from_headers(&headers)
-                .unwrap()
-                .1,
+            agent_context_from_headers(&headers).unwrap().compaction,
             Some(AgentCompaction::default())
         );
     }
