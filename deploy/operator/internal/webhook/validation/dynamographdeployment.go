@@ -32,6 +32,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -265,6 +266,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				))
 			}
 		}
+
+		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
+		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
@@ -544,6 +548,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	}
 
 	canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(v.operatorPrincipal, *v.userInfo)
+	const validateGPUMemoryServiceNewState = true // DGD updates do not run the stateless new-state traversal.
 	componentsPath := fldPath.Child("components")
 	for i := range newSpec.Components {
 		newComponent := &newSpec.Components[i]
@@ -557,6 +562,12 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			componentsPath.Index(i),
 			canModifyReplicas,
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
+			validateGPUMemoryServiceNewState,
+		)...)
+		allErrs = append(allErrs, v.validateDynamoGraphDeploymentSharedSpecUpdate(
+			newComponent,
+			oldComponent,
+			componentsPath.Index(i),
 		)...)
 	}
 
@@ -598,6 +609,53 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		))
 	}
 
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentSharedSpecUpdate validates DGD-specific component fields on update.
+// newComponent, oldComponent, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpecUpdate(
+	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	newPowerLimit, newHasPowerLimit := dgdPowerLimit(newComponent)
+	oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
+
+	// Reject transitions into, out of, or within the power-annotation contract.
+	if newHasPowerLimit != oldHasPowerLimit ||
+		(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
+		var invalidValue any
+		if newHasPowerLimit {
+			invalidValue = newPowerLimit
+		}
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	if oldHasPowerLimit {
+		// Keep the Planner's remaining cached per-replica power inputs stable.
+		newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
+		oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
+		if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
+			allErrs = append(allErrs, field.Invalid(
+				newNumberOfGPUs.path,
+				newNumberOfGPUs.invalidValue(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+		if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode", "nodeCount"),
+				newComponent.GetNumberOfNodes(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+	}
 	return allErrs
 }
 
@@ -657,4 +715,32 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyUpdate(
 		newPolicy,
 		"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy",
 	)}
+}
+
+// validateDGDComponentPowerAnnotation validates the power-limit annotation value and
+// its incompatibility with DRA-backed GPU allocation on a single component.
+// component and componentPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentPath *field.Path,
+) field.ErrorList {
+	powerLimitValue, hasPowerLimit := dgdPowerLimit(component)
+	if !hasPowerLimit {
+		return nil
+	}
+	var allErrs field.ErrorList
+	powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
+	if err := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath); err != nil {
+		allErrs = append(allErrs, err)
+	}
+	if draPath := dgdDRAPath(component, componentPath); draPath != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			draPath,
+			fmt.Sprintf(
+				"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
+				consts.KubeAnnotationGPUPowerLimit,
+			),
+		))
+	}
+	return allErrs
 }

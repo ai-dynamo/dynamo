@@ -16,12 +16,8 @@ import pytest
 import requests
 from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.managed_deployment import (
-    DeploymentSpec,
-    ManagedDeployment,
-    _get_workspace_dir,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +91,7 @@ class CheckpointBackendConfig:
 CHECKPOINT_BACKENDS = {
     "vllm": CheckpointBackendConfig(
         name="vllm",
-        manifest=("examples", "backends", "vllm", "deploy", "v1beta1", "agg.yaml"),
+        manifest=("examples", "backends", "vllm", "deploy", "agg.yaml"),
         decode_component="VllmDecodeWorker",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
@@ -116,7 +112,6 @@ CHECKPOINT_BACKENDS = {
             "backends",
             "sglang",
             "deploy",
-            "v1beta1",
             "agg.yaml",
         ),
         decode_component="decode",
@@ -143,7 +138,6 @@ CHECKPOINT_BACKENDS = {
             "backends",
             "trtllm",
             "deploy",
-            "v1beta1",
             "agg.yaml",
         ),
         decode_component="TRTLLMWorker",

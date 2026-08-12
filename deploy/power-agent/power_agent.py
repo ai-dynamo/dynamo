@@ -14,12 +14,14 @@ Runs as a privileged DaemonSet (hostPID: true) on each GPU node. Every 15s:
      (nvmlDeviceSetPowerManagementLimit) or DCGM (dcgmConfigSet).
 
 Scope is opt-in: the agent only ever caps a GPU whose pod carries the
-dynamo.nvidia.com/gpu-power-limit annotation (set by the planner on
-prefill/decode worker pods). A GPU running only unannotated pods — a
-non-Dynamo workload, or a Dynamo worker not yet annotated — that the agent
-never capped is left at its hardware default and untouched. If the agent had
-previously capped that GPU and the opted-in pod is now gone (a non-managed
-workload reuses it, or the planner removed the annotation), the cap is
+dynamo.nvidia.com/gpu-power-limit annotation. That annotation is DGD-owned —
+authored on the worker component's podTemplate (by a human or the profiler)
+and stamped onto each worker pod by the operator at create time; the agent
+reads the live pod annotation and never depends on who wrote it. A GPU running
+only unannotated pods — a non-Dynamo workload, or a Dynamo worker not yet
+annotated — that the agent never capped is left at its hardware default and
+untouched. If the agent had previously capped that GPU and the opted-in pod is
+now gone (a non-managed workload reuses it, or the pod was deleted), the cap is
 released back to default so it does not strand on the new tenant. See
 ``_build_uid_to_annotation`` and ``_release_managed_gpu``.
 
@@ -613,12 +615,12 @@ def _release_managed_gpu(
     Runtime counterpart to ``_shutdown_cleanup`` / ``_restore_orphaned_gpus_on_startup``.
     Invoked from steady-state reconcile when a GPU we previously capped is now
     running only unannotated / non-K8s processes — i.e. the opted-in pod is gone
-    and a non-managed workload owns the GPU (or the planner removed the
-    annotation to release it). Without this, the agent's last cap would strand
-    on the reused GPU until the next agent shutdown (startup orphan recovery
-    skips busy GPUs), silently throttling the new tenant. This implements the
-    "planner owns cap lifecycle via annotation removal/update" contract at
-    runtime.
+    and a non-managed workload owns the GPU (or the annotated pod was deleted,
+    releasing the cap). Without this, the agent's last cap would strand on the
+    reused GPU until the next agent shutdown (startup orphan recovery skips busy
+    GPUs), silently throttling the new tenant. This implements the "cap
+    lifecycle follows the live pod annotation" contract at runtime — that
+    annotation is DGD-owned and applied by the operator.
 
     Routed through the active ``Actuator`` (not raw ``pynvml``) so the release
     write flows through the same library that applied the cap. On
@@ -1402,11 +1404,11 @@ class PowerAgent:
         non-empty ``pod_annotations`` and fall through to the "no parseable
         annotation → safe default" branch in ``_resolve_cap_for_gpu`` — i.e.
         the agent would silently power-cap a co-located non-Dynamo workload (or
-        a Dynamo worker the planner has not yet annotated). Gating on key
-        presence is what keeps the agent from touching GPUs it was never asked
-        to manage. The planner is the sole writer of this key and stamps it
-        only on prefill/decode worker pods. Do NOT reintroduce unannotated pods
-        with a ``None`` value.
+        a Dynamo worker not yet annotated). Gating on key presence is what keeps
+        the agent from touching GPUs it was never asked to manage. This key is
+        DGD-owned: authored on the worker component podTemplate and applied to
+        worker pods by the operator. Do NOT reintroduce unannotated pods with a
+        ``None`` value.
 
         A pod that carries the key but with a malformed/empty value IS kept
         (value as-is) so the safe-default fail-safe still applies to a
@@ -1531,15 +1533,15 @@ class PowerAgent:
         Caps are persistent by design: when a managed GPU is merely idle this
         cycle (no processes at all) we deliberately DO NOT restore default TGP
         here. A managed worker may exit briefly (OOM, reschedule) and return to
-        the same GPU; restoring during that gap would violate the planner's
-        power budget, and the planner owns cap lifecycle via annotation
-        removal/update.
+        the same GPU; restoring during that gap would violate the deployment's
+        power budget. Cap lifecycle is driven by the live pod annotation, which
+        is DGD-owned and applied by the operator.
 
         A cap IS restored to default in three places:
           - ``_release_managed_gpu`` during ordinary reconcile, when a GPU we
             previously capped now runs only unannotated / non-K8s processes
             (the opted-in pod is gone and a non-managed tenant owns the GPU,
-            or the planner removed the annotation);
+            or the pod carrying the annotation was deleted);
           - ``_shutdown_cleanup`` at agent shutdown (invoked from ``run()``
             after SIGTERM); and
           - ``_restore_orphaned_gpus_on_startup`` (previously-managed +

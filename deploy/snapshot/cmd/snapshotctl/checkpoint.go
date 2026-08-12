@@ -63,25 +63,21 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		return nil, err
 	}
 
-	targetValue, err := reconcileTargetContainers(pod.Annotations, opts.Container, 1, 1)
+	containers, err := reconcileTargetContainers(pod.Annotations, opts.Container, 1, 1)
 	if err != nil {
 		return nil, err
 	}
-	annotations := map[string]string{}
-	for k, v := range pod.Annotations {
-		annotations[k] = v
-	}
-	annotations[snapshotprotocol.TargetContainersAnnotation] = targetValue
 
 	checkpointJobName := pod.Name + "-checkpoint"
 	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
-			Annotations: annotations,
+			Annotations: pod.Annotations,
 		},
 		Spec: *pod.Spec.DeepCopy(),
 	}, snapshotprotocol.CheckpointJobOptions{
 		Namespace:       namespace,
+		TargetContainer: containers[0],
 		CheckpointID:    checkpointID,
 		ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
 		SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
@@ -116,7 +112,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}
 
 	snapName := podSnapshotName(checkpointJobName)
-	snap, err := createPodSnapshot(waitCtx, crClient, namespace, snapName, sourcePod.Name, sourcePod.UID, checkpointID)
+	snap, err := createPodSnapshot(waitCtx, crClient, namespace, snapName, sourcePod.Name, sourcePod.UID, containers, checkpointID)
 	if err != nil {
 		return nil, err
 	}

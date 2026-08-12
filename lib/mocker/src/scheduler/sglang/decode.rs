@@ -7,15 +7,21 @@ use crate::common::protocols::OutputSignal;
 use crate::common::speculative::SpeculativeDecodeSampler;
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::SglangKvManager;
+use crate::replay::offline::evidence::{
+    EnginePressureState, PressureKind, canonical_evidence_capture_active, record_pressure,
+    with_engine_evidence_timestamp,
+};
 
 use super::config::{SglangConfig, floor_to_block};
 use super::request::SglangRequest;
+use crate::scheduler::AcceptLengthSample;
 
 #[derive(Default)]
 pub(super) struct DecodeResult {
     pub(super) requests: Vec<SglangRequest>,
     pub(super) completed_requests: Vec<SglangRequest>,
     pub(super) output_signals: Vec<OutputSignal>,
+    pub(super) accept_length: AcceptLengthSample,
     pub(super) retracted_any: bool,
     pub(super) end_ms: f64,
 }
@@ -109,10 +115,41 @@ fn check_decode_mem_for_burst(
             break;
         };
 
+        let pressure_before = canonical_evidence_capture_active().then(|| {
+            let request = &running[idx];
+            (
+                request.uuid,
+                EnginePressureState {
+                    running_requests: running.len(),
+                    waiting_requests: None,
+                    active_blocks: active_kv_blocks(kv_manager, config.block_size),
+                },
+                request.allocated_tokens.div_ceil(config.block_size),
+                logical_available / config.block_size,
+                page_growth_needed.div_ceil(config.block_size),
+            )
+        });
         let mut req = running.remove(idx);
         kv_manager.retract_in_place(&mut req.kv_lease);
         req.reset_for_retract();
         req.debug_assert_invariants(config.block_size);
+        if let Some((uuid, state_before, request_blocks, logical_available, required_blocks)) =
+            pressure_before
+        {
+            record_pressure(
+                PressureKind::SglangRetraction,
+                uuid,
+                state_before,
+                EnginePressureState {
+                    running_requests: running.len(),
+                    waiting_requests: None,
+                    active_blocks: active_kv_blocks(kv_manager, config.block_size),
+                },
+                request_blocks,
+                Some(logical_available),
+                Some(required_blocks),
+            );
+        }
         retracted.push(req);
     }
 
@@ -131,6 +168,11 @@ fn check_decode_mem_for_burst(
     }
 
     retracted
+}
+
+fn active_kv_blocks(kv_manager: &SglangKvManager, block_size: usize) -> usize {
+    let used = kv_manager.cache().total_tokens() - kv_manager.cache().available_tokens();
+    used.div_ceil(block_size)
 }
 
 #[cfg(test)]
@@ -199,6 +241,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 token_id: None,
                 completed: true,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
                     config.worker_type,
                     true,
@@ -230,7 +273,9 @@ pub(super) fn simulate_decode_step_with_sampler(
     } else {
         config.speculative_max_tokens.unwrap_or(1)
     };
-    let retracted = check_decode_mem_for_burst(running, kv_manager, config, max_burst);
+    let retracted = with_engine_evidence_timestamp(current_time_ms, || {
+        check_decode_mem_for_burst(running, kv_manager, config, max_burst)
+    });
     let retracted_any = !retracted.is_empty();
     if running.is_empty() {
         return Ok(DecodeResult {
@@ -239,6 +284,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
+            ..DecodeResult::default()
         });
     }
 
@@ -247,7 +293,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         .map(SglangRequest::current_sequence_len)
         .sum();
     let avg_context = total_context / running.len();
-    let active_kv_tokens = total_context.min(config.total_kv_tokens);
+    let active_kv_tokens = total_context;
     let decode_time = config.perf_model.predict_decode_time(
         running.len(),
         active_kv_tokens,
@@ -275,13 +321,16 @@ pub(super) fn simulate_decode_step_with_sampler(
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
+            ..DecodeResult::default()
         });
     };
 
     output_signals.reserve(running.len());
     let mut completed_indices = Vec::new();
+    let mut accept_length = AcceptLengthSample::default();
 
     for (idx, req) in running.iter_mut().enumerate() {
+        let mut emitted_tokens = 0usize;
         let remaining = req.remaining_output_tokens();
         let burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
             remaining.min(1)
@@ -306,6 +355,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 token_id: Some(token_id),
                 completed: is_complete,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
                     config.worker_type,
                     is_complete,
@@ -314,6 +364,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                     config.kv_bytes_per_token,
                 ),
             });
+            emitted_tokens += 1;
 
             if is_complete {
                 completed_indices.push(idx);
@@ -323,6 +374,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             cache_materialized_prefix(req, kv_manager, config);
             req.debug_assert_invariants(config.block_size);
         }
+        accept_length.record_forward(emitted_tokens);
     }
 
     debug_assert!(reservation.len() <= reserved_pages);
@@ -339,6 +391,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         requests: retracted,
         completed_requests,
         output_signals,
+        accept_length,
         retracted_any,
         end_ms: current_time_ms + total_time.as_secs_f64() * 1000.0,
     })

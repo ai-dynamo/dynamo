@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from typing import Any, Optional
 
 import numpy as np
@@ -50,10 +52,30 @@ from dynamo.profiler.utils.profile_common import (
     derive_planner_image,
     is_mocker_enabled,
     is_planner_enabled,
+    needs_mocker_aic_perf_model,
     needs_profile_data,
 )
+from dynamo.profiler.utils.replay_optimize.constants import AIC_BACKEND_VERSIONS
 
 logger = logging.getLogger(__name__)
+
+_MOCKER_AIC_BACKEND_VERSIONS = {
+    **AIC_BACKEND_VERSIONS,
+    "trtllm": "1.3.0rc10",
+}
+
+
+def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
+    try:
+        perf_database = importlib.import_module("aiconfigurator_core.sdk.perf_database")
+    except ModuleNotFoundError as e:
+        if e.name != "aiconfigurator_core":
+            raise
+        return None
+    return perf_database.get_latest_database_version
+
+
+get_latest_database_version = _load_latest_database_version()
 
 # ConfigMap name prefixes (a 4-char UUID suffix is appended at runtime
 # so that multiple deployments in the same namespace don't collide)
@@ -399,6 +421,11 @@ def _inject_mocker_aic_args(
     if "--aic-perf-model" not in args_list:
         args_list.append("--aic-perf-model")
     args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
+    backend_version = _MOCKER_AIC_BACKEND_VERSIONS.get(aic_spec.backend)
+    if backend_version is not None:
+        args_list = set_argument_value(
+            args_list, "--aic-backend-version", backend_version
+        )
     args_list = set_argument_value(args_list, "--aic-system", aic_spec.system)
     args_list = set_argument_value(args_list, "--aic-tp-size", str(kwargs["tp_size"]))
     args_list = set_argument_value(
@@ -706,10 +733,31 @@ def build_aic_perf_model_spec(
     if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
         return None
 
+    if get_latest_database_version is None:
+        logger.warning(
+            "aiconfigurator-core is unavailable; Planner will use FPM regression "
+            "instead of native AIC estimates."
+        )
+        return None
+
+    backend_version = get_latest_database_version(
+        system=system,
+        backend=resolved_backend,
+    )
+    if backend_version is None:
+        logger.warning(
+            "No AIC performance database is available for system=%s, backend=%s; "
+            "Planner will use FPM regression instead of native AIC estimates.",
+            system,
+            resolved_backend,
+        )
+        return None
+
     return AICPerfModelSpec(
         hf_id=dgdr.model,
         system=system,
         backend=resolved_backend,
+        backend_version=backend_version,
         prefill_pick=best_prefill_pick,
         decode_pick=best_decode_pick,
     )
@@ -733,9 +781,8 @@ def build_aic_interpolation_spec(
     the mocker (via ``--aic-perf-model`` flags injected into worker args).
     Returns ``None`` when any of the following hold:
 
-    * no AIC consumer needs it — planner is disabled or has
-      ``enable_throughput_scaling=False``, **and** mocker is disabled
-    * ``pre_deployment_sweeping_mode`` is not ``Rapid``
+    * neither a throughput-scaling Planner with a rapid sweep nor a mocker in
+      rapid mode needs it
     * picks are missing
     * ``resolved_backend`` is not one AIC supports
 
@@ -757,16 +804,14 @@ def build_aic_interpolation_spec(
         if dgdr.features is not None and dgdr.features.planner is not None
         else None
     )
-    mocker_enabled = is_mocker_enabled(dgdr)
+    mocker_needs_aic = needs_mocker_aic_perf_model(dgdr)
     planner_needs_aic = (
         is_planner_enabled(dgdr)
         and planner is not None
         and planner.enable_throughput_scaling
+        and planner.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
     )
-    if not planner_needs_aic and not mocker_enabled:
-        return None
-    sweep_mode = planner.pre_deployment_sweeping_mode if planner is not None else None
-    if sweep_mode != PlannerPreDeploymentSweepMode.Rapid:
+    if not planner_needs_aic and not mocker_needs_aic:
         return None
     if best_prefill_pick is None or best_decode_pick is None:
         logger.info(

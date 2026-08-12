@@ -64,13 +64,14 @@ The router uses a cost function that combines cache-aware prefill cost, potentia
 
 4. **Cost formula**:
    ```text
-   adjusted_prefill_blocks = (
+   effective_device_credit = overlap_score_credit * overlap_score_credit_decay_factor
+   adjusted_prefill_blocks = max(0, (
        prefill_blocks
-       - overlap_score_credit * device_overlap_blocks
+       - effective_device_credit * device_overlap_blocks
        - host_cache_hit_weight * host_overlap_blocks
        - disk_cache_hit_weight * disk_overlap_blocks
        - shared_cache_multiplier * shared_beyond_blocks
-   )
+   ))
    active_request_blocks = decode_active_request_weight * active_requests
    cost = (
        prefill_load_scale * adjusted_prefill_blocks
@@ -80,9 +81,13 @@ The router uses a cost function that combines cache-aware prefill cost, potentia
    ```
    - Lower costs indicate better routing choices
    - `overlap_score_credit` is a finite, nonnegative device-local prefix-overlap credit multiplier
+   - `overlap_score_credit_decay_factor` is `1 / (1 + decay * normalized_excess_prefill)`; it is `1` when decay is disabled or the worker has no excess prefill load
+   - The combined cache credit is clamped so adjusted prefill blocks cannot become negative
    - `prefill_load_scale` controls adjusted prompt-side load relative to potential decode blocks
    - `decode_active_request_weight` defaults to `0`; use a positive value only when decode step latency depends materially on active batch size
    - Higher overlap credits favor cache reuse (improving TTFT), while lower credits prioritize even load distribution (improving ITL)
+
+   The experimental conditional-disaggregation path has a decode-worker exception. When the decode worker does not track prefill tokens and a positive overlap credit permits conditional prefill bypass, its score is `max(0, potential_decode_blocks - overlap_credit_blocks) + active_request_blocks`; it does not add the ordinary prefill term.
 
 #### Worker Selection
 
@@ -158,15 +163,15 @@ The KVIndexer supports two backend implementations, selected via `--router-event
 
 ### Inter-Router Communication
 
-In distributed deployments with multiple routers, each router maintains visibility over only a portion of the total requests. To ensure consistent routing decisions, routers synchronize their states through three event types:
+In distributed deployments with multiple routers, each router initially sees only the active requests it routed. With replica sync enabled, routers exchange three best-effort lifecycle event types to improve that view:
 
-1. **AddRequest**: Notifies other routers when a request is assigned to a worker. Includes request ID, worker ID, token sequence blocks, and overlap score to track block usage across the system.
+1. **AddRequest**: Notifies peer routers when a request is assigned to a worker. It carries the request ID, worker ID and DP rank, token sequence, whether to track prefill tokens, the expected output length, and the prefill load hint.
 
 2. **MarkPrefillCompleted**: Signals when a request moves from prefill to decode phase, allowing routers to update their worker load calculations by excluding completed prefill tokens.
 
 3. **Free**: Indicates request completion and resource release, enabling accurate block reference counting across all routers.
 
-Each event carries a unique router ID to prevent self-event processing. This asynchronous communication system ensures optimal routing decisions by maintaining consistent KV cache state across all routers, even as they handle different request streams.
+Each event carries a unique router ID to prevent self-event processing. Publication is fire-and-forget and the bounded outbound publisher queue drops the newest event when full. These events improve cross-replica active-load estimates; they do not synchronize prefix-cache state or guarantee identical routing decisions. Output-block growth is tracked locally rather than published as a lifecycle event. Routers periodically force-expire stale synchronized requests; configure the safety timeout with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds).
 
 ## Event Transport Modes
 
@@ -217,7 +222,7 @@ graph TD
 1. Each worker assigns monotonically increasing event IDs starting from 0
 2. The router tracks the last received event ID per worker
 3. If an event arrives with `event_id > last_id + 1`, the router detects a gap
-4. The router queries the worker's local indexer for the missing event range `[last_id+1, event_id-1]`
+4. The router resets that worker rank and requests a full snapshot (`start_event_id=None`, `end_event_id=None`)
 5. On worker discovery (Added event), the router dumps the worker's entire local indexer state
 
 **Startup behavior:**
@@ -234,7 +239,7 @@ In addition to cached blocks, each router replica needs to track active blocks (
 - The first token is generated (prefill complete)
 - The response ends (request freed)
 
-This is managed locally in each router via a "slot manager". To maintain consistency across the system, router replicas synchronize these local predictions with each other through NATS core messaging.
+This is managed locally in each router via a "slot manager". With `--router-replica-sync`, router replicas exchange lifecycle predictions through the configured Runtime event plane (ZMQ by default, with NATS Core available by configuration).
 
 ```mermaid
 sequenceDiagram
@@ -271,10 +276,10 @@ sequenceDiagram
     R2-->>R1: Sync: Free(B)
     deactivate R2
 
-    Note over R1,R2: Both routers have consistent<br/>view of active blocks
+    Note over R1,R2: Both routers have a more complete,<br/>best-effort view of active blocks
 ```
 
-This dual-layer approach—worker-recoverable KV cache state and ephemeral active-block synchronization across router replicas—balances cache reuse with current load.
+This dual-layer approach—worker-recoverable KV cache state and ephemeral, best-effort active-block synchronization across router replicas—balances cache reuse with current load without treating router lifecycle events as authoritative storage.
 
 ## See Also
 

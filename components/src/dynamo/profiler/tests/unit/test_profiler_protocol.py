@@ -21,6 +21,9 @@ try:
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
         PickedParallelConfig,
     )
+    from dynamo.profiler.utils.config_modifiers.protocol import (  # noqa: F401
+        BaseConfigModifier,
+    )
     from dynamo.profiler.utils.defaults import (
         DYNAMO_RUN_DEFAULT_PORT,
         EngineType,
@@ -853,13 +856,14 @@ def test_update_model_from_pvc_absolute_path_inside_mount_is_not_doubled(
         pvc_path=model_path,
     )
 
-    services = result["spec"]["services"]
-    for svc_name, svc in services.items():
-        args = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
+    for component in result["spec"]["components"]:
+        args = _main_container(component).get("args", [])
         flat_args = " ".join(args) if args else ""
         assert f"{pvc_mount_path}{pvc_mount_path}" not in flat_args
-        if svc_name in BaseConfigModifier._NON_WORKER_SERVICES:
-            continue
+
+    for component in _worker_components(result):
+        args = _main_container(component).get("args", [])
+        flat_args = " ".join(args) if args else ""
         assert model_path in flat_args
 
 

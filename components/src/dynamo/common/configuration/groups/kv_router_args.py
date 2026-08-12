@@ -179,7 +179,7 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
                 "Must be finite and non-negative; values above 1.0 give device "
-                "overlap extra credit and can make the adjusted prefill cost negative."
+                "overlap extra credit, with adjusted prefill cost clamped at zero."
             ),
             arg_type=float,
             dest="overlap_score_credit",
@@ -314,8 +314,9 @@ class KvRouterArgGroup(ArgGroup):
             dest="router_track_output_blocks",
             help=(
                 "KV Router: Track output blocks during generation. When enabled, the router adds "
-                "placeholder blocks as tokens are generated and applies fractional decay based on "
-                "progress toward expected output sequence length."
+                "placeholder blocks as tokens are generated. With expected output sequence length, "
+                "fractional decay applies to output blocks and the structurally exclusive prompt "
+                "suffix; shared prompt blocks retain full weight."
             ),
             obsolete_flag="--track-output-blocks",
         )
@@ -415,8 +416,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_POLICY_CONFIG",
             default=None,
             help=(
-                "KV Router: Startup-only YAML policy-family and cache-bucket "
-                "queue configuration. "
+                "KV Router: Startup-only YAML configuration for policy-class queues "
+                "and custom worker-selection instances. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."

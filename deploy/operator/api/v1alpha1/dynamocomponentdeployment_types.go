@@ -153,8 +153,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
-	// the service using the Scale subresource. When disabled, replicas can be modified directly.
+	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
+	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
+	// `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled because
+	// `enabled` defaults to false.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
@@ -263,7 +265,6 @@ type DynamoComponentDeploymentStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment"
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
@@ -288,10 +289,6 @@ type DynamoComponentDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoComponentDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {

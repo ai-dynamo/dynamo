@@ -137,6 +137,7 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         replay_mode="offline",
         replay_concurrency=8,
     )
+    report = report.summary
     aic = _run_aic_static_point(
         backend_name=backend_name,
         isl=isl,
@@ -249,7 +250,9 @@ def test_run_synthetic_disagg_replay_preserves_aic_local_optimum(
             replay_mode="offline",
             router_mode="round_robin",
         )
-        reports[variant_name] = report["output_throughput_tok_s"] / total_gpu_budget
+        reports[variant_name] = (
+            report.summary["output_throughput_tok_s"] / total_gpu_budget
+        )
 
     assert reports["picked"] > reports["p_minus_2_d_plus_2"]
     assert reports["picked"] > reports["p_plus_2_d_minus_2"]

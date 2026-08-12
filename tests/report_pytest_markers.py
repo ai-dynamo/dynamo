@@ -241,6 +241,7 @@ STUB_MODULES = [
     "vllm.tool_parsers.hermes_tool_parser",
     "vllm.tool_parsers.mistral_tool_parser",
     "vllm.tool_parsers.qwen3_engine_tool_parser",
+    "vllm.tool_parsers.utils",
     "vllm.utils",
     "vllm.utils.async_utils",
     "vllm.utils.hashing",
@@ -283,6 +284,9 @@ STUB_MODULES = [
     "aiconfigurator_core.sdk",
     "aiconfigurator_core.sdk.engine",
     "aiconfigurator_core.sdk.memory",
+    "aiconfigurator_core.sdk.models",
+    "aiconfigurator_core.sdk.perf_database",
+    "aiconfigurator_core.sdk.utils",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -300,6 +304,9 @@ FORCE_STUB_MODULES = {
     "aiconfigurator.cli.main",
     "aiconfigurator_core.sdk.engine",
     "aiconfigurator_core.sdk.memory",
+    "aiconfigurator_core.sdk.models",
+    "aiconfigurator_core.sdk.perf_database",
+    "aiconfigurator_core.sdk.utils",
 }
 
 # Project paths for local imports

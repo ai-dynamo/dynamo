@@ -477,14 +477,14 @@ class TestRunDefaultSim:
 
 
 # ---------------------------------------------------------------------------
-# Force-disagg when interpolation data is needed
+# Force-disagg when a downstream consumer needs separate worker picks
 # ---------------------------------------------------------------------------
 
 
 class TestRunDefaultSimForceDisagg:
-    """When AIC picks an aggregated config but the DGDR requires interpolation
-    data (mocker or throughput-scaling), _run_default_sim must override the
-    selection to the best available disaggregated config."""
+    """When AIC picks an aggregated config but a downstream consumer needs
+    separate prefill/decode picks, _run_default_sim must select the best
+    available disaggregated config."""
 
     def _call_default_sim(self, dgdr, execute_return_value):
         with (
@@ -534,7 +534,7 @@ class TestRunDefaultSimForceDisagg:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_no_profile_data_needed_agg_pick_preserved(self):
-        """When no interpolation data is needed, an agg pick is kept as-is."""
+        """When no downstream consumer needs disagg picks, agg is preserved."""
         dgdr = _make_dgdr()  # no mocker, no throughput scaling
         result = self._call_default_sim(dgdr, self._both_configs(chosen="agg"))
         assert result["chosen_exp"] == "agg"

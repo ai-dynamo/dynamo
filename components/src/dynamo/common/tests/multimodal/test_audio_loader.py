@@ -10,6 +10,8 @@ import dynamo.common.multimodal.audio_loader as audio_loader_module
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.audio_loader import AudioLoader
+from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 
 pytestmark = [
     pytest.mark.unit,
@@ -176,3 +178,36 @@ async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_load_audio_missing_decoder_is_actionable():
+    """vLLM's own hint here is `pip install vllm[audio]`, which drags in an
+    unpinned stack; the wrap must point at the validated bounded install and
+    say there is no hardware alternative for audio."""
+    loader = AudioLoader()
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ImportError("Please install vllm[audio] for audio support")
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader.load_audio("https://example.com/x.mp3")
+
+    msg = str(exc_info.value)
+    assert VALIDATED_SPECS["av"] in msg
+    assert "install_media_decoders vllm" in msg
+    assert "NVDEC does not decode audio" in msg
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_preserves_missing_decoder_error():
+    """The batch aggregate wraps failures in a generic Exception; the
+    missing-decoder type must survive it (review finding)."""
+    loader = AudioLoader()
+    err = audio_loader_module.audio_decoder_missing("vllm")
+    loader.load_audio = AsyncMock(side_effect=err)  # type: ignore[method-assign]
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/x.mp3"}])
+
+    assert exc_info.value is err

@@ -9,11 +9,11 @@ Use this matrix to see which KV offloading tiers the Dynamo KV router can use fo
 
 ## Support Matrix
 
-Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dynamo integration in progress · ❌ not yet supported · — does not exist for this framework.
+Legend: ✅ tier-aware routing · ⚠️ available but not fully validated · 🟡 router-visible, tier-agnostic · 🚧 Dynamo integration in progress · ❌ not yet supported · — does not exist for this framework.
 
 | Framework | Version gates | GPU | CPU RAM | Disk | Shared pool |
 | --- | --- | --- | --- | --- | --- |
-| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | 🚧 vLLM main emits FS/OBJ events; Dynamo tier mapping is in progress | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
+| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | ⚠️ Unified `STORAGE` events map to the Disk tier with locality gating; available but not fully validated | 🚧 Remote locality is dropped; shared-pool indexing is still planned |
 | [**SGLang**](#sglang) | SGLang v0.5.11+; v0.5.13+ with Mooncake; Dynamo v1.2+ | ✅ KV events | ✅ HiCache + KV events | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
 | [**TensorRT-LLM**](#tensorrt-llm) | Dynamo v1.3.0+ for the current event flag | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
 
@@ -61,8 +61,9 @@ PYTHONHASHSEED=0 python3 -m dynamo.vllm \
 ```
 
 - Versions: vLLM v0.24.0 or later. Earlier versions publish placeholder CPU events that the router silently drops — offloading still works engine-side, but the router only sees the GPU tier.
-- Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM main emits FS and OBJ events. Dynamo tier mapping is in progress.
-- Shared pools: vLLM main publishes optional `LOCAL` / `REMOTE` locality metadata on FS and OBJ events. Dynamo shared-pool indexing is in progress.
+- Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM emits a unified `STORAGE` medium. Dynamo maps worker-local `STORAGE` events to the Disk tier. The path is available but not yet fully validated.
+- Shared pools: `LOCAL` or absent locality remains worker-local; `REMOTE` or unknown locality is dropped. Dynamo does not yet build a shared-pool index from these events.
+- Cache-salted requests do not currently reuse `STORAGE`-tier entries for routing because those events omit the extra cache-namespace keys. See [Known Limitations](../backends/vllm/native-kv-offloading.md#known-limitations).
 
 See [Native KV Offloading](../backends/vllm/native-kv-offloading.md) for the full support matrix (including disaggregated and tensor-parallel status), setup commands, verification, and troubleshooting.
 
@@ -112,7 +113,7 @@ See the [TensorRT-LLM backend docs](../backends/tensorrt-llm/overview.md) for wo
 The Rust worker selector (`lib/kv-router/src/scheduling/selector.rs`) scores each candidate worker with:
 
 ```
-overlap_credit_blocks = device_overlap_blocks       * 1.0   // overlap_score_credit, configurable
+overlap_credit_blocks = device_overlap_blocks       * effective_device_credit
                       + host_pinned_overlap_blocks  * 0.75  // host_cache_hit_weight, configurable in router config
                       + disk_overlap_blocks         * 0.25  // disk_cache_hit_weight, configurable in router config
                       + shared_overlap_blocks       * shared_cache_multiplier
@@ -120,8 +121,13 @@ overlap_credit_blocks = device_overlap_blocks       * 1.0   // overlap_score_cre
 adjusted_prefill_blocks = max(raw_prefill_blocks - overlap_credit_blocks, 0)
 
 logit = prefill_load_scale * adjusted_prefill_blocks   // default 1.0
-      + decode_blocks                                    // load term
+      + decode_blocks                                    // active/projected KV load
+      + decode_active_request_weight * active_requests  // optional, default 0
 ```
+
+Before applying the device term, the router computes
+`effective_device_credit = overlap_score_credit / (1 + overlap_score_credit_decay * normalized_excess_prefill)`.
+The host, disk, and shared-cache credits do not decay.
 
 The router picks the worker with the **minimum** logit.
 

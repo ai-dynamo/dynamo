@@ -57,7 +57,7 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
   <Step title="Deploy a LoRA-enabled worker">
     Enable LoRA on the **worker**: set LoRA and system API environment variables, and pass vLLM LoRA flags in `args:`. `DYN_SYSTEM_ENABLED` and `DYN_SYSTEM_PORT` expose load/unload on the worker system port.
 
-    Adapted from [`examples/backends/vllm/deploy/v1beta1/agg_lora.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/agg_lora.yaml):
+    Adapted from the [`agg_lora.yaml` example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/lora/agg_lora.yaml):
 
     ```yaml
     apiVersion: nvidia.com/v1beta1

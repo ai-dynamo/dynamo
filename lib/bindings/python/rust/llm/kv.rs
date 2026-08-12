@@ -34,7 +34,7 @@ use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
     SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
     SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest,
+    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyFactory,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -430,57 +430,68 @@ mod select_service_cli_tests {
     }
 }
 
+#[cfg(not(feature = "select-service"))]
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    #[cfg(feature = "select-service")]
-    {
-        let cli = SelectServiceCli::try_parse_from(
-            std::iter::once(OsString::from("python -m dynamo.select_service"))
-                .chain(args.into_iter().map(Into::into)),
-        )?;
+    let _ = args;
+    anyhow::bail!(
+        "dynamo.select_service is not available in this build; reinstall with --features select-service"
+    )
+}
 
-        init_standalone_logging();
+#[cfg(feature = "select-service")]
+pub(crate) fn run_select_service_cli_with_worker_selection_policy_factory<I, T, F>(
+    args: I,
+    resolve_policy: F,
+) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+    F: FnOnce(&KvRouterConfig) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>>,
+{
+    let cli = SelectServiceCli::try_parse_from(
+        std::iter::once(OsString::from("python -m dynamo.select_service"))
+            .chain(args.into_iter().map(Into::into)),
+    )?;
 
-        let rt = tokio::runtime::Runtime::new()?;
-        let mut kv_router_config =
-            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-        if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
-            kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
-        }
-        if let Some(algorithm) = cli.router_tracking_hash {
-            kv_router_config.router_tracking_hash = algorithm;
-        }
-        if let Some(key_file) = cli.router_tracking_key_file {
-            kv_router_config.router_tracking_key_file = Some(key_file);
-        }
-        if let Some(key_id) = cli.router_tracking_key_id {
-            kv_router_config.router_tracking_key_id = Some(key_id);
-        }
-        rt.block_on(selection::run_server(SelectionServiceConfig {
-            port: cli.port,
-            threads: cli.threads,
-            indexer_peers: cli.indexer_peers,
-            replica_sync_port: cli.replica_sync_port,
-            replica_sync_peers: cli.replica_sync_peers,
-            kv_router_config,
-            selection_cache: selection_cache_config_from_overrides(
-                cli.selection_cache_ttl_secs,
-                cli.selection_cache_max_entries,
-                cli.selection_cache_max_bytes,
-            ),
-        }))
+    init_standalone_logging();
+
+    let mut kv_router_config =
+        try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+    if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
+        kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
     }
-
-    #[cfg(not(feature = "select-service"))]
-    {
-        let _ = args;
-        anyhow::bail!(
-            "dynamo.select_service is not available in this build; reinstall with --features select-service"
-        )
+    if let Some(algorithm) = cli.router_tracking_hash {
+        kv_router_config.router_tracking_hash = algorithm;
     }
+    if let Some(key_file) = cli.router_tracking_key_file {
+        kv_router_config.router_tracking_key_file = Some(key_file);
+    }
+    if let Some(key_id) = cli.router_tracking_key_id {
+        kv_router_config.router_tracking_key_id = Some(key_id);
+    }
+    let config = SelectionServiceConfig {
+        port: cli.port,
+        threads: cli.threads,
+        indexer_peers: cli.indexer_peers,
+        replica_sync_port: cli.replica_sync_port,
+        replica_sync_peers: cli.replica_sync_peers,
+        kv_router_config,
+        selection_cache: selection_cache_config_from_overrides(
+            cli.selection_cache_ttl_secs,
+            cli.selection_cache_max_entries,
+            cli.selection_cache_max_bytes,
+        ),
+    };
+    let builder = config
+        .service_builder()
+        .resolved_worker_selection_policy_factory(resolve_policy(&config.kv_router_config)?);
+    let rt = tokio::runtime::Runtime::new()?;
+    let service = rt.block_on(builder.build())?;
+    rt.block_on(selection::run_server_with_service(config.port, service))
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
@@ -575,10 +586,13 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
+        let factory =
+            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
-            .selection_cache(selection_cache.unwrap_or_default().inner);
+            .selection_cache(selection_cache.unwrap_or_default().inner)
+            .resolved_worker_selection_policy_factory(factory);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -1056,7 +1070,7 @@ fn depythonize_kv_event_inputs(events: &Bound<'_, PyAny>) -> PyResult<Vec<KvEven
 impl KvEventPublisher {
     /// Wrap an already-constructed Rust publisher as the Python pyclass.
     ///
-    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// Used by the Backend SDK bridge (`crate::backend`) so the Worker
     /// can hand a publisher built from a [`PushSource`] back to the Python
     /// engine without going through the Python-side `__init__` (which
     /// requires an `Endpoint` and rebuilds the publisher from scratch).
@@ -1070,9 +1084,8 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
-            // The unified backend does not run TRT-LLM multimodal, so this bridge
-            // carries no image marker; the non-unified path sets it via the
-            // constructor.
+            // This bridge has no image-token configuration. Python callers can
+            // set one through the public constructor when needed.
             image_token_id: None,
         }
     }
@@ -1794,22 +1807,20 @@ impl KvRouter {
                         inject_timing_from_tracker(data, tracker);
                     }
 
-                    let py_response = Python::with_gil(|py| {
-                        pythonize(py, &response.data)
-                            .map(|obj| obj.unbind())
-                            .map_err(|e| e.to_string())
+                    let response = response.map_data(|data| {
+                        Python::with_gil(|py| {
+                            pythonize(py, &data)
+                                .map(|obj| obj.unbind())
+                                .map_err(|error| error.to_string())
+                        })
                     });
+                    let is_error = response.is_error();
 
-                    match py_response {
-                        Ok(obj) => {
-                            if tx.send(RsAnnotated::from_data(obj)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to pythonize response: {}", e);
-                            break;
-                        }
+                    if tx.send(response).await.is_err() {
+                        break;
+                    }
+                    if is_error {
+                        break;
                     }
                 }
 
@@ -1854,6 +1865,7 @@ impl KvRouter {
     #[new]
     #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
+        py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
@@ -1864,6 +1876,15 @@ impl KvRouter {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
+        }
+        if let Some(instance) = kv_router_config
+            .inner()
+            .selected_worker_selection_policy_instance()
+            .map_err(to_pyerr)?
+        {
+            return Err(PyValueError::new_err(format!(
+                "worker-selection instance {instance:?} is configured, but python -m dynamo.router does not support linked worker-selection policies; use python -m dynamo.frontend or a custom EPP binary"
+            )));
         }
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
@@ -1891,41 +1912,45 @@ impl KvRouter {
             .transpose()
             .map_err(to_pyerr)?;
 
+        // The initial-worker wait can be unbounded. Releasing the GIL makes it
+        // supervisable from another thread, but not cancellable.
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async move {
-            let client = endpoint.inner.client().await.map_err(to_pyerr)?;
+        py.allow_threads(|| {
+            runtime.block_on(async move {
+                let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
-            // Create PushRouter with KV router mode
-            let push_router = rs::pipeline::PushRouter::<
-                llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                rs::protocols::annotated::Annotated<
-                    llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                >,
-            >::from_client(
-                client,
-                rs::pipeline::network::egress::push_router::RouterMode::KV,
-            )
-            .await
-            .map_err(to_pyerr)?;
+                // Create PushRouter with KV router mode
+                let push_router = rs::pipeline::PushRouter::<
+                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+                    rs::protocols::annotated::Annotated<
+                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+                    >,
+                >::from_client(
+                    client,
+                    rs::pipeline::network::egress::push_router::RouterMode::KV,
+                )
+                .await
+                .map_err(to_pyerr)?;
 
-            // Create KvRouter using helper function (ensures etcd registration)
-            let kv_router = create_kv_router_from_endpoint(
-                endpoint,
-                block_size,
-                Some(kv_router_config.inner()),
-                prefill_load_estimator,
-            )
-            .await?;
+                // Create KvRouter using helper function (ensures etcd registration)
+                let kv_router = create_kv_router_from_endpoint(
+                    endpoint,
+                    block_size,
+                    Some(kv_router_config.inner()),
+                    prefill_load_estimator,
+                )
+                .await?;
 
-            let kv_push_router = RsKvPushRouter::new(
-                push_router,
-                kv_router,
-                session_affinity_ttl_secs.map(Duration::from_secs),
-            )
-            .map_err(to_pyerr)?;
+                let kv_push_router = RsKvPushRouter::new(
+                    push_router,
+                    kv_router,
+                    session_affinity_ttl_secs.map(Duration::from_secs),
+                )
+                .map_err(to_pyerr)?;
 
-            Ok(Self {
-                inner: Arc::new(kv_push_router),
+                Ok(Self {
+                    inner: Arc::new(kv_push_router),
+                })
             })
         })
     }
