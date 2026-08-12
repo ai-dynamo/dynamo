@@ -119,6 +119,7 @@ pub struct WorkerSet {
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
+    pub(crate) generate_trace_tokenizer: Option<crate::tokenizers::Tokenizer>,
 
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
@@ -158,6 +159,7 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
+            generate_trace_tokenizer: None,
             worker_monitor: None,
             prefill_router: None,
             encoder_router: None,
@@ -353,6 +355,7 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
+            generate_trace_tokenizer: self.generate_trace_tokenizer.clone(),
             worker_monitor: self.worker_monitor.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
