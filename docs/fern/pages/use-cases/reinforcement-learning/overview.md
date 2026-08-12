@@ -50,7 +50,7 @@ Use Dynamo as the rollout-serving plane behind an RL framework. The framework re
 |---|---|---|
 | [verl Dynamo rollout backend recipe](https://github.com/verl-project/verl-recipe/blob/main/dynamo/README.md) | Run Dynamo as an async rollout backend with KV-aware routing, rollout token data, and weight-update control. | Available recipe |
 | [prime-rl Dynamo training recipes](https://github.com/PrimeIntellect-ai/prime-rl/pull/3180) | Train against an external Dynamo/vLLM rollout-serving stack using Dynamo worker discovery and weight-update control. The PR includes Dynamo example configs for Qwen3 0.6B Math, Qwen3 30B Thinking, and GLM-5.2 FP8 R2E. | Open PR |
-| [Slime external rollout endpoint](https://github.com/Aphoh/slime/pull/1) | Use Slime's external SGLang-compatible engine path with a shared Dynamo rollout endpoint and direct per-worker controls. | Open PR |
+| [Slime external rollout example](https://github.com/ai-dynamo/dynamo/tree/main/examples/rl/slime) | Run Slime's external SGLang-compatible engine path with Dynamo's shared `/generate` endpoint, health-filtered direct worker controls, and dynamic discovery before weight updates. | Available example |
 
 ## Backend Support Snapshot
 

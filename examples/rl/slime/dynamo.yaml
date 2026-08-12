@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-rollout
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    dynamo.nvidia.com/slime-role: frontend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-control
+spec:
+  clusterIP: None
+  ports:
+    - name: system
+      port: 9090
+      targetPort: 9090
+  selector:
+    dynamo.nvidia.com/slime-role: worker
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: slime-sglang
+spec:
+  backendFramework: sglang
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: frontend
+        spec:
+          containers:
+            - name: main
+              image: ${DYNAMO_IMAGE}
+              env:
+                - name: DYN_SGLANG_ENABLE_GENERATE
+                  value: "1"
+    - name: worker
+      type: worker
+      replicas: 2
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker
+        spec:
+          containers:
+            - name: main
+              image: ${DYNAMO_IMAGE}
+              command:
+                - python3
+                - -m
+                - dynamo.sglang
+              args:
+                - --model-path
+                - ${MODEL_PATH}
+                - --served-model-name
+                - ${MODEL_PATH}
+                - --tp
+                - "1"
+                - --trust-remote-code
+                - --skip-tokenizer-init
+              env:
+                - name: DYN_SYSTEM_PORT
+                  value: "9090"
+                - name: DYN_SGLANG_ENGINE_ROUTES
+                  value: >-
+                    server_info=get_server_info pause_generation:tm flush_cache
+                    init_weights_update_group update_weights_from_distributed:tm
+                    destroy_weights_update_group continue_generation:tm
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
