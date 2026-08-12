@@ -2,16 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
 from dynamo.workflow import (
+    DeploymentSpec,
     StageContext,
     StageContract,
     ValueSpec,
     Workflow,
     WorkflowExecutionError,
+    WorkflowExecutor,
     WorkflowValidationError,
+    compile_workflow,
 )
 from dynamo.workflow.remote import (
     STAGE_REQUEST_SCHEMA,
@@ -198,3 +203,108 @@ def test_inline_server_rejects_undeclared_tensor_fallback() -> None:
 
     with pytest.raises(WorkflowValidationError, match="does not support.*tensor"):
         RemoteStageServer("tensor", TensorRunner())
+
+
+TOKENS = ValueSpec(type="json")
+TEXT_ENCODER = StageContract(
+    id="text-encoder",
+    inputs={"text": ValueSpec(type="text")},
+    outputs={"tokens": TOKENS},
+)
+KEYWORD_CLASSIFIER = StageContract(
+    id="keyword-classifier",
+    inputs={"tokens": TOKENS},
+    outputs={"scores": ValueSpec(type="json")},
+)
+TEXT_GENERATOR = StageContract(
+    id="text-generator",
+    inputs={"tokens": TOKENS},
+    outputs={"text": ValueSpec(type="text")},
+)
+
+
+class _TextEncoder:
+    contract = TEXT_ENCODER
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(
+        self, inputs: Mapping[str, Any], context: StageContext
+    ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
+        self.calls += 1
+        return {"tokens": inputs["text"].lower().split()}
+
+
+class _KeywordClassifier:
+    contract = KEYWORD_CLASSIFIER
+
+    async def run(
+        self, inputs: Mapping[str, Any], context: StageContext
+    ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
+        tokens = inputs["tokens"]
+        workflow_hits = sum(token == "workflow" for token in tokens)
+        score = workflow_hits / max(1, len(tokens))
+        return {"scores": {"workflow": score, "other": 1.0 - score}}
+
+
+class _TextGenerator:
+    contract = TEXT_GENERATOR
+
+    async def run(
+        self, inputs: Mapping[str, Any], context: StageContext
+    ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
+        return {"text": " ".join(reversed(inputs["tokens"]))}
+
+
+class _LoopbackClient:
+    def __init__(self, server: RemoteStageServer) -> None:
+        self._server = server
+
+    async def round_robin(self, request: Mapping[str, Any], *, annotated: bool) -> Any:
+        assert annotated is False
+        return self._server.generate(request)
+
+
+async def test_three_remote_stages_fan_out_and_join_through_envelopes() -> None:
+    workflow = Workflow("remote-text-fanout")
+    text = workflow.input("text", type="text")
+    encoder = workflow.stage("encoder", TEXT_ENCODER, text=text)
+    classifier = workflow.stage("classifier", KEYWORD_CLASSIFIER, tokens=encoder.tokens)
+    generator = workflow.stage("generator", TEXT_GENERATOR, tokens=encoder.tokens)
+    workflow.output("scores", classifier.scores)
+    workflow.output("text", generator.text)
+
+    endpoint_ids = {
+        "encoder": "workflows.encoder.generate",
+        "classifier": "workflows.classifier.generate",
+        "generator": "workflows.generator.generate",
+    }
+    encoder_runner = _TextEncoder()
+    runners = {
+        "encoder": encoder_runner,
+        "classifier": _KeywordClassifier(),
+        "generator": _TextGenerator(),
+    }
+    plan = compile_workflow(workflow, DeploymentSpec.remote(**endpoint_ids))
+    clients = {
+        endpoint_ids[stage_id]: RemoteStageClient(
+            _LoopbackClient(RemoteStageServer(stage_id, runner))
+        )
+        for stage_id, runner in runners.items()
+    }
+    executor = WorkflowExecutor(plan, remote_clients=clients)
+
+    result = await executor.run(
+        {"text": "Dynamo workflow runs across processes"},
+        attempt_id="remote-example-1",
+    )
+
+    assert result == {
+        "scores": {"workflow": 0.2, "other": 0.8},
+        "text": "processes across runs workflow dynamo",
+    }
+    assert encoder_runner.calls == 1
