@@ -8,11 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.workflow import (
+    DeploymentSpec,
     StageContext,
     StageContract,
+    StageRunner,
     ValueSpec,
     Workflow,
     WorkflowExecutionError,
+    WorkflowExecutor,
     WorkflowValidationError,
     compile_workflow,
 )
@@ -54,6 +57,14 @@ def _workflow() -> Workflow:
     return workflow
 
 
+def _compile_local(workflow: Workflow, **runners: StageRunner) -> WorkflowExecutor:
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec.local(**{stage_id: stage_id for stage_id in runners}),
+    )
+    return WorkflowExecutor(plan, runners)
+
+
 @dataclass
 class _Encoder:
     contract = ENCODER
@@ -86,7 +97,7 @@ class _Generator:
 
 async def test_concise_compile_and_run_preserve_fanout_value_identity():
     embedding = object()
-    plan = compile_workflow(
+    plan = _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
@@ -136,7 +147,7 @@ class _BarrierGenerator:
 async def test_independent_branches_run_concurrently_before_join():
     embedding = object()
     barrier = _BranchBarrier(2)
-    plan = compile_workflow(
+    plan = _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BarrierClassifier(barrier),
@@ -182,7 +193,7 @@ async def test_first_worker_failure_cancels_and_awaits_sibling():
     embedding = object()
     barrier = _BranchBarrier(2)
     cancelled = asyncio.Event()
-    plan = compile_workflow(
+    plan = _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_FailingClassifier(barrier),
@@ -215,7 +226,7 @@ async def test_timeout_cancels_and_awaits_running_stages():
     embedding = object()
     started = asyncio.Event()
     cancelled = asyncio.Event()
-    plan = compile_workflow(
+    plan = _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BlockingClassifier(started, cancelled),
@@ -233,7 +244,7 @@ async def test_caller_cancellation_cleans_up_running_stages():
     embedding = object()
     started = asyncio.Event()
     cancelled = asyncio.Event()
-    plan = compile_workflow(
+    plan = _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BlockingClassifier(started, cancelled),
@@ -251,21 +262,30 @@ async def test_caller_cancellation_cleans_up_running_stages():
 
 def test_compile_requires_exact_bindings_and_matching_contracts():
     with pytest.raises(WorkflowValidationError, match="missing"):
-        compile_workflow(_workflow(), encoder=_Encoder(object()))
+        compile_workflow(_workflow(), DeploymentSpec.local(encoder="encoder"))
 
     wrong = SimpleNamespace(contract=CLASSIFIER, run=_Generator(object()).run)
     with pytest.raises(WorkflowValidationError, match="does not match"):
-        compile_workflow(
-            _workflow(),
-            encoder=_Encoder(object()),
-            classifier=_Classifier(object()),
-            generator=wrong,
+        WorkflowExecutor(
+            compile_workflow(
+                _workflow(),
+                DeploymentSpec.local(
+                    encoder="encoder",
+                    classifier="classifier",
+                    generator="generator",
+                ),
+            ),
+            {
+                "encoder": _Encoder(object()),
+                "classifier": _Classifier(object()),
+                "generator": wrong,
+            },
         )
 
 
 async def test_runtime_rejects_bad_inputs_and_worker_outputs():
     embedding = object()
-    plan = compile_workflow(
+    plan = _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
@@ -282,7 +302,7 @@ async def test_runtime_rejects_bad_inputs_and_worker_outputs():
         async def run(self, inputs, context):
             return {"wrong": "value"}
 
-    bad_plan = compile_workflow(
+    bad_plan = _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
@@ -296,7 +316,7 @@ async def test_runtime_enforces_json_data_model() -> None:
     workflow = Workflow("json-values")
     value = workflow.input("value", type="json")
     workflow.output("value", value)
-    plan = compile_workflow(workflow)
+    plan = _compile_local(workflow)
 
     shared = [1, 2]
     valid = {"none": None, "bool": True, "number": 1.5, "shared": [shared, shared]}
@@ -337,7 +357,7 @@ async def test_tensor_and_image_constraints_are_checked_without_framework_import
         async def run(self, inputs, context):
             return {"image": SimpleNamespace(mode="RGB", size=(10, 10))}
 
-    plan = compile_workflow(workflow, convert=Converter())
+    plan = _compile_local(workflow, convert=Converter())
     value = SimpleNamespace(dtype="float32", shape=(2, 4))
 
     assert (await plan.run({"tensor": value}))["image"].mode == "RGB"
