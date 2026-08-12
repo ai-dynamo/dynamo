@@ -3,8 +3,7 @@
 
 //! Local IP address resolution for advertising endpoints.
 
-use crate::pipeline::network::tcp::server::{DefaultIpResolver, IpResolver};
-use local_ip_address::Error;
+use crate::pipeline::network::tcp::server::{DefaultIpResolver, IpResolver, resolve_local_ip};
 use std::net::{IpAddr, Ipv4Addr};
 
 const FALLBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -23,13 +22,7 @@ pub fn tcp_rpc_host_from_env() -> String {
 }
 
 fn resolve<R: IpResolver>(resolver: R) -> String {
-    let ip = resolver
-        .local_ip()
-        .or_else(|err| match err {
-            Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-            _ => Err(err),
-        })
-        .unwrap_or(FALLBACK);
+    let ip = resolve_local_ip(&resolver).unwrap_or(FALLBACK);
 
     match ip {
         IpAddr::V6(_) => format!("[{ip}]"),
@@ -40,6 +33,7 @@ fn resolve<R: IpResolver>(resolver: R) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use local_ip_address::Error;
 
     struct MockIpResolver {
         v4: Result<IpAddr, Error>,
@@ -62,6 +56,20 @@ mod tests {
         }
     }
 
+    struct StrategyErrorThenIpv6Resolver;
+
+    impl IpResolver for StrategyErrorThenIpv6Resolver {
+        fn local_ip(&self) -> Result<IpAddr, Error> {
+            Err(Error::StrategyError(
+                "ifa_prefixlen must be initialized".to_string(),
+            ))
+        }
+
+        fn local_ipv6(&self) -> Result<IpAddr, Error> {
+            Ok(IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]))
+        }
+    }
+
     #[test]
     fn ipv4_returned_unbracketed() {
         let r = MockIpResolver {
@@ -78,6 +86,11 @@ mod tests {
             v6: Ok(IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1])),
         };
         assert_eq!(resolve(r), "[2001:db8::1]");
+    }
+
+    #[test]
+    fn strategy_error_falls_back_to_bracketed_ipv6() {
+        assert_eq!(resolve(StrategyErrorThenIpv6Resolver), "[2001:db8::1]");
     }
 
     #[test]
