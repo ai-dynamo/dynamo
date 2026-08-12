@@ -587,9 +587,6 @@ impl<
         &self,
         request_id: Option<&str>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        if !self.queueing_enabled {
-            return None;
-        }
         request_id?;
         Some(Box::new(RequestLifecycleLease {
             cleanup: Arc::clone(&self.cleanup),
@@ -2090,14 +2087,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_queueing_has_no_cancellation_lease() {
-        let (queue, _slots) = make_queue(1, 16, 64, None);
+    async fn disabled_queueing_lifecycle_lease_retracts_admitted_request() {
+        let isl = 64;
+        let (queue, slots) = make_queue(1, 16, isl, None);
+        let request_id = "default-path";
+        let (request, response_rx) = make_request(request_id, isl);
+        let lease = queue
+            .new_request_lifecycle_lease(Some(request_id))
+            .expect("tracked lifecycle requests need a lease when queueing is disabled");
+        let lease = queue
+            .enqueue_with_block_hashes_and_lease(request, None, Some(lease))
+            .await
+            .expect("queue actor must return the armed lease after immediate admission");
 
-        assert!(
-            queue
-                .new_request_lifecycle_lease(Some("default-path"))
-                .is_none()
-        );
+        response_rx
+            .await
+            .expect("response sender dropped")
+            .expect("request should be admitted immediately");
+        assert!(slots.request_worker(&request_id.to_owned()).is_some());
+
+        // Models the cancellation branch winning after the actor delivered an
+        // admission but before LocalScheduler can disarm its lifecycle lease.
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while slots.request_worker(&request_id.to_owned()).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped immediate-admission lease did not release scheduler state");
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1128,6 +1128,54 @@ pub unsafe extern "C" fn mark_prefill_complete(
     }
 }
 
+/// Release only the prefill reservation for an EPP-owned booking.
+///
+/// This is used when a cancelled prefill admission completes after the request
+/// has already fallen back to aggregate decode routing. It must not free any
+/// decode booking that the fallback path may have installed.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid non-empty null-terminated UTF-8 string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn release_prefill_reservation(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+) -> QueryRouterResult {
+    if handle.is_null() || request_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+    let request_id = match unsafe { CStr::from_ptr(request_id) }.to_str() {
+        Ok(value) if !value.is_empty() => value.to_owned(),
+        _ => return QueryRouterResult::ErrInvalidParam,
+    };
+    let epp_reservations = handles.epp_reservations.clone();
+    let result = handles.runtime.secondary().block_on(async {
+        tokio::time::timeout(Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC), async {
+            epp_reservations.release(&request_id).await
+        })
+        .await
+    });
+
+    match result {
+        Ok(Ok(())) => QueryRouterResult::Ok,
+        Ok(Err(error)) => {
+            tracing::warn!(%request_id, %error, "Failed to release EPP prefill reservation");
+            QueryRouterResult::ErrQueryFailed
+        }
+        Err(_) => {
+            tracing::warn!(
+                %request_id,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
+                "release_prefill_reservation timed out"
+            );
+            QueryRouterResult::ErrTimeout
+        }
+    }
+}
+
 /// Free both prefill and decode bookkeeping for an EPP-owned booking.
 ///
 /// Missing reservations are treated as successful idempotent cleanup.

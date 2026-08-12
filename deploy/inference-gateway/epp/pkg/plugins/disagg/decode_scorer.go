@@ -41,42 +41,12 @@ const (
 	DpRankHeader          = "x-dynamo-dp-rank"
 	PrefillDpRankHeader   = "x-dynamo-prefill-dp-rank"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
-
-	decodeStateKey = "dynamo-decode-routing-state"
 )
 
 // compile-time type assertions
 var _ schedtypes.Scorer = &DynDecodeScorer{}
 var _ plugins.Plugin = &DynDecodeScorer{}
-var _ rc.PreRequest = &DynDecodeScorer{}
 var _ rc.ResponseBodyProcessor = &DynDecodeScorer{}
-
-// DecodeRoutingState holds routing information passed from Score() to PreRequest().
-type DecodeRoutingState struct {
-	BookingID      string
-	WorkerID       string
-	DpRank         uint32
-	TokenData      []int64
-	CacheNamespace string
-}
-
-// Clone implements plugins.StateData.
-func (s *DecodeRoutingState) Clone() plugins.StateData {
-	if s == nil {
-		return nil
-	}
-	clone := &DecodeRoutingState{
-		BookingID:      s.BookingID,
-		WorkerID:       s.WorkerID,
-		DpRank:         s.DpRank,
-		CacheNamespace: s.CacheNamespace,
-	}
-	if s.TokenData != nil {
-		clone.TokenData = make([]int64, len(s.TokenData))
-		copy(clone.TokenData, s.TokenData)
-	}
-	return clone
-}
 
 // DynDecodeScorerConfig holds the configuration for the DynDecodeScorer plugin.
 type DynDecodeScorerConfig struct{}
@@ -99,10 +69,10 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 }
 
 // NewDynDecodeScorer initializes a new DynDecodeScorer.
-func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
+func NewDynDecodeScorer(_ context.Context) *DynDecodeScorer {
 	return &DynDecodeScorer{
 		typedName:           plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
-		pluginState:         plugins.NewPluginState(ctx),
+		routeDecode:         dynscorer.CallRouteDecodeRequest,
 		addRequest:          dynscorer.CallAddRequest,
 		markPrefillComplete: dynscorer.CallMarkPrefillComplete,
 		freeBooking:         dynscorer.CallFreeRequest,
@@ -112,7 +82,7 @@ func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
 // DynDecodeScorer is a scorer plugin for the decode scheduling profile.
 type DynDecodeScorer struct {
 	typedName           plugins.TypedName
-	pluginState         *plugins.PluginState
+	routeDecode         func(string, string, bool) (*dynscorer.RoutingResult, error)
 	addRequest          func(string, []int64, uint64, uint32, string) error
 	markPrefillComplete func(string) error
 	freeBooking         func(string) error
@@ -167,7 +137,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		"endpointCount", len(endpoints),
 		"endpointsJSON", string(endpointsJSON))
 
-	result, err := dynscorer.CallRouteDecodeRequest(requestJSON, endpointsJSON, isDisaggregated)
+	result, err := s.routeDecode(requestJSON, endpointsJSON, isDisaggregated)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: FFI decode routing failed")
 		s.rollbackPrefillReservation(ctx, cycleState, req, booking, "decode routing failed")
@@ -181,6 +151,28 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 
 	workerIDStr := fmt.Sprintf("%d", result.WorkerID)
 	dpRankStr := strconv.FormatUint(uint64(result.DpRank), 10)
+	lifecycle := registerBookingLifecycle(booking.ID, s.freeBooking)
+	lifecycle.armCancellation(ctx)
+	if !lifecycle.startDecodeRegistration() {
+		logger.V(logutil.VERBOSE).Info("DynDecodeScorer: request cancelled before decode booking registration",
+			"bookingID", booking.ID)
+		s.rollbackPrefillReservation(ctx, cycleState, req, booking, "decode booking registration cancelled")
+		return uniformScores(endpoints, 1.0)
+	}
+	addErr := s.addRequest(booking.ID, result.TokenData, result.WorkerID, result.DpRank, result.CacheNamespace)
+	lifecycle.finishDecodeRegistration()
+	if addErr != nil {
+		logger.V(logutil.DEFAULT).Error(addErr, "DynDecodeScorer: failed to add decode booking",
+			"bookingID", booking.ID)
+		s.rollbackPrefillReservation(ctx, cycleState, req, booking, "decode booking failed")
+		return uniformScores(endpoints, 1.0)
+	}
+	if err := ctx.Err(); err != nil {
+		logger.V(logutil.VERBOSE).Info("DynDecodeScorer: scheduling cancelled during decode booking registration", "error", err.Error())
+		s.rollbackPrefillReservation(ctx, cycleState, req, booking, "decode scheduling cancelled during booking registration")
+		return uniformScores(endpoints, 1.0)
+	}
+
 	logger.V(logutil.DEFAULT).Info("[EPP-SCORER] FFI returned tokens from C bindings tokenization",
 		"bookingID", booking.ID,
 		"decodeWorkerID", workerIDStr,
@@ -197,15 +189,6 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		delete(req.Headers, PrefillWorkerIDHeader)
 		delete(req.Headers, PrefillDpRankHeader)
 	}
-
-	routingState := &DecodeRoutingState{
-		BookingID:      booking.ID,
-		WorkerID:       workerIDStr,
-		DpRank:         result.DpRank,
-		TokenData:      result.TokenData,
-		CacheNamespace: result.CacheNamespace,
-	}
-	s.pluginState.Write(booking.ID, plugins.StateKey(decodeStateKey), routingState)
 
 	// Inject pre-computed tokens into the request body so the frontend
 	// sidecar can skip redundant tokenization.
@@ -238,7 +221,10 @@ func (s *DynDecodeScorer) rollbackPrefillReservation(
 	booking *BookingState,
 	reason string,
 ) {
-	if booking != nil && booking.PrefillReserved && s.cleanupBooking(ctx, booking.ID, reason) {
+	if booking != nil {
+		if findBookingLifecycle(booking.ID) != nil || booking.PrefillReserved {
+			s.cleanupBooking(ctx, booking.ID, reason)
+		}
 		booking.PrefillReserved = false
 		cycleState.Write(BookingStateKey, booking)
 	}
@@ -248,62 +234,11 @@ func (s *DynDecodeScorer) rollbackPrefillReservation(
 			request.Headers = map[string]string{}
 		}
 		request.Headers[RoutingModeHeader] = "aggregated"
+		delete(request.Headers, WorkerIDHeader)
+		delete(request.Headers, DpRankHeader)
 		delete(request.Headers, PrefillWorkerIDHeader)
 		delete(request.Headers, PrefillDpRankHeader)
 	}
-}
-
-// PreRequest registers the request with the Dynamo router's bookkeeping.
-func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.InferenceRequest, _ *schedtypes.SchedulingResult) {
-	logger := log.FromContext(ctx)
-	bookingID := bookingIDFromRequest(request)
-	if bookingID == "" {
-		logger.V(logutil.DEBUG).Info("DynDecodeScorer PreRequest: no controller booking ID, skipping")
-		return
-	}
-	if err := ctx.Err(); err != nil {
-		s.cleanupBooking(ctx, bookingID, "request cancelled before decode booking")
-		return
-	}
-
-	state, err := plugins.ReadPluginStateKey[*DecodeRoutingState](
-		s.pluginState, bookingID, plugins.StateKey(decodeStateKey),
-	)
-	s.pluginState.Delete(bookingID)
-	if err != nil || state == nil || state.BookingID != bookingID {
-		logger.V(logutil.DEBUG).Info("DynDecodeScorer PreRequest: no routing state found",
-			"bookingID", bookingID)
-		s.cleanupBooking(ctx, bookingID, "decode routing state missing")
-		return
-	}
-
-	var workerIDUint uint64
-	if _, parseErr := fmt.Sscanf(state.WorkerID, "%d", &workerIDUint); parseErr != nil {
-		logger.V(logutil.DEFAULT).Error(parseErr, "DynDecodeScorer PreRequest: invalid worker ID",
-			"bookingID", bookingID, "workerID", state.WorkerID)
-		s.cleanupBooking(ctx, bookingID, "decode worker ID invalid")
-		return
-	}
-
-	if addErr := s.addRequest(
-		bookingID,
-		state.TokenData,
-		workerIDUint,
-		state.DpRank,
-		state.CacheNamespace,
-	); addErr != nil {
-		logger.V(logutil.DEFAULT).Error(addErr, "DynDecodeScorer PreRequest: failed to add request",
-			"bookingID", bookingID)
-		s.cleanupBooking(ctx, bookingID, "decode booking failed")
-		return
-	}
-
-	logger.V(logutil.VERBOSE).Info("DynDecodeScorer PreRequest: registered request",
-		"bookingID", bookingID,
-		"workerID", state.WorkerID,
-		"dpRank", state.DpRank,
-		"hasCacheNamespace", state.CacheNamespace != "",
-		"tokenCount", len(state.TokenData))
 }
 
 // ResponseBody handles streaming chunks and end-of-stream cleanup.

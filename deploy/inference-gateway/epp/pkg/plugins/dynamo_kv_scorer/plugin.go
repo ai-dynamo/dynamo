@@ -79,6 +79,9 @@ query_router_result_t route_prefill_request_with_reservation(RouterHandles *hand
 query_router_result_t cancel_prefill_reservation(RouterHandles *handle,
                                                   const char *reservation_id);
 
+query_router_result_t release_prefill_reservation(RouterHandles *handle,
+                                                   const char *reservation_id);
+
 query_router_result_t route_decode_request(RouterHandles *handle,
                                            const char *request_json,
                                            const char *pods_json,
@@ -552,6 +555,33 @@ func CallCancelPrefillReservation(reservationID string) error {
 	rc := C.cancel_prefill_reservation(router, cReservationID)
 	if rc != C.QUERY_ROUTER_OK {
 		return fmt.Errorf("cancel_prefill_reservation failed with code %d", rc)
+	}
+	return nil
+}
+
+// CallReleasePrefillReservation releases only the EPP prefill reservation.
+// It does not remove a decode booking that aggregate fallback may have installed.
+func CallReleasePrefillReservation(reservationID string) error {
+	if reservationID == "" {
+		return fmt.Errorf("prefill reservation ID is required")
+	}
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+
+	rc := C.release_prefill_reservation(router, cReservationID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("release_prefill_reservation failed with code %d", rc)
 	}
 	return nil
 }
