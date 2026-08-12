@@ -440,18 +440,14 @@ def test_direct_agentic_dynamo_trace_honors_per_request_capture():
         / "pi_request_trace.jsonl.gz"
     )
 
-    report = run_trace_replay(
-        trace_path,
-        extra_engine_args=_vllm_args(),
-        replay_mode="offline",
-        trace_format="dynamo",
-        capture_per_request=True,
-    )
-
-    assert report.per_request
-    assert report.coverage["capture_per_request"] is True
-    assert report.coverage["per_request_records"] == len(report.per_request)
-    assert report.summary["completed_requests"] == len(report.per_request)
+    with pytest.raises(Exception, match="prefix_reset=true"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_mode="offline",
+            trace_format="dynamo",
+            capture_per_request=True,
+        )
 
 
 def test_planner_replay_accepts_multi_shard_dynamo_trace(tmp_path):

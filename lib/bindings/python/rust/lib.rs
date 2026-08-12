@@ -109,6 +109,53 @@ static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry>
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
 
+const ENABLED_CARGO_FEATURES: &[&str] = &[
+    #[cfg(feature = "aic-forward-pass")]
+    "aic-forward-pass",
+    #[cfg(feature = "ckf-diagnostics")]
+    "ckf-diagnostics",
+    #[cfg(feature = "custom-policy")]
+    "custom-policy",
+    #[cfg(feature = "kv-indexer")]
+    "kv-indexer",
+    #[cfg(feature = "kv-indexer-metrics")]
+    "kv-indexer-metrics",
+    #[cfg(feature = "media-ffmpeg")]
+    "media-ffmpeg",
+    #[cfg(feature = "mm-routing")]
+    "mm-routing",
+    #[cfg(feature = "mocker-kvbm-offload")]
+    "mocker-kvbm-offload",
+    #[cfg(feature = "nvtx")]
+    "nvtx",
+    #[cfg(feature = "replay-bench")]
+    "replay-bench",
+    #[cfg(feature = "request-trace-s3")]
+    "request-trace-s3",
+    #[cfg(feature = "select-service")]
+    "select-service",
+    #[cfg(feature = "slot-tracker")]
+    "slot-tracker",
+];
+
+/// Immutable build facts compiled into the native extension.
+///
+/// Developer builds may report `source_revision="unknown"`. Release and
+/// authoritative replay consumers must reject that value.
+#[pyfunction]
+fn build_identity(py: Python<'_>) -> PyResult<PyObject> {
+    let identity = PyDict::new(py);
+    identity.set_item("source_revision", env!("DYNAMO_SOURCE_COMMIT"))?;
+    identity.set_item("package_version", env!("CARGO_PKG_VERSION"))?;
+    identity.set_item("cargo_features", ENABLED_CARGO_FEATURES.to_vec())?;
+    identity.set_item(
+        "default_features",
+        env!("DYNAMO_BUILD_DEFAULT_FEATURES") == "true",
+    )?;
+    identity.set_item("build_profile", env!("DYNAMO_BUILD_PROFILE"))?;
+    Ok(identity.into_any().unbind())
+}
+
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
     logging::make_client_request_span(
@@ -178,6 +225,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
     m.add_function(wrap_pyfunction!(run_select_service, m)?)?;
+    m.add_function(wrap_pyfunction!(build_identity, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -247,6 +295,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("__source_revision__", env!("DYNAMO_SOURCE_COMMIT"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
     m.add_class::<planner::VirtualConnectorClient>()?;
     m.add_class::<planner::PlannerDecision>()?;

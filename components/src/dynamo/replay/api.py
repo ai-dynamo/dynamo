@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import math
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,9 @@ from dynamo.replay.report import PlannerReplayDetails, ReplayReport
 InteractiveRouter = Literal["external", "round_robin", "kv_router"]
 PoolRouter = Literal["round_robin"]
 TerminalStatus = Literal["completed", "rejected", "canceled", "failed"]
+WorkerLifecycleStatus = Literal[
+    "active", "static_inactive", "starting", "draining", "removed"
+]
 
 
 class ReplayStepStatus(TypedDict):
@@ -53,6 +57,7 @@ class ReplayPlacementCandidate(TypedDict):
     queued_tokens: int | None
     running_tokens: int | None
     max_num_seqs: int | None
+    preemption_count: int | None
     kv_prefix_overlap_tokens: int | None
     kv_capacity_blocks: int | None
     kv_occupied_blocks: int | None
@@ -110,6 +115,11 @@ class ReplayPendingPlacement(TypedDict):
     session_id: str
     authored_turn_index: int
     ready_at_ms: float
+    input_length: int
+    priority: int
+    strict_priority: int
+    policy_class: str | None
+    routing_constraints: ReplayRoutingConstraintsData
     eligible_pool_ids: list[str]
     candidates: list[ReplayPlacementCandidate]
 
@@ -118,6 +128,8 @@ class ReplayWorkerSnapshot(TypedDict):
     pool_id: str
     worker_id: int
     dp_rank: int
+    lifecycle_status: WorkerLifecycleStatus
+    provisioned: bool
     active: bool
     draining: bool
     in_flight_requests: int
@@ -126,6 +138,7 @@ class ReplayWorkerSnapshot(TypedDict):
     queued_tokens: int | None
     running_tokens: int | None
     max_num_seqs: int | None
+    preemption_count: int | None
     kv_capacity_blocks: int | None
     kv_occupied_blocks: int | None
     kv_free_blocks: int | None
@@ -160,21 +173,49 @@ class WorkerTarget:
 
 @dataclass(frozen=True, slots=True)
 class ReplayRoutingConstraints:
-    """Placement constraints visible to and enforced for every router mode."""
+    """Request routing constraints for static replay.
+
+    ``required_taints`` is a hard eligibility filter for external placement,
+    pool round-robin, native round-robin, and native KV routing.
+    ``preferred_taints`` is advisory scoring metadata: native KV routing and an
+    external controller may use it, while round-robin does not turn it into an
+    eligibility requirement. Taint names must be non-empty and already trimmed;
+    required taints must be unique; preferred weights must be finite (negative
+    weights are supported). Unsupported constraint keys fail schema parsing.
+    """
 
     required_taints: Sequence[str] = ()
     preferred_taints: Mapping[str, float] = field(default_factory=dict)
 
     def to_native(self) -> dict[str, Any]:
+        required = list(self.required_taints)
+        if any(not name or name.strip() != name for name in required):
+            raise ValueError("required taint names must be non-empty and trimmed")
+        if len(set(required)) != len(required):
+            raise ValueError("required taint names must be unique")
+        preferred = dict(self.preferred_taints)
+        if any(not name or name.strip() != name for name in preferred):
+            raise ValueError("preferred taint names must be non-empty and trimmed")
+        if any(not math.isfinite(weight) for weight in preferred.values()):
+            raise ValueError("preferred taint weights must be finite")
         return {
-            "required_taints": list(self.required_taints),
-            "preferred_taints": dict(self.preferred_taints),
+            "required_taints": required,
+            "preferred_taints": preferred,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerSpec:
-    """One stable worker in a static replay pool."""
+    """One stable worker in a static replay pool.
+
+    ``active=False`` and ``draining=False`` means provisioned static-inactive
+    capacity: it is billed for the full session but never starts or becomes
+    eligible for placement.
+
+    ``taints`` participate in the routing contract. ``tags`` and
+    ``capabilities`` are descriptive policy observations only; this milestone
+    has no request-side tag/capability constraint fields.
+    """
 
     worker_id: int
     max_num_seqs: int | None = None
@@ -310,7 +351,11 @@ class ReplayRequestSpec:
 
 @dataclass(frozen=True, slots=True)
 class ReplayAgenticRequest:
-    """One request row and its causal DAG edge metadata."""
+    """One request row and its causal DAG edge metadata.
+
+    ``prefix_reset=True`` is unsupported by the static replay kernel and fails
+    closed instead of being treated as reporting-only metadata.
+    """
 
     request: ReplayRequestSpec | Mapping[str, Any]
     wait_for: Sequence[str] = ()
@@ -318,6 +363,8 @@ class ReplayAgenticRequest:
     prefix_reset: bool = False
 
     def to_native(self) -> dict[str, Any]:
+        if self.prefix_reset:
+            raise ValueError("Dynamo Replay does not support prefix_reset=true")
         request = (
             self.request.to_native()
             if isinstance(self.request, ReplayRequestSpec)
@@ -444,8 +491,11 @@ class OfflineReplaySession:
     """Drive one long-lived Dynamo offline replay on an explicit virtual clock.
 
     The session is synchronous and polling based. Placement decisions are made
-    after draining ``placement_needed`` events and supplied explicitly through
-    :meth:`assign`; the replay loop never invokes a Python callback.
+    after draining a ``placement_needed`` event (or reading
+    :meth:`pending_placements`) and supplied explicitly through :meth:`assign`.
+    Exactly one external placement boundary is exposed at a time so the next
+    same-time observation includes the prior assignment's scheduler effects;
+    the replay loop never invokes a Python callback.
     """
 
     def __init__(

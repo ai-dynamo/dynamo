@@ -24,6 +24,20 @@ from typing_extensions import NotRequired
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
 
+__version__: str
+__source_revision__: str
+
+class BuildIdentity(TypedDict):
+    source_revision: str
+    package_version: str
+    cargo_features: list[str]
+    default_features: bool
+    build_profile: str
+
+def build_identity() -> BuildIdentity:
+    """Return immutable source and Cargo build facts embedded in the extension."""
+    ...
+
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
     Log a message from Python with file and line info
@@ -2459,6 +2473,7 @@ class _ReplayPlacementCandidateData(TypedDict):
     queued_tokens: Optional[int]
     running_tokens: Optional[int]
     max_num_seqs: Optional[int]
+    preemption_count: Optional[int]
     kv_prefix_overlap_tokens: Optional[int]
     kv_capacity_blocks: Optional[int]
     kv_occupied_blocks: Optional[int]
@@ -2511,6 +2526,11 @@ class _ReplayPendingPlacementData(TypedDict):
     session_id: str
     authored_turn_index: int
     ready_at_ms: float
+    input_length: int
+    priority: int
+    strict_priority: int
+    policy_class: Optional[str]
+    routing_constraints: _ReplayRoutingConstraintsData
     eligible_pool_ids: List[str]
     candidates: List[_ReplayPlacementCandidateData]
 
@@ -2518,6 +2538,8 @@ class _ReplayWorkerSnapshotData(TypedDict):
     pool_id: str
     worker_id: int
     dp_rank: int
+    lifecycle_status: Literal["active", "static_inactive", "starting", "draining", "removed"]
+    provisioned: bool
     active: bool
     draining: bool
     in_flight_requests: int
@@ -2526,6 +2548,7 @@ class _ReplayWorkerSnapshotData(TypedDict):
     queued_tokens: Optional[int]
     running_tokens: Optional[int]
     max_num_seqs: Optional[int]
+    preemption_count: Optional[int]
     kv_capacity_blocks: Optional[int]
     kv_occupied_blocks: Optional[int]
     kv_free_blocks: Optional[int]

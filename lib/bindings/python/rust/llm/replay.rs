@@ -1361,7 +1361,7 @@ impl PyOfflineReplaySession {
         pythonize_interactive(py, &events)
     }
 
-    fn pending_placements(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn pending_placements(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let pending = self.inner.pending_placements().map_err(to_pyerr)?;
         pythonize_interactive(py, &pending)
     }

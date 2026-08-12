@@ -159,6 +159,7 @@ def test_interactive_lifecycle_correlation_and_final_report_conversion():
     assert worker["queued_tokens"] == 0
     assert worker["running_tokens"] == 0
     assert worker["max_num_seqs"] == 4
+    assert worker["preemption_count"] == 0
     assert worker["kv_capacity_blocks"] == 64
     assert worker["kv_occupied_blocks"] is not None
     assert worker["kv_free_blocks"] is not None
@@ -237,7 +238,7 @@ def test_interactive_assignment_and_admission_errors_preserve_session_state():
 
     invalid = _request("invalid", 0).to_native()
     invalid["hash_ids"] = []
-    with pytest.raises(Exception, match="hash capacity"):
+    with pytest.raises(Exception, match=r"requires exactly .* hash IDs"):
         session.submit(invalid)
 
     unknown_field = _request("unknown", 0).to_native()
@@ -450,7 +451,6 @@ def test_interactive_static_heterogeneous_pools_serialize_and_route_both_forms()
     placement_events = session.drain_events()
     assert [event["event"]["logical_request_id"] for event in placement_events] == [
         "exact-fast",
-        "pool-slow",
     ]
     assert all(
         event["event"]["eligible_pool_ids"] == ["fast", "slow"]
@@ -465,10 +465,19 @@ def test_interactive_static_heterogeneous_pools_serialize_and_route_both_forms()
     assert candidates[0]["taints"] == ["fast"]
     assert candidates[0]["capabilities"] == ["chat"]
 
+    with pytest.raises(Exception, match="no current policy observation"):
+        session.assign_pool("pool-slow", "slow")
     session.assign(
         "exact-fast",
         WorkerTarget(pool_id="fast", worker_id=10),
     )
+    second_boundary = session.drain_events()
+    assert [
+        event["event"]["logical_request_id"]
+        for event in second_boundary
+        if event["event_type"] == "placement_needed"
+    ] == ["pool-slow"]
+    placement_events += second_boundary
     session.assign_pool("pool-slow", "slow")
     events = placement_events + _drive_external_to_terminals(
         session,
@@ -494,6 +503,18 @@ def test_interactive_static_heterogeneous_pools_serialize_and_route_both_forms()
         record["logical_request_id"]: (record["pool_id"], record["worker_id"])
         for record in report.per_request
     } == {"exact-fast": ("fast", 10), "pool-slow": ("slow", 20)}
+    routed_targets = {
+        record["logical_request_id"]: (
+            record["routing_history"][-1]["pool_id"],
+            record["routing_history"][-1]["worker_id"],
+            record["routing_history"][-1]["dp_rank"],
+        )
+        for record in report.per_request
+    }
+    assert routed_targets == {
+        "exact-fast": ("fast", 10, 0),
+        "pool-slow": ("slow", 20, 0),
+    }
 
 
 def test_interactive_constraints_and_invalid_assignment_recovery():
@@ -527,6 +548,9 @@ def test_interactive_constraints_and_invalid_assignment_recovery():
         router="external",
     )
     request = _request("constrained", 0).to_native()
+    request["priority"] = -7
+    request["strict_priority"] = 13
+    request["policy_class"] = "latency-sensitive"
     request["routing_constraints"] = ReplayRoutingConstraints(
         required_taints=("trusted",),
         preferred_taints={"trusted": 2.0},
@@ -546,6 +570,17 @@ def test_interactive_constraints_and_invalid_assignment_recovery():
         False,
     ]
     assert placement["candidates"][1]["constraint_reason"] is not None
+    pending = session.pending_placements()
+    assert len(pending) == 1
+    assert pending[0]["input_length"] == 4
+    assert pending[0]["priority"] == -7
+    assert pending[0]["strict_priority"] == 13
+    assert pending[0]["policy_class"] == "latency-sensitive"
+    assert pending[0]["routing_constraints"] == placement["routing_constraints"]
+    assert "requested_output_length" not in pending[0]
+    assert "output_length" not in pending[0]
+    assert "ttft_ms" not in pending[0]
+    assert "e2e_latency_ms" not in pending[0]
 
     with pytest.raises(Exception, match="pool.*unavailable"):
         session.assign(
@@ -619,4 +654,133 @@ def test_interactive_pool_topology_mapping_rejects_unknown_fields_without_fallba
             engine_args=engine_args,
             pools=[PoolSpec("pool", engine_args, [WorkerSpec(0)])],
             trace_block_size=4,
+        )
+
+
+@pytest.mark.parametrize(
+    ("constraints", "message"),
+    [
+        ({"required_taints": [""], "preferred_taints": {}}, "required taint"),
+        (
+            {"required_taints": ["dup", "dup"], "preferred_taints": {}},
+            "duplicates required taint",
+        ),
+        (
+            {"required_taints": [], "preferred_taints": {" bad ": 1.0}},
+            "preferred taint",
+        ),
+        (
+            {"required_taints": [], "preferred_taints": {"score": float("nan")}},
+            "preferred-taint weight",
+        ),
+    ],
+)
+def test_invalid_routing_constraints_roll_back_public_append(constraints, message):
+    session = OfflineReplaySession(
+        engine_args=_engine_args(),
+        num_workers=1,
+        trace_block_size=4,
+        router="external",
+    )
+    first = _request("rollback-first", 0).to_native()
+    invalid = _request("rollback-invalid", 1).to_native()
+    invalid["routing_constraints"] = constraints
+    workflow = {
+        "trace_block_size": 4,
+        "requests": [
+            {"request": first},
+            {"request": invalid},
+        ],
+    }
+    with pytest.raises(Exception, match=message):
+        session.append_agentic_workflow(workflow, 0.0)
+    assert session.snapshot()["pending_request_count"] == 0
+
+    # Exact identity reuse proves the rejected batch did not leak registration.
+    session.submit(first)
+    events = _drive_external_to_terminals(session, {"rollback-first"})
+    assert sum(event["event_type"] == "terminal" for event in events) == 1
+    session.close()
+    session.finalize()
+
+
+def test_unsatisfiable_static_taints_fail_atomically_and_session_recovers():
+    session = OfflineReplaySession(
+        pools=[
+            PoolSpec(
+                "default",
+                _engine_args(),
+                [WorkerSpec(0, taints=["plain"])],
+            )
+        ],
+        trace_block_size=4,
+    )
+    authored = _request("no-eligible", 0).to_native()
+    authored["routing_constraints"] = {
+        "required_taints": ["secure"],
+        "preferred_taints": {},
+    }
+
+    with pytest.raises(Exception, match="no static active worker"):
+        session.submit(authored)
+    assert session.snapshot()["pending_request_count"] == 0
+    assert session.pending_placements() == []
+    assert session.drain_events() == []
+
+    authored["routing_constraints"] = {
+        "required_taints": [],
+        "preferred_taints": {},
+    }
+    session.submit(authored)
+    events = _drive_external_to_terminals(session, {"no-eligible"})
+    assert sum(event["event_type"] == "terminal" for event in events) == 1
+    session.close()
+    report = session.finalize()
+    assert report.summary["completed_requests"] == 1
+
+
+def test_prefix_reset_fails_in_python_and_native_boundaries_without_identity_leak():
+    request = _request("prefix-reset", 0)
+    with pytest.raises(ValueError, match="does not support prefix_reset=true"):
+        ReplayAgenticRequest(request=request, prefix_reset=True).to_native()
+
+    session = OfflineReplaySession(
+        engine_args=_engine_args(),
+        num_workers=1,
+        trace_block_size=4,
+        router="external",
+    )
+    raw_request = request.to_native()
+    with pytest.raises(Exception, match="unsupported prefix_reset=true"):
+        session.append_agentic_workflow(
+            {
+                "trace_block_size": 4,
+                "requests": [
+                    {"request": raw_request, "prefix_reset": True},
+                ],
+            },
+            0.0,
+        )
+    assert session.snapshot()["pending_request_count"] == 0
+    session.submit(raw_request)
+    _drive_external_to_terminals(session, {"prefix-reset"})
+    session.close()
+    session.finalize()
+
+
+def test_non_pooled_static_session_rejects_startup_time():
+    with pytest.raises(Exception, match="must not configure startup_time"):
+        OfflineReplaySession(
+            engine_args=MockEngineArgs(
+                block_size=4,
+                num_gpu_blocks=64,
+                max_num_seqs=4,
+                max_num_batched_tokens=64,
+                speedup_ratio=1000.0,
+                g1_backend="native",
+                startup_time=1.0,
+            ),
+            num_workers=1,
+            trace_block_size=4,
+            router="external",
         )
