@@ -842,7 +842,7 @@ async fn lora_request_selection_reaches_the_grpc_boundary() {
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
     engine.start(0).await.expect("start");
     let mut value = serde_json::to_value(request()).expect("serialize request");
-    value["routing"] = json!({"lora_name": "math-r8"});
+    value["routing"]["lora_name"] = json!("math-r8");
     let request = serde_json::from_value(value).expect("deserialize request");
 
     let outputs = collect(&engine, request).await;
