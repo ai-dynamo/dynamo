@@ -66,7 +66,11 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		if err != nil {
 			return nil, err
 		}
-		if len(m.CUDA.SourceGPUUUIDs) > 1 && cudaJobFile == "" {
+		hasVMMState, err := cuda.HasVMMState(opts.CheckpointPath)
+		if err != nil {
+			return nil, err
+		}
+		if len(m.CUDA.SourceGPUUUIDs) > 1 && cudaJobFile == "" && !hasVMMState {
 			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
 		}
 	}
@@ -222,9 +226,22 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		_, err = cuda.RestoreProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
+		}
+		// CUDA APIs must be available for VMM replay. Application progress
+		// remains gated by the restore-complete sentinel.
+		if err := cuda.UnlockProcessTree(ctx, restorePIDs, cudaHelperFdPath, log); err != nil {
+			return nil, 0, fmt.Errorf("CUDA unlock failed: %w", err)
+		}
+		if err := cuda.RestoreVMM(
+			ctx,
+			opts.CheckpointPath,
+			restorePIDs,
+			m.CUDA.PIDs,
+		); err != nil {
+			return nil, 0, fmt.Errorf("restore CUDA VMM interpose state: %w", err)
 		}
 	}
 	timings.cudaDuration = time.Since(cudaStart)

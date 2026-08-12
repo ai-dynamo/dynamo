@@ -4,6 +4,7 @@
 package protocol
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"path/filepath"
 
@@ -14,15 +15,28 @@ import (
 )
 
 type CheckpointJobOptions struct {
-	Namespace             string
-	TargetContainer       string
-	CheckpointID          string
-	ArtifactVersion       string
-	SeccompProfile        string
-	Name                  string
-	ActiveDeadlineSeconds *int64
-	TTLSecondsAfterFinish *int32
-	WrapLaunchJob         bool
+	Namespace              string
+	TargetContainer        string
+	CheckpointID           string
+	ArtifactVersion        string
+	SeccompProfile         string
+	Name                   string
+	ActiveDeadlineSeconds  *int64
+	TTLSecondsAfterFinish  *int32
+	WrapLaunchJob          bool
+	EnableCUDAVMMInterpose bool
+}
+
+func wrapWithCUDAVMMInterposeLauncher(command, args []string) ([]string, []string) {
+	wrappedArgs := make([]string, 0, len(command)+len(args))
+	wrappedArgs = append(wrappedArgs, command...)
+	wrappedArgs = append(wrappedArgs, args...)
+	return []string{"snapshot-cuda-vmm-launch"}, wrappedArgs
+}
+
+func vmmInterposeJobID(checkpointID string) string {
+	digest := sha256.Sum256([]byte(checkpointID))
+	return fmt.Sprintf("%x", digest[:16])
 }
 
 func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
@@ -83,10 +97,23 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	targetContainer.LivenessProbe = nil
 	targetContainer.StartupProbe = nil
 
-	if opts.WrapLaunchJob {
+	if opts.WrapLaunchJob || opts.EnableCUDAVMMInterpose {
 		if len(targetContainer.Command) == 0 {
-			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
+			return nil, fmt.Errorf("checkpoint job requires container.command when launch wrapping is enabled")
 		}
+	}
+	if opts.EnableCUDAVMMInterpose {
+		targetContainer.Command, targetContainer.Args =
+			wrapWithCUDAVMMInterposeLauncher(
+				targetContainer.Command,
+				targetContainer.Args,
+			)
+		targetContainer.Env = append(targetContainer.Env, corev1.EnvVar{
+			Name:  "DYN_SNAPSHOT_JOB_ID",
+			Value: vmmInterposeJobID(opts.CheckpointID),
+		})
+	}
+	if opts.WrapLaunchJob {
 		targetContainer.Command, targetContainer.Args = wrapWithCudaCheckpointLaunchJob(
 			targetContainer.Command,
 			targetContainer.Args,
