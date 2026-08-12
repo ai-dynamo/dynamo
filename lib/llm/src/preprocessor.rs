@@ -4815,7 +4815,7 @@ impl OpenAIPreprocessor {
                 None
             } else {
                 state.eof_flushed = true;
-                let mut flushed = drain_undecided_buffers(&mut state.choices);
+                let flushed = drain_undecided_buffers(&mut state.choices);
                 if flushed.is_empty() {
                     None
                 } else {
@@ -4834,8 +4834,10 @@ impl OpenAIPreprocessor {
                     template.delta.reasoning_content = None;
                     template.finish_reason = None;
                     template.logprobs = None;
+                    let mut flushed: Vec<_> = flushed.into_iter().collect();
+                    flushed.sort_unstable_by_key(|(index, _)| *index);
                     data.inner.choices = flushed
-                        .drain()
+                        .into_iter()
                         .map(|(index, buffer)| {
                             let mut choice = template.clone();
                             choice.index = index;

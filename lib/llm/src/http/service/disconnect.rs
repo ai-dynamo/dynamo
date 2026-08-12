@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keep_alive_does_not_reset_inactivity_timeout() {
+    async fn test_activity_signal_resets_inactivity_timeout() {
         let model = "keep-alive-model";
         let (metrics, guard, _context, handle) = setup_test(model, "req-keep-alive");
         let tracked_context = Arc::new(MockContext::with_kill_tracking());
@@ -734,14 +734,17 @@ mod tests {
         );
         tokio::pin!(monitored);
 
-        tokio::spawn(async move {
-            for _ in 0..3 {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                activity_tx.send(()).unwrap();
-            }
-        });
+        let next = monitored.next();
+        tokio::pin!(next);
 
-        assert!(monitored.next().await.is_none());
+        tokio::time::advance(Duration::from_secs(9)).await;
+        activity_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!tracked_context.is_killed());
+
+        tokio::time::advance(Duration::from_secs(8)).await;
+        assert!(next.await.is_none());
         assert!(tracked_context.is_killed());
         assert_eq!(metrics.get_inflight_count(model), 0);
     }

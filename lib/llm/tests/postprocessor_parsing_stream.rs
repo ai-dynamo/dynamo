@@ -1352,6 +1352,43 @@ async fn postprocessor_parsing_stream_nemotron_v3_disabled_reasoning_tracks_pref
     );
 }
 
+#[tokio::test]
+async fn postprocessor_parsing_stream_disabled_reasoning_orders_eof_flush_by_choice() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"enable_thinking": false})).unwrap());
+
+    let input_stream = stream::iter(vec![Annotated::from_data(mock_multi_choice_content_chunk(
+        &[(2, "<thi"), (0, "<thi"), (1, "<thi")],
+    ))]);
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<_> = output_stream.collect().await;
+
+    let recovered = output_chunks
+        .iter()
+        .filter_map(|output| output.data.as_ref())
+        .find(|data| {
+            data.inner.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| get_text(content) == "<thi")
+            })
+        })
+        .expect("synthetic recovery chunk");
+    let indices: Vec<_> = recovered
+        .inner
+        .choices
+        .iter()
+        .map(|choice| choice.index)
+        .collect();
+    assert_eq!(indices, vec![0, 1, 2]);
+}
+
 /// The disabled-reasoning strip path ends its stream by cloning the last chunk
 /// as an envelope for whatever is still buffered. That clone drops `usage` and
 /// `llm_metrics` so the previous chunk's tokens are not counted twice, but it
