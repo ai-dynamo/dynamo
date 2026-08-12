@@ -24,6 +24,7 @@ from dynamo.vllm.decoder_stage import VllmDecoderStage  # noqa: E402
 from dynamo.workflow import (  # noqa: E402
     DeploymentSpec,
     StageContext,
+    ValueRef,
     WorkflowExecutor,
     compile_workflow,
 )
@@ -193,14 +194,10 @@ def test_workflow_is_the_readable_pipeline_and_uses_declared_ports():
         "classifier",
         "generator",
     ]
-    assert workflow.outputs["scores"].to_dict() == {
-        "stage": "classifier",
-        "output": "scores",
-    }
-    assert workflow.outputs["chunk"].to_dict() == {
-        "stage": "generator",
-        "output": "chunk",
-    }
+    assert workflow.outputs["scores"] == ValueRef.for_stage_output(
+        "classifier", "scores"
+    )
+    assert workflow.outputs["chunk"] == ValueRef.for_stage_output("generator", "chunk")
 
 
 async def test_start_builds_prompt_adapter_outside_decoder() -> None:

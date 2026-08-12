@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lower placement-neutral workflows into portable execution plans."""
+"""Lower placement-neutral workflows into physical execution plans."""
 
 from __future__ import annotations
 

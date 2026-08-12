@@ -134,7 +134,7 @@ class WorkflowExecutor:
 
     @property
     def plan(self) -> ExecutionPlan:
-        """Return the portable plan hydrated by this executor."""
+        """Return the physical plan hydrated by this executor."""
 
         return self._plan
 
