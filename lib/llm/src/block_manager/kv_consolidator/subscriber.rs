@@ -154,14 +154,14 @@ fn process_event(
     engine_source: EventSource,
 ) {
     // G1-only ingress: this source is the engine's local device (G1) cache.
-    // Non-local events (REMOTE / unknown locality) and native lower-tier media
-    // (CPU offload, vLLM STORAGE) belong to other systems — KVBM offload arrives
-    // via its own source — so they must not be tracked as G1 here.
+    // Non-local events (REMOTE / unknown locality), native lower-tier media
+    // (CPU offload, vLLM STORAGE), and unrecognized media (fail-closed) belong
+    // to other systems — KVBM offload arrives via its own source — so they must
+    // not be tracked as G1 here.
     if matches!(event.locality(), Some(Locality::Remote | Locality::Unknown))
-        || event
-            .medium()
-            .and_then(RouterStorageTier::from_kv_medium)
-            .is_some_and(|tier| !tier.is_gpu())
+        || event.medium().is_some_and(|m| {
+            RouterStorageTier::from_kv_medium(m) != Some(RouterStorageTier::Device)
+        })
     {
         return;
     }
@@ -294,8 +294,8 @@ mod tests {
     }
 
     /// G1-only ingress contract: only local device (G1) events reach the
-    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload) and non-local
-    /// (REMOTE / unknown locality) events are dropped.
+    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload), unrecognized
+    /// media (FS), and non-local (REMOTE / unknown locality) events are dropped.
     #[test]
     fn process_event_tracks_only_g1_device_events() {
         let mut tracker = PassthroughCacheStatusTracker::new();
@@ -309,6 +309,12 @@ mod tests {
         process_event(
             &mut tracker,
             stored_event(Some("CPU"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("FS"), None),
             None,
             EventSource::Vllm,
         );

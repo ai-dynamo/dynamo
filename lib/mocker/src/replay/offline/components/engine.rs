@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents, WorkerTopology};
 use super::super::events::{SimulationWorkerStage, WorkerCompletionPayload};
+use super::super::evidence::{WorkerPool, with_engine_evidence_context};
 #[cfg(test)]
 use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
@@ -23,11 +24,28 @@ fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
 }
 
+fn evidence_pool(stage: SimulationWorkerStage) -> WorkerPool {
+    match stage {
+        SimulationWorkerStage::Aggregated => WorkerPool::Agg,
+        SimulationWorkerStage::Prefill => WorkerPool::Prefill,
+        SimulationWorkerStage::Decode => WorkerPool::Decode,
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(in crate::replay::offline) struct WorkerScaleDelta {
+    pub added: Vec<usize>,
+    pub cancelled_startups: Vec<usize>,
+    pub newly_draining: Vec<usize>,
+    pub removed: Vec<usize>,
+}
+
 #[derive(Clone, Copy)]
 struct PassBoundary {
     start_ms: f64,
     end_ms: f64,
     completion_capacity: usize,
+    tokens_visible: bool,
 }
 
 impl PassBoundary {
@@ -382,10 +400,8 @@ where
     }
 
     /// Apply a target worker count: add new workers or mark excess for removal.
-    /// Returns `(added_ids, newly_marked_ids, removed_ids)` so the caller can
-    /// update the router immediately. Newly marked workers should be removed
-    /// from routing eligibility right away; removed workers have already
-    /// drained and their retained router state can be finalized.
+    /// Returns one batch delta so the caller can update routing and lifecycle
+    /// evidence from the same state mutation.
     ///
     /// The effective count is `active + pending_startup` — workers that will
     /// be active once all startups complete. On scale-down, pending startup
@@ -394,10 +410,11 @@ where
     pub(in crate::replay::offline) fn apply_target_count(
         &mut self,
         target: usize,
-    ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    ) -> WorkerScaleDelta {
         let active_ids = self.active_group_ids();
         let effective = active_ids.len() + self.pending_startup.len();
         let mut added = Vec::new();
+        let mut cancelled_startups = Vec::new();
         let mut newly_marked = Vec::new();
 
         if target > effective {
@@ -413,21 +430,21 @@ where
             let excess = effective - target;
 
             // Cancel pending startup workers first (reverse order = highest IDs).
-            let to_cancel: Vec<usize> = self
+            cancelled_startups = self
                 .pending_startup
                 .iter()
                 .copied()
                 .rev()
                 .take(excess)
                 .collect();
-            for &id in &to_cancel {
+            for &id in &cancelled_startups {
                 self.pending_startup.remove(&id);
                 let tombstoned = self.tombstone_group(id);
                 debug_assert!(tombstoned);
             }
 
             // Mark active workers for removal if more excess remains.
-            let remaining = excess - to_cancel.len();
+            let remaining = excess - cancelled_startups.len();
             for &id in active_ids.iter().rev().take(remaining) {
                 self.mark_for_removal(id);
                 newly_marked.push(id);
@@ -436,7 +453,12 @@ where
 
         // Clean up any workers that have already fully drained.
         let removed = self.try_remove_drained();
-        (added, newly_marked, removed)
+        WorkerScaleDelta {
+            added,
+            cancelled_startups,
+            newly_draining: newly_marked,
+            removed,
+        }
     }
 
     /// Return stable mocker worker IDs that are active for new admissions.
@@ -580,15 +602,17 @@ where
         rank_id: usize,
         boundary: PassBoundary,
         mut executed: EnginePassResult,
-        align_collector: Option<&mut TraceCollector>,
+        collector: &mut TraceCollector,
         effects: &mut EngineEffects<Observation::Batch>,
     ) {
         if let Some(fpm) = executed.fpm.as_mut() {
             fpm.wall_time_secs = boundary.wall_time_secs();
         }
-        if let Some(collector) = align_collector {
-            collector.align_pass_token_times(&executed.output_signals, boundary.end_ms);
-        }
+        collector.on_scheduler_pass(
+            &executed,
+            boundary.start_ms,
+            boundary.tokens_visible.then_some(boundary.end_ms),
+        );
 
         let admitted_requests = !executed.admissions.is_empty();
         let had_raw_observations = !executed.kv_events.is_empty();
@@ -652,7 +676,7 @@ where
     pub(in crate::replay::offline) fn drive_ready(
         &mut self,
         now_ms: f64,
-        mut collector: Option<&mut TraceCollector>,
+        collector: &mut TraceCollector,
     ) -> anyhow::Result<EngineEffects<Observation::Batch>> {
         // The serial coordinator may make another component observable at the
         // same virtual timestamp. Match the former full scan by retrying
@@ -690,27 +714,19 @@ where
             let mut effects = EngineEffects::default();
             let group_end_ms = if rank_ids.len() == 1 {
                 let rank_id = rank_ids[0];
-                let executed = match self.pass_mode {
-                    EnginePassMode::Visible => {
-                        let Some(collector) = collector.as_deref_mut() else {
-                            bail!("offline replay visible engine pass requires a collector");
-                        };
+                let (worker_id, dp_rank) =
+                    Self::required_worker(&self.workers, rank_id).rank_identity();
+                let executed = with_engine_evidence_context(
+                    now_ms,
+                    evidence_pool(self.stage),
+                    worker_id,
+                    dp_rank,
+                    || {
                         Self::required_worker_mut(&mut self.workers, rank_id)
-                            .try_execute_pass(collector, now_ms)
-                    }
-                    EnginePassMode::Hidden => Self::required_worker_mut(&mut self.workers, rank_id)
-                        .try_execute_hidden_pass(now_ms),
-                }?;
+                            .try_execute_pass(now_ms)
+                    },
+                )?;
                 let group_end_ms = executed.end_ms.max(now_ms);
-                let align_collector = if self.pass_mode == EnginePassMode::Visible {
-                    Some(
-                        collector
-                            .as_deref_mut()
-                            .expect("visible pass collector checked before execution"),
-                    )
-                } else {
-                    None
-                };
                 Self::lower_executed_pass(
                     &mut self.workers,
                     self.stage,
@@ -719,9 +735,10 @@ where
                         start_ms: now_ms,
                         end_ms: group_end_ms,
                         completion_capacity: 1,
+                        tokens_visible: self.pass_mode == EnginePassMode::Visible,
                     },
                     executed,
-                    align_collector,
+                    collector,
                     &mut effects,
                 );
                 group_end_ms
@@ -734,19 +751,18 @@ where
                         executed_by_rank.push(None);
                         continue;
                     }
-                    let executed = match self.pass_mode {
-                        EnginePassMode::Visible => {
-                            let Some(collector) = collector.as_deref_mut() else {
-                                bail!("offline replay visible engine pass requires a collector");
-                            };
+                    let (worker_id, dp_rank) =
+                        Self::required_worker(&self.workers, rank_id).rank_identity();
+                    let executed = with_engine_evidence_context(
+                        now_ms,
+                        evidence_pool(self.stage),
+                        worker_id,
+                        dp_rank,
+                        || {
                             Self::required_worker_mut(&mut self.workers, rank_id)
-                                .try_execute_pass(collector, now_ms)
-                        }
-                        EnginePassMode::Hidden => {
-                            Self::required_worker_mut(&mut self.workers, rank_id)
-                                .try_execute_hidden_pass(now_ms)
-                        }
-                    }?;
+                                .try_execute_pass(now_ms)
+                        },
+                    )?;
                     executed_by_rank.push(Some(executed));
                 }
 
@@ -759,6 +775,7 @@ where
                     start_ms: now_ms,
                     end_ms: group_end_ms,
                     completion_capacity,
+                    tokens_visible: self.pass_mode == EnginePassMode::Visible,
                 };
 
                 for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
@@ -790,22 +807,13 @@ where
                         continue;
                     };
 
-                    let align_collector = if self.pass_mode == EnginePassMode::Visible {
-                        Some(
-                            collector
-                                .as_deref_mut()
-                                .expect("visible pass collector checked before execution"),
-                        )
-                    } else {
-                        None
-                    };
                     Self::lower_executed_pass(
                         &mut self.workers,
                         self.stage,
                         rank_id,
                         boundary,
                         executed,
-                        align_collector,
+                        collector,
                         &mut effects,
                     );
                 }
@@ -1057,7 +1065,7 @@ mod tests {
         collector.on_arrival(fast, 0.0, 4, 1);
         collector.on_arrival(slow, 0.0, 8, 1);
 
-        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let effects = engine.drive_ready(0.0, &mut collector).unwrap();
 
         let scheduled = effects.scheduled_completion.as_ref().unwrap();
         assert_eq!(scheduled.payloads.len(), 2);
@@ -1088,7 +1096,7 @@ mod tests {
         let mut collector = TraceCollector::default();
         collector.on_arrival(slow, 0.0, 8, 1);
 
-        let mut first_epoch = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let mut first_epoch = engine.drive_ready(0.0, &mut collector).unwrap();
         let first_scheduled = first_epoch.scheduled_completion.as_ref().unwrap();
         assert_eq!(first_scheduled.payloads.len(), 2);
         assert!(engine.debug_snapshots().iter().all(|rank| rank.busy));
@@ -1108,17 +1116,12 @@ mod tests {
         let mid_epoch = Uuid::from_u128(41);
         collector.on_arrival(mid_epoch, 4.0, 4, 1);
         engine.dispatch(1, timed_request(mid_epoch, 4)).unwrap();
-        assert!(
-            engine
-                .drive_ready(4.0, Some(&mut collector))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(engine.drive_ready(4.0, &mut collector).unwrap().is_empty());
 
         for payload in first_epoch.scheduled_completion.take().unwrap().payloads {
             engine.on_scheduled_completion(payload).unwrap();
         }
-        let second_epoch = engine.drive_ready(9.0, Some(&mut collector)).unwrap();
+        let second_epoch = engine.drive_ready(9.0, &mut collector).unwrap();
         let second_scheduled = second_epoch.scheduled_completion.as_ref().unwrap();
         assert_eq!(second_scheduled.payloads.len(), 2);
         assert!((second_scheduled.at_ms - 14.0).abs() < f64::EPSILON);
@@ -1137,7 +1140,7 @@ mod tests {
 
             let mut now_ms = 0.0;
             while engine.in_flight() > 0 {
-                let effects = engine.drive_ready(now_ms, Some(&mut collector)).unwrap();
+                let effects = engine.drive_ready(now_ms, &mut collector).unwrap();
                 assert!(effects.immediate_completions.is_empty());
                 let scheduled = effects.scheduled_completion.unwrap();
                 assert_eq!(scheduled.payloads.len(), dp_size as usize);
@@ -1198,7 +1201,7 @@ mod tests {
         engine.dispatch(0, timed_request(completed, 4)).unwrap();
         assert_eq!(engine.in_flight(), 1);
         let effects = engine
-            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .drive_ready(0.0, &mut TraceCollector::default())
             .unwrap();
         let completion = take_only_completion(effects);
         assert_eq!(engine.in_flight(), 1);
@@ -1229,21 +1232,21 @@ mod tests {
             .unwrap();
 
         let first = engine
-            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .drive_ready(0.0, &mut TraceCollector::default())
             .unwrap();
         let first = take_only_completion(first);
         assert_eq!(first.worker_idx, 0);
         assert_eq!(engine.ready_groups, BTreeSet::from([1]));
 
         let second = engine
-            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .drive_ready(0.0, &mut TraceCollector::default())
             .unwrap();
         let second = take_only_completion(second);
         assert_eq!(second.worker_idx, 1);
     }
 
     #[test]
-    fn kv_visibility_follows_backend_contract_and_fpm_waits_for_completion() {
+    fn kv_events_wait_for_completion_for_all_backends() {
         let make_engine = |engine_type| {
             let args = MockEngineArgs::builder()
                 .engine_type(engine_type)
@@ -1274,30 +1277,34 @@ mod tests {
         };
         let mut collector = TraceCollector::default();
 
-        let mut vllm = make_engine(EngineType::Vllm);
-        vllm.dispatch(0, request(Uuid::from_u128(10))).unwrap();
-        let vllm_start = vllm.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert!(!vllm_start.pass_start_events.0.is_empty());
-        let vllm_end = take_only_completion(vllm_start);
-        assert!(vllm_end.engine_events.0.is_empty());
-        assert!(vllm_end.fpm.is_some());
-
-        let mut sglang = make_engine(EngineType::Sglang);
-        sglang.dispatch(0, request(Uuid::from_u128(11))).unwrap();
-        let sglang_start = sglang.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert!(sglang_start.pass_start_events.0.is_empty());
-        let sglang_end = take_only_completion(sglang_start);
-        assert!(!sglang_end.engine_events.0.is_empty());
-        assert!(sglang_end.fpm.is_some());
+        for (engine_type, uuid) in [
+            (EngineType::Vllm, Uuid::from_u128(10)),
+            (EngineType::Trtllm, Uuid::from_u128(11)),
+            (EngineType::Sglang, Uuid::from_u128(12)),
+        ] {
+            let mut engine = make_engine(engine_type);
+            engine.dispatch(0, request(uuid)).unwrap();
+            let pass_start = engine.drive_ready(0.0, &mut collector).unwrap();
+            assert!(
+                pass_start.pass_start_events.0.is_empty(),
+                "{engine_type:?} exposed KV events before pass completion"
+            );
+            let pass_end = take_only_completion(pass_start);
+            assert!(
+                !pass_end.engine_events.0.is_empty(),
+                "{engine_type:?} did not expose KV events at pass completion"
+            );
+            assert!(pass_end.fpm.is_some());
+        }
     }
 
     #[test]
     fn test_apply_target_count_scale_up_with_startup() {
         let mut engine = engine_with_startup(2, Some(5.0));
-        let (added, newly_marked, _) = engine.apply_target_count(4);
+        let delta = engine.apply_target_count(4);
 
-        assert_eq!(added.len(), 2);
-        assert!(newly_marked.is_empty());
+        assert_eq!(delta.added.len(), 2);
+        assert!(delta.newly_draining.is_empty());
         // New workers are in pending_startup.
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 4);
@@ -1306,10 +1313,10 @@ mod tests {
     #[test]
     fn test_apply_target_count_scale_up_without_startup() {
         let mut engine = engine_with_startup(2, None);
-        let (added, newly_marked, _) = engine.apply_target_count(4);
+        let delta = engine.apply_target_count(4);
 
-        assert_eq!(added.len(), 2);
-        assert!(newly_marked.is_empty());
+        assert_eq!(delta.added.len(), 2);
+        assert!(delta.newly_draining.is_empty());
         // Without startup delay, workers are immediately active.
         assert_eq!(engine.active_worker_ids().len(), 4);
         assert_eq!(engine.worker_count(), 4);
@@ -1327,8 +1334,9 @@ mod tests {
         // Scale down to 3 — should cancel 1 startup worker, not mark any active.
         engine.ready_groups.insert(3);
         engine.deferred_ready_groups.insert(3);
-        let (_added, newly_marked, _) = engine.apply_target_count(3);
-        assert!(newly_marked.is_empty());
+        let delta = engine.apply_target_count(3);
+        assert!(delta.newly_draining.is_empty());
+        assert_eq!(delta.cancelled_startups, vec![3]);
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 3); // 2 active + 1 still starting
         assert!(!engine.ready_groups.contains(&3));
@@ -1337,17 +1345,18 @@ mod tests {
         assert!(engine.workers[3].is_none());
 
         // Scale down to 2 — should cancel the remaining startup worker.
-        let (_added, newly_marked, _) = engine.apply_target_count(2);
-        assert!(newly_marked.is_empty());
+        let delta = engine.apply_target_count(2);
+        assert!(delta.newly_draining.is_empty());
+        assert_eq!(delta.cancelled_startups, vec![2]);
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 2);
 
         // Tombstoned stable IDs are never reused. The next worker and rank
         // come from the append-only vector tails.
-        let (added, newly_marked, removed) = engine.apply_target_count(3);
-        assert_eq!(added, vec![4]);
-        assert!(newly_marked.is_empty());
-        assert!(removed.is_empty());
+        let delta = engine.apply_target_count(3);
+        assert_eq!(delta.added, vec![4]);
+        assert!(delta.newly_draining.is_empty());
+        assert!(delta.removed.is_empty());
         assert_eq!(engine.worker_groups[4].as_deref(), Some(&[4][..]));
         assert_eq!(engine.rank_id_capacity(), 5);
     }
@@ -1360,8 +1369,9 @@ mod tests {
         engine.apply_target_count(5);
 
         // Scale down to 1 — should cancel 2 startup, mark 2 active.
-        let (_added, newly_marked, _) = engine.apply_target_count(1);
-        assert_eq!(newly_marked.len(), 2);
+        let delta = engine.apply_target_count(1);
+        assert_eq!(delta.cancelled_startups.len(), 2);
+        assert_eq!(delta.newly_draining.len(), 2);
         assert_eq!(engine.active_worker_ids().len(), 1);
     }
 
@@ -1380,7 +1390,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let effects = engine.drive_ready(0.0, &mut collector).unwrap();
         assert_eq!(
             effects
                 .scheduled_completion
@@ -1389,13 +1399,13 @@ mod tests {
             Some(1)
         );
 
-        let (_, newly_marked, _) = engine.apply_target_count(1);
-        assert_eq!(newly_marked, vec![1]);
+        let delta = engine.apply_target_count(1);
+        assert_eq!(delta.newly_draining, vec![1]);
         assert_eq!(engine.active_group_ids(), vec![0]);
         assert_eq!(engine.draining_group_ids(), vec![1]);
 
-        let (added, _, _) = engine.apply_target_count(2);
-        assert_eq!(added, vec![2]);
+        let delta = engine.apply_target_count(2);
+        assert_eq!(delta.added, vec![2]);
         assert_eq!(engine.active_group_ids(), vec![0, 2]);
         assert_eq!(engine.draining_group_ids(), vec![1]);
         assert_eq!(engine.non_draining_group_count(), 2);
@@ -1405,8 +1415,8 @@ mod tests {
     #[test]
     fn test_mark_worker_ready_activates_pending() {
         let mut engine = engine_with_startup(1, Some(5.0));
-        let (added, _, _) = engine.apply_target_count(2);
-        let new_id = added[0];
+        let delta = engine.apply_target_count(2);
+        let new_id = delta.added[0];
 
         assert_eq!(engine.active_worker_ids().len(), 1);
         engine
@@ -1438,13 +1448,13 @@ mod tests {
             .unwrap();
         let mut collector = TraceCollector::default();
 
-        let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let first = engine.drive_ready(0.0, &mut collector).unwrap();
         assert_eq!(first.admissions.len(), 1);
         let first = take_only_completion(first);
         assert_eq!(first.completed_requests, 0);
         engine.on_scheduled_completion(first).unwrap();
 
-        let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let second = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(second.admissions.is_empty());
         assert_eq!(second.immediate_completions.len(), 1);
         assert!(second.scheduled_completion.is_none());
@@ -1456,7 +1466,7 @@ mod tests {
         assert_eq!(engine.ready_groups, BTreeSet::from([0]));
         engine.on_scheduled_completion(second).unwrap();
 
-        let final_pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let final_pass = engine.drive_ready(0.0, &mut collector).unwrap();
         let final_pass = take_only_completion(final_pass);
         assert_eq!(final_pass.completed_requests, 1);
         assert!(
@@ -1485,7 +1495,7 @@ mod tests {
             .unwrap();
         let mut collector = TraceCollector::default();
 
-        let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let first = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(first.is_empty());
         assert!(engine.ready_groups.is_empty());
         assert_eq!(engine.deferred_ready_groups, BTreeSet::from([0]));
@@ -1499,7 +1509,7 @@ mod tests {
             }]
         );
 
-        let retry = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let retry = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(retry.is_empty());
         assert_eq!(engine.deferred_ready_groups, BTreeSet::from([0]));
     }
@@ -1507,8 +1517,8 @@ mod tests {
     #[test]
     fn test_mark_worker_ready_returns_false_for_cancelled() {
         let mut engine = engine_with_startup(1, Some(5.0));
-        let (added, _, _) = engine.apply_target_count(2);
-        let new_id = added[0];
+        let delta = engine.apply_target_count(2);
+        let new_id = delta.added[0];
 
         // Cancel by scaling back down.
         engine.apply_target_count(1);
@@ -1560,7 +1570,7 @@ mod tests {
             )
             .unwrap();
         let mut collector = TraceCollector::default();
-        let mut pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let mut pass = engine.drive_ready(0.0, &mut collector).unwrap();
         assert_eq!(
             pass.scheduled_completion.as_ref().unwrap().payloads.len(),
             1
@@ -1589,8 +1599,8 @@ mod tests {
         ));
         assert!(effects.lifecycle_events.is_empty());
 
-        let (_, newly_marked, _) = engine.apply_target_count(0);
-        assert_eq!(newly_marked, vec![0]);
+        let delta = engine.apply_target_count(0);
+        assert_eq!(delta.newly_draining, vec![0]);
         assert!(engine.active_worker_ids().is_empty());
         assert_eq!(engine.worker_count(), 1);
 
@@ -1660,7 +1670,7 @@ mod tests {
             )
             .unwrap();
         let mut collector = TraceCollector::default();
-        let mut seed = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let mut seed = engine.drive_ready(0.0, &mut collector).unwrap();
         assert!(
             seed.pass_start_events
                 .0

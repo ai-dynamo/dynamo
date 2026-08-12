@@ -54,6 +54,13 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 
+# Runtime test images rebuild Rust crates, so carry the same version-matched
+# protoc binary and well-known schemas used by the wheel builder.
+COPY --from=wheel_builder /usr/local/bin/protoc /usr/local/bin/protoc
+COPY --from=wheel_builder /usr/local/include/google/protobuf/ /usr/local/include/google/protobuf/
+ENV PROTOC=/usr/local/bin/protoc
+RUN protoc --version && test -f /usr/local/include/google/protobuf/struct.proto
+
 {% if target not in ("dev", "local-dev") %}
 # Copy built artifacts (not needed for dev/local-dev; users build from source)
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
@@ -73,7 +80,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         python${PYTHON_VERSION}-venv \
         build-essential \
         cmake \
-        protobuf-compiler \
         pkg-config \
         clang \
         libclang-dev \

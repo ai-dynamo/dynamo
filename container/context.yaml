@@ -38,7 +38,7 @@ dynamo:
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.12.0"
 
-  nats_version: v2.10.28
+  nats_version: v2.12.12
   etcd_version: v3.5.30
 
   nixl_ref: v1.0.1
@@ -51,7 +51,10 @@ dynamo:
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
-  ffmpeg_version: "8.1"
+  # 8.1.2 is an upstream maintenance release that picks up security fixes over
+  # 8.1; combined with the narrowed decoder set in wheel_builder it trims the
+  # media decode surface. Keep in sync with native_packages.yaml's ffmpeg entry.
+  ffmpeg_version: "8.1.2"
   # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
@@ -73,11 +76,11 @@ vllm:
     # the runtime image — see the codec-purge follow-up.)
     baseline_sbom: cuda@2ab6381d
   xpu:
-    base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
-    runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
-    base_image_tag: ee0da84ab9e04ac7610e28580af62c365e898389-xpu
-    runtime_image_tag: ee0da84ab9e04ac7610e28580af62c365e898389-xpu
-    baseline_sbom: vllm-ci-test-repo@22b2291f
+    base_image: vllm/vllm-openai-xpu
+    runtime_image: vllm/vllm-openai-xpu
+    base_image_tag: v0.26.0
+    runtime_image_tag: v0.26.0
+    baseline_sbom: vllm-openai-xpu@e2ab5095
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
@@ -86,13 +89,13 @@ vllm:
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
   flashinf_ref: v0.6.14
   vllm_omni_ref: "v0.26.0rc1"
-  nixl_ref: v1.3.1
+  nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress: "true"
-  modelexpress_version: "0.4.0"
+  modelexpress_version: "0.5.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
   aws_sdk_cpp_version: "1.11.760"
 
@@ -108,9 +111,10 @@ sglang:
     # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
     # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
     # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
-    # the licenses stage appends -${TARGETARCH}.cdx.json. (sglang ships no system
-    # GPL ffmpeg/codec dpkgs; the GPL imageio-ffmpeg pip binary is replaced by an
-    # in-tree LGPL ffmpeg in sglang_runtime.Dockerfile — no dpkg purge needed.)
+    # the licenses stage appends -${TARGETARCH}.cdx.json. SGLang's codec-bearing
+    # Python wheels are purged in sglang_runtime.Dockerfile; only the in-tree VP9
+    # ffmpeg is copied in (CUDA, for the video-generation encode path) and the
+    # Dynamo Rust wheel is built without media-ffmpeg.
     baseline_sbom: cuda@8b2705ea
   xpu:
     base_image: intel/deep-learning-essentials
@@ -129,20 +133,20 @@ sglang:
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
   nixl_ref: v1.3.0
-  enable_media_ffmpeg: "true"
+  enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
   enable_modelexpress: "true"
-  modelexpress_version: "0.4.0"
+  modelexpress_version: "0.5.0"
 
 trtllm:
   cuda13.1:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.3.0rc22
+    runtime_image_tag: 1.3.0rc23
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@36d6146d
+    baseline_sbom: release@316b840a
   nixl_ref: v1.3.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

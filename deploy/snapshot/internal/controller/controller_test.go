@@ -713,4 +713,3 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 		}
 	}
 }
-

@@ -59,6 +59,19 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  // dev/local-dev templates build only the dev images -- they must NOT pull in
+  // `core` (all runtime builds + the GPU test matrix), and must not be silently
+  // uncovered the way they were when they sat in `ignore`.
+  {
+    file: 'container/templates/dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'dev.Dockerfile triggers dev image builds only'
+  },
+  {
+    file: 'container/templates/local_dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'local_dev.Dockerfile triggers dev image builds only'
+  },
   // Backend-specific files should only trigger their backend
   {
     file: 'examples/backends/vllm/launch/dsr1_dep.sh',
@@ -74,6 +87,21 @@ const testCases = [
     file: 'examples/backends/trtllm/example.py',
     expect: { core: false, vllm: false, sglang: false, trtllm: true },
     desc: 'trtllm script triggers only trtllm'
+  },
+  {
+    file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
+    expect: { core: false, examples: true },
+    desc: 'recipe matrix dotfile triggers recipe check without core'
+  },
+  {
+    file: 'scripts/kustomize-matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator triggers recipe check without core'
+  },
+  {
+    file: 'tests/test_kustomize_matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator test triggers recipe check without core'
   },
   {
     file: 'components/src/dynamo/vllm/worker.py',

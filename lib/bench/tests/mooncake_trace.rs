@@ -25,8 +25,8 @@ use dc_ckf_parity::{DirectCkfParityConfig, DirectCkfParityIndexer, DirectCkfPari
 #[cfg(feature = "mocker-kvbm-offload")]
 use dynamo_bench::kv_router_common::replay::generate_g2_replay_artifacts_with_capacity;
 use dynamo_bench::kv_router_common::replay::{
-    WorkerReplayArtifacts, generate_replay_artifacts,
-    generate_replay_artifacts_with_args_and_visibility, process_mooncake_trace,
+    WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
+    process_mooncake_trace,
 };
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
@@ -39,8 +39,7 @@ use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
-    ReplayKvEventVisibility, ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts,
-    native_g1_parent_chain_artifact,
+    ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
 };
 use mooncake_open_loop::{
     MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
@@ -112,13 +111,6 @@ impl MockEngineParityKind {
             Self::Vllm => EngineType::Vllm,
             Self::Sglang => EngineType::Sglang,
             Self::Trtllm => EngineType::Trtllm,
-        }
-    }
-
-    fn kv_event_visibility_override(self) -> Option<ReplayKvEventVisibility> {
-        match self {
-            Self::Sglang => Some(ReplayKvEventVisibility::PassStart),
-            Self::Vllm | Self::Trtllm => None,
         }
     }
 
@@ -214,13 +206,8 @@ async fn generate_mock_engine_parity_artifacts(
         MockEngineParityKind::Sglang,
         MockEngineParityKind::Trtllm,
     ] {
-        let artifacts = generate_replay_artifacts_with_args_and_visibility(
-            traces,
-            engine.mock_engine_args()?,
-            None,
-            engine.kv_event_visibility_override(),
-        )
-        .await?;
+        let artifacts =
+            generate_replay_artifacts_with_args(traces, engine.mock_engine_args()?, None).await?;
         assert_no_removed_kv_events(engine.name(), &artifacts);
         artifact_sets.push(MockEngineReplayArtifacts {
             engine_name: engine.name(),

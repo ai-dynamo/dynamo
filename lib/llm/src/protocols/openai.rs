@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::{
     ContentProvider,
@@ -15,6 +16,7 @@ use crate::types::TokenIdType;
 pub mod audios;
 pub mod batches;
 pub mod chat_completions;
+pub mod classify;
 pub mod common_ext;
 pub mod completions;
 pub(crate) mod delta_common;
@@ -22,6 +24,7 @@ pub mod embeddings;
 pub mod generate;
 pub mod images;
 pub mod models;
+pub mod pooling;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
@@ -32,6 +35,14 @@ use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
     TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
+
+/// Side from which prompt tokens are truncated.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTruncationSide {
+    Left,
+    Right,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AnnotatedDelta<R> {

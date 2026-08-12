@@ -56,6 +56,7 @@ const (
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
+	KubeAnnotationGPUPowerLimit                   = "dynamo.nvidia.com/gpu-power-limit"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"

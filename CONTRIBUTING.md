@@ -23,7 +23,7 @@ For the full contribution guide — including how to get started, build from sou
 
 **[Contribution Guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide)** (docs site)
 
-Or view the source: [`docs/contribution-guide.md`](docs/fern/contribution-guide.md)
+Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md)
 
 ## Quick Links
 

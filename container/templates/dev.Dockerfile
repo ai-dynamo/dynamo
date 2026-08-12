@@ -84,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         pybind11-dev \
         pkg-config \
         protobuf-compiler \
+        libprotobuf-dev \
         # Debugging / tracing
         gdb \
         valgrind \
@@ -485,6 +486,16 @@ RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dyna
 {% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% elif framework == "vllm" %}
+# The upstream vllm/vllm-openai base does not ship /opt/nvidia/nvidia_entrypoint.sh,
+# so setting it here makes every `docker run` of the vLLM dev image fail with
+# "stat /opt/nvidia/nvidia_entrypoint.sh: no such file or directory".
+# vllm_runtime.Dockerfile already resets ENTRYPOINT for that reason — keep dev
+# aligned with it instead of clobbering it back. (local_dev.Dockerfile does the same.)
+# CMD must be non-empty here: with both ENTRYPOINT and CMD empty, a bare
+# `docker run <image>` fails with "no command specified".
+ENTRYPOINT []
+CMD ["/bin/bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

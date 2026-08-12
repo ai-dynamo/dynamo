@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 import dynamo.replay.api as replay_api
 import dynamo.replay.main as replay_main
 from dynamo.llm import KvRouterConfig
+from dynamo.replay import ReplayReport
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -22,7 +24,7 @@ def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):
 
     def capture_api(*args, **kwargs):
         api_calls.append((args, kwargs))
-        return {}
+        return SimpleNamespace(summary={}, per_request=None, coverage={})
 
     monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", capture_api)
     replay_api.run_trace_replay("mooncake.jsonl")
@@ -43,7 +45,8 @@ def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):
     monkeypatch.setattr(
         replay_main,
         "run_trace_replay",
-        lambda trace_files, **kwargs: cli_calls.append((trace_files, kwargs)) or {},
+        lambda trace_files, **kwargs: cli_calls.append((trace_files, kwargs))
+        or ReplayReport(summary={}, per_request=None, coverage={}, planner=None),
     )
     monkeypatch.setattr(replay_main, "format_report_table", lambda report: "")
     monkeypatch.setattr(

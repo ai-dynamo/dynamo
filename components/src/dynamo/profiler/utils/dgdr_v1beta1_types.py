@@ -161,7 +161,7 @@ class ModelCacheSpec(BaseModel):
     )
     pvcModelPath: Optional[str] = Field(
         default=None,
-        description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").',
+        description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a container-visible absolute path already under PVCMountPath. Such an absolute path is interpreted as container-visible; use the relative form without a leading slash to address the same path prefix within the PVC.',
     )
     pvcMountPath: str = Field(
         default="/opt/model-cache",

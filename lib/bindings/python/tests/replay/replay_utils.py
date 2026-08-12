@@ -248,7 +248,15 @@ def _partial_router_config():
     )
 
 
+def _report_summary(report):
+    if not isinstance(report, dict):
+        return report.summary
+    summary = report.get("summary")
+    return summary if isinstance(summary, dict) else report
+
+
 def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_tokens):
+    report = _report_summary(report)
     assert report["num_requests"] == num_requests
     assert report["completed_requests"] == num_requests
     assert report["total_input_tokens"] == num_requests * input_tokens
@@ -256,6 +264,7 @@ def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_to
 
 
 def _assert_basic_report_metrics(report):
+    report = _report_summary(report)
     assert report["request_throughput_rps"] > 0
     assert report["output_throughput_tok_s"] > 0
     assert report["duration_ms"] > 0

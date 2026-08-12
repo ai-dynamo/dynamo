@@ -8,6 +8,8 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
+use dynamo_kv_router::selector::WorkerSelector;
+
 use dynamo_runtime::{
     pipeline::{ManyOut, SingleIn},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
@@ -16,6 +18,7 @@ use dynamo_runtime::{
 use super::{PrefillCompletion, PrefillError, PrefillRouter};
 use crate::{
     kv_router::KvPushRouter,
+    local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         llm_backend::{FinishReason, LLMEngineOutput, PreprocessedRequest},
         timing::RequestTracker,
@@ -23,12 +26,18 @@ use crate::{
     session_affinity::{AffinityTarget, SessionAffinityPushRouter},
 };
 
-pub(super) enum InnerPrefillRouter {
-    KvRouter(Arc<KvPushRouter>),
+pub(super) enum InnerPrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    KvRouter(Arc<KvPushRouter<Sel>>),
     SimpleRouter(Arc<SessionAffinityPushRouter>),
 }
 
-impl InnerPrefillRouter {
+impl<Sel> InnerPrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     pub(super) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -48,7 +57,10 @@ impl InnerPrefillRouter {
     }
 }
 
-impl PrefillRouter {
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     pub(super) async fn consume_prefill_stream(
         mut prefill_response: ManyOut<Annotated<LLMEngineOutput>>,
         tracker: Option<Arc<RequestTracker>>,
@@ -188,6 +200,7 @@ impl PrefillRouter {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::selector::DefaultWorkerSelector;
     use futures::stream;
     use serde_json::json;
 
@@ -214,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn first_output_error_does_not_record_prefill_complete() {
         let tracker = Arc::new(RequestTracker::new());
-        let result = PrefillRouter::consume_prefill_stream(
+        let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
             prefill_stream(vec![Annotated::from_error("prefill failed")]),
             Some(tracker.clone()),
         )
@@ -227,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn later_output_error_is_propagated_after_prefill_arrival() {
         let tracker = Arc::new(RequestTracker::new());
-        let result = PrefillRouter::consume_prefill_stream(
+        let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
             prefill_stream(vec![
                 valid_prefill_output(),
                 Annotated::from_error("prefill stream failed"),
@@ -254,7 +267,7 @@ mod tests {
                 finish_reason: Some(finish_reason.clone()),
                 ..Default::default()
             };
-            let result = PrefillRouter::consume_prefill_stream(
+            let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
                 prefill_stream(vec![Annotated::from_data(output)]),
                 None,
             )
@@ -279,7 +292,7 @@ mod tests {
             disaggregated_params: Some(json!({"ctx_request_id": 42})),
             ..Default::default()
         };
-        let result = PrefillRouter::consume_prefill_stream(
+        let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
             prefill_stream(vec![Annotated::from_data(output)]),
             None,
         )
@@ -299,7 +312,7 @@ mod tests {
             disaggregated_params: Some(json!({"ctx_request_id": 42})),
             ..Default::default()
         };
-        let result = PrefillRouter::consume_prefill_stream(
+        let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
             prefill_stream(vec![Annotated::from_data(output)]),
             None,
         )
@@ -323,7 +336,7 @@ mod tests {
                 disaggregated_params: Some(disaggregated_params),
                 ..Default::default()
             };
-            let result = PrefillRouter::consume_prefill_stream(
+            let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
                 prefill_stream(vec![Annotated::from_data(output)]),
                 None,
             )

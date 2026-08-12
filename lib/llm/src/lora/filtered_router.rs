@@ -20,6 +20,7 @@ use dynamo_runtime::{
     engine::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data,
     },
+    error::{DynamoError, ErrorType},
     pipeline::{Error, ManyOut, RouterMode, SingleIn, network::egress::push_router::PushRouter},
     protocols::annotated::Annotated,
 };
@@ -207,11 +208,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .filter
             .filter_worker_ids_for_lora(Some(lora_name.as_str()), &routable);
 
-        // Stage 2: among the replica candidates, prefer free (non-overloaded) workers to match
-        // PushRouter's load-aware selection. When every replica candidate is busy, retain that
-        // constrained set rather than degrade to non-replica workers. `direct_within` then rejects
-        // the selected overloaded worker with `ResourceExhausted`; LoRA routing never bypasses
-        // the allocation just to avoid an overload response.
+        if replica_candidates.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No workers available after LoRA filtering (lora={})",
+                lora_name
+            ));
+        }
+
+        // Stage 2: among the replica candidates, use only free workers. If none
+        // are free, the whole eligible LoRA pool is exhausted; selecting one
+        // busy replica would incorrectly report worker-local overload.
         let free: std::collections::HashSet<u64> =
             self.inner.client.instance_ids_free().into_iter().collect();
         let free_replica_candidates: Vec<u64> = replica_candidates
@@ -219,18 +225,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .copied()
             .filter(|id| free.contains(id))
             .collect();
-        let candidates = if free_replica_candidates.is_empty() {
-            replica_candidates
-        } else {
-            free_replica_candidates
-        };
-
-        if candidates.is_empty() {
+        if free_replica_candidates.is_empty() {
             return Err(anyhow::anyhow!(
-                "No workers available after LoRA filtering (lora={})",
-                lora_name
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message(format!(
+                        "All eligible LoRA workers are overloaded (lora={lora_name})"
+                    ))
+                    .build()
             ));
         }
+        let candidates = free_replica_candidates;
 
         let Some(target) = self.select_from(&candidates) else {
             return Err(anyhow::anyhow!(

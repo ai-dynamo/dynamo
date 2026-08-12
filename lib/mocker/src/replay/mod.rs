@@ -9,6 +9,7 @@ mod online;
 mod router_shared;
 mod validate;
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -25,7 +26,8 @@ pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
-    PerRequestRecord, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
+    PerRequestAdmissionRecord, PerRequestRecord, PerRequestRoutingRecord, ReplayRequestPool,
+    ReplayRoutingOutcome, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
     TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
     TraceSimulationReport, TraceThroughputStats,
 };
@@ -39,6 +41,50 @@ pub enum ReplayRouterMode {
 pub enum ReplayArgsMode {
     Aggregated,
     Disagg,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReplayDeterminism {
+    #[default]
+    Random,
+    CanonicalV1,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplayCaptureOptions {
+    pub capture_per_request: bool,
+    pub capture_planner_details: bool,
+    pub capture_canonical_evidence: bool,
+    pub determinism: ReplayDeterminism,
+}
+
+impl ReplayCaptureOptions {
+    pub fn effective_per_request(self) -> bool {
+        self.capture_per_request || self.capture_canonical_evidence
+    }
+}
+
+thread_local! {
+    static REPLAY_DETERMINISM: Cell<ReplayDeterminism> =
+        const { Cell::new(ReplayDeterminism::Random) };
+}
+
+pub fn with_replay_determinism<T>(determinism: ReplayDeterminism, run: impl FnOnce() -> T) -> T {
+    struct Reset(ReplayDeterminism);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REPLAY_DETERMINISM.with(|current| current.set(self.0));
+        }
+    }
+
+    let previous = REPLAY_DETERMINISM.with(|current| current.replace(determinism));
+    let _reset = Reset(previous);
+    run()
+}
+
+#[cfg(feature = "replay-bench")]
+pub(crate) fn canonical_replay_active() -> bool {
+    REPLAY_DETERMINISM.with(|current| current.get() == ReplayDeterminism::CanonicalV1)
 }
 
 pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
@@ -121,6 +167,18 @@ pub use offline::components::TrafficStats;
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
 pub use offline::scaling::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
+pub use offline::{
+    CANONICAL_RESULT_EXCLUSIONS, CANONICAL_SCHEMA_VERSION, CanonicalAicIdentity,
+    CanonicalAicImplementation, CanonicalDeterminismMetadata, CanonicalEngineConfig,
+    CanonicalExecutionMetadata, CanonicalReplayCoverage, CanonicalReplayMetadata,
+    CanonicalReplayRecord, CanonicalReplayRouterMode, CanonicalReplayTopology,
+    CanonicalRouterMetadata, CanonicalSemanticFeatures, CanonicalSlaMetadata,
+    CanonicalSyntheticSpec, CanonicalWorkloadMetadata, EnginePressureState, KvIngestBoundary,
+    KvIngestBoundaryStats, KvIngestEvidence, LifecycleOperation, OfflineRuntimeEvidence,
+    PressureEvidence, PressureKind, PressureRecord, WorkerLifecycleTransition,
+    WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState, canonical_engine_pool_metadata,
+    canonical_router_metadata, canonical_topology, with_runtime_evidence,
+};
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(

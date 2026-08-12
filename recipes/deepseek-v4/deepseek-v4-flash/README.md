@@ -74,7 +74,7 @@ Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agen
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/fern/kubernetes/quickstart.mdx).
+1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **GPU cluster** of the matching arch. Each worker pod requests **4 GPUs**; totals per variant:
    - **AGG** (`agg-b200-agentic` / `agg-h200-agentic`): **4 GPUs on one node** (x86_64).
    - **DisAgg B200** (`disagg-b200-agentic`, 2P1D): **12 B200** — (2 prefill + 1 decode) pods × 4 GPUs, across **multiple nodes**; needs the [per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated).

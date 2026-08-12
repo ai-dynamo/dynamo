@@ -71,7 +71,7 @@ Bold = recommended pick per SKU: B200 disagg wins (+6.2%); H200 AGG wins (1P3D d
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/fern/kubernetes/quickstart.mdx).
+1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **GPU cluster.** Hardware depends on the variant:
    - **B200 variants** (agentic + `vllm-agg-b200`, `sglang-agg`, `sglang-disagg-b200`): **8 B200 GPUs per worker** (TP=8 fills the box, x86_64). Totals: **AGG `agg-b200-agentic` = 8** (1 node); **DisAgg `disagg-b200-agentic` (1P1D) = 16** (1 prefill + 1 decode pod, across 2 nodes).
    - **H200 variants**: **8 H200 GPUs per worker** (public FP8 checkpoint, `max_model_len=86016`). Totals: **AGG `agg-h200-agentic` = 8** (1 node — the recommended H200 pick); **DisAgg `disagg-h200-agentic` (1P3D) = 32** (1 prefill + 3 decode pods, across 4 nodes).
