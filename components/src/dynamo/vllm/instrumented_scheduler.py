@@ -85,6 +85,7 @@ import logging
 import math
 import os
 import queue
+import random
 import threading
 import time
 import uuid
@@ -2255,6 +2256,29 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             self._bench_block_hasher = None
 
+        # Vocabulary bound for synthetic token randomization (see
+        # _bench_synthetic_token_ids). Zero disables randomization and falls
+        # back to all-zero prompts.
+        self._bench_vocab_size = 0
+        model_config = getattr(vllm_config, "model_config", None)
+        get_vocab_size = getattr(model_config, "get_vocab_size", None)
+        if callable(get_vocab_size):
+            try:
+                self._bench_vocab_size = int(get_vocab_size())
+            except Exception:
+                logger.warning(
+                    "Could not determine vocab size; synthetic benchmark "
+                    "prompts fall back to all-zero tokens",
+                    exc_info=True,
+                )
+        if self._bench_vocab_size <= 1:
+            logger.warning(
+                "Synthetic benchmark prompts use all-zero tokens "
+                "(vocab_size=%d): MoE routing collapses on constant input and "
+                "biases measured latency",
+                self._bench_vocab_size,
+            )
+
         logger.info(
             "Benchmark mode enabled: %s (cudagraph_mode=%s, capture_sizes=%s)",
             self._bench_config,
@@ -3244,6 +3268,37 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Request injection / cleanup ------------------------------------
 
+    def _bench_synthetic_token_ids(self, salt: str, length: int) -> list[int]:
+        """Salt-seeded random token ids for synthetic benchmark prompts.
+
+        All-zero prompts are not measurement-neutral: an MoE router collapses
+        constant input onto a few experts, which skews expert-parallel load
+        balance and biases measured latency (quantified on H200 TEP4/TEP8:
+        -9% on small-token decode through +15% on 8k-token prefill vs real
+        traffic; randomized prompts realign prefill across 128-8192 tokens
+        to within +/-1.6%).
+
+        Determinism contract: ``random.Random(salt)`` seeds from a stable
+        hash of the string, and ``choices`` consumes the stream one draw per
+        element, so the same salt yields the same sequence across processes
+        AND a shorter draw is a strict prefix of a longer one. The fake
+        prefix-cache pairing depends on that prefix property: the seed
+        request (length = prefix_tokens) and the measuring request
+        (length = full prompt) share a salt, so their first prefix_tokens
+        ids -- and therefore their block hashes -- are identical.
+        """
+        vocab_size = getattr(self, "_bench_vocab_size", 0)
+        if vocab_size <= 1:
+            return [0] * length
+        # Mix the attention-DP rank into the seed: salts are derived from
+        # rank-local counters that lockstep keeps identical across ranks, so
+        # without this every rank would inject byte-identical token streams
+        # and expert routing would be correlated across the whole DP group --
+        # a milder cousin of the constant-input collapse this method removes.
+        dp_rank = getattr(self, "_fpm_dp_rank", 0)
+        rng = random.Random(f"dp{dp_rank}:{salt}")
+        return rng.choices(range(1, vocab_size), k=length)
+
     def _bench_cache_fake_prefixes(
         self,
         prefix_lengths: Sequence[int],
@@ -3290,7 +3345,12 @@ class InstrumentedScheduler(AsyncScheduler):
                     continue
                 req = Request(
                     request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
-                    prompt_token_ids=[0] * prefix_tokens,
+                    # Salted by cache_salt: the measuring request draws its
+                    # prompt from the same salt, so the seeded prefix matches
+                    # token-for-token and the block hashes line up.
+                    prompt_token_ids=self._bench_synthetic_token_ids(
+                        cache_salt, prefix_tokens
+                    ),
                     sampling_params=SamplingParams(max_tokens=1),
                     pooling_params=None,
                     block_hasher=self._bench_block_hasher,
@@ -3347,13 +3407,16 @@ class InstrumentedScheduler(AsyncScheduler):
         requests: list[Request] = []
         for index, prompt_len in enumerate(prompt_lens):
             req_id = f"__bench_{self._bench_seq + index}"
+            salt = cache_salts[index] if cache_salts is not None else req_id
             req = Request(
                 request_id=req_id,
-                prompt_token_ids=[0] * prompt_len,
+                # Same salt as the fake-prefix seed for this slot: the first
+                # expected_kv_read_tokens ids reproduce the seeded prefix.
+                prompt_token_ids=self._bench_synthetic_token_ids(salt, prompt_len),
                 sampling_params=SamplingParams(max_tokens=max_tokens),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
-                cache_salt=cache_salts[index] if cache_salts is not None else req_id,
+                cache_salt=salt,
             )
 
             if expected_kv_read_tokens is not None:
@@ -3386,7 +3449,7 @@ class InstrumentedScheduler(AsyncScheduler):
         We pad each synthetic prompt to ``ctx_len + 1`` tokens (rather than
         ``ctx_len``) so the input slot at position ``ctx_len`` -- the one
         the decode iteration reads from -- is part of the request's prompt
-        and therefore guaranteed to be a valid token id (0). Without this
+        and therefore guaranteed to be a valid in-vocab token id. Without this
         padding the worker's async-scheduler bookkeeping writes a ``-1``
         placeholder into ``token_ids_cpu[req_idx, ctx_len]`` after
         sampling (gpu_model_runner._update_states_after_model_execute, see
@@ -3415,7 +3478,7 @@ class InstrumentedScheduler(AsyncScheduler):
         for ctx_len in context_lengths:
             req_id = f"__bench_{self._bench_seq}"
             padded_len = ctx_len + 1
-            prompt = [0] * padded_len
+            prompt = self._bench_synthetic_token_ids(req_id, padded_len)
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
@@ -4295,6 +4358,18 @@ class InstrumentedScheduler(AsyncScheduler):
             "measurement_policy": {
                 "decode": "steady_state_second_step",
                 "prefill": "single_step",
+            },
+            # Provenance for the synthetic prompt content: a vocab-size
+            # lookup failure silently reverts prompts to all-zeros, whose
+            # MoE bias this schema exists to rule out -- consumers must be
+            # able to tell the two artifact populations apart.
+            "synthetic_prompts": {
+                "mode": (
+                    "salted_random"
+                    if getattr(self, "_bench_vocab_size", 0) > 1
+                    else "zeros"
+                ),
+                "vocab_size": getattr(self, "_bench_vocab_size", 0),
             },
             "capacity": {
                 "common": (
