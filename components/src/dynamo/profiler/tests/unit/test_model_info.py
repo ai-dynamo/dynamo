@@ -46,6 +46,10 @@ def test_mamba_cache_align_block_size_from_local_config(tmp_path) -> None:
         ({"n_positions": 1024}, 1024),
         ({"text_config": {"max_sequence_length": 4096}}, 4096),
         (
+            {"max_position_embeddings": 8192, "model_max_length": 131072},
+            131072,
+        ),
+        (
             {
                 "max_position_embeddings": 2048,
                 "model_type": "llama",
@@ -71,6 +75,15 @@ def test_model_context_length_from_local_config(
     assert get_model_context_length(tmp_path) == expected
 
 
+def test_model_context_length_uses_tokenizer_ceiling(tmp_path) -> None:
+    (tmp_path / "config.json").write_text(json.dumps({"max_position_embeddings": 8192}))
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"model_max_length": 2048})
+    )
+
+    assert get_model_context_length(tmp_path) == 2048
+
+
 def test_model_context_length_prefers_nested_object_config(monkeypatch) -> None:
     config = SimpleNamespace(
         max_position_embeddings=8192,
@@ -79,6 +92,10 @@ def test_model_context_length_prefers_nested_object_config(monkeypatch) -> None:
     monkeypatch.setattr(
         "dynamo.profiler.utils.model_info._load_model_config",
         lambda *args, **kwargs: config,
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info._load_tokenizer_config",
+        lambda *args, **kwargs: None,
     )
 
     assert get_model_context_length("test/model") == 2048
@@ -100,6 +117,10 @@ def test_model_config_falls_back_when_aic_download_fails(monkeypatch) -> None:
     monkeypatch.setattr(
         "dynamo.profiler.utils.model_info.AutoConfig.from_pretrained",
         lambda *args, **kwargs: expected,
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info._load_tokenizer_config",
+        lambda *args, **kwargs: None,
     )
 
     assert get_model_context_length("test/model") == 4096

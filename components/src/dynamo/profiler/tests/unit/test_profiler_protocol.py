@@ -435,6 +435,30 @@ def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:
     assert result[result.index("--max-num-batched-tokens") + 1] == "8320"
 
 
+def test_vllm_mamba_align_normalizes_duplicate_token_caps() -> None:
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--mamba-cache-mode",
+        "align",
+        "--max-num-batched-tokens",
+        "20000",
+        "--max-num-batched-tokens=1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier._apply_mamba_cache_align_token_floor(args, "nemotron")
+
+    assert result == [
+        "--mamba-cache-mode",
+        "align",
+        "--max-num-batched-tokens",
+        "8320",
+    ]
+
+
 def test_vllm_mamba_align_skips_without_explicit_align_mode() -> None:
     """Do not probe model metadata for ordinary prefix-caching decode workers."""
     modifier = CONFIG_MODIFIERS["vllm"]
@@ -458,6 +482,9 @@ def test_vllm_mamba_align_skips_without_explicit_align_mode() -> None:
     [
         (["--max-model-len", "6500"], 2048, ["--max-model-len", "2048"]),
         (["--max-model-len=6500"], 4096, ["--max-model-len", "4096"]),
+        (["--max-model-len", "6k"], 4096, ["--max-model-len", "4096"]),
+        (["--max-model-len=6K"], 4096, ["--max-model-len", "4096"]),
+        (["--max-model-len", "6.5k"], 4096, ["--max-model-len", "4096"]),
         (["--max-model-len", "2048"], 4096, ["--max-model-len", "2048"]),
         (
             ["--max-model-len", "2000", "--max-model-len=6500"],
@@ -503,7 +530,13 @@ def test_vllm_model_runtime_constraints_update_worker_configs() -> None:
                 _make_component(
                     "VllmPrefillWorker",
                     "prefill",
-                    args=["--max-model-len=6500"],
+                    args=[
+                        "--max-model-len=6500",
+                        "--mamba-cache-mode",
+                        "align",
+                        "--max-num-batched-tokens",
+                        "1024",
+                    ],
                 ),
                 _make_component(
                     "VllmDecodeWorker",
@@ -536,7 +569,8 @@ def test_vllm_model_runtime_constraints_update_worker_configs() -> None:
     components = _components_by_name(result)
     prefill_args = _main_container(components["VllmPrefillWorker"])["args"]
     args = _main_container(components["VllmDecodeWorker"])["args"]
-    assert prefill_args == ["--max-model-len", "2048"]
+    assert prefill_args[prefill_args.index("--max-model-len") + 1] == "2048"
+    assert prefill_args[prefill_args.index("--max-num-batched-tokens") + 1] == "8320"
     assert args[args.index("--max-model-len") + 1] == "2048"
     assert args[args.index("--max-num-batched-tokens") + 1] == "8320"
 

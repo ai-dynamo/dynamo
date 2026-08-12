@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import re
 from typing import Tuple
 from uuid import uuid4
 
@@ -56,14 +57,33 @@ def _get_valued_arg(args: list[str], key: str) -> str | None:
 
 
 def _set_valued_arg(args: list[str], key: str, value: str) -> list[str]:
-    for i, arg in enumerate(args):
-        if arg == key and i + 1 < len(args):
-            args[i + 1] = value
-            return args
-        if isinstance(arg, str) and arg.startswith(f"{key}="):
-            args[i] = f"{key}={value}"
-            return args
-    return set_argument_value(args, key, value)
+    return set_unique_argument_value(args, key, value)
+
+
+def _parse_human_readable_int(value: str) -> int:
+    """Match vLLM's decimal lowercase and binary uppercase size suffixes."""
+    value = value.strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
+    if match is None:
+        return int(value)
+
+    number, suffix = match.groups()
+    if suffix.islower():
+        multiplier = {
+            "k": 10**3,
+            "m": 10**6,
+            "g": 10**9,
+            "t": 10**12,
+        }[suffix]
+        return int(float(number) * multiplier)
+
+    multiplier = {
+        "K": 2**10,
+        "M": 2**20,
+        "G": 2**30,
+        "T": 2**40,
+    }[suffix]
+    return int(number) * multiplier
 
 
 def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
@@ -299,7 +319,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         if current is None:
             return args
         try:
-            current_value = int(current)
+            current_value = _parse_human_readable_int(current)
         except ValueError:
             logger.warning(
                 "Cannot validate non-integer vLLM --max-model-len value %r",
@@ -371,10 +391,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
                 )
                 continue
             args = cls._apply_model_context_window_ceiling(args, model_name_or_path)
-            if component_type == SubComponentType.DECODE:
-                args = cls._apply_mamba_cache_align_token_floor(
-                    args, model_name_or_path
-                )
+            args = cls._apply_mamba_cache_align_token_floor(args, model_name_or_path)
             main_container.args = args
         return cfg.model_dump()
 

@@ -231,9 +231,47 @@ def _positive_int_config_value(config: object, attr: str) -> Optional[int]:
     value = _get_config_value(config, attr)
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _load_tokenizer_config(
+    model_name_or_path: Union[str, Path],
+) -> Optional[dict]:
+    """Load optional tokenizer metadata without making context lookup fail."""
+    path = Path(model_name_or_path)
+    if path.is_dir():
+        config_path = path / "tokenizer_config.json"
+        if not config_path.is_file():
+            return None
+    else:
+        try:
+            config_path = Path(
+                hf_hub_download(
+                    repo_id=str(model_name_or_path),
+                    filename="tokenizer_config.json",
+                )
+            )
+        except Exception:
+            logger.debug(
+                "Could not load tokenizer config for %s",
+                model_name_or_path,
+                exc_info=True,
+            )
+            return None
+
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.debug(
+            "Could not read tokenizer config for %s",
+            model_name_or_path,
+            exc_info=True,
+        )
+        return None
+    return config if isinstance(config, dict) else None
 
 
 def _load_model_config(
@@ -269,6 +307,10 @@ def get_model_context_length(
 ) -> Optional[int]:
     """Return vLLM's config-derived context-window ceiling when available."""
     config = _load_model_config(model_name_or_path, trust_remote_code)
+    tokenizer_config = _load_tokenizer_config(model_name_or_path)
+    tokenizer_context_length = _positive_int_config_value(
+        tokenizer_config, "model_max_length"
+    )
     candidates = []
     for key in ("text_config", "language_config", "decoder", "generator"):
         nested = _get_config_value(config, key)
@@ -289,6 +331,12 @@ def get_model_context_length(
         model_max_length = _positive_int_config_value(candidate, "model_max_length")
         if model_max_length is not None:
             context_length = model_max_length
+        if tokenizer_context_length is not None:
+            context_length = (
+                min(context_length, tokenizer_context_length)
+                if context_length is not None
+                else tokenizer_context_length
+            )
         if context_length is None:
             continue
 
