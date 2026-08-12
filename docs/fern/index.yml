@@ -208,10 +208,10 @@ navigation:
         contents:
           - page: Overview
             path: pages/kubernetes/auto-deployment/overview.mdx
-          - page: Auto Deploy with DGDR
+          - page: Auto Deploy with DGDR v1beta1
             slug: dgdr-walkthrough
             path: pages/kubernetes/auto-deployment/auto-deploy-with-dgdr.md
-          - page: DGDR v1beta2
+          - page: Auto Deploy with DGDR v1beta2
             path: pages/kubernetes/auto-deployment/dgdr-v1beta2.md
           - page: Dynamo Profiler
             path: pages/kubernetes/auto-deployment/dynamo-profiler.md

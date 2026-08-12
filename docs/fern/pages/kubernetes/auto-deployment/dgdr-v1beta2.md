@@ -5,11 +5,12 @@ title: Search Deployment Configurations with DGDR v1beta2
 subtitle: Run a replay-backed deployment search, inspect its candidates, and promote a candidate to a DynamoGraphDeployment
 ---
 
-`DynamoGraphDeploymentRequest` (DGDR) `v1beta2` uses AI Simulate Sweeper to evaluate deployment
-configurations with Replay. A request can optimize one metric or search for a Pareto front. During
-the search, Dynamo publishes a bounded set of `DynamoGraphDeploymentCandidate` (DGDC) resources.
-Each candidate contains a complete `DynamoGraphDeployment` (DGD) spec that you can inspect and
-deploy.
+`DynamoGraphDeploymentRequest` (DGDR) `v1beta2` uses [AI Simulate
+Sweeper](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
+to evaluate deployment configurations with Replay. A request can optimize one metric or search for
+a Pareto front. During the search, Dynamo publishes a bounded set of
+`DynamoGraphDeploymentCandidate` (DGDC) resources. Each candidate contains a complete
+`DynamoGraphDeployment` (DGD) spec that you can inspect and deploy.
 
 Each accepted DGDR generation creates an immutable `DynamoGraphDeploymentRun`. The run owns the
 Sweeper Job, its DGDCs, progress, and report references. This lets one DGDR retain a history of
@@ -22,6 +23,10 @@ independent searches without keeping completed Jobs alive.
 Unlike the `v1beta1` profiler, Sweeper searches commonly run for hours and can return multiple
 useful configurations. DGDR reports progress after each search round and refreshes its visible
 candidates as better configurations are found.
+
+This guide describes the Kubernetes workflow and the stable DGDR fields. Use the Sweeper
+documentation as the reference for traffic, optimization goals, and the unstructured search
+parameters supported by the installed Sweeper version.
 
 ## Create a Search
 
@@ -157,7 +162,12 @@ spec:
 ```
 
 `arrivalSpeedupRatio` maps directly to the Replay traffic-rate control. A value of `1.0` preserves
-the recorded arrival rate.
+the recorded arrival rate. [Sweeper Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
+defines the supported workload shapes, trace fields, and open-loop versus closed-loop behavior.
+
+To create a Mooncake-format trace for testing, follow [Generate a Synthetic Trace in the Sweeper
+examples](https://github.com/ai-dynamo/dynamo/blob/main/aisimulate/examples/sweeper/README.md#generate-a-synthetic-trace),
+then copy the generated JSONL file to the PVC referenced by `workload.trace.source`.
 
 ## Choose an Objective
 
@@ -173,8 +183,9 @@ spec:
       itlMs: 50
 ```
 
-Supported Sweeper metrics include throughput, throughput per GPU, per-user throughput,
-end-to-end latency, goodput, and goodput per GPU.
+Common Sweeper metrics include throughput, end-to-end latency, goodput, and their per-GPU variants.
+See [Sweeper Optimization Goals](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md)
+for the supported targets, directions, and SLA semantics.
 
 For a multi-objective search, set `mode: pareto` and list the metrics:
 
@@ -206,9 +217,11 @@ Sweeper computes the complete non-dominated front. DGDR publishes no more than
 | `maxConcurrentCandidates` | Maximum candidates evaluated concurrently in one round |
 | `maxEvaluationDuration`   | Timeout for one candidate evaluation                   |
 
-`search.parameters` is an unstructured object passed to the search implementation. Use the keys and
-values supported by the installed AI Simulate Sweeper version. The Kubernetes API preserves these
-values but does not validate their nested schema.
+`search.parameters` is an unstructured object passed to the search implementation. The Kubernetes
+API preserves these values but does not validate their nested schema. Use [Sweeper
+Configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
+as the parameter reference for the installed Sweeper version. For Dynamo-specific Planner and
+Router parameters, see [Dynamo Sweeper Integration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md).
 
 The unstructured boundary is intentional. Search adapters and experimental knobs evolve faster than
 the Kubernetes API. Stable concepts such as the workload, objective, hardware budget, and search
@@ -480,4 +493,8 @@ kubectl delete dgd minimax-production -n inference
 - [Auto Deployment Overview](overview.mdx)
 - [Auto Deploy with DGDR v1beta1](auto-deploy-with-dgdr.md)
 - [DynamoGraphDeployment Reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx)
-- [AI Simulate Sweeper](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md)
+- [AI Simulate Sweeper Overview](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
+- [Sweeper Configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
+- [Sweeper Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
+- [Sweeper Optimization Goals](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md)
+- [Dynamo Sweeper Integration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md)
