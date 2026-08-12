@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -8,9 +7,15 @@ import os
 import socket
 import struct
 
+import msgspec
 import pytest
+from _deps import HAS_GMS
 
-msgspec = pytest.importorskip("msgspec")
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
 
 from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import (

@@ -93,7 +93,9 @@ class DynamoWorkerProcess(ManagedProcess):
     ):
         self.worker_id = worker_id
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
         request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
+        request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
 
         command = [
             "python3",
@@ -154,7 +156,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Always set an explicit per-worker FPM port to avoid collisions with
         # the backend default (20380) under parallel test execution.
-        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # Disable backend shutdown grace period for all migration tests

@@ -233,9 +233,11 @@ def _prepare_deployment(
                 merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
                 merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
-        # Pin vLLM forward-pass metrics to a test-allocated port so launch
-        # scripts do not fall back to random host port selection.
-        if ports.fpm_port:
+        # Pin vLLM forward-pass metrics to a test-allocated port for
+        # single-worker deployments so launch scripts do not fall back to
+        # random host port selection. Multi-worker scripts need per-worker
+        # base ports and should not share one global DYN_FORWARDPASS_METRIC_PORT.
+        if ports.fpm_port and len(dynamic_system_ports) == 1:
             merged_env["DYN_FORWARDPASS_METRIC_PORT"] = str(ports.fpm_port)
 
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
