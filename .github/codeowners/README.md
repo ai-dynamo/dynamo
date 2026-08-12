@@ -99,6 +99,15 @@ generated outputs together.
 - Legacy `classify.keyword_rules` are rejected because auto-classification and
   keyword co-ownership required a live tree. Declare ownership with explicit
   area `path_globs` or `shared` entries.
+- Legacy `advisory` is rejected wherever it appears — a top-level `advisory:`
+  block, an `advisory` key on a `shared` entry, or one on a filetype rule.
+  Every owner in CODEOWNERS blocks, so there is no non-blocking spelling left;
+  ignoring the key would silently turn a rule its author marked non-blocking
+  into a required approver. Rejection is on key **presence**, so `advisory:
+  false` and `advisory: []` fail too. To keep a reviewer, move the entry to
+  `shared` and list **all** intended owners: `shared` rules are emitted last
+  and win by last-match, so a single-owner `shared` entry replaces the current
+  owner rather than adding to it.
 - Base area owners are GitHub **teams**. The one exception is
   `external_contributors.yaml`, which appends named individuals as area-scoped
   **co-owners** (never sole owners); team membership is otherwise managed

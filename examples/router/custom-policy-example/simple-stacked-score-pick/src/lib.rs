@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Factory and registration for the `disaggregated-load` policy.
-//!
-//! The factory selects prefill or decode components for each routing partition.
+//! Factory and registration for the `simple-stacked-score-pick` policy.
 
 mod picker;
 mod scorer;
@@ -15,11 +13,9 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{KvRouterConfig, WorkerPicker, WorkerScorer, WorkerSelectionPolicy};
-use picker::{DecodePicker, PrefillPicker};
-use scorer::{DecodeLoadScorer, PrefillLoadScorer};
-
-const DECODE_WORKER_TYPE: &str = "decode";
+use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicy};
+use picker::LowestCostPicker;
+use scorer::{ActiveRequestsScorer, UncachedBlocksScorer};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,14 +28,15 @@ fn provider(
 
     Ok(Arc::new(
         |config: &KvRouterConfig, worker_type, _partition| {
-            let (scorers, picker): (Vec<Box<dyn WorkerScorer>>, Box<dyn WorkerPicker>) =
-                if worker_type == DECODE_WORKER_TYPE {
-                    (vec![Box::new(DecodeLoadScorer)], Box::new(DecodePicker))
-                } else {
-                    (vec![Box::new(PrefillLoadScorer)], Box::new(PrefillPicker))
-                };
-
-            WorkerSelectionPolicy::new(config.clone(), worker_type, scorers, picker)
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type,
+                vec![
+                    Box::new(ActiveRequestsScorer),
+                    Box::new(UncachedBlocksScorer),
+                ],
+                Box::new(LowestCostPicker),
+            )
         },
     ))
 }
@@ -47,5 +44,5 @@ fn provider(
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("disaggregated-load", Arc::new(provider))
+    registry.register("simple-stacked-score-pick", Arc::new(provider))
 }

@@ -36,7 +36,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
     codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
     ```
 
-    Codex sends a `session-id` header that Dynamo maps to `session_id`.
+    Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
 
   </Tab>
   <Tab title="Pi">
