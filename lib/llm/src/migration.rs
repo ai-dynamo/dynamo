@@ -426,10 +426,13 @@ where
                 Ok(())
             }
             Some(Err(err)) => {
-                self.record_migration_outcome(
-                    migration_event.as_ref(),
-                    frontend_service::migration_outcome::FAILURE,
-                );
+                let outcome =
+                    if error::match_error_chain(err.as_ref(), &[ErrorType::Cancelled], &[]) {
+                        frontend_service::migration_outcome::CANCELLED
+                    } else {
+                        frontend_service::migration_outcome::FAILURE
+                    };
+                self.record_migration_outcome(migration_event.as_ref(), outcome);
                 Err(err) // should propagate original error if any
             }
             None => {
@@ -702,6 +705,8 @@ mod tests {
         FailThenCancel {
             context: Arc<Controller>,
         },
+        /// Fails on the first call, then generate returns a cancellation error
+        FailThenGenerateCancelled,
         /// One addressed worker rejects admission, then a replacement succeeds.
         WorkerOverloadSequence {
             worker_ids: Vec<u64>,
@@ -821,6 +826,19 @@ mod tests {
                         DynamoError::builder()
                             .error_type(ErrorType::CannotConnect)
                             .message("no responders")
+                            .build()
+                    ))
+                }
+                MockBehavior::FailThenGenerateCancelled => {
+                    let error_type = if call_num == 0 {
+                        ErrorType::CannotConnect
+                    } else {
+                        ErrorType::Cancelled
+                    };
+                    Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(error_type)
+                            .message("request cancelled")
                             .build()
                     ))
                 }
@@ -1582,6 +1600,61 @@ mod tests {
 
         let result = RetryManager::build(
             ctx,
+            BTreeMap::new(),
+            request,
+            next_generate,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("cancelled migration must fail"),
+            Err(error) => error,
+        };
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("error should be a DynamoError");
+        assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::CANCELLED,
+            ),
+            1
+        );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
+            ),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_generate_cancelled_during_migration() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenGenerateCancelled,
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+        let metrics = Arc::new(Metrics::new());
+
+        let result = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
             BTreeMap::new(),
             request,
             next_generate,
