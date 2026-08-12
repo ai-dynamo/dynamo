@@ -50,6 +50,10 @@ use super::sink::RequestTraceSink;
 
 const CHANNEL_CAPACITY: usize = 2048;
 const DEFAULT_BUFFER_INITIAL_BYTES: usize = 256 * 1024;
+// Keep the age gauge current while a partially filled batch waits for the
+// regular flush tick. The batch is reset before gzip/upload begins, so there
+// is no active in-memory batch to report while an upload is in flight.
+const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 // Bound S3 upload duration so a stalled endpoint or slow network cannot wedge
 // the worker task indefinitely. `attempt_timeout` covers a single HTTP attempt;
 // the outer timeout bounds the full call including retries (three total).
@@ -357,8 +361,11 @@ async fn run_worker(
     let mut seq: u64 = 0;
     let mut flush_tick = tokio::time::interval(flush_interval);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut metrics_tick = tokio::time::interval(METRICS_REFRESH_INTERVAL);
+    metrics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Skip the immediate tick that `interval` fires at t=0.
     flush_tick.tick().await;
+    metrics_tick.tick().await;
 
     loop {
         tokio::select! {
@@ -392,6 +399,11 @@ async fn run_worker(
             _ = flush_tick.tick() => {
                 if !batch.is_empty() {
                     upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                }
+            }
+            _ = metrics_tick.tick() => {
+                if !batch.is_empty() {
+                    batch.refresh_metrics();
                 }
             }
             message = rx.recv() => {
@@ -607,9 +619,16 @@ impl JsonlBatch {
         self.raw.extend_from_slice(&line);
         self.lines = self.lines.saturating_add(1);
         self.oldest_enqueued_at.get_or_insert(enqueued_at);
-        S3_REQUEST_TRACE_METRICS
-            .set_batch_state(self.uncompressed_bytes(), self.oldest_enqueued_at);
+        self.refresh_metrics();
         Ok(())
+    }
+
+    fn refresh_metrics(&self) {
+        self.refresh_metrics_with(&S3_REQUEST_TRACE_METRICS);
+    }
+
+    fn refresh_metrics_with(&self, metrics: &S3RequestTraceMetrics) {
+        metrics.set_batch_state(self.uncompressed_bytes(), self.oldest_enqueued_at);
     }
 
     /// Consume the accumulated JSONL, gzip it on a blocking worker, and
@@ -826,6 +845,22 @@ mod tests {
                 "dynamo_frontend_request_trace_s3_uploaded_bytes_total",
             ]
         );
+    }
+
+    #[test]
+    fn batch_metrics_refresh_advances_oldest_record_age() {
+        let metrics = S3RequestTraceMetrics::new();
+        let mut batch = JsonlBatch::new();
+        batch.raw.extend_from_slice(b"record\n");
+        batch.lines = 1;
+        batch.oldest_enqueued_at = Some(Instant::now() - Duration::from_secs(1));
+
+        batch.refresh_metrics_with(&metrics);
+        let initial_age = metrics.oldest_buffered_record_age_seconds.get();
+        std::thread::sleep(Duration::from_millis(10));
+        batch.refresh_metrics_with(&metrics);
+
+        assert!(metrics.oldest_buffered_record_age_seconds.get() > initial_age);
     }
 
     #[test]
