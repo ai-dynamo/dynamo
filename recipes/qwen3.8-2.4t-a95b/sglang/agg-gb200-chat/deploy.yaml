@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3.8-2.4T-A95B on SGLang via Dynamo, aggregated, GB200 (TP=16) over MNNVL.
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: qwen38max-sgl-agg-cd
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: qwen38max-sgl-agg-cd-channel
+  numNodes: 0
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen38max-sgl-agg
+  labels:
+    app.kubernetes.io/name: qwen38max-sgl-agg
+    engine: sglang
+    hardware: gb200
+    mode: agg
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+          cloud.google.com/gke-nodepool: customer-gpu-w0e
+        tolerations:
+        - {key: kubernetes.io/arch, operator: Equal, value: arm64,         effect: NoSchedule}
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1
+          imagePullPolicy: IfNotPresent
+          command: [python3]
+          args:
+          - -m
+          - dynamo.frontend
+          - --model-path
+          - Qwen/Qwen3.8-2.4T-A95B
+          - --model-name
+          - Qwen/Qwen3.8-2.4T-A95B
+          - --dyn-chat-processor
+          - sglang
+          - --reasoning-parser
+          - qwen3
+          - --enable-streaming-reasoning-dispatch
+          - --router-mode
+          - kv
+          - --router-kv-events
+          - --trust-remote-code
+          env:
+          - {name: HF_HOME,            value: /model-cache}
+          - {name: HF_HUB_OFFLINE,     value: "1"}
+          - {name: TRANSFORMERS_OFFLINE, value: "1"}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+          - {name: model-cache, mountPath: /model-cache, readOnly: true}
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim: {claimName: model-cache}
+
+  - name: Decode
+    type: decode
+    replicas: 1
+    multinode:
+      nodeCount: 4
+    podTemplate:
+      spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+          cloud.google.com/gke-nodepool: customer-gpu-w0e
+        tolerations:
+        - {key: kubernetes.io/arch, operator: Equal, value: arm64,         effect: NoSchedule}
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: qwen38max-sgl-agg-cd-channel
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          workingDir: /workspace
+          args:
+          - |
+            exec python3 -m dynamo.sglang \
+              --model-path Qwen/Qwen3.8-2.4T-A95B \
+              --served-model-name Qwen/Qwen3.8-2.4T-A95B \
+              --trust-remote-code \
+              --tensor-parallel-size 16 \
+              --quantization fp8 \
+              --kv-cache-dtype fp8_e4m3 \
+              --context-length 262144 \
+              --mem-fraction-static 0.92 \
+              --max-running-requests 1024 \
+              --chunked-prefill-size 8192 \
+              --max-prefill-tokens 8192 \
+              --page-size 64 \
+              --attention-backend trtllm_mha \
+              --linear-attn-prefill-backend flashinfer \
+              --linear-attn-decode-backend flashinfer \
+              --moe-runner-backend flashinfer_trtllm \
+              --moe-a2a-backend none \
+              --mamba-ssm-dtype bfloat16 \
+              --mamba-radix-cache-strategy extra_buffer \
+              --flashinfer-allreduce-fusion-backend mnnvl \
+              --cuda-graph-backend-prefill breakable \
+              --cuda-graph-backend-decode full \
+              --weight-loader-prefetch-checkpoints \
+              --weight-loader-prefetch-num-threads 4 \
+              --watchdog-timeout 900 \
+              --decode-log-interval 1 \
+              --enable-cache-report
+          env:
+          - {name: NCCL_ALGO,                                value: Ring}
+          - {name: NCCL_PROTO,                               value: LL128}
+          - {name: NCCL_MNNVL_ENABLE,                        value: "1"}
+          - {name: NCCL_CUMEM_ENABLE,                        value: "1"}
+          - {name: MC_FORCE_MNNVL,                           value: "1"}
+          - {name: NCCL_DEBUG,                               value: WARN}
+          - {name: SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S, value: "3600"}
+          - {name: SGLANG_FLASHINFER_AUTOTUNE_CACHE,         value: "1"}
+          - {name: FLASHINFER_WORKSPACE_BASE,                value: /cache-persist/flashinfer}
+          - {name: SGLANG_CACHE_DIR,                         value: /cache-persist/sglang}
+          - {name: FLASHINFER_DISABLE_VERSION_CHECK,         value: "1"}
+          - {name: SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK, value: "1"}
+          - {name: HF_HOME,                                  value: /model-cache}
+          - {name: HF_HUB_OFFLINE,                          value: "1"}
+          - {name: TRANSFORMERS_OFFLINE,                     value: "1"}
+          - {name: PYTHONUNBUFFERED,                         value: "1"}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            failureThreshold: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+          securityContext:
+            runAsUser: 0
+            capabilities: {add: [IPC_LOCK]}
+          resources:
+            claims:
+            - name: compute-domain-channel
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              nvidia.com/gpu: "4"
+          volumeMounts:
+          - {name: model-cache,   mountPath: /model-cache, readOnly: true}
+          - {name: compile-cache, mountPath: /cache-persist}
+          - {name: dshm,          mountPath: /dev/shm}
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim: {claimName: model-cache}
+        - name: compile-cache
+          hostPath:
+            path: /mnt/stateful_partition/kube-ephemeral-ssd/cache/qwen38max-sgl-agg
+            type: DirectoryOrCreate
+        - name: dshm
+          emptyDir:
+            medium: Memory
