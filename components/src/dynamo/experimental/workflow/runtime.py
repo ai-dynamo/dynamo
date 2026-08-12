@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hydration and execution for compiled Dynamo workflows."""
+"""Runtime binding and execution for compiled Dynamo workflows."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class _ImageValue(Protocol):
 
 
 class WorkflowExecutor:
-    """Hydrate and execute one compiled workflow plan."""
+    """Bind runtime resources and execute one compiled workflow plan."""
 
     def __init__(
         self,
