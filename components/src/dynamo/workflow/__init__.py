@@ -4,14 +4,14 @@
 """Authoring and canonical IR for Dynamo inference workflows."""
 
 from dynamo.workflow.builder import StageHandle, Workflow
+from dynamo.workflow.compiler import DeploymentSpec, compile_workflow
 from dynamo.workflow.ir import StageIR, WorkflowIR
+from dynamo.workflow.plan import EdgePlan, ExecutionPlan, LocalBinding
 from dynamo.workflow.runtime import (
-    ExecutionPlan,
-    LocalBinding,
     StageContext,
     StageRunner,
     WorkflowExecutionError,
-    compile_workflow,
+    WorkflowExecutor,
 )
 from dynamo.workflow.types import (
     PortSpec,
@@ -24,6 +24,8 @@ from dynamo.workflow.types import (
 
 __all__ = [
     "PortSpec",
+    "DeploymentSpec",
+    "EdgePlan",
     "StageContract",
     "StageHandle",
     "StageIR",
@@ -35,6 +37,7 @@ __all__ = [
     "Workflow",
     "WorkflowIR",
     "WorkflowExecutionError",
+    "WorkflowExecutor",
     "WorkflowValidationError",
     "ExecutionPlan",
     "LocalBinding",
