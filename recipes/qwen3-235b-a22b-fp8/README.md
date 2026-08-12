@@ -52,8 +52,8 @@ kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 ## Cloud Provider Overlays
 
 The Blackwell disaggregated recipe keeps the shared deployment in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`.
-Provider-specific deltas live in Kustomize Components and are selected by
-`trtllm/disagg/blackwell/.kustomize-matrix.yaml`.
+Provider-specific deltas live in Kustomize Components and instance-type templates
+and are selected by `trtllm/disagg/blackwell/.kustomize-matrix.yaml`.
 Shared Kustomize building blocks belong under `recipes/kustomize/components/`;
 the disaggregated provider Components use the
 backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
@@ -63,17 +63,18 @@ the selected composition. Cluster users can apply a checked-in `deploy-*.yaml`
 manifest directly or apply its public overlay with `kubectl apply -k`; neither
 path requires regeneration.
 For recipe contributors, the source of truth is the matrix, `kustomize/base/`,
-recipe-local Components, plus any referenced shared Components under
-`recipes/kustomize/components/`. Public overlay
-`kustomization.yaml` files and `deploy-*.yaml` files are generated artifacts:
-commit them for review, but do not edit them by hand.
+recipe-local Components, shared template sources, plus any referenced shared
+Components under `recipes/kustomize/components/`. Public overlay
+`kustomization.yaml` files, generated template Components, and `deploy-*.yaml`
+files are generated artifacts: commit them for review, but do not edit them by
+hand.
 Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from source YAML before matching rendered fields.
 Comments inside literal block scalars already render in place.
 
 | Rendered manifest | Provider fabric | Patch source |
 |-------------------|-----------------|--------------|
 | `trtllm/disagg/blackwell/deploy-generic.yaml` | Provider-neutral baseline | `trtllm/disagg/blackwell/kustomize/overlays/generic/` |
-| `trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml` | AWS EFA on `p6-b200.48xlarge`, 8 EFA per worker | `recipes/kustomize/components/aws-efa-p8d8/` |
+| `trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml` | AWS EFA on `p6-b200.48xlarge`, derived from each worker's GPU count | `recipes/kustomize/templates/aws-efa/p6-b200.48xlarge/` |
 | `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `recipes/kustomize/components/disagg-workers/gke-roce/` |
 | `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `recipes/kustomize/components/disagg-workers/nscale-ib/` |
 
