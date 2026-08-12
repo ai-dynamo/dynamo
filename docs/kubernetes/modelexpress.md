@@ -23,7 +23,7 @@ Use ModelExpress when model rollout time, autoscale cold start, or fleet-wide mo
 ## How It Works
 
 1. A ModelExpress server runs in the cluster and stores metadata for available model sources.
-2. vLLM workers use the ModelExpress loader (`--load-format mx` on newer images, or `mx-source` / `mx-target` on older split-loader images).
+2. vLLM workers use the native ModelExpress loader (`--load-format modelexpress`).
 3. If a compatible source worker is already serving the model, a new worker pulls model tensors from that source over NIXL/RDMA.
 4. If no source is available, the worker falls back to storage. With ModelStreamer, the first worker can stream safetensors from `s3://`, `gs://`, `az://`, or a local path.
 5. The Kubernetes operator can inject `MODEL_EXPRESS_URL` into all Dynamo pods from the platform `modelExpressURL` setting.
@@ -55,15 +55,15 @@ services:
           - --model
           - meta-llama/Llama-3.1-70B-Instruct
           - --load-format
-          - mx
+          - modelexpress
         env:
           - name: VLLM_PLUGINS
             value: modelexpress
 ```
 
-<Note>
-Use the load format supported by your runtime image. ModelExpress v0.3 and newer document the unified `mx` loader. Some older Dynamo images expose `mx-source` and `mx-target` loader names instead.
-</Note>
+> [!NOTE]
+> Dynamo vLLM and SGLang runtime images include ModelExpress v0.5.0. vLLM v0.23.0 and newer
+> recognize the `modelexpress` loader natively.
 
 ## Stream Without Shared Storage
 
@@ -98,7 +98,7 @@ services:
           - --model
           - meta-llama/Llama-3.1-70B-Instruct
           - --load-format
-          - mx
+          - modelexpress
         env:
           - name: VLLM_PLUGINS
             value: modelexpress
