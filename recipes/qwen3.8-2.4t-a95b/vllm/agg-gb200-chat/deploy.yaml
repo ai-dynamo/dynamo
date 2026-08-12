@@ -80,12 +80,6 @@ spec:
           workingDir: /workspace
           args:
           - |
-            sed -i '/^class Qwen3_5ForCausalLMBase(/,/^):$/ { /^):$/a\    hf_to_vllm_mapper = WeightsMapper(\n        orig_to_new_prefix={"model.language_model.": "model."}\n    )\n
-            }' \
-              /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_5.py &&
-            sed -i \
-              's@return loader.load_weights(weights)$@return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)@' \
-              /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_5.py &&
             exec python3 -m dynamo.vllm \
               --model Qwen/Qwen3.8-2.4T-A95B \
               --hf-overrides '{"architectures":["Qwen3_5MoeForCausalLM"]}' \
