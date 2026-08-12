@@ -19,6 +19,7 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+ARG TRANSFORMERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -250,6 +251,19 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 {% endif %}
 
 {% endif %}
+
+# The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
+# `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
+# heterogeneous per-layer configs, but vLLM's corresponding support missed
+# 0.27.1 and the engine crashes during ModelConfig initialization. Apply the
+# upstream-recommended 5.14.1 workaround after all optional runtime packages
+# have been layered, and fail the image build if the final version drifts.
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps \
+        "transformers==${TRANSFORMERS_VERSION}" && \
+    python3 -c "import importlib.metadata as md, sys; actual = md.version('transformers'); expected = sys.argv[1]; assert actual == expected, f'expected transformers {expected}, found {actual}'" \
+        "${TRANSFORMERS_VERSION}"
 
 {% if device == "xpu" %}
 RUN apt-get update && \
