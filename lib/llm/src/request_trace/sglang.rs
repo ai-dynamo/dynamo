@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::SharedFinishReasonMetadata;
 use super::integration::{RequestEndTraceState, emit_request_end_trace_state};
+use crate::discovery::GenerateTraceConfig;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
@@ -33,6 +34,7 @@ enum SglangRequestTraceState {
 
 struct ActiveSglangRequestTrace {
     request_end: RequestEndTraceState,
+    tool_call_parser: Option<String>,
 }
 
 impl SglangRequestTrace {
@@ -51,12 +53,12 @@ impl SglangRequestTrace {
     pub(crate) fn prepare(
         self,
         context: Context<PreprocessedRequest>,
-        trace_block_size: Option<u32>,
+        trace_config: Option<GenerateTraceConfig>,
     ) -> (Self, Context<PreprocessedRequest>) {
         if matches!(self.0, SglangRequestTraceState::Disabled) {
             return (self, context);
         }
-        let Some(trace_block_size) = trace_block_size else {
+        let Some(trace_config) = trace_config else {
             tracing::warn!(
                 "native SGLang request trace skipped because runtime metadata is missing"
             );
@@ -67,16 +69,22 @@ impl SglangRequestTrace {
         let Some(request_end) = super::integration::build_new_request_end_trace_state(
             &mut request,
             &context,
-            trace_block_size as usize,
+            trace_config.kv_cache_block_size as usize,
         ) else {
             return (
                 Self(SglangRequestTraceState::Disabled),
                 context.map(|_| request),
             );
         };
+        let tool_call_parser = request_end
+            .finish_reason_metadata()
+            .and(trace_config.tool_call_parser);
         (
             Self(SglangRequestTraceState::Active(Box::new(
-                ActiveSglangRequestTrace { request_end },
+                ActiveSglangRequestTrace {
+                    request_end,
+                    tool_call_parser,
+                },
             ))),
             context.map(|_| request),
         )
@@ -96,6 +104,7 @@ impl SglangRequestTrace {
             stream,
             engine_context,
             active.request_end,
+            active.tool_call_parser,
             request_id,
         ))
     }
@@ -108,6 +117,8 @@ struct SglangTraceStream {
     request_id: Option<String>,
     tracker: Arc<RequestTracker>,
     finish_reason_metadata: Option<SharedFinishReasonMetadata>,
+    tool_call_parser: Option<String>,
+    output_text: Option<String>,
     first_token_recorded: bool,
     observed_osl: usize,
     terminal_recorded: bool,
@@ -128,6 +139,7 @@ impl SglangTraceStream {
         stream: EngineStream<Annotated<LLMEngineOutput>>,
         engine_context: Arc<dyn AsyncEngineContext>,
         request_end: RequestEndTraceState,
+        tool_call_parser: Option<String>,
         request_id: String,
     ) -> Self {
         let tracker = request_end.request_tracker();
@@ -139,6 +151,8 @@ impl SglangTraceStream {
             request_id: Some(request_id),
             tracker,
             finish_reason_metadata,
+            output_text: tool_call_parser.as_ref().map(|_| String::new()),
+            tool_call_parser,
             first_token_recorded: false,
             observed_osl: 0,
             terminal_recorded: false,
@@ -155,6 +169,11 @@ impl SglangTraceStream {
                 self.tracker.record_first_token();
                 self.first_token_recorded = true;
             }
+        }
+        if let Some(output_text) = self.output_text.as_mut()
+            && let Some(text) = native_response.get("text").and_then(Value::as_str)
+        {
+            output_text.push_str(text);
         }
 
         let Some(meta_info) = native_response.get("meta_info") else {
@@ -180,6 +199,19 @@ impl SglangTraceStream {
         }
     }
 
+    fn take_tool_parse(&mut self) -> Option<(String, String, SharedFinishReasonMetadata)> {
+        if !self.terminal_recorded {
+            return None;
+        }
+        Some((
+            self.output_text
+                .take()
+                .filter(|output| !output.is_empty())?,
+            self.tool_call_parser.take()?,
+            self.finish_reason_metadata.take()?,
+        ))
+    }
+
     fn finish(&mut self) {
         drop(self.inner.take());
         if self.request_end.is_none() {
@@ -190,11 +222,26 @@ impl SglangTraceStream {
         // the two observers stay ordered without a global atomic RMW.
         self.tracker.record_osl(self.observed_osl);
         self.tracker.record_finish();
-        if let (Some(request_end), Some(request_id)) =
+        let (Some(request_end), Some(request_id)) =
             (self.request_end.take(), self.request_id.take())
-        {
+        else {
+            return;
+        };
+        let Some((output_text, tool_call_parser, metadata)) = self.take_tool_parse() else {
             emit_request_end_trace_state(request_end, request_id);
-        }
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "native SGLang tool metadata skipped because no Tokio runtime is available"
+            );
+            emit_request_end_trace_state(request_end, request_id);
+            return;
+        };
+        runtime.spawn(async move {
+            record_tool_calls(&metadata, &output_text, &tool_call_parser).await;
+            emit_request_end_trace_state(request_end, request_id);
+        });
     }
 }
 
@@ -293,6 +340,43 @@ fn record_finish_reason(metadata: &SharedFinishReasonMetadata, finish_reason: &V
     }
 }
 
+async fn record_tool_calls(
+    metadata: &SharedFinishReasonMetadata,
+    output_text: &str,
+    tool_call_parser: &str,
+) {
+    let tool_calls = match dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize(
+        output_text,
+        Some(tool_call_parser),
+        None,
+    )
+    .await
+    {
+        Ok((tool_calls, _)) => tool_calls,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                parser = tool_call_parser,
+                "failed to parse native SGLang output for request-trace tool metadata"
+            );
+            return;
+        }
+    };
+
+    for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
+        let Ok(tool_call_index) = u32::try_from(tool_call_index) else {
+            tracing::warn!("too many native SGLang tool calls to represent in request trace");
+            break;
+        };
+        metadata.record_tool_call(
+            0,
+            tool_call_index,
+            Some(&tool_call.id),
+            Some(&tool_call.function.name),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -387,6 +471,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parsed_tools_do_not_override_length() {
+        let metadata = SharedFinishReasonMetadata::default();
+        record_finish_reason(&metadata, &serde_json::json!({"type": "length"}));
+        record_tool_calls(
+            &metadata,
+            r#"<tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>"#,
+            "qwen25",
+        )
+        .await;
+
+        let metadata = snapshot(metadata);
+        assert_eq!(metadata.finish_reason, Some(FinishReason::Length));
+        assert_eq!(metadata.tool_calls.len(), 1);
+        assert_eq!(metadata.tool_calls[0].name.as_deref(), Some("get_weather"));
+    }
+
+    #[tokio::test]
     async fn disabled_trace_returns_original_engine_stream() {
         let stream = engine_stream(futures::stream::empty());
         let original =
@@ -418,6 +519,7 @@ mod tests {
             Annotated::from_data(LLMEngineOutput {
                 engine_data: Some(serde_json::json!({
                     "sglang_response": {
+                        "text": "<think>Inspect the weather.</think><tool_call>{\"name\":\"get_",
                         "output_ids": [101],
                         "meta_info": {
                             "finish_reason": null,
@@ -432,6 +534,7 @@ mod tests {
             Annotated::from_data(LLMEngineOutput {
                 engine_data: Some(serde_json::json!({
                     "sglang_response": {
+                        "text": "weather\",\"arguments\":{\"city\":\"SF\"}}</tool_call>",
                         "output_ids": [102],
                         "meta_info": {
                             "finish_reason": {"type": "stop", "matched": "END"},
@@ -446,7 +549,10 @@ mod tests {
         ]));
 
         let responses = SglangRequestTrace(SglangRequestTraceState::Active(Box::new(
-            ActiveSglangRequestTrace { request_end: state },
+            ActiveSglangRequestTrace {
+                request_end: state,
+                tool_call_parser: Some("qwen25".to_string()),
+            },
         )))
         .wrap(stream, "req-sglang".to_string())
         .collect::<Vec<_>>()
@@ -475,13 +581,21 @@ mod tests {
         assert!(request.ttft_ms.is_some());
         assert!(request.total_time_ms.is_some());
         let finish = request.finish_reason_metadata.expect("finish metadata");
-        assert_eq!(finish.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(finish.finish_reason, Some(FinishReason::ToolCalls));
         assert_eq!(finish.backend_finish_reason.as_deref(), Some("stop"));
         assert_eq!(
             finish.stop_reason,
             Some(StopReason::String("END".to_string()))
         );
-        assert!(finish.tool_calls.is_empty());
+        assert_eq!(finish.tool_calls.len(), 1);
+        assert!(finish.tool_calls[0].id.is_some());
+        assert_eq!(finish.tool_calls[0].name.as_deref(), Some("get_weather"));
+        assert!(
+            serde_json::to_value(&finish.tool_calls[0])
+                .unwrap()
+                .get("arguments")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -516,7 +630,10 @@ mod tests {
             drop_osl: 1,
         });
         let mut wrapped = SglangRequestTrace(SglangRequestTraceState::Active(Box::new(
-            ActiveSglangRequestTrace { request_end: state },
+            ActiveSglangRequestTrace {
+                request_end: state,
+                tool_call_parser: None,
+            },
         )))
         .wrap(stream, "req-drop-order".to_string());
 
