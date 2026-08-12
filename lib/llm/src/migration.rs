@@ -404,8 +404,7 @@ where
     }
 
     async fn new_stream(&mut self, mut retry_reason: RetryReason) -> Result<()> {
-        let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
-        loop {
+        let response_stream = loop {
             match retry_reason {
                 RetryReason::Initial => {}
                 RetryReason::Migration if self.retries_left > 0 => {
@@ -446,8 +445,8 @@ where
                     .build()
                     .into());
             }
-            response_stream = Some(self.next_generate.generate(request).await);
-            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err() {
+            let response_stream = self.next_generate.generate(request).await;
+            if let Some(err) = response_stream.as_ref().err() {
                 if is_worker_draining_for_request(&self.request, err.as_ref())
                     && self.worker_draining_reselections_left > 0
                 {
@@ -464,15 +463,14 @@ where
                     }
                 }
             }
-            break;
-        }
+            break response_stream;
+        };
         match response_stream {
-            Some(Ok(next_stream)) => {
+            Ok(next_stream) => {
                 self.next_stream = Some(next_stream);
                 Ok(())
             }
-            Some(Err(err)) => Err(err), // should propagate original error if any
-            None => Err(Error::msg("Request stream was not created")),
+            Err(err) => Err(err), // should propagate original error if any
         }
     }
 
