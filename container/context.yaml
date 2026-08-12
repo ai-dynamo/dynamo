@@ -88,7 +88,7 @@ vllm:
     runtime_image_tag: v0.27.1
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
   flashinf_ref: v0.6.16.post3
-  vllm_omni_ref: "v0.26.0rc1"
+  vllm_omni_ref: "v0.27.0rc1"
   # vLLM 0.27.1 lacks the Transformers 5.15 heterogeneous Gemma 4 config
   # support that landed upstream after the release. Remove this pin when the
   # vLLM base images include https://github.com/vllm-project/vllm/pull/49797.
