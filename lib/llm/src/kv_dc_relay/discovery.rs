@@ -202,6 +202,33 @@ impl PartialEq for StoredModelCard {
     }
 }
 
+impl StoredModelCard {
+    fn update_taints(&mut self, taints: Vec<String>) -> bool {
+        let normalized = taints.iter().cloned().collect();
+        if self.card.runtime_config.taints == normalized {
+            return false;
+        }
+        self.card.runtime_config.taints = normalized;
+
+        if let Some(runtime_config) = self
+            .serialized
+            .get_mut("runtime_config")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            runtime_config.insert(
+                "taints".to_string(),
+                serde_json::Value::Array(
+                    taints.into_iter().map(serde_json::Value::String).collect(),
+                ),
+            );
+        } else {
+            self.serialized = serde_json::to_value(&self.card)
+                .expect("a deserialized model deployment card must remain serializable");
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct BindingIdentity {
     model: CanonicalModelId,
@@ -372,6 +399,19 @@ impl MembershipState {
                     return true;
                 }
                 false
+            }
+            DiscoveryEvent::ModelTaintsUpdated(update) => {
+                if !filter.matches(&endpoint_id(&update.id)) {
+                    return false;
+                }
+                let Some(card) = self.cards.get_mut(&update.id) else {
+                    tracing::warn!(
+                        instance_id = update.id.instance_id,
+                        "Ignoring taint update for an unknown cross-DC model card"
+                    );
+                    return false;
+                };
+                card.update_taints(update.taints)
             }
             DiscoveryEvent::Removed(DiscoveryInstanceId::Model(id)) => {
                 self.cards.remove(&id).is_some()
@@ -902,6 +942,7 @@ mod tests {
     use super::*;
     use crate::model_card::LoraInfo;
     use crate::worker_type::WorkerType;
+    use dynamo_runtime::discovery::ModelTaintsUpdate;
 
     fn card(name: &str, artifact: &str, block_size: u32) -> ModelDeploymentCard {
         let mut card = ModelDeploymentCard::with_name_only(name);
@@ -1085,6 +1126,52 @@ mod tests {
         endpoint: &EndpointId,
     ) -> &'a EndpointMembership {
         &view.endpoints[endpoint]
+    }
+
+    #[test]
+    fn scoped_taint_update_reprojects_known_card_without_synthesizing_unknown_worker() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        let mut base = card("llama", "meta/llama", 64);
+        base.runtime_config.taints = HashSet::from(["old".to_string()]);
+        let base_instance = instance("generate", 1, None, base);
+        let DiscoveryInstanceId::Model(id) = base_instance.id() else {
+            unreachable!()
+        };
+        assert!(state.apply(DiscoveryEvent::Added(base_instance), &filter));
+
+        assert!(state.apply(
+            DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id: id.clone(),
+                taints: vec!["blue".to_string(), "gpu".to_string()],
+            }),
+            &filter,
+        ));
+        let view = state.view(&filter);
+        let membership = membership_for_endpoint(&view, &EndpointId::from("prod.backend.generate"));
+        assert_eq!(
+            membership.runtime_configs.get(&1).unwrap().taints,
+            HashSet::from(["blue".to_string(), "gpu".to_string()])
+        );
+
+        assert!(!state.apply(
+            DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id: id.clone(),
+                taints: vec!["blue".to_string(), "gpu".to_string()],
+            }),
+            &filter,
+        ));
+        assert!(!state.apply(
+            DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id: ModelCardInstanceId {
+                    instance_id: 99,
+                    ..id
+                },
+                taints: vec!["unknown".to_string()],
+            }),
+            &filter,
+        ));
+        assert_eq!(state.cards.len(), 1);
     }
 
     #[test]

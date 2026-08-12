@@ -34,7 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
@@ -51,7 +51,7 @@ const (
 
 type Reconciler interface {
 	client.Client
-	GetRecorder() record.EventRecorder
+	GetRecorder() events.EventRecorder
 }
 
 // ResourceGenerator is a function that generates a resource.
@@ -95,7 +95,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 	err = r.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}, oldResource)
 	oldResourceIsNotFound := errors.IsNotFound(err)
 	if err != nil && !oldResourceIsNotFound {
-		r.GetRecorder().Eventf(resource, corev1.EventTypeWarning, fmt.Sprintf("Get%s", resourceType), "Failed to get %s %s: %s", resourceType, resourceNamespace, err)
+		r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, fmt.Sprintf("Get%s", resourceType), "Get", "Failed to get %s %s: %s", resourceType, resourceNamespace, err)
 		logs.Error(err, "Failed to get resource.")
 		return
 	}
@@ -114,7 +114,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			err = ctrl.SetControllerReference(parentResource, resource, r.Scheme())
 			if err != nil {
 				logs.Error(err, "Failed to set controller reference.")
-				r.GetRecorder().Eventf(resource, corev1.EventTypeWarning, "SetControllerReference", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
+				r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, "SetControllerReference", "Update", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
 		} else {
@@ -125,22 +125,22 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		hash, err = GetSpecHash(resource)
 		if err != nil {
 			logs.Error(err, "Failed to get spec hash.")
-			r.GetRecorder().Eventf(resource, corev1.EventTypeWarning, "GetSpecHash", "Failed to get spec hash for %s %s: %s", resourceType, resourceNamespace, err)
+			r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, "GetSpecHash", "Get", "Failed to get spec hash for %s %s: %s", resourceType, resourceNamespace, err)
 			return
 		}
 
 		// On create, set generation to 1 (new resources start at generation 1)
 		updateAnnotations(resource, hash, 1)
 
-		r.GetRecorder().Eventf(resource, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Creating a new %s %s", resourceType, resourceNamespace)
+		r.GetRecorder().Eventf(resource, nil, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Creating a new %s %s", resourceType, resourceNamespace)
 		err = r.Create(ctx, resource)
 		if err != nil {
 			logs.Error(err, "Failed to create Resource.")
-			r.GetRecorder().Eventf(resource, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
+			r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Create", "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
 			return
 		}
 		logs.Info(fmt.Sprintf("%s created.", resourceType))
-		r.GetRecorder().Eventf(resource, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Created %s %s", resourceType, resourceNamespace)
+		r.GetRecorder().Eventf(resource, nil, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Created %s %s", resourceType, resourceNamespace)
 		modified = true
 		res = resource
 	} else {
@@ -150,11 +150,11 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			err = r.Delete(ctx, oldResource)
 			if err != nil {
 				logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
-				r.GetRecorder().Eventf(oldResource, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
+				r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Delete", "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
 			logs.Info(fmt.Sprintf("%s deleted.", resourceType))
-			r.GetRecorder().Eventf(oldResource, corev1.EventTypeNormal, fmt.Sprintf("Delete%s", resourceType), "Deleted %s %s", resourceType, resourceNamespace)
+			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeNormal, fmt.Sprintf("Delete%s", resourceType), "Delete", "Deleted %s %s", resourceType, resourceNamespace)
 			modified = true
 			return
 		}
@@ -163,13 +163,13 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		var changeResult SpecChangeResult
 		changeResult, err = GetSpecChangeResult(oldResource, resource)
 		if err != nil {
-			r.GetRecorder().Eventf(resource, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
+			r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Update", "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
 			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
 		}
 
 		if !changeResult.NeedsUpdate {
 			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
-			r.GetRecorder().Eventf(oldResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Skipping update %s %s", resourceType, resourceNamespace)
+			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Skipping update %s %s", resourceType, resourceNamespace)
 			res = oldResource
 			return
 		}
@@ -194,7 +194,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			err = CopySpec(resource, oldResource)
 			if err != nil {
 				logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
-				r.GetRecorder().Eventf(oldResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
+				r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Update", "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
 		} else {
@@ -206,11 +206,11 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		err = r.Update(ctx, oldResource)
 		if err != nil {
 			logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
-			r.GetRecorder().Eventf(oldResource, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
+			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Update", "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
 			return
 		}
 		logs.Info(fmt.Sprintf("%s updated.", resourceType))
-		r.GetRecorder().Eventf(oldResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
+		r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Updated %s %s", resourceType, resourceNamespace)
 		modified = true
 		res = oldResource
 	}

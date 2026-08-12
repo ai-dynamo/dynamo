@@ -67,7 +67,7 @@ The router selects the worker with the lowest cost. When `router_temperature` is
 
 Before scoring, the router filters candidates by request allow-lists, exact pins, DP-rank bounds, required taints, and busy-threshold overload state. For those hard eligibility rules, see [Router Filtering](worker-filtering.md).
 
-To replace only the scoring and picking stage with statically linked Rust code, see [Custom Worker Selection](../../../advanced-customizations/custom-worker-selection.mdx).
+To replace only the scoring and picking stage with statically linked Rust code, see [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
 
 When requests wait in policy-class queues, weighted
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the
