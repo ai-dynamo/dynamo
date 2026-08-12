@@ -139,7 +139,7 @@ targets:
   recommended: false
   hardware:
     gpu: GB200
-    count: 32
+    count: 48
   runtime:
     framework: sglang
   topology: disaggregated
