@@ -777,6 +777,11 @@ pub mod kv_publisher {
 
     /// Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
     pub const ZMQ_SUSPICIOUS_EVENTS_TOTAL: &str = "kv_publisher_zmq_suspicious_events_total";
+
+    /// Total lower-tier chunk-removal normalization outcomes, labeled by outcome
+    /// (tail_expanded, passthrough, duplicate_store_suppressed)
+    pub const LOWER_TIER_REMOVAL_NORMALIZE_TOTAL: &str =
+        "kv_publisher_lower_tier_removal_normalize_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.

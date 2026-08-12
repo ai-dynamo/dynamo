@@ -98,6 +98,8 @@ pub(crate) struct KvPublisherMetrics {
     pub zmq_conversion_issues_total: IntCounterVec,
     /// Total number of suspicious-but-forwarded ZMQ KV events.
     pub zmq_suspicious_events_total: IntCounterVec,
+    /// Lower-tier chunk-removal normalization outcomes, by outcome.
+    pub lower_tier_removal_normalize_total: IntCounterVec,
 }
 
 static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
@@ -150,6 +152,14 @@ impl KvPublisherMetrics {
                         &[],
                     )
                     .expect("failed to create kv_publisher_zmq_suspicious_events_total");
+                let lower_tier_removal_normalize_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::LOWER_TIER_REMOVAL_NORMALIZE_TOTAL,
+                        "Total lower-tier chunk-removal normalization outcomes",
+                        &["outcome"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_lower_tier_removal_normalize_total");
 
                 Arc::new(Self {
                     engines_dropped_events_total,
@@ -157,6 +167,7 @@ impl KvPublisherMetrics {
                     zmq_filtered_events_total,
                     zmq_conversion_issues_total,
                     zmq_suspicious_events_total,
+                    lower_tier_removal_normalize_total,
                 })
             })
             .clone()
@@ -165,6 +176,15 @@ impl KvPublisherMetrics {
     /// Increment the engines dropped events counter by the given amount.
     pub fn increment_engines_dropped_events(&self, count: u64) {
         self.engines_dropped_events_total.inc_by(count);
+    }
+
+    /// Add to a lower-tier removal normalization outcome counter.
+    pub fn add_lower_tier_normalize(&self, outcome: &'static str, count: u64) {
+        if count > 0 {
+            self.lower_tier_removal_normalize_total
+                .with_label_values(&[outcome])
+                .inc_by(count);
+        }
     }
 
     pub fn increment_zmq_event(&self, stage: &'static str, event_type: &'static str) {

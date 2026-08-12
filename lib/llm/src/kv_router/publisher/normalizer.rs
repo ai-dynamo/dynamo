@@ -25,6 +25,8 @@ use std::collections::{HashMap, HashSet};
 
 use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, KvCacheStoreData, StorageTier};
 
+use crate::kv_router::metrics::kv_publisher_metrics;
+
 /// Per-worker reconstruction of block-wise removals from chunk-tail keys.
 ///
 /// Partitioned by `(dp_rank, storage_tier)` to mirror [`super::dedup::EventDedupFilter`]:
@@ -58,6 +60,9 @@ impl ChunkNormalizer {
         };
         let members = self.per_key.entry((dp_rank, tier)).or_default();
         if members.contains_key(&tail) {
+            if let Some(m) = kv_publisher_metrics() {
+                m.add_lower_tier_normalize("duplicate_store_suppressed", 1);
+            }
             return false;
         }
         members.insert(tail, data.blocks.iter().map(|b| b.block_hash).collect());
@@ -77,18 +82,31 @@ impl ChunkNormalizer {
         hashes: Vec<ExternalSequenceBlockHash>,
     ) -> Vec<ExternalSequenceBlockHash> {
         let mut out: HashSet<ExternalSequenceBlockHash> = HashSet::default();
+        let mut expanded: u64 = 0;
+        let mut passthrough: u64 = 0;
         match self.per_key.get_mut(&(dp_rank, tier)) {
             Some(map) => {
                 for h in hashes {
                     match map.remove(&h) {
-                        Some(members) => out.extend(members),
+                        Some(members) => {
+                            expanded += 1;
+                            out.extend(members);
+                        }
                         None => {
+                            passthrough += 1;
                             out.insert(h);
                         }
                     }
                 }
             }
-            None => out.extend(hashes),
+            None => {
+                passthrough = hashes.len() as u64;
+                out.extend(hashes);
+            }
+        }
+        if let Some(m) = kv_publisher_metrics() {
+            m.add_lower_tier_normalize("tail_expanded", expanded);
+            m.add_lower_tier_normalize("passthrough", passthrough);
         }
         out.into_iter().collect()
     }
