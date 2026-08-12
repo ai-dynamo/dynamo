@@ -14,6 +14,7 @@ THINKING_CONTROL_KEYS = (
     "enable_thinking",
     "thinking_mode",
     "reasoning_effort",
+    "thinking_effort",
 )
 
 
