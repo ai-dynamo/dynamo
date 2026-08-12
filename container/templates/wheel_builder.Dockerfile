@@ -17,27 +17,25 @@ FROM --platform=linux/arm64 quay.io/pypa/manylinux_2_28_aarch64 AS manylinux_arm
 {% endif %}
 
 {% if device == "cuda" and make_efa == true %}
-# EFA images load libfabric from the /opt/amazon/efa prefix that the AWS EFA
-# Installer lays down in templates/aws.Dockerfile, so NIXL's LIBFABRIC plugin has
-# to be built against that same prefix. The installer is Debian-packaged, so
-# materialize it in an Ubuntu stage and copy the prefix into the AlmaLinux wheel
-# builder. Same installer invocation as templates/aws.Dockerfile.
-FROM ubuntu:24.04 AS efa_sdk
+# EFA images load libfabric from /opt/amazon/efa, installed by the AWS EFA
+# Installer in templates/aws.Dockerfile. NIXL's LIBFABRIC plugin has to link
+# against that same prefix, but the AlmaLinux manylinux builder cannot run the
+# Debian-packaged installer. Stage it on the framework's own runtime image, so
+# the base and the installer invocation both match the aws stage, then copy the
+# prefix across. The trailing ldconfig the aws stage runs is omitted: only
+# /opt/amazon/efa is copied out of here, not /etc/ld.so.cache.
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS efa_sdk
 
 ARG EFA_VERSION
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl && \
     curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
         https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
     tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
     cd aws-efa-installer && \
+    apt-get update && \
     ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
-    cd .. && rm -rf aws-efa-installer* && \
-    rm -rf /var/lib/apt/lists/*
+    cd .. && rm -rf aws-efa-installer*
 {% endif %}
 
 ##################################
@@ -221,7 +219,7 @@ ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
 COPY --from=efa_sdk /opt/amazon/efa /opt/amazon/efa
 # Register the prefix the way the from-source build below registers
 # /usr/local/libfabric, so loader and pkg-config lookups behave the same.
-RUN printf '%s\n' /opt/amazon/efa/lib > /etc/ld.so.conf.d/000_efa.conf && ldconfig
+RUN printf '%s\n' /opt/amazon/efa/lib > /etc/ld.so.conf.d/efa.conf && ldconfig
 ENV PKG_CONFIG_PATH="/opt/amazon/efa/lib/pkgconfig:${PKG_CONFIG_PATH}"
 {% endif %}
 {% endif %}

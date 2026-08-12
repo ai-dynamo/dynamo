@@ -14,7 +14,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
-#   efa      -> all framework EFA runtime image builds (aws.Dockerfile, wheel_builder.Dockerfile)
+#   efa      -> all framework EFA runtime image builds (changes to aws.Dockerfile or wheel_builder.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
