@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Union
+from typing import Mapping, Optional, Union
 
 from dynamo.experimental.workflow.builder import WorkflowBuilder
 from dynamo.experimental.workflow.ir import WorkflowIR
@@ -54,15 +54,19 @@ class DeploymentSpec:
 
 def compile_workflow(
     workflow: Union[WorkflowBuilder, WorkflowIR],
-    deployment: DeploymentSpec,
+    deployment: Optional[DeploymentSpec] = None,
 ) -> ExecutionPlan:
-    """Compile one logical workflow using explicit placement bindings."""
+    """Compile one logical workflow, defaulting every stage to local placement."""
 
     workflow_ir = (
         workflow.build() if isinstance(workflow, WorkflowBuilder) else workflow
     )
     if not isinstance(workflow_ir, WorkflowIR):
         raise TypeError("workflow must be a Workflow or WorkflowIR")
+    if deployment is None:
+        deployment = DeploymentSpec.local(
+            **{stage.id: stage.id for stage in workflow_ir.stages}
+        )
     if not isinstance(deployment, DeploymentSpec):
         raise TypeError("deployment must use DeploymentSpec")
 
