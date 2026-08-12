@@ -1288,11 +1288,21 @@ impl Endpoint {
         // rendering the pull path unreachable. Anything else stays on pull.
         let use_push_egress = push_egress::handler_supports_push(&generator);
 
-        // Both outcomes of the branch come out together: the ingress, and the
-        // engine to register in the local (in-process) registry. Only the pull
-        // path has one — the push engine hands responses to a per-request
-        // sender rather than returning them from the generator, which the
-        // in-process `SingleIn`/`ManyOut` registry does not model.
+        // Both outcomes of the branch come out together: the ingress that
+        // serves network requests, and the engine registered in the local
+        // (in-process) registry.
+        //
+        // Push endpoints get BOTH. The push engine serves the network, but the
+        // local registry — used by in-process callers and, critically, by the
+        // canary health check (`lib/runtime/src/health_check.rs`) — needs a
+        // `SingleIn`/`ManyOut` engine, which the per-request sender does not
+        // model. A pull engine over the SAME handler supplies one: called
+        // without a `response_sender`, `@push_egress_capable` returns the
+        // handler's own async generator untouched, so the local path is
+        // ordinary pull egress. Registering it is what keeps the endpoint in
+        // `SystemHealth::health_check_targets`; drop it and health status falls
+        // through to the process-wide `system_health`, which the TRT-LLM worker
+        // never sets Ready — a permanent 503 on default settings.
         //
         // Both outcomes are logged. Push mode is chosen by signature
         // inspection, which can silently answer "no"; without the pull line the
@@ -1304,6 +1314,11 @@ impl Endpoint {
             Option<Arc<engine::PythonAsyncEngine>>,
         ) = if use_push_egress {
             tracing::info!(endpoint = %endpoint_name, "serving endpoint with push egress");
+            // Same handler object, two engines: a refcount bump, not a copy.
+            let local = Arc::new(engine::PythonAsyncEngine::new(
+                generator.clone_ref(py),
+                self.event_loop.clone(),
+            )?);
             let ingress = PythonPushEgressIngress::for_engine_with_adapter(
                 Arc::new(push_egress::PythonPushEngine::new(
                     generator,
@@ -1312,7 +1327,7 @@ impl Endpoint {
                 python_payload::PythonIngressPayloadAdapter,
             )
             .map_err(to_pyerr)?;
-            (ingress, None)
+            (ingress, Some(local))
         } else {
             tracing::debug!(endpoint = %endpoint_name, "serving endpoint with pull egress");
             let engine = Arc::new(engine::PythonAsyncEngine::new(
@@ -1354,19 +1369,10 @@ impl Endpoint {
             .metrics_labels(metrics_labels)
             .handler(ingress);
 
-        // Canary health checks require a local engine registered in the DRT
-        // endpoint registry, which only the pull path creates. Skip the payload
-        // on push endpoints; warn once so the gap is visible rather than silent.
-        if use_push_egress {
-            if health_payload_json.is_some() {
-                tracing::warn!(
-                    endpoint = %endpoint_name,
-                    "health_check_payload ignored for push-egress endpoint: \
-                     canary health checks require a local engine and are not \
-                     supported on the push path"
-                );
-            }
-        } else if let Some(payload) = health_payload_json {
+        // Applies to both paths. `start_with_registration` bails if a payload is
+        // set while canary is enabled and no local engine is registered; the
+        // push branch above registers one precisely so this stays valid.
+        if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
 

@@ -523,19 +523,29 @@ class TestFallbackPath:
         collected = run(_test())
         assert collected == [1, 2, 3]
 
-    def test_no_sender_warns_exactly_once(self, caplog):
-        """Warning fires on the first call and never again."""
+    def test_no_sender_logs_exactly_once(self, caplog):
+        """The notice fires on the first call and never again.
+
+        It is INFO, not WARNING: the pull arm is reached in normal operation by
+        in-process callers and the canary health check, which go through the
+        pull engine registered in the local endpoint registry. Logging it at
+        warning level made every canary-enabled deployment report a false alarm.
+        """
         decorated = push_egress_capable(_gen_one_token)
         dummy = object.__new__(object)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             decorated(dummy, request={}, context=None)
             decorated(dummy, request={}, context=None)
 
-        warnings = [r for r in caplog.records if "response_sender" in r.message]
+        notices = [r for r in caplog.records if "response_sender" in r.message]
         assert (
-            len(warnings) == 1
-        ), f"expected exactly 1 warning about missing sender, got {len(warnings)}"
+            len(notices) == 1
+        ), f"expected exactly 1 notice about missing sender, got {len(notices)}"
+        assert notices[0].levelno == logging.INFO, (
+            "the pull arm is a normal path, not a fault; logging it at "
+            f"{notices[0].levelname} cries wolf on every health check"
+        )
 
     def test_warned_no_sender_global_is_module_mutable_state(self):
         """_warned_no_sender is module-global mutable state.

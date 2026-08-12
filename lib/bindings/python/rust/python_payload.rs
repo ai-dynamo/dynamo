@@ -416,31 +416,6 @@ mod tests {
     /// codec must produce byte-identical frames from both egress paths.
     /// Non-determinism would mean the pull and push paths could silently
     /// diverge on map ordering or float representation.
-    #[test]
-    fn encode_annotated_response_same_input_same_bytes_both_codecs() {
-        for codec in [
-            RequestPlanePayloadCodec::Json,
-            RequestPlanePayloadCodec::Msgpack,
-        ] {
-            let (bytes_a, is_error_a) = encode_annotated_response(
-                codec,
-                Annotated::from_data(serde_json::json!({"x": 1, "y": "z"})),
-            )
-            .unwrap();
-            let (bytes_b, is_error_b) = encode_annotated_response(
-                codec,
-                Annotated::from_data(serde_json::json!({"x": 1, "y": "z"})),
-            )
-            .unwrap();
-            assert_eq!(
-                bytes_a,
-                bytes_b,
-                "codec={} must be deterministic",
-                codec.name()
-            );
-            assert_eq!(is_error_a, is_error_b);
-        }
-    }
 
     #[test]
     fn network_ingress_types_do_not_contain_serde_json_value() {

@@ -91,13 +91,17 @@ def push_egress_capable(func):
     """Let an async-generator ``generate`` be driven by push OR by pull.
 
     Turns ``async def generate(self, request, context)`` into a plain ``def``
-    returning whichever object the active Rust engine expects: an async
-    generator draining into the sender when one is supplied (push, what a
-    current binding always does), or the handler's own async generator
-    untouched when none is (pull, reached only against a binding predating this
-    path). The choice is made purely on whether a sender arrived -- Rust decides
-    once at ``serve_endpoint`` time, and second-guessing it here could only
-    produce a shape mismatch.
+    returning whichever object the calling Rust engine expects: an async
+    generator draining into the sender when one is supplied (push), or the
+    handler's own async generator untouched when none is (pull). The choice is
+    made purely on whether a sender arrived -- Rust decides per call, and
+    second-guessing it here could only produce a shape mismatch.
+
+    Both arms are live in normal operation. Network requests arrive through the
+    push ingress; in-process callers and the canary health check go through the
+    pull engine registered in the local endpoint registry, which passes no
+    sender. That is why the pull arm must keep working rather than being
+    treated as a legacy fallback.
 
     Must stay the OUTERMOST decorator (invariant 2 in the module docstring).
     Any decorator that inspects what it wraps must sit *inside*, where it still
@@ -114,12 +118,15 @@ def push_egress_capable(func):
         if response_sender is None:
             if not _warned_no_sender:
                 _warned_no_sender = True
-                logger.warning(
-                    "the Rust bridge did not provide a response_sender for %s; "
-                    "falling back to the generator (pull) path. Expect the "
-                    "decode-worker GIL cost this decorator exists to remove -- "
-                    "the dynamo._core binding is probably older than the "
-                    "push-egress path.",
+                # Expected for in-process and canary calls, which come through
+                # the locally registered pull engine. Only a problem if it is
+                # every request -- that would mean the network ingress is on
+                # pull too, i.e. the signature probe in `serve_endpoint` found
+                # no `response_sender`, and the GIL cost this decorator exists
+                # to remove is still being paid.
+                logger.info(
+                    "no response_sender for %s; serving this call on the pull "
+                    "path (expected for in-process and health-check calls)",
                     getattr(func, "__qualname__", func),
                 )
             return stream
