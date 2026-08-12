@@ -34,11 +34,11 @@ pub use dynamo_llm::model_type::ModelInput;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
     FinishReason, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY,
-    KV_HINT_MIGRATE_CAPABILITY_KEY, KvEventPublisher, KvEventSource, KvHints, KvTransferPlan,
-    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs, Metrics,
-    MetricsBindings, MetricsCtx, MigrateHint, MultimodalData, OnPublisherReady,
-    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, RawEngine,
-    SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs, chunk, usage,
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvEventPublisher, KvEventSource, KvHints, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs, Metrics, MetricsBindings,
+    MetricsCtx, MultimodalData, OnPublisherReady, OnSnapshotPublisherReady, OutputOptions,
+    PrefillResult, PreprocessedRequest, RawEngine, SamplingOptions, StopConditions, StopReason,
+    TopLogprob, TopLogprobs, TransferHint, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

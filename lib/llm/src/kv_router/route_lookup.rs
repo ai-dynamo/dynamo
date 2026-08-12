@@ -18,7 +18,7 @@ use super::{Indexer, indexer::TieredMatchDetails, metrics};
 pub(super) struct TieredLookupOptions<'a> {
     pub(super) cache_namespace: Option<&'a str>,
     pub(super) retain_block_hashes: bool,
-    pub(super) retain_router_hint_chain: bool,
+    pub(super) retain_kv_transfer_chain: bool,
 }
 
 pub(super) struct TieredLookupResult {
@@ -52,15 +52,15 @@ pub(super) async fn query_tiered_matches(
     block_hashes: Vec<LocalBlockHash>,
     options: TieredLookupOptions<'_>,
 ) -> Result<TieredLookupResult, KvRouterError> {
-    let retain_router_hint_chain =
-        options.retain_router_hint_chain && indexer.supports_router_hint_chain_retention();
-    if options.retain_router_hint_chain && !retain_router_hint_chain {
+    let retain_kv_transfer_chain =
+        options.retain_kv_transfer_chain && indexer.supports_kv_transfer_chain_retention();
+    if options.retain_kv_transfer_chain && !retain_kv_transfer_chain {
         tracing::warn!(
-            "router_hint chain retention is not supported by this indexer configuration; router hints will not be attached"
+            "KV transfer chain retention is not supported by this indexer configuration; KV transfer hints will not be attached"
         );
     }
     let lower_tier_options = LowerTierQueryOptions {
-        retain_router_hint_chain,
+        retain_kv_transfer_chain,
     };
     if options.retain_block_hashes {
         let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) =

@@ -82,7 +82,7 @@ impl Indexer {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
 
-    pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
+    pub(crate) fn supports_kv_transfer_chain_retention(&self) -> bool {
         matches!(
             self,
             Self::KvIndexer {
@@ -505,11 +505,11 @@ mod tests {
     }
 
     #[test]
-    fn router_hint_chain_retention_requires_event_driven_primary() {
-        assert!(make_test_indexer().supports_router_hint_chain_retention());
-        assert!(make_test_concurrent_indexer().supports_router_hint_chain_retention());
-        assert!(!make_test_concurrent_approx_indexer().supports_router_hint_chain_retention());
-        assert!(!Indexer::None.supports_router_hint_chain_retention());
+    fn kv_transfer_chain_retention_requires_event_driven_primary() {
+        assert!(make_test_indexer().supports_kv_transfer_chain_retention());
+        assert!(make_test_concurrent_indexer().supports_kv_transfer_chain_retention());
+        assert!(!make_test_concurrent_approx_indexer().supports_kv_transfer_chain_retention());
+        assert!(!Indexer::None.supports_kv_transfer_chain_retention());
     }
 
     async fn flush_indexer(indexer: &Indexer) {

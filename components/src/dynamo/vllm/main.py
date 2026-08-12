@@ -47,7 +47,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.kv_hints import enable_kv_migrate_hint_support
+from dynamo.vllm.kv_hints import enable_kv_transfer_hint_support
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -686,7 +686,7 @@ async def register_vllm_model(
     runtime_config = ModelRuntimeConfig()
     dp_range = get_dp_range_for_worker(vllm_config)
     apply_data_parallel_runtime_config(runtime_config, dp_range)
-    enable_kv_migrate_hint_support(
+    enable_kv_transfer_hint_support(
         runtime_config, config.engine_args, worker_type, dp_range
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
