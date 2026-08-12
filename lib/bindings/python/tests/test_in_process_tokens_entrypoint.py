@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,7 @@ async def test_in_process_tokens_requires_typed_python_engine() -> None:
     EntrypointArgs(
         EngineType.InProcessTokens,
         model_path="org/model",
+        custom_template_path=Path("templates/vision.jinja"),
         in_process_token_engine=engine,
     )
 

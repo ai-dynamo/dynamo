@@ -3106,6 +3106,7 @@ class EntrypointArgs:
         chat_engine_factory: Optional[Callable] = None,
         in_process_token_engine: Optional[PythonAsyncEngine] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        custom_template_path: Optional[str] = None,
         *,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
@@ -3143,6 +3144,7 @@ class EntrypointArgs:
             chat_engine_factory: Optional Python chat completions engine factory callback
             in_process_token_engine: Optional typed token engine hosted by this frontend process
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            custom_template_path: Optional path to a custom Jinja chat template
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
