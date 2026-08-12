@@ -3235,6 +3235,44 @@ async fn response_format_gemma4_bare_json_stays_content() {
     assert_eq!(content, json);
 }
 
+#[tokio::test]
+async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
+    let preprocessor = build_preprocessor(Some("gemma4"), None);
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "dummy-gemma4-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": "answer plainly"
+            }
+        ],
+        "stream": true
+    }))
+    .unwrap();
+
+    let text = "<|channel>thought\nshould stay plain<channel|>final answer";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(text), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
+    );
+    assert_eq!(content, text);
+}
+
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
 /// preserve native reasoning before guided JSON. Structured bare JSON should
 /// therefore use the legacy guided-output bypass and remain assistant content.

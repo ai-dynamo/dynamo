@@ -4290,11 +4290,9 @@ impl OpenAIPreprocessor {
     ///   only when no content was generated (non-streaming, in the aggregator).
     /// For DeepSeek: follows the same effective mode used by the prompt renderer.
     /// For Mistral: disabled unless `reasoning_effort` is present and not `none`.
-    /// For gemma4: disabled when chat_template_args contains "enable_thinking": false.
-    ///   Gemma 4's chat template injects `<|think|>` only when `enable_thinking is
-    ///   defined and enable_thinking` (truthy), so when callers explicitly set the
-    ///   flag false the model emits no `<|channel>` markers and the parser would
-    ///   only ever fall through.
+    /// For Gemma 4: reasoning is opt-in and disabled unless chat_template_args
+    ///   explicitly enables thinking. Gemma 4's chat template injects reasoning
+    ///   markers only when enable_thinking=true.
     /// For MiniMax M3: disabled when chat_template_args contains
     ///   "thinking_mode": "disabled", matching SGLang's MiniMax M3 request
     ///   convention.
@@ -4332,11 +4330,7 @@ impl OpenAIPreprocessor {
                 | "minimax_m2",
             ) => !Self::deepseek_renderer_reasoning_enabled(chat_template_args, true),
             Some("gemma4") | Some("gemma-4") => {
-                if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args)
-                {
-                    return !enabled;
-                }
-                false
+                dynamo_renderer::thinking_bool_from_args(chat_template_args) != Some(true)
             }
             Some("mistral") => !Self::mistral_reasoning_enabled(chat_template_args),
             Some("minimax_m3") | Some("minimax-m3") => {
@@ -7797,14 +7791,20 @@ mod tests {
             (
                 Some("gemma4"),
                 None,
-                false,
-                "gemma4 + no args → enabled (parser still runs but is a no-op when no markers arrive)",
+                true,
+                "gemma4 + no args → disabled (reasoning is opt-in)",
             ),
             (
                 Some("gemma-4"),
                 Some(&enable_thinking_false),
                 true,
                 "gemma-4 (hyphen alias) + enable_thinking=false → disabled",
+            ),
+            (
+                Some("gemma-4"),
+                None,
+                true,
+                "gemma-4 (hyphen alias) + no args → disabled (reasoning is opt-in)",
             ),
             (Some("mistral"), None, true, "mistral + no args → disabled"),
             (
