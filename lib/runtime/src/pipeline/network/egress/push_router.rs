@@ -1584,9 +1584,12 @@ where
             Err(err) => {
                 if self.fault_detection_enabled {
                     if is_inhibited(err.as_ref()) {
-                        tracing::debug!(
-                            "Reporting instance {instance_id} down due to error: {err}"
-                        );
+                        // Quarantining a worker is a fault event, not routine
+                        // bookkeeping: at debug it is invisible in production,
+                        // so a pool silently shrinking to zero looks identical
+                        // to "no workers registered". Matches the warn! the
+                        // response-timeout quarantine below already uses.
+                        tracing::warn!("Reporting instance {instance_id} down due to error: {err}");
                         self.client.report_instance_down(instance_id);
                     } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
                         // Backpressure: worker said "my queue is full,
@@ -1615,7 +1618,7 @@ where
             if let Some(err) = res.err()
                 && is_inhibited(&err)
             {
-                tracing::debug!(
+                tracing::warn!(
                     "Reporting instance {instance_id} down due to migratable error: {err}"
                 );
                 client.report_instance_down(instance_id);
