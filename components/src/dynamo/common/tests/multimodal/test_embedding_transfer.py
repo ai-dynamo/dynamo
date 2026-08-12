@@ -6,19 +6,24 @@
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from random import randint
 
+import msgspec
 import pytest
 import torch
 
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     LocalEmbeddingSender,
+    MonolithicCounter,
     NixlReadEmbeddingReceiver,
     NixlReadEmbeddingSender,
+    NixlTransferRequest,
     NixlWriteEmbeddingReceiver,
     NixlWriteEmbeddingSender,
     RingBuffer,
+    TransferRequest,
 )
 
 # GPU tier is set per-class/per-test below (gpu_0 for local/ring buffer, gpu_1
@@ -132,6 +137,432 @@ class TestNixlWriteEmbeddingTransfer:
         receiver = NixlWriteEmbeddingReceiver()
 
         await benchmark(sender, receiver, from_cuda=True)
+
+
+class _FakeWriteReceiverAgent:
+    def __init__(self):
+        self.notifs = {"sender": []}
+        self.sent = []
+        self.handshake_sent = asyncio.Event()
+
+    def add_remote_agent(self, metadata):
+        return metadata
+
+    def send_notif(self, sender_agent_id, notif_msg):
+        self.sent.append((sender_agent_id, notif_msg))
+        decoded = msgspec.msgpack.decode(notif_msg)
+        if not (len(decoded) == 2 and decoded[0] == "cancel"):
+            self.handshake_sent.set()
+
+    def update_notifs(self):
+        return self.notifs
+
+
+class _FakeWriteSenderAgent:
+    def __init__(
+        self,
+        handshake,
+        *,
+        fail_descriptor=False,
+        fail_notifications=0,
+        fail_remote_agent_additions=0,
+    ):
+        if handshake is None:
+            self.notifications = []
+        elif isinstance(handshake, list):
+            self.notifications = list(handshake)
+        else:
+            self.notifications = [handshake]
+        self.fail_descriptor = fail_descriptor
+        self.fail_notifications = fail_notifications
+        self.fail_remote_agent_additions = fail_remote_agent_additions
+        self.remote_agent_add_calls = 0
+        self.sent = []
+        self.terminal_sent = asyncio.Event()
+        self.deregistered = []
+
+    def get_new_notifs(self):
+        if not self.notifications:
+            return {}
+        notifications, self.notifications = self.notifications, []
+        return {"receiver": notifications}
+
+    def queue_notification(self, notification):
+        self.notifications.append(notification)
+
+    def send_notif(self, remote_agent_id, notif_msg):
+        if self.fail_notifications:
+            self.fail_notifications -= 1
+            raise RuntimeError("notification failed")
+        self.sent.append((remote_agent_id, msgspec.msgpack.decode(notif_msg)))
+        self.terminal_sent.set()
+
+    def add_remote_agent(self, metadata):
+        self.remote_agent_add_calls += 1
+        if self.fail_remote_agent_additions:
+            self.fail_remote_agent_additions -= 1
+            raise RuntimeError("remote agent setup failed")
+        return metadata
+
+    def get_xfer_descs(self, *args, **kwargs):
+        if self.fail_descriptor:
+            raise RuntimeError("target descriptor failed")
+        return object()
+
+    def deregister_memory(self, descriptor):
+        self.deregistered.append(descriptor)
+
+
+def _write_handshake(tensor_id=41, write_done_id=7, metadata=b""):
+    return msgspec.msgpack.encode(
+        (tensor_id, (1234, 8, 0, "cpu"), write_done_id, metadata)
+    )
+
+
+def _write_sender_for_unit_test(agent):
+    sender = object.__new__(NixlWriteEmbeddingSender)
+    sender.nixl_agent = agent
+    sender.remote_agents = {"receiver": object()}
+    sender.transfer_tracker = {}
+    sender.transfer_created_at = {}
+    sender.transfer_failures = {}
+    sender.retired_transfer_ids = OrderedDict()
+    sender.retired_transfer_limit = 4
+    sender.pending_terminal_notifications = OrderedDict()
+    sender.responder_lease_expirations = {}
+    sender.pending_write_requests = OrderedDict()
+    sender.pending_write_retry_after = {}
+    sender.pending_write_retry_attempts = {}
+    sender.inflight_transfers = {}
+    sender._closing = False
+    sender.registered_descs = {}
+    sender.transfer_queue = asyncio.Queue()
+    sender.transfer_timeout = 60
+    return sender
+
+
+async def _run_sender_until_terminal(sender, agent, *, wake_sender=False):
+    if wake_sender:
+        sender.transfer_queue.put_nowait("task_indicator")
+    task = asyncio.create_task(sender._state_update())
+    try:
+        await asyncio.wait_for(agent.terminal_sent.wait(), timeout=1)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+def _write_receiver_for_unit_test(buffer_size=8):
+    receiver = object.__new__(NixlWriteEmbeddingReceiver)
+    receiver.ring_buffer = RingBuffer(buffer_size)
+    receiver.transfer_tensor = receiver.ring_buffer.buffer_tensor
+    receiver.nixl_agent = _FakeWriteReceiverAgent()
+    receiver.remote_agents = {"sender": object()}
+    receiver.id_counter = MonolithicCounter()
+    receiver.to_buffer_id = {}
+    receiver._quarantine_tasks = set()
+    return receiver
+
+
+def _write_request(*, shape, tensor_size, expires_at_unix=None):
+    return TransferRequest(
+        embeddings_shape=shape,
+        embedding_dtype_str="float16",
+        serialized_request=NixlTransferRequest(
+            sender_agent_id="sender",
+            agent_metadata=None,
+            tensor_id=41,
+            tensor_size=tensor_size,
+            expires_at_unix=expires_at_unix,
+        ).model_dump_json(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_cancel_after_handshake_quarantines_ring_slot():
+    receiver = _write_receiver_for_unit_test()
+    receive_task = asyncio.create_task(
+        receiver.receive_embeddings(_write_request(shape=[4], tensor_size=8))
+    )
+    await asyncio.wait_for(receiver.nixl_agent.handshake_sent.wait(), timeout=1)
+
+    receive_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await receive_task
+
+    # A remote WRITE may still target the advertised address, so the whole
+    # ring remains unavailable until the sender reports a terminal handle.
+    unavailable_id, unavailable = receiver.ring_buffer.get_buffer(8)
+    assert unavailable_id is None
+    assert unavailable is None
+
+    handshake = next(
+        msgspec.msgpack.decode(payload)
+        for _, payload in receiver.nixl_agent.sent
+        if len(msgspec.msgpack.decode(payload)) == 4
+    )
+    write_done_id = handshake[2]
+    receiver.nixl_agent.notifs["sender"].append(
+        msgspec.msgpack.encode(("terminal", write_done_id, "DONE"))
+    )
+    await asyncio.wait_for(asyncio.gather(*receiver._quarantine_tasks), timeout=1)
+
+    available_id, available = receiver.ring_buffer.get_buffer(8)
+    assert available_id is not None
+    assert available is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    ("shape", "tensor_size", "error"),
+    [
+        ([4], 7, "tensor_size does not match"),
+        ([2, -2], 8, "positive dimensions"),
+    ],
+)
+async def test_nixl_write_malformed_descriptor_preserves_ring_capacity(
+    shape, tensor_size, error
+):
+    receiver = _write_receiver_for_unit_test()
+
+    with pytest.raises(ValueError, match=error):
+        await receiver.receive_embeddings(
+            _write_request(shape=shape, tensor_size=tensor_size)
+        )
+
+    assert not receiver.ring_buffer.allocated_buffer_id_to_range
+    available_id, available = receiver.ring_buffer.get_buffer(8)
+    assert available_id is not None
+    assert available is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_expired_lease_never_allocates_ring_buffer():
+    receiver = _write_receiver_for_unit_test()
+
+    with pytest.raises(TimeoutError, match="lease expired"):
+        await receiver.receive_embeddings(
+            _write_request(
+                shape=[4],
+                tensor_size=8,
+                expires_at_unix=time.time() - 1,
+            )
+        )
+
+    assert not receiver.ring_buffer.allocated_buffer_id_to_range
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_late_handshake_for_retired_id_gets_terminal_error():
+    agent = _FakeWriteSenderAgent(_write_handshake())
+    sender = _write_sender_for_unit_test(agent)
+    sender.retired_transfer_ids[41] = time.perf_counter()
+
+    await _run_sender_until_terminal(sender, agent)
+
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_terminal_ack_retries_while_sender_is_idle():
+    agent = _FakeWriteSenderAgent(_write_handshake(), fail_notifications=2)
+    sender = _write_sender_for_unit_test(agent)
+    sender.retired_transfer_ids[41] = time.perf_counter()
+
+    await _run_sender_until_terminal(sender, agent)
+
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+    assert not sender.pending_terminal_notifications
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_descriptor_init_failure_gets_terminal_error():
+    agent = _FakeWriteSenderAgent(_write_handshake(), fail_descriptor=True)
+    sender = _write_sender_for_unit_test(agent)
+    source = torch.zeros(4, dtype=torch.float16)
+    transfer_future = asyncio.get_running_loop().create_future()
+    descriptor = object()
+    sender.transfer_tracker[41] = (source, object(), transfer_future)
+    sender.transfer_created_at[41] = time.perf_counter()
+    sender.registered_descs[(source.data_ptr(), source.get_device())] = [
+        descriptor,
+        1,
+    ]
+
+    await _run_sender_until_terminal(sender, agent, wake_sender=True)
+
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+    with pytest.raises(RuntimeError, match="target descriptor failed"):
+        await transfer_future
+    assert agent.deregistered == [descriptor]
+    assert 41 in sender.retired_transfer_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_shutdown_waits_for_late_handshake():
+    agent = _FakeWriteSenderAgent(None)
+    sender = _write_sender_for_unit_test(agent)
+    sender.transfer_timeout = 1
+    source = torch.zeros(4, dtype=torch.float16)
+    transfer_future = asyncio.get_running_loop().create_future()
+    descriptor = object()
+    sender.transfer_tracker[41] = (source, object(), transfer_future)
+    sender.transfer_created_at[41] = time.perf_counter()
+    sender.responder_lease_expirations[41] = time.time() + 1
+    sender.registered_descs[(source.data_ptr(), source.get_device())] = [
+        descriptor,
+        1,
+    ]
+    sender._state_update_task = asyncio.create_task(sender._state_update())
+
+    close_task = asyncio.create_task(sender.aclose())
+    await asyncio.sleep(0.03)
+    assert not close_task.done()
+    assert transfer_future.done()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await transfer_future
+
+    agent.queue_notification(_write_handshake())
+    await asyncio.wait_for(agent.terminal_sent.wait(), timeout=1)
+    await asyncio.wait_for(close_task, timeout=1)
+
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+    assert agent.deregistered == [descriptor]
+    assert sender._state_update_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_boundary_handshake_survives_receiver_expiry():
+    agent = _FakeWriteSenderAgent(_write_handshake())
+    sender = _write_sender_for_unit_test(agent)
+    sender.retired_transfer_ids[41] = time.perf_counter()
+
+    # Model a handshake emitted immediately before the receiver-side cutoff.
+    # One receiver-expiry boundary has passed, but the sender's guarded
+    # responder lease must still be alive to reject it explicitly.
+    receiver_expiry = time.time() - 0.01
+    sender.responder_lease_expirations[41] = receiver_expiry + 1
+    sender._expire_responder_leases()
+    assert 41 in sender.responder_lease_expirations
+
+    await _run_sender_until_terminal(sender, agent)
+
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+    assert 41 not in sender.responder_lease_expirations
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_shutdown_retries_first_contact_handshake():
+    agent = _FakeWriteSenderAgent(
+        _write_handshake(metadata=b"receiver-metadata"),
+        fail_remote_agent_additions=1,
+    )
+    sender = _write_sender_for_unit_test(agent)
+    sender.remote_agents = {}
+    sender.retired_transfer_ids[41] = time.perf_counter()
+    sender.responder_lease_expirations[41] = time.time() + 1
+    sender._state_update_task = asyncio.create_task(sender._state_update())
+
+    await asyncio.wait_for(sender.aclose(), timeout=1)
+
+    assert agent.remote_agent_add_calls == 2
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+    assert not sender.pending_write_requests
+    assert not sender.responder_lease_expirations
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_handshake_then_cancel_gets_terminal_error():
+    agent = _FakeWriteSenderAgent(
+        [_write_handshake(), msgspec.msgpack.encode(("cancel", 41))]
+    )
+    sender = _write_sender_for_unit_test(agent)
+    source = torch.zeros(4, dtype=torch.float16)
+    transfer_future = asyncio.get_running_loop().create_future()
+    descriptor = object()
+    sender.transfer_tracker[41] = (source, object(), transfer_future)
+    sender.transfer_created_at[41] = time.perf_counter()
+    sender.responder_lease_expirations[41] = time.time() + 1
+    sender.registered_descs[(source.data_ptr(), source.get_device())] = [
+        descriptor,
+        1,
+    ]
+
+    await _run_sender_until_terminal(sender, agent, wake_sender=True)
+
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+    with pytest.raises(RuntimeError, match="cancelled by receiver"):
+        await transfer_future
+    assert agent.deregistered == [descriptor]
+    assert not sender.pending_write_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_cancel_during_first_contact_retry_gets_terminal_error():
+    agent = _FakeWriteSenderAgent(
+        _write_handshake(metadata=b"receiver-metadata"),
+        fail_remote_agent_additions=1,
+    )
+    sender = _write_sender_for_unit_test(agent)
+    sender.remote_agents = {}
+    source = torch.zeros(4, dtype=torch.float16)
+    transfer_future = asyncio.get_running_loop().create_future()
+    descriptor = object()
+    sender.transfer_tracker[41] = (source, object(), transfer_future)
+    sender.transfer_created_at[41] = time.perf_counter()
+    sender.responder_lease_expirations[41] = time.time() + 1
+    sender.registered_descs[(source.data_ptr(), source.get_device())] = [
+        descriptor,
+        1,
+    ]
+    sender._state_update_task = asyncio.create_task(sender._state_update())
+
+    while agent.remote_agent_add_calls < 1:
+        await asyncio.sleep(0.001)
+    agent.queue_notification(msgspec.msgpack.encode(("cancel", 41)))
+    await asyncio.wait_for(agent.terminal_sent.wait(), timeout=1)
+    await asyncio.wait_for(sender.aclose(), timeout=1)
+
+    assert agent.remote_agent_add_calls == 2
+    assert agent.sent == [("receiver", ["terminal", 7, "ERR"])]
+    with pytest.raises(RuntimeError, match="cancelled by receiver"):
+        await transfer_future
+    assert agent.deregistered == [descriptor]
+
+
+@pytest.mark.asyncio
+@pytest.mark.gpu_0
+async def test_nixl_write_first_contact_failures_back_off():
+    agent = _FakeWriteSenderAgent(
+        _write_handshake(metadata=b"receiver-metadata"),
+        fail_remote_agent_additions=100,
+    )
+    sender = _write_sender_for_unit_test(agent)
+    sender.remote_agents = {}
+    sender.retired_transfer_ids[41] = time.perf_counter()
+    sender.responder_lease_expirations[41] = time.time() + 1
+    state_task = asyncio.create_task(sender._state_update())
+
+    try:
+        await asyncio.sleep(0.085)
+        assert 2 <= agent.remote_agent_add_calls <= 4
+        assert sender.pending_write_requests
+    finally:
+        state_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await state_task
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -13,11 +14,8 @@ from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 import dynamo.nixl_connect as connect
-from dynamo.common.multimodal import (
-    LocalEmbeddingSender,
-    NixlReadEmbeddingSender,
-    NixlWriteEmbeddingSender,
-)
+from dynamo.common.backend.multimodal import encoder_terminal_chunk
+from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.multimodal.embedding_transfer import AbstractEmbeddingSender
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.time_section import time_and_log_code_section
@@ -30,6 +28,14 @@ from ..multimodal_utils import (
     get_encoder_components,
     load_vision_model,
     vLLMMultimodalRequest,
+)
+from ..multimodal_utils.custom_encoder import (
+    AsyncVisionEncoder,
+    CustomEncoderAdapter,
+    LinearEmbedsAdapter,
+    extract_custom_encoder_image_urls,
+    load_custom_encoder,
+    stage_linear_visual_prompt,
 )
 from ..multimodal_utils.embedding_cache import EmbeddingCache
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
@@ -56,54 +62,82 @@ class EmbeddingItem:
 class EncodeWorkerHandler:
     def __init__(
         self,
-        engine_args: AsyncEngineArgs,
+        config: Any,
         embedding_transfer_mode: EmbeddingTransferMode,
     ) -> None:
+        self.config = config
+        engine_args: AsyncEngineArgs = config.engine_args
         self.engine_args = engine_args
         self.model = self.engine_args.model
+        self._custom_encoder: AsyncVisionEncoder | None = None
+        self._custom_encoder_adapter: CustomEncoderAdapter | None = None
+        self._custom_encoder_model_config: Any | None = None
+        self.send_complete_queue: asyncio.Queue[tuple[Any, Any]] | None = None
+        self.send_complete_checker_task: asyncio.Task | None = None
+        self._cleanup_complete = False
 
-        self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=self.engine_args.trust_remote_code
-        )
-        self.vision_model = load_vision_model(
-            self.model,
-            enforce_eager=self.engine_args.enforce_eager,
-            trust_remote_code=self.engine_args.trust_remote_code,
-        )
-        hidden_size = getattr(self.vision_model, "out_hidden_size", None)
-        if hidden_size is None:
-            hidden_size = getattr(
-                getattr(self.vision_model, "config", None), "hidden_size", "unknown"
+        try:
+            if config.custom_encoder_class:
+                self._custom_encoder_model_config = engine_args.create_model_config()
+                (
+                    self._custom_encoder,
+                    self._custom_encoder_adapter,
+                ) = load_custom_encoder(
+                    config,
+                    self._custom_encoder_model_config,
+                    actor_name="custom-encode-worker",
+                )
+                self.image_loader = None
+                self.image_processor = None
+                self.vision_model = None
+                self.vision_encoder = None
+                self.projector = None
+            else:
+                self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
+                self.image_processor = AutoImageProcessor.from_pretrained(
+                    self.model, trust_remote_code=self.engine_args.trust_remote_code
+                )
+                self.vision_model = load_vision_model(
+                    self.model,
+                    enforce_eager=self.engine_args.enforce_eager,
+                    trust_remote_code=self.engine_args.trust_remote_code,
+                )
+                hidden_size = getattr(self.vision_model, "out_hidden_size", None)
+                if hidden_size is None:
+                    hidden_size = getattr(
+                        getattr(self.vision_model, "config", None),
+                        "hidden_size",
+                        "unknown",
+                    )
+                logger.debug(f"embedding hidden dim: {hidden_size}")
+                self.vision_encoder, self.projector = get_encoder_components(
+                    self.model, self.vision_model
+                )
+            self.min_workers = 1
+            self._connector: connect.Connector | None = None
+            self._accumulated_time = 0.0
+            self._processed_requests = 0
+            self.readables: list[Any] = []
+            self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
+            self.embedding_sender: AbstractEmbeddingSender = EMBEDDING_SENDER_FACTORIES[
+                embedding_transfer_mode
+            ]()
+
+            self.send_complete_queue = asyncio.Queue()
+            self.send_complete_checker_task = asyncio.create_task(
+                self.check_complete(self.send_complete_queue)
             )
-        logger.debug(f"embedding hidden dim: {hidden_size}")
-        self.min_workers = 1
-
-        # Get encoder components for the model
-        self.vision_encoder, self.projector = get_encoder_components(
-            self.model, self.vision_model
-        )
-        self._connector: connect.Connector | None = None
-        self._accumulated_time = 0.0
-        self._processed_requests = 0
-        self.readables: list[Any] = []
-        self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
-        self.embedding_sender: AbstractEmbeddingSender
-        if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
-            self.embedding_sender = LocalEmbeddingSender()
-        elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
-            self.embedding_sender = NixlWriteEmbeddingSender()
-        elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
-            self.embedding_sender = NixlReadEmbeddingSender()
-        else:
-            raise ValueError(
-                f"Invalid embedding transfer mode: {embedding_transfer_mode}"
-            )
-
-        self.send_complete_queue: asyncio.Queue[tuple[Any, Any]] = asyncio.Queue()
-        self.send_complete_checker_task = asyncio.create_task(
-            self.check_complete(self.send_complete_queue)
-        )
+        except BaseException:
+            if self._custom_encoder is not None:
+                try:
+                    self._custom_encoder.shutdown()
+                except Exception:
+                    logger.exception(
+                        "Failed to shut down custom encoder during startup rollback"
+                    )
+                self._custom_encoder = None
+                self._custom_encoder_adapter = None
+            raise
 
     async def check_complete(self, queue):
         while True:
@@ -111,13 +145,65 @@ class EncodeWorkerHandler:
             if transfer_future is None:  # Sentinel value to stop the checker
                 queue.task_done()
                 break
-            await transfer_future
+            try:
+                await transfer_future
+            except Exception:
+                logger.exception("Encoder embedding transfer failed")
             queue.task_done()
 
-    def cleanup(self):
-        self.send_complete_queue.put_nowait(
-            (None, None)
-        )  # Send sentinel value to stop the checker
+    async def cleanup(self):
+        if self._cleanup_complete:
+            return
+        self._cleanup_complete = True
+        cleanup_error = None
+        sender_drained = False
+
+        try:
+            embedding_sender = getattr(self, "embedding_sender", None)
+            if embedding_sender is not None:
+                await embedding_sender.aclose()
+            sender_drained = True
+        except Exception as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+            else:
+                logger.exception("Embedding sender cleanup also failed")
+        finally:
+            if self._custom_encoder is not None:
+                try:
+                    self._custom_encoder.shutdown()
+                except Exception as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    else:
+                        logger.exception("Custom encoder cleanup also failed")
+                finally:
+                    self._custom_encoder = None
+                    self._custom_encoder_adapter = None
+
+        checker_task = self.send_complete_checker_task
+        self.send_complete_checker_task = None
+        if checker_task is not None:
+            try:
+                if sender_drained and self.send_complete_queue is not None:
+                    await self.send_complete_queue.join()
+                    self.send_complete_queue.put_nowait((None, None))
+                    await checker_task
+                else:
+                    checker_task.cancel()
+                    try:
+                        await checker_task
+                    except asyncio.CancelledError:
+                        pass
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                else:
+                    logger.exception("Transfer completion checker cleanup also failed")
+
+        self.send_complete_queue = None
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def async_init(self, runtime: DistributedRuntime):
         """Initialize the connector for RDMA transfers"""
@@ -128,9 +214,12 @@ class EncodeWorkerHandler:
         logger.info("Encode worker startup completed.")
 
     @_nvtx.range_decorator("mm:encode_worker_generate", color="blue")
-    async def generate(
-        self, request: vLLMMultimodalRequest, context
-    ) -> AsyncIterator[str]:
+    async def generate(self, request: Any, context) -> AsyncIterator[Any]:
+        if self._custom_encoder is not None:
+            async for chunk in self._generate_custom_encoder(request, context):
+                yield chunk
+            return
+
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
                 request = vLLMMultimodalRequest.model_validate_json(request)
@@ -347,3 +436,52 @@ class EncodeWorkerHandler:
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
+
+    async def _generate_custom_encoder(
+        self,
+        request: Any,
+        context: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        if isinstance(request, str):
+            request = json.loads(request)
+        elif not isinstance(request, dict):
+            request = request.model_dump(mode="python")
+
+        request_id = context.id()
+        if self._custom_encoder is None or self._custom_encoder_adapter is None:
+            raise RuntimeError("custom encode worker was not initialized")
+        if self._custom_encoder_model_config is None:
+            raise RuntimeError("custom encode worker has no decoder model config")
+
+        image_urls = extract_custom_encoder_image_urls(request)
+        if not image_urls:
+            raise ValueError("custom encode worker received no image inputs")
+        token_ids = request.get("token_ids") or []
+        encodings = await self._custom_encoder.encode(image_urls)
+        if not isinstance(self._custom_encoder_adapter, LinearEmbedsAdapter):
+            raise ValueError(
+                "frontend custom-encoder routing currently requires a text-only "
+                "decoder using LinearEmbedsAdapter"
+            )
+        prepared_prompt = self._custom_encoder_adapter.prepare_compact_prompt(
+            token_ids,
+            encodings,
+        )
+        handoff, transfer_future = await stage_linear_visual_prompt(
+            prepared_prompt,
+            self.embedding_sender,
+            transfer_mode=self.config.embedding_transfer_mode.value,
+            decoder_model=self.config.model,
+            decoder_revision=self.config.engine_args.revision,
+            model_config=self._custom_encoder_model_config,
+        )
+        self.send_complete_queue.put_nowait(
+            (transfer_future, prepared_prompt.visual_embeds)
+        )
+        self._processed_requests += 1
+        logger.debug(
+            "Custom encode worker prepared request %s with %d image(s)",
+            request_id,
+            len(image_urls),
+        )
+        yield encoder_terminal_chunk(handoff)

@@ -33,7 +33,7 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
-from .constants import DisaggregationMode
+from .constants import CustomEncoderRoutingMode, DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -769,42 +769,51 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         handler = EncodeWorkerHandler(
-            config.engine_args,
+            config,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
         )
-        await handler.async_init(runtime)
-
-        # Encode workers register a model card so the frontend's
-        # serving-readiness gate can count them. The card carries no OpenAI
-        # surface (`ModelType.Empty`) — the encode endpoint isn't routed by
-        # the OpenAI dispatch. `needs` is the DNF for an encode worker:
-        # either a P+D pair or a single Aggregated peer.
-        await register_model(
-            ModelInput.Tokens,
-            ModelType.Empty,
-            generate_endpoint,
-            config.model,
-            model_name=config.served_model_name or config.model,
-            worker_type=WorkerType.Encode,
-            needs=[
-                [WorkerType.Prefill, WorkerType.Decode],
-                [WorkerType.Aggregated],
-            ],
-        )
-        register_model_taint_route(runtime, generate_endpoint)
-        logger.info("Starting to serve the encode worker endpoint...")
-
+        primary_error = None
         try:
+            await handler.async_init(runtime)
+
+            # Encode workers register a model card so the frontend's
+            # serving-readiness gate can count them. The card carries no OpenAI
+            # surface (`ModelType.Empty`) — the encode endpoint isn't routed by
+            # the OpenAI dispatch. `needs` is the DNF for an encode worker:
+            # either a P+D pair or a single Aggregated peer.
+            await register_model(
+                ModelInput.Tokens,
+                ModelType.Empty,
+                generate_endpoint,
+                config.model,
+                model_name=config.served_model_name or config.model,
+                worker_type=WorkerType.Encode,
+                needs=[
+                    [WorkerType.Prefill, WorkerType.Decode],
+                    [WorkerType.Aggregated],
+                ],
+            )
+            register_model_taint_route(runtime, generate_endpoint)
+            logger.info("Starting to serve the encode worker endpoint...")
+
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate, metrics_labels=[("model", config.model)]
                 ),
             )
-        except Exception as e:
+        except BaseException as e:
+            primary_error = e
             logger.error(f"Failed to serve encode worker endpoint: {e}")
             raise
         finally:
-            handler.cleanup()
+            try:
+                await handler.cleanup()
+            except Exception:
+                if primary_error is None:
+                    raise
+                logger.exception(
+                    "Failed to clean up encode worker after an earlier failure"
+                )
 
     async def _create_embedding_worker(
         self,
@@ -1280,7 +1289,15 @@ class WorkerFactory:
             # AGGREGATED
             worker_type = WorkerType.Aggregated
             needs_set = []
-        if config.route_to_encoder:
+        if (
+            config.route_to_encoder
+            or getattr(
+                config,
+                "custom_encoder_routing_mode",
+                CustomEncoderRoutingMode.INLINE,
+            )
+            == CustomEncoderRoutingMode.FRONTEND
+        ):
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 

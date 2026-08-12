@@ -66,6 +66,7 @@ pub struct EncoderRouter {
     target_tx: Option<watch::Sender<Option<Endpoint>>>,
     cancel_token: CancellationToken,
     lifecycle: AtomicU8,
+    require_handoff: bool,
     model_name: String,
     namespace: String,
 }
@@ -85,13 +86,14 @@ impl EncoderRouter {
             target_tx: None,
             cancel_token: CancellationToken::new(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
+            require_handoff: false,
             model_name: String::new(),
             namespace: String::new(),
         })
     }
 
     /// Create a router whose endpoint is driven by committed discovery topology.
-    pub fn new(model_name: String, namespace: String) -> Arc<Self> {
+    pub fn new(model_name: String, namespace: String, require_handoff: bool) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
         let (target_tx, target_rx) = watch::channel(None);
         let router = Arc::new(Self {
@@ -100,6 +102,7 @@ impl EncoderRouter {
             target_tx: Some(target_tx),
             cancel_token: cancel_token.clone(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
+            require_handoff,
             model_name,
             namespace,
         });
@@ -296,6 +299,18 @@ impl EncoderRouter {
             .context("Encode worker terminal is missing an object-shaped encoder_result")?;
         Ok((result, terminal.worker_trace_link))
     }
+
+    fn install_encode_result(
+        request: &mut PreprocessedRequest,
+        encoder_result: serde_json::Value,
+        worker_link: Option<TraceLink>,
+    ) {
+        request.encoder_result = Some(encoder_result);
+        // The descriptor replaces the raw image payload. Keeping both would
+        // waste request-plane bandwidth and risks downstream double decoding.
+        request.multi_modal_data = None;
+        request.migration_link = worker_link;
+    }
 }
 
 #[async_trait]
@@ -313,8 +328,13 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (mut request, context) = request.into_parts();
-        if self.lifecycle_state() != EncoderLifecycleState::Active || !Self::should_encode(&request)
-        {
+        if !Self::should_encode(&request) {
+            return next.generate(context.map(|_| request)).await;
+        }
+        if self.lifecycle_state() != EncoderLifecycleState::Active {
+            if self.require_handoff {
+                anyhow::bail!("custom encoder handoff is required but no Encode worker is active");
+            }
             return next.generate(context.map(|_| request)).await;
         }
 
@@ -338,10 +358,12 @@ impl
                 // Once the Encode worker has emitted a transfer handle, always hand it
                 // to the downstream worker even if the caller disconnected. The
                 // receiver owns transfer completion and buffer release.
-                request.encoder_result = Some(encoder_result);
-                request.migration_link = worker_link;
+                Self::install_encode_result(&mut request, encoder_result, worker_link);
             }
             Err(error) => {
+                if self.require_handoff {
+                    return Err(error).context("Required custom encoder hop failed");
+                }
                 tracing::error!(
                     %error,
                     model = %self.model_name,
@@ -421,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_activation_does_not_keep_router_alive() {
-        let router = EncoderRouter::new("model".into(), "namespace".into());
+        let router = EncoderRouter::new("model".into(), "namespace".into(), false);
         let weak = Arc::downgrade(&router);
 
         drop(router);
@@ -452,6 +474,60 @@ mod tests {
             .expect("downstream must receive the original request");
         assert!(request.encoder_result.is_none());
         assert!(request.multi_modal_data.is_some());
+    }
+
+    #[tokio::test]
+    async fn required_encoder_is_fail_closed_while_inactive() {
+        let router = EncoderRouter::new("model".into(), "namespace".into(), true);
+        let downstream = Arc::new(CaptureEngine::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            downstream.clone();
+
+        let result = router
+            .generate(SingleIn::new(multimodal_request()), next)
+            .await;
+        let error = result
+            .err()
+            .expect("required handoff must reject an inactive Encode route");
+
+        assert!(error.to_string().contains("no Encode worker is active"));
+        assert!(downstream.request.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn required_encoder_failure_does_not_call_downstream() {
+        let router = EncoderRouter::new("model".into(), "namespace".into(), true);
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        let downstream = Arc::new(CaptureEngine::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            downstream.clone();
+
+        let result = router
+            .generate(SingleIn::new(multimodal_request()), next)
+            .await;
+        let error = result
+            .err()
+            .expect("required handoff must propagate Encode failure");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Required custom encoder hop failed")
+        );
+        assert!(downstream.request.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn successful_encoder_result_replaces_raw_media() {
+        let mut request = multimodal_request();
+        let descriptor = json!({"schema_version": 1});
+
+        EncoderRouter::install_encode_result(&mut request, descriptor.clone(), None);
+
+        assert_eq!(request.encoder_result, Some(descriptor));
+        assert!(request.multi_modal_data.is_none());
     }
 
     #[tokio::test]

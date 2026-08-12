@@ -18,6 +18,7 @@ import torch
 
 from dynamo.vllm.multimodal_utils.custom_encoder.adapter import (
     build_mixed_embeds,
+    build_mixed_layout,
     create_custom_encoder_adapter,
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import VisionEncoderBackend
@@ -33,6 +34,16 @@ pytestmark = [
 _HIDDEN = 8
 _PLACEHOLDER = 999
 _ADAPTER_PLACEHOLDER = 99
+
+
+def test_build_mixed_layout_keeps_only_visual_rows():
+    image = torch.arange(16, dtype=torch.float16).reshape(2, _HIDDEN)
+    layout = build_mixed_layout([1, 2, _PLACEHOLDER, 3], [image], _PLACEHOLDER)
+
+    assert layout.visual_embeds.data_ptr() == image.data_ptr()
+    assert layout.visual_embeds.shape == (2, _HIDDEN)
+    assert layout.prompt_token_ids == [1, 2, _PLACEHOLDER, _PLACEHOLDER, 3]
+    assert layout.prompt_is_token_ids == [True, True, False, False, True]
 
 
 def test_build_mixed_embeds_multi_image_token_expand():
