@@ -10,7 +10,7 @@ use super::super::entrypoints::{
     run_trace_workload_collect,
 };
 use super::super::extensions::kv_events::HandoffDisaggRuntime;
-use super::super::planner_hook::PlannerTickDecision;
+use super::super::scaling::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
 use super::*;
 use crate::common::protocols::{
     EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
@@ -18,19 +18,22 @@ use crate::common::protocols::{
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::TraceSimulationReport;
 
-struct CaptureOnceHook {
+struct CaptureOncePolicy {
     at_ms: f64,
-    captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+    captured: Rc<RefCell<Option<ReplayScalingSnapshot>>>,
 }
 
-impl PlannerHook for CaptureOnceHook {
+impl ReplayScalingPolicy for CaptureOncePolicy {
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
         Ok(self.at_ms)
     }
 
-    fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
-        *self.captured.borrow_mut() = Some(metrics);
-        Ok(PlannerTickDecision::default())
+    fn on_tick(
+        &mut self,
+        snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        *self.captured.borrow_mut() = Some(snapshot);
+        Ok(ReplayScalingDecision::default())
     }
 }
 
@@ -289,7 +292,7 @@ fn request(
 }
 
 #[test]
-fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
+fn scaling_tick_emits_idle_fpm_for_both_disagg_pools() {
     let mut config = disagg_config();
     config.num_prefill_workers = 1;
     config.num_decode_workers = 1;
@@ -299,7 +302,7 @@ fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
     )
     .unwrap();
     let captured = Rc::new(RefCell::new(None));
-    let hook = CaptureOnceHook {
+    let policy = CaptureOncePolicy {
         at_ms: 2_000.0,
         captured: Rc::clone(&captured),
     };
@@ -313,14 +316,14 @@ fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
         ReplayRouterMode::RoundRobin,
     )
     .unwrap()
-    .with_planner_hook(Box::new(hook))
+    .with_scaling_policy(Box::new(policy))
     .run()
     .unwrap();
 
     let metrics = captured
         .borrow_mut()
         .take()
-        .expect("planner tick must fire");
+        .expect("scaling tick must fire");
     assert_eq!(metrics.now_ms, 2_000.0);
     for snapshots in [&metrics.prefill_fpm, &metrics.decode_fpm] {
         assert_eq!(snapshots.len(), 1);
@@ -463,7 +466,9 @@ fn test_derive_stage_router_configs_force_required_overrides() {
 #[case(ReplayRouterMode::KvRouter)]
 fn test_trace_smoke_reports_decode_only_tokens(#[case] router_mode: ReplayRouterMode) {
     let config = disagg_config();
-    let requests = vec![request(1, 128, 3, 5.0)];
+    let mut planned = request(1, 128, 1, 5.0);
+    planned.output_token_ids = Some(vec![11, 12, 13]);
+    let requests = vec![planned];
 
     let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
     let (collector, stats) = run_trace_collect(&config, requests, router_config, 1.0, router_mode);
@@ -1353,9 +1358,10 @@ fn destination_first_workload_materializes_for_decode_reservation_then_completes
     );
 
     runtime.apply_scaling(1, 1).unwrap();
-    let (_, stats) = runtime.run().unwrap();
+    let (collector, stats) = runtime.run().unwrap();
 
     assert_eq!(stats.request_snapshots[&uuid].phase, DisaggPhase::Done);
+    assert_eq!(collector.finish().request_counts.total_output_tokens, 4);
 }
 
 #[test]

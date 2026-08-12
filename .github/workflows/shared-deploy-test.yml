@@ -14,8 +14,8 @@ on:
         description: 'JSON array of deployment profiles to test'
         type: string
         required: true
-      image_suffix:
-        description: 'Image suffix (e.g. vllm-runtime-cuda13-amd64)'
+      image_tag:
+        description: 'Runtime image tag'
         type: string
         required: true
       namespace:
@@ -59,6 +59,7 @@ jobs:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -82,7 +83,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only
           # Mount the shared model cache only when both endpoint vars are set

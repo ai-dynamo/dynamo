@@ -229,7 +229,7 @@ impl ListenerLoop {
                     }
                 }
             };
-            if msg.len() < 3 {
+            if msg.len() != 4 {
                 tracing::warn!(
                     worker_id,
                     dp_rank,
@@ -239,12 +239,15 @@ impl ListenerLoop {
                 break;
             }
 
-            let payload = msg.get(2).expect("frame count checked above");
+            // vLLM replay responses include the DEALER identity delimiter plus the
+            // original PUB topic, so the payload shape is:
+            // [empty delimiter, topic, sequence number, encoded event batch].
+            let payload = msg.get(3).expect("frame count checked above");
             if payload.is_empty() {
                 break;
             }
 
-            let seq_bytes = msg.get(1).expect("frame count checked above");
+            let seq_bytes = msg.get(2).expect("frame count checked above");
             if seq_bytes.len() != 8 {
                 tracing::warn!(
                     worker_id,

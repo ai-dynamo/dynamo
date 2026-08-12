@@ -69,6 +69,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
+	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
+	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
+	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+	// It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
+
 	// DynamoNamespace is deprecated and will be removed in a future version.
 	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
 	// +kubebuilder:validation:Optional
@@ -109,7 +118,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	// ExtraPodSpec allows to override the main pod spec configuration.
 	// It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
-	// that allows overriding the main container configuration.
+	// that allows overriding the main container configuration. New components must set
+	// extraPodSpec and provide a non-empty mainContainer image. Existing components created
+	// without extraPodSpec may remain unchanged.
 	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
@@ -142,8 +153,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
-	// the service using the Scale subresource. When disabled, replicas can be modified directly.
+	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
+	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
+	// `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled because
+	// `enabled` defaults to false.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
@@ -252,7 +265,6 @@ type DynamoComponentDeploymentStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment"
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
@@ -277,10 +289,6 @@ type DynamoComponentDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoComponentDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {

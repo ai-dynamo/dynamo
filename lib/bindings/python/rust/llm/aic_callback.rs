@@ -5,10 +5,8 @@
 //!
 //! [`RustAicCallback`] wraps a compiled `aiconfigurator_core::AicEngine` and
 //! answers the mocker/router latency predictions purely in Rust — no GIL on the
-//! predict hot path. AIC 0.9 wheels that predate the compiled-engine Python
-//! modules use [`PyAicCallback`] against the same AIC perf database. Once the
-//! compiled SDK is present, build failures remain hard errors. KV-block sizing
-//! still crosses into Python via [`estimate_aic_num_gpu_blocks`].
+//! predict hot path. Engine build failures are hard errors. KV-block sizing still
+//! crosses into Python via [`estimate_aic_num_gpu_blocks`].
 
 #[cfg(feature = "aic-forward-pass")]
 use std::collections::HashMap;
@@ -18,136 +16,13 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "aic-forward-pass")]
 use std::time::Duration;
 
-#[cfg(feature = "aic-forward-pass")]
-use pyo3::exceptions::PyModuleNotFoundError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(feature = "aic-forward-pass")]
-use aiconfigurator_core::{AicEngine, build_aic_engine};
+use aiconfigurator_core::{AicEngine, AicEngineBuilder, BackendKind};
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
-
-/// GIL-bound compatibility callback for AIC 0.9 releases that predate the
-/// compiled-engine Python modules. The Python helper still uses AIC's real
-/// perf database and operation model; only the execution path is slower.
-#[cfg(feature = "aic-forward-pass")]
-pub(super) struct PyAicCallback {
-    session: Py<PyAny>,
-}
-
-#[cfg(feature = "aic-forward-pass")]
-impl PyAicCallback {
-    fn predict_prefill_ms(
-        &self,
-        batch_size: usize,
-        effective_isl: usize,
-        prefix: usize,
-    ) -> PyResult<f64> {
-        Python::with_gil(|py| {
-            self.session
-                .call_method1(py, "predict_prefill", (batch_size, effective_isl, prefix))
-                .and_then(|result| result.extract::<f64>(py))
-        })
-    }
-}
-
-#[cfg(feature = "aic-forward-pass")]
-impl AicCallback for PyAicCallback {
-    fn predict_prefill(
-        &self,
-        batch_size: usize,
-        effective_isl: usize,
-        prefix: usize,
-    ) -> anyhow::Result<f64> {
-        self.predict_prefill_ms(batch_size, effective_isl, prefix)
-            .map_err(|error| anyhow::anyhow!("AIC predict_prefill (python) failed: {error}"))
-    }
-
-    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> anyhow::Result<f64> {
-        Python::with_gil(|py| {
-            self.session
-                .call_method1(py, "predict_decode", (batch_size, isl, osl))
-                .and_then(|result| result.extract::<f64>(py))
-        })
-        .map_err(|error| anyhow::anyhow!("AIC predict_decode (python) failed: {error}"))
-    }
-}
-
-#[cfg(feature = "aic-forward-pass")]
-impl PrefillLoadEstimator for PyAicCallback {
-    fn predict_prefill_duration(
-        &self,
-        batch_size: usize,
-        effective_isl: usize,
-        prefix: usize,
-    ) -> anyhow::Result<Duration> {
-        let latency_ms = self.predict_prefill_ms(batch_size, effective_isl, prefix)?;
-        Ok(Duration::from_secs_f64(latency_ms / 1000.0))
-    }
-}
-
-#[cfg(feature = "aic-forward-pass")]
-fn compiled_engine_sdk_available(py: Python<'_>) -> PyResult<bool> {
-    match py.import("aiconfigurator.sdk.engine") {
-        Ok(_) => Ok(true),
-        Err(error) if error.is_instance_of::<PyModuleNotFoundError>(py) => {
-            let missing_module = error
-                .value(py)
-                .getattr("name")
-                .and_then(|name| name.extract::<String>())?;
-            if missing_module == "aiconfigurator.sdk.engine" {
-                Ok(false)
-            } else {
-                Err(error)
-            }
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(feature = "aic-forward-pass")]
-#[allow(clippy::too_many_arguments)]
-fn create_python_aic_callback(
-    py: Python<'_>,
-    backend_name: &str,
-    system: &str,
-    model_path: &str,
-    tp_size: usize,
-    backend_version: Option<&str>,
-    moe_tp_size: Option<usize>,
-    moe_ep_size: Option<usize>,
-    attention_dp_size: Option<usize>,
-    gemm_dtype: Option<&str>,
-    moe_dtype: Option<&str>,
-    fmha_dtype: Option<&str>,
-    kv_cache_dtype: Option<&str>,
-    comm_dtype: Option<&str>,
-    nextn: Option<usize>,
-    nextn_accept_rates: Option<&str>,
-) -> PyResult<PyAicCallback> {
-    let module = py.import("dynamo._internal.aic")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("backend_name", backend_name)?;
-    kwargs.set_item("system", system)?;
-    kwargs.set_item("model_path", model_path)?;
-    kwargs.set_item("tp_size", tp_size)?;
-    kwargs.set_item("backend_version", backend_version)?;
-    kwargs.set_item("moe_tp_size", moe_tp_size)?;
-    kwargs.set_item("moe_ep_size", moe_ep_size)?;
-    kwargs.set_item("attention_dp_size", attention_dp_size)?;
-    kwargs.set_item("gemm_dtype", gemm_dtype)?;
-    kwargs.set_item("moe_dtype", moe_dtype)?;
-    kwargs.set_item("fmha_dtype", fmha_dtype)?;
-    kwargs.set_item("kv_cache_dtype", kv_cache_dtype)?;
-    kwargs.set_item("comm_dtype", comm_dtype)?;
-    kwargs.set_item("nextn", nextn)?;
-    kwargs.set_item("nextn_accept_rates", nextn_accept_rates)?;
-    let session = module.call_method("create_session", (), Some(&kwargs))?;
-    Ok(PyAicCallback {
-        session: session.unbind(),
-    })
-}
 
 /// Pure-Rust AIC callback: wraps an `aiconfigurator_core::AicEngine`
 /// compiled once at startup and answers predict calls with NO PyO3 / GIL on the
@@ -210,8 +85,9 @@ impl PrefillLoadEstimator for RustAicCallback {
 }
 
 /// Build the pure-Rust AIC engine ONCE at startup and cache it per identity.
-/// `build_aic_engine` crosses into Python once here (shared pyo3 interpreter) to
-/// run `compile_engine`; the returned engine's predict hot path is pure Rust.
+/// `AicEngineBuilder::build` crosses into Python once here (shared pyo3
+/// interpreter) to run `compile_engine`; the returned engine's predict hot path
+/// is pure Rust.
 ///
 /// Once the compiled-engine SDK is available, a build failure is a HARD ERROR.
 /// The requested model/system/backend must be supported by the Rust engine
@@ -238,32 +114,24 @@ fn build_rust_engine(
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
-    // Speculative (MTP) decoding: forward the mocker's nextn / accept-rates to
-    // the engine build, mirroring the Python AicSession path. Dense models pass
-    // nextn=0 and no rates. accept-rates arrive comma-separated from the caller.
-    let nextn = nextn.unwrap_or(0) as u32;
-    let nextn_accept_rates: Option<Vec<f64>> = match nextn_accept_rates {
-        Some(s) if !s.trim().is_empty() => Some(
-            s.split(',')
-                .map(|x| x.trim().parse::<f64>())
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "AIC: invalid nextn_accept_rates {s:?}: {e}"
-                    ))
-                })?,
-        ),
-        _ => None,
-    };
+    // Speculative (MTP) decoding: aic-core models the cost of one verification
+    // iteration from `nextn`. Dynamo retains the per-position acceptance rates
+    // for scheduler burst sampling above core, so validate them here but do not
+    // include them in the compiled-engine identity.
+    let nextn = u32::try_from(nextn.unwrap_or(0))
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("AIC: nextn does not fit in u32"))?;
+    let aic_module = py.import("dynamo._internal.aic")?;
+    if nextn > 0 {
+        aic_module.call_method1("_pad_nextn_accept_rates", (nextn_accept_rates,))?;
+    }
     // Resolve each quant-mode string through the single Python source of truth
     // (`dynamo._internal.aic._resolve_quant_mode_name`) so this latency-engine
     // path matches the Python paths (`create_session`/`estimate_num_gpu_blocks`)
     // exactly: it normalizes the vocabulary (`auto`/`none`/`null` -> default,
     // `int4` -> `int4_wo`) AND validates per field, rejecting unsupported
     // field/dtype combos (e.g. `kvcache=int4`) up front with a clear error
-    // instead of a generic failure from `build_aic_engine`. Done before the
+    // instead of a generic failure from `AicEngineBuilder::build`. Done before the
     // cache key so equivalent spellings share one compiled engine.
-    let aic_module = py.import("dynamo._internal.aic")?;
     let resolve_quant_mode = |field: &str, value: Option<&str>| -> PyResult<Option<String>> {
         aic_module
             .call_method1("_resolve_quant_mode_name", (field, value))?
@@ -275,49 +143,65 @@ fn build_rust_engine(
     let kv_cache_dtype = resolve_quant_mode("kvcache", kv_cache_dtype)?;
     let comm_dtype = resolve_quant_mode("comm", comm_dtype)?;
 
-    // Cache the compiled engine per identity. build_aic_engine compiles the
+    // Cache the compiled engine per identity. AicEngineBuilder::build compiles the
     // model (Python) and loads the perf DB (Rust parquet) — a one-time startup
     // cost, but callers may construct several callbacks (per-worker,
     // prefill+decode). Mirror the Python `_cached_engine_handle` so the build is
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
         return Ok(Arc::clone(existing));
     }
-    // Reuse aiconfigurator's own systems-path resolution: this sets
-    // AICONFIGURATOR_SYSTEMS_PATH in the process env, which build_aic_engine
-    // reads for the Rust-side perf-DB load.
-    if let Err(e) = py
-        .import("aiconfigurator.sdk.rust_engine_step")
-        .and_then(|m| m.call_method0("_configure_default_data_roots"))
-    {
-        tracing::warn!("AIC: could not configure data roots ({e}); relying on build-time default");
+    let backend = match backend_name {
+        "trtllm" => BackendKind::Trtllm,
+        "sglang" => BackendKind::Sglang,
+        "vllm" => BackendKind::Vllm,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "AIC: unsupported backend {backend_name:?}; expected trtllm, sglang, or vllm"
+            )));
+        }
+    };
+    let to_u32 = |field: &str, value: usize| {
+        u32::try_from(value).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!("AIC: {field} does not fit in u32"))
+        })
+    };
+    let mut builder = AicEngineBuilder::new(model_path, system, backend)
+        .tp_size(to_u32("tp_size", tp_size)?)
+        .attention_dp_size(to_u32("attention_dp_size", attention_dp_size.unwrap_or(1))?)
+        .moe_parallelism(
+            moe_tp_size
+                .map(|value| to_u32("moe_tp_size", value))
+                .transpose()?,
+            moe_ep_size
+                .map(|value| to_u32("moe_ep_size", value))
+                .transpose()?,
+        )
+        .speculative_decoding(nextn);
+    if let Some(value) = backend_version {
+        builder = builder.backend_version(value);
     }
-    let engine = build_aic_engine(
-        model_path,
-        system,
-        backend_name,
-        backend_version,
-        tp_size as u32,
-        1, // pp_size
-        attention_dp_size.unwrap_or(1) as u32,
-        moe_tp_size.map(|x| x as u32),
-        moe_ep_size.map(|x| x as u32),
-        gemm_dtype.as_deref(),     // gemm_quant_mode
-        moe_dtype.as_deref(),      // moe_quant_mode
-        kv_cache_dtype.as_deref(), // kvcache_quant_mode
-        fmha_dtype.as_deref(),     // fmha_quant_mode
-        comm_dtype.as_deref(),     // comm_quant_mode
-        nextn,                     // speculative (MTP) tokens; 0 for dense
-        nextn_accept_rates,        // per-position accept rates
-        None,                      // kv_block_size
-        None,                      // systems_path (resolved via env above / build-time default)
-    )
-    .map_err(|e| {
+    if let Some(value) = gemm_dtype {
+        builder = builder.gemm_quant_mode(value);
+    }
+    if let Some(value) = moe_dtype {
+        builder = builder.moe_quant_mode(value);
+    }
+    if let Some(value) = kv_cache_dtype {
+        builder = builder.kvcache_quant_mode(value);
+    }
+    if let Some(value) = fmha_dtype {
+        builder = builder.fmha_quant_mode(value);
+    }
+    if let Some(value) = comm_dtype {
+        builder = builder.comm_quant_mode(value);
+    }
+    let engine = builder.build().map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!(
             "AIC: failed to build the Rust engine for {model_path} / {system} / {backend_name}: {e}"
         ))
@@ -352,30 +236,6 @@ pub(super) fn create_aic_callback(
 ) -> PyResult<Arc<dyn AicCallback>> {
     #[cfg(feature = "aic-forward-pass")]
     {
-        if !compiled_engine_sdk_available(py)? {
-            tracing::warn!(
-                "AIC compiled-engine SDK is unavailable; using the GIL-bound Python \
-                 perf-model compatibility path"
-            );
-            return Ok(Arc::new(create_python_aic_callback(
-                py,
-                backend_name,
-                system,
-                model_path,
-                tp_size,
-                backend_version,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                gemm_dtype,
-                moe_dtype,
-                fmha_dtype,
-                kv_cache_dtype,
-                comm_dtype,
-                nextn,
-                nextn_accept_rates,
-            )?));
-        }
         let engine = build_rust_engine(
             py,
             backend_name,
@@ -403,8 +263,7 @@ pub(super) fn create_aic_callback(
 }
 
 /// Build the AIC prefill-load estimator for the KV router / live path. Requires
-/// the `aic-forward-pass` feature. AIC 0.9 uses the Python compatibility path;
-/// compiled-engine build failures remain hard errors.
+/// the `aic-forward-pass` feature; compiled-engine build failures are hard errors.
 #[cfg_attr(not(feature = "aic-forward-pass"), allow(unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_prefill_load_estimator(
@@ -427,30 +286,6 @@ pub(super) fn create_aic_prefill_load_estimator(
 ) -> PyResult<Arc<dyn PrefillLoadEstimator>> {
     #[cfg(feature = "aic-forward-pass")]
     {
-        if !compiled_engine_sdk_available(py)? {
-            tracing::warn!(
-                "AIC compiled-engine SDK is unavailable; using the GIL-bound Python \
-                 prefill-load compatibility path"
-            );
-            return Ok(Arc::new(create_python_aic_callback(
-                py,
-                backend_name,
-                system,
-                model_path,
-                tp_size,
-                backend_version,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                gemm_dtype,
-                moe_dtype,
-                fmha_dtype,
-                kv_cache_dtype,
-                comm_dtype,
-                nextn,
-                nextn_accept_rates,
-            )?));
-        }
         let engine = build_rust_engine(
             py,
             backend_name,

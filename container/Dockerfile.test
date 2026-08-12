@@ -9,12 +9,16 @@ ARG BASE_IMAGE
 
 FROM ${BASE_IMAGE} AS test_image
 
-# Install test dependencies on top of runtime image
+# Install test dependencies on top of runtime image.
+# No uv cache: this image is built from a SHA-tagged base, so the layer is
+# rebuilt every time and a shared cache mount would be the one place a build
+# could still meet uv cache entries written by a different uv version. The
+# download is a few seconds against a ~660MB cache, so UV_NO_CACHE keeps it out
+# of the layer rather than trading that for the version hazard.
 USER root
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    export UV_NO_CACHE=1 UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     if [ -n "$VIRTUAL_ENV" ]; then \
         uv pip install \

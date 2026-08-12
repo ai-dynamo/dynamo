@@ -8,6 +8,8 @@ use axum::response::Response;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 use tower::ServiceExt;
 
@@ -17,11 +19,16 @@ use super::*;
 use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
+use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
+use crate::scheduling::selector::{
+    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
+};
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
 
@@ -36,6 +43,84 @@ fn test_config() -> crate::config::KvRouterConfig {
 fn app() -> Router {
     let service = Arc::new(SelectionService::new_local_for_test(test_config(), 1));
     create_router(Arc::new(AppState { service }))
+}
+
+struct WorkerIdScorer;
+
+impl WorkerScorer for WorkerIdScorer {
+    fn score(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        Ok(candidate.worker().worker_id as f64)
+    }
+}
+
+struct LowestCostPicker;
+
+impl WorkerPicker for LowestCostPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        let candidates = input.candidates();
+        Ok(candidates
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+            .map(|(row, _)| row)
+            .expect("eligible candidate"))
+    }
+}
+
+struct NonFiniteScorer;
+
+impl WorkerScorer for NonFiniteScorer {
+    fn score(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        Ok(f64::NAN)
+    }
+}
+
+struct InvalidRowPicker;
+
+impl WorkerPicker for InvalidRowPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        Ok(input.candidates().len())
+    }
+}
+
+struct RejectAllFilter;
+
+impl WorkerFilter for RejectAllFilter {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        Ok(false)
+    }
+}
+
+struct RejectWorker(WorkerId);
+
+impl WorkerFilter for RejectWorker {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        Ok(candidate.worker().worker_id != self.0)
+    }
 }
 
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
@@ -128,6 +213,246 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
         body["max_num_batched_tokens"] = serde_json::json!(max_tokens);
     }
     post(app, "/workers", &body.to_string()).await
+}
+
+#[derive(Default)]
+struct FactoryRendezvous {
+    arrivals: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl FactoryRendezvous {
+    fn wait_for_peer(&self) {
+        let mut arrivals = self.arrivals.lock().unwrap();
+        *arrivals += 1;
+        if *arrivals == 2 {
+            self.ready.notify_all();
+            return;
+        }
+
+        let (arrivals, _) = self
+            .ready
+            .wait_timeout_while(arrivals, Duration::from_secs(2), |arrivals| *arrivals < 2)
+            .unwrap();
+        assert_eq!(*arrivals, 2, "selector factories did not run concurrently");
+    }
+}
+
+async fn native_policy_app<F>(factory: F) -> Router
+where
+    F: for<'a> Fn(
+            &crate::config::KvRouterConfig,
+            &'static str,
+            RoutingPartitionRef<'a>,
+        ) -> WorkerSelectionPolicy
+        + Send
+        + Sync
+        + 'static,
+{
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selection_policy_factory(factory)
+        .build()
+        .await
+        .expect("build selection service");
+    create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }))
+}
+
+async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
+    let loads = app
+        .oneshot(
+            Request::builder()
+                .uri("/loads?model_name=model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response_json(loads).await[0]["loads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|load| load["worker_id"] == worker_id)
+        .unwrap()["active_requests"]
+        .as_u64()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer_picker_and_books()
+{
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_partitions = Arc::new(Mutex::new(Vec::new()));
+    let factory_rendezvous = Arc::new(FactoryRendezvous::default());
+    let calls = Arc::clone(&factory_calls);
+    let partitions = Arc::clone(&factory_partitions);
+    let rendezvous = Arc::clone(&factory_rendezvous);
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selection_policy_factory(move |config, worker_type, partition| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            partitions.lock().unwrap().push(partition.into_owned());
+            rendezvous.wait_for_peer();
+            WorkerSelectionPolicy::new_with_filters(
+                config.clone(),
+                worker_type,
+                vec![Box::new(RejectWorker(1))],
+                vec![Box::new(WorkerIdScorer)],
+                Box::new(LowestCostPicker),
+            )
+        })
+        .build()
+        .await
+        .expect("build selection service");
+    let app = create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }));
+
+    let model_registration = tokio::spawn(register_worker_id(app.clone(), 1, None));
+    let other_app = app.clone();
+    let other_registration = tokio::spawn(async move {
+        let body = serde_json::json!({
+            "worker_id": 4,
+            "model_name": "other-model",
+            "endpoint": "http://worker-4:8000",
+            "block_size": 4
+        });
+        post(other_app, "/workers", &body.to_string()).await
+    });
+    assert_eq!(
+        model_registration.await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        other_registration.await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 2, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 3, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+    let mut partitions = factory_partitions.lock().unwrap().clone();
+    partitions.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+    assert_eq!(
+        partitions,
+        [
+            RoutingPartitionRef::new("model", "default").into_owned(),
+            RoutingPartitionRef::new("other-model", "default").into_owned(),
+        ]
+    );
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"custom-selector"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    let reserved = response_json(reserved).await;
+    assert_eq!(reserved["worker_id"], 2);
+    assert_eq!(reserved["effective_prefill_tokens"], 4);
+
+    assert_eq!(active_requests(app.clone(), 2).await, 1);
+
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
+    let app = native_policy_app(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type,
+            vec![Box::new(NonFiniteScorer)],
+            Box::new(LowestCostPicker),
+        )
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let rejected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"non-finite"}"#,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        response_json(rejected).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("non-finite")
+    );
+    assert_eq!(active_requests(app, 1).await, 0);
+}
+
+#[tokio::test]
+async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
+    let app = native_policy_app(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type,
+            Vec::new(),
+            Box::new(InvalidRowPicker),
+        )
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let rejected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"invalid-row"}"#,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        response_json(rejected).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("candidate row")
+    );
+    assert_eq!(active_requests(app, 1).await, 0);
+}
+
+#[tokio::test]
+async fn worker_selection_filter_returns_unavailable_without_booking() {
+    let app = native_policy_app(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new_with_filters(
+            config.clone(),
+            worker_type,
+            vec![Box::new(RejectAllFilter)],
+            Vec::new(),
+            Box::new(LowestCostPicker),
+        )
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let rejected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"filtered"}"#,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(active_requests(app, 1).await, 0);
 }
 
 #[test]
@@ -423,6 +748,7 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
         device: MatchDetails {
             overlap_scores: device_scores,
             last_matched_hashes: Default::default(),
+            router_hint_root_candidates: None,
         },
         lower_tier: Default::default(),
     };
@@ -571,6 +897,9 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
     assert_eq!(body["overlap"]["dp"]["0"], 0);
     assert!(body.get("cached_tokens").is_none());
     assert!(body.get("effective_overlap_blocks").is_none());
+    assert!(body.get("sequence_hashes").is_none());
+    assert!(body.get("isl_tokens").is_none());
+    assert!(body.get("track_prefill_tokens").is_none());
 
     let loads_response = app
         .oneshot(
@@ -651,6 +980,17 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let body = response_json(response).await;
     assert_eq!(body["selection_id"], "res-a");
     assert_eq!(body["effective_prefill_tokens"], 4);
+    assert_eq!(body["isl_tokens"], 4);
+    assert_eq!(body["track_prefill_tokens"], true);
+    let block_hashes = compute_block_hash_for_seq(&[1, 2, 3, 4], 4, BlockHashOptions::default());
+    let expected_sequence_hashes: Vec<i64> = compute_seq_hash_for_block(&block_hashes)
+        .iter()
+        .map(|hash| *hash as i64)
+        .collect();
+    assert_eq!(
+        body["sequence_hashes"],
+        serde_json::json!(expected_sequence_hashes)
+    );
 
     let loads_response = app
         .clone()
@@ -684,6 +1024,68 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
         .await
         .unwrap();
     assert_eq!(free.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn explicit_replay_preserves_disabled_prefill_tracking() {
+    let source = app();
+    let peer = app();
+    for app in [source.clone(), peer.clone()] {
+        assert_eq!(
+            register_worker(app, None).await.status(),
+            StatusCode::CREATED
+        );
+    }
+
+    let response = post(
+        source.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated","router_config_override":{"track_prefill_tokens":false}}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let selected = response_json(response).await;
+    assert_eq!(selected["track_prefill_tokens"], false);
+
+    let reservation = serde_json::json!({
+        "model_name": "model",
+        "selection_id": "replicated",
+        "worker_id": selected["worker_id"],
+        "dp_rank": selected["dp_rank"],
+        "sequence_hashes": selected["sequence_hashes"],
+        "isl_tokens": selected["isl_tokens"],
+        "effective_prefill_tokens": selected["effective_prefill_tokens"],
+        "track_prefill_tokens": selected["track_prefill_tokens"]
+    });
+    let response = post(peer.clone(), "/reservations", &reservation.to_string()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    for app in [source, peer] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/loads")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loads = response_json(response).await;
+        assert_eq!(loads[0]["loads"][0]["active_requests"], 1);
+        assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
+        assert_eq!(loads[0]["loads"][0]["potential_decode_blocks"], 1);
+
+        let response = post(
+            app,
+            "/potential_loads",
+            r#"{"model_name":"model","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":false}}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let potential = response_json(response).await;
+        assert_eq!(potential[0]["potential_decode_blocks"], 1);
+    }
 }
 
 #[tokio::test]

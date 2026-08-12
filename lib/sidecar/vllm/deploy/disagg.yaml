@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL. Disaggregated vLLM deployment using the Rust sidecar.
+#
+# Prefill and decode run as separate worker pods. Each pod has two containers:
+#   - main: the Dynamo worker (dynamo-vllm-sidecar). No GPU. Its
+#     --disaggregation-mode (prefill|decode) sets the gRPC kv_transfer_params
+#     handoff. Must be named "main" (operator injects discovery env + probes).
+#   - vllm-engine: the stock vLLM image running vllm-rs with the NIXL KV
+#     connector. Holds the GPU. KV cache moves prefill -> decode engine-to-engine
+#     over NIXL/RDMA (not through the sidecars). Native sidecar; see initContainers.
+#
+# The frontend routes to a prefill worker, gets kv_transfer_params, then routes
+# to a decode worker with that handoff. This sidecar does NOT publish KV events,
+# so use the default router (not --router-mode kv).
+#
+# kv_role is kv_producer on prefill and kv_consumer on decode (kv_both is
+# deprecated for NixlConnector).
+#
+# PREREQUISITES / CAVEATS:
+#   - Needs a sidecar built from lib/sidecar/vllm/Dockerfile that carries the
+#     disaggregation fixes (component-by-role + NIXL port encoding); older builds
+#     route both roles to one component and generate zero tokens.
+#   - RDMA/NIXL: the engine needs rdma/ib devices, IPC_LOCK/SYS_RESOURCE, pinned
+#     memory (ulimit -l unlimited), and UCX tuning; adjust for your fabric.
+#   - VLLM_NIXL_SIDE_CHANNEL_HOST must be a routable pod IP (set via downward API).
+#   - No published vLLM sidecar image yet — build from lib/sidecar/vllm/Dockerfile
+#     and set <your-registry>.
+#
+# The prefill->decode flow was validated on a single node (prefill+decode
+# co-located, NIXL over CUDA-IPC/TCP without rdma/ib); the rdma/ib requests below
+# target a real RDMA fabric.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-disagg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+
+  - name: VLLMPrefillWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        initContainers:
+        - name: vllm-engine
+          image: vllm/vllm-openai:v0.26.0
+          restartPolicy: Always
+          # RDMA/NIXL needs pinned memory + privileged caps. runAsUser: 0 is only
+          # required for the rdma/ib path; drop it if your fabric doesn't need it.
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          # The socket probes cover container lifecycle. The Dynamo sidecar also
+          # checks both services through the standard gRPC health API.
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          env:
+          # NIXL side-channel must advertise a routable pod IP (no dynamo.vllm
+          # wrapper here to auto-detect it).
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          # UCX/RDMA tuning — adjust NET_DEVICES to your fabric.
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: "0"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          # vllm-rs is not on PATH; resolve it from the installed vllm package.
+          # --host 127.0.0.1 keeps the unauthenticated gRPC on pod loopback (the
+          # NIXL side-channel uses the pod IP via VLLM_NIXL_SIDE_CHANNEL_HOST).
+          command: ["/bin/sh", "-c"]
+          args:
+          - |
+            VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
+              --host 127.0.0.1 --grpc-port 50051 \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-vllm-sidecar:1.3.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --vllm-endpoint
+          - 127.0.0.1:50051
+          - --disaggregation-mode
+          - prefill
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+
+  - name: VLLMDecodeWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        initContainers:
+        - name: vllm-engine
+          image: vllm/vllm-openai:v0.26.0
+          restartPolicy: Always
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          # The socket probes cover container lifecycle. The Dynamo sidecar also
+          # checks both services through the standard gRPC health API.
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          env:
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1
+          - name: UCX_IB_ADDR_TYPE
+            value: eth
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: "0"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          # vllm-rs is not on PATH; resolve it from the installed vllm package.
+          # --host 127.0.0.1 keeps the unauthenticated gRPC on pod loopback (the
+          # NIXL side-channel uses the pod IP via VLLM_NIXL_SIDE_CHANNEL_HOST).
+          command: ["/bin/sh", "-c"]
+          args:
+          - |
+            VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
+              --host 127.0.0.1 --grpc-port 50051 \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-vllm-sidecar:1.3.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --vllm-endpoint
+          - 127.0.0.1:50051
+          - --disaggregation-mode
+          - decode
+          envFrom:
+          - secretRef:
+              name: hf-token-secret

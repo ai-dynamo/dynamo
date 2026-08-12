@@ -50,7 +50,7 @@ class DynamoWorkerProcess(ManagedProcess):
         self,
         request,
         frontend_port: int,
-        mode: str = "prefill_and_decode",
+        mode: str = "agg",
     ):
         """
         Initialize TensorRT-LLM worker process.
@@ -58,7 +58,7 @@ class DynamoWorkerProcess(ManagedProcess):
         Args:
             request: pytest request object
             frontend_port: Port for the frontend server
-            mode: One of "prefill_and_decode", "prefill", "decode"
+            mode: One of "agg", "prefill", "decode"
         """
         # Allocate system port for this worker
         system_port = allocate_port(DynamoPortRange.SERVE.value)
@@ -79,7 +79,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--max-num-tokens",
             "16384",
         ]
-        if mode != "prefill_and_decode":
+        if mode != "agg":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
                 f.write(
                     "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
@@ -174,7 +174,7 @@ def test_request_cancellation_trtllm_aggregated(
 
     This test verifies that when a request is cancelled by the client,
     the system properly handles the cancellation and cleans up resources
-    on the worker side in aggregated (prefill_and_decode) mode. Tests three scenarios:
+    on the worker side in aggregated (agg) mode. Tests three scenarios:
     1. Completion request
     2. Chat completion request (non-streaming)
     3. Chat completion request (streaming)
@@ -190,9 +190,7 @@ def test_request_cancellation_trtllm_aggregated(
         logger.info("Frontend started successfully")
 
         # Step 2: Start an aggregated worker (allocates its own system_port)
-        with DynamoWorkerProcess(
-            request, frontend.frontend_port, mode="prefill_and_decode"
-        ) as worker:
+        with DynamoWorkerProcess(request, frontend.frontend_port, mode="agg") as worker:
             logger.info(f"Aggregated Worker PID: {worker.get_pid()}")
 
             # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?

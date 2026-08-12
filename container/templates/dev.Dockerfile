@@ -84,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         pybind11-dev \
         pkg-config \
         protobuf-compiler \
+        libprotobuf-dev \
         # Debugging / tracing
         gdb \
         valgrind \
@@ -134,13 +135,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Add external repos (NVIDIA devtools, GitHub CLI) and install in one pass.
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
-#
-# ==================== TEMPORARY WORKAROUND ====================
-# The devtools repo index lists "Filename: ./nsight-systems-...deb", so apt
-# requests the "/./" literally and that bucket 404s on it (the CUDA repo
-# normalizes fine). Fetch the normalized URL directly instead of by name.
-# Revert to a plain apt-get install once NVIDIA fixes the bucket.
-# ==============================================================
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
         | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
@@ -151,10 +145,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
-    curl --retry 3 --retry-delay 5 -fsSL -o /tmp/nsys.deb \
-        "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nsight-systems-2025.5.1_2025.5.1.121-1_${TARGETARCH}.deb" && \
-    apt-get install -y --no-install-recommends /tmp/nsys.deb gh && \
-    rm -f /tmp/nsys.deb && \
+    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 gh && \
     rm -rf /var/lib/apt/lists/*
 
 # ======================================================================
@@ -359,13 +350,13 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 # SGLang XPU: conda env from framework stage; install uv and maturin.
 # uv doesn't natively recognize conda envs (no pyvenv.cfg), so we use
 # --python to target the conda interpreter explicitly.
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
     chmod +x ${VIRTUAL_ENV}/bin/uv && \
     pip install maturin[patchelf]
 {% else %}
 # SGLang CUDA: Create venv with --system-site-packages to inherit runtime packages
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
     cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
@@ -382,7 +373,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 # CUDA: Runtime uses system Python, so --system-site-packages correctly inherits packages.
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
-    ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
+    ln -sf /opt/uv/bin/uv /opt/dynamo/venv/bin/uv
 {% else %}
 # CPU/XPU: Runtime uses /opt/venv from upstream vLLM-CPU image. Reuse it directly
 # instead of creating /opt/dynamo/venv, since --system-site-packages points to UV Python
@@ -392,7 +383,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 # Point /usr/local/bin/python to /opt/venv so scripts using 'python' work correctly
 # Use a wrapper script instead of symlink to ensure Python recognizes the venv context
 RUN chown -R dynamo:0 /opt/venv && \
-    ln -sf /usr/local/bin/uv /opt/venv/bin/uv && \
+    ln -sf /opt/uv/bin/uv /opt/venv/bin/uv && \
     rm -f /usr/local/bin/python && \
     echo '#!/bin/bash' > /usr/local/bin/python && \
     echo 'exec /opt/venv/bin/python "$@"' >> /usr/local/bin/python && \
@@ -414,7 +405,7 @@ ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     # Git LFS init (needed for requirements with lfs=true); folded in to save a layer.
     git lfs install && \
@@ -495,6 +486,16 @@ RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dyna
 {% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% elif framework == "vllm" %}
+# The upstream vllm/vllm-openai base does not ship /opt/nvidia/nvidia_entrypoint.sh,
+# so setting it here makes every `docker run` of the vLLM dev image fail with
+# "stat /opt/nvidia/nvidia_entrypoint.sh: no such file or directory".
+# vllm_runtime.Dockerfile already resets ENTRYPOINT for that reason — keep dev
+# aligned with it instead of clobbering it back. (local_dev.Dockerfile does the same.)
+# CMD must be non-empty here: with both ENTRYPOINT and CMD empty, a bare
+# `docker run <image>` fails with "no command specified".
+ENTRYPOINT []
+CMD ["/bin/bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

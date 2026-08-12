@@ -12,11 +12,11 @@ import (
 	"strings"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,7 +37,7 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
 	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
-	_, err := validator.Validate(ctx, dgd)
+	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
 		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
 	}
@@ -67,32 +67,22 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					ComponentName: "frontend",
-					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "frontend",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 				{
-					ComponentName: "worker",
-					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(2)),
-				},
-			},
-		},
-	}
-}
-
-func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeployment {
-	return &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-graph",
-			Namespace: "default",
-		},
-		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "worker",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 			},
 		},

@@ -160,8 +160,11 @@ impl ZmqKvEventSink {
 
                         let sock = router_socket.as_mut().unwrap();
                         for (seq, payload) in ring_buffer.iter().skip(start_idx) {
+                            // ROUTER consumes the identity frame; the DEALER-side
+                            // listener receives [delimiter, topic, seq, payload].
                             let frames = vec![
                                 identity.clone().to_vec(),
+                                Vec::new(),
                                 Vec::new(),
                                 seq.to_be_bytes().to_vec(),
                                 payload.to_vec(),
@@ -174,6 +177,7 @@ impl ZmqKvEventSink {
 
                         let sentinel_frames = vec![
                             identity.to_vec(),
+                            Vec::new(),
                             Vec::new(),
                             (-1i64).to_be_bytes().to_vec(),
                             Vec::new(),

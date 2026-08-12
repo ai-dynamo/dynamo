@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-import dynamo._core as _core
 import dynamo._internal.aic as aic_helpers
 import dynamo.replay.main as replay_main
 from dynamo.mocker import MockEngineArgs
@@ -159,40 +158,6 @@ def test_resolve_aic_blocks_keeps_per_rank_capacity_for_attention_dp(monkeypatch
     assert _resolve(8) == (1000, 8)
     assert _resolve(1) == (1000, None)
     assert _resolve(None) == (1000, None)
-
-
-def test_resolve_aic_blocks_falls_back_when_memory_estimator_is_unavailable(
-    monkeypatch, caplog
-):
-    def unavailable(**_kwargs):
-        raise replay_main.AicMemoryEstimatorUnavailableError("estimator unavailable")
-
-    monkeypatch.setattr(replay_main, "estimate_num_gpu_blocks", unavailable)
-    raw = {
-        "aic_backend": "vllm",
-        "aic_model_path": "/models/mock",
-        "aic_tp_size": 1,
-    }
-
-    replay_main._resolve_aic_num_gpu_blocks(raw)
-
-    assert raw["num_gpu_blocks"] == 16384
-    assert "Falling back to default num_gpu_blocks=16384" in caplog.text
-
-
-@pytest.mark.skipif(
-    not hasattr(_core, "RustEnginePerfModel"),
-    reason="bindings built without the aic-forward-pass feature",
-)
-def test_direct_replay_falls_back_when_memory_estimator_is_unavailable(monkeypatch):
-    def unavailable(**_kwargs):
-        raise aic_helpers.AicMemoryEstimatorUnavailableError("estimator unavailable")
-
-    monkeypatch.setattr(aic_helpers, "estimate_num_gpu_blocks", unavailable)
-
-    report = _run_direct_aic_replay()
-
-    assert report["completed_requests"] == 1
 
 
 def test_direct_replay_preserves_other_capacity_errors(monkeypatch):

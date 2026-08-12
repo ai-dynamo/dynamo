@@ -26,8 +26,10 @@ pytestmark = [
     pytest.mark.multimodal,
     pytest.mark.unit,
     pytest.mark.gpu_1,
-    pytest.mark.profiled_vram_gib(0),
 ]
+
+# Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
+# sequential GPU stage so TensorRT-LLM initialization is shared.
 
 
 def test_trtllm_qwen2vl_uses_in_vocab_image_markers() -> None:

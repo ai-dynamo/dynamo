@@ -24,7 +24,7 @@ use crate::client::{self, Client, Discovery, Pool};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, new_output_ids, output_ids_to_u32, terminal_from_meta,
 };
 
 pub struct SglangSidecarEngine {
@@ -87,7 +87,7 @@ impl SglangSidecarEngine {
 
         let config = WorkerConfig {
             namespace: args.namespace,
-            component: component_for_mode(disaggregation_mode).to_string(),
+            component: disaggregation_mode.discovery_component().to_string(),
             endpoint: args.endpoint,
             endpoint_types: args.endpoint_types,
             custom_jinja_template: args.custom_jinja_template,
@@ -242,6 +242,7 @@ impl LLMEngine for SglangSidecarEngine {
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
             let mut logprob_offset = 0_usize;
+            let mut token_offset = 0_usize;
             loop {
                 tokio::select! {
                     biased;
@@ -273,13 +274,22 @@ impl LLMEngine for SglangSidecarEngine {
                         if let Some(value) = meta_u32(&response.meta_info, "prompt_tokens") {
                             observed_prompt_tokens = value;
                         }
-                        let token_ids = match output_ids_to_u32(&response.output_ids) {
+                        // SGLang streams output_ids cumulatively (the whole sequence
+                        // so far, like its logprob metadata), so emit only the tokens
+                        // appended since the previous chunk.
+                        let token_ids = match output_ids_to_u32(new_output_ids(
+                            &response.output_ids,
+                            token_offset,
+                        )) {
                             Ok(ids) => ids,
                             Err(err) => {
                                 yield Err(err);
                                 break;
                             }
                         };
+                        // Never rewind: a regressive chunk (shorter than what we
+                        // already emitted) must not let later growth re-emit tokens.
+                        token_offset = token_offset.max(response.output_ids.len());
                         let (log_probs, top_logprobs, next_offset) =
                             match extract_logprobs(
                                 &response.meta_info,
@@ -421,14 +431,6 @@ fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoErr
     }
 }
 
-fn component_for_mode(mode: DisaggregationMode) -> &'static str {
-    if mode.is_prefill() {
-        "prefill"
-    } else {
-        "backend"
-    }
-}
-
 fn discovery_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -539,6 +541,10 @@ fn build_engine_config(
     bootstrap_port: Option<u16>,
 ) -> Result<EngineConfig, DynamoError> {
     let page_size = client::json_u32(&discovery.server_info, "page_size");
+    let dcp_size = client::json_u32(&discovery.server_info, "dcp_size")
+        .unwrap_or(1)
+        .max(1);
+    let kv_cache_block_size = page_size.map(|size| size.saturating_mul(dcp_size));
     let max_total_tokens = client::json_u64(&discovery.server_info, "max_total_num_tokens");
     let total_kv_blocks = match (max_total_tokens, page_size) {
         (Some(tokens), Some(page_size)) if page_size > 0 => {
@@ -588,10 +594,11 @@ fn build_engine_config(
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
         served_model_name: discovery.served_model_name.clone(),
+        model_aliases: Vec::new(),
         runtime_data,
         llm: Some(LlmRegistration {
             context_length: discovery.max_model_len,
-            kv_cache_block_size: page_size,
+            kv_cache_block_size,
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
@@ -706,5 +713,24 @@ mod tests {
 
         assert_eq!(registration.data_parallel_start_rank, Some(0));
         assert_eq!(registration.data_parallel_size, Some(16));
+    }
+
+    #[test]
+    fn dcp_registers_logical_kv_block_size() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "page_size": 64,
+                "dcp_size": 8,
+                "max_total_num_tokens": 1024,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+        let registration = config.llm.unwrap();
+
+        assert_eq!(registration.kv_cache_block_size, Some(512));
+        assert_eq!(registration.total_kv_blocks, Some(16));
     }
 }

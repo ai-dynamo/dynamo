@@ -28,8 +28,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
-use dynamo_renderer::OAIPromptFormatter;
-use dynamo_runtime::config::is_truthy;
+use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
+use dynamo_runtime::config::{is_truthy, parse_bool_opt};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use either::Either;
 use futures::Stream;
@@ -42,9 +42,15 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::Arc,
+};
 use tracing;
 
+use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
@@ -228,6 +234,7 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
+const DEFAULT_THINKING_MODE_RUNTIME_KEY: &str = "default_thinking_mode";
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
 /// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
@@ -283,14 +290,23 @@ where
     attach_metrics_annotation(response, &metrics);
 }
 
-// Reasoning State for reasoning parsing transformation step
+// Reasoning State for reasoning parsing transformation step.
+//
+// The reasoning parser and the guided-JSON bypass decision are kept per
+// `choice.index` so that with `n > 1` one choice's bare-JSON bypass cannot
+// suppress another choice's reasoning split. This mirrors the per-choice state
+// already used by the tool-call jail and the leading-`<think>` strip stage.
+struct ChoiceReasoningState {
+    parser: Box<dyn ReasoningParser>,
+    guided_json_bypass_decision: Option<bool>,
+}
+
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    parser_name: String,
+    prompt_injected_reasoning: bool,
     bypass_bare_guided_json: bool,
-    // TODO: Track this per choice.index for n > 1. The current bypass
-    // decision and parser state are shared across all streamed choices.
-    guided_json_bypass_decision: Option<bool>,
+    choices: HashMap<u32, ChoiceReasoningState>,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -415,6 +431,104 @@ fn attach_agent_context_from_context(
     }
 }
 
+/// Thin wrapper that normalizes `function.arguments` in historical tool-calls
+/// from a JSON string to an object before passing messages to a MiniJinja
+/// template.  Only used when `OpenAIPreprocessor::normalize_tool_call_args` is
+/// true (e.g. GLM-5.2); all other trait methods delegate directly to the inner
+/// request so routing, sampling, and annotation behavior is unchanged.
+struct NormalizedArgsRequest<'a, R>(&'a R);
+
+impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
+    fn model(&self) -> String {
+        self.0.model()
+    }
+
+    fn messages(&self) -> minijinja::value::Value {
+        let mut json =
+            serde_json::to_value(self.0.typed_messages().unwrap_or_default()).unwrap_or_default();
+        if let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json) {
+            tracing::error!(
+                error = %e,
+                "tool_call arguments normalization failed; template rendering may fail \
+                 if it calls .items() on a string"
+            );
+        }
+        minijinja::value::Value::from_serialize(&json)
+    }
+
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
+        self.0.typed_messages()
+    }
+
+    fn tools(&self) -> Option<minijinja::value::Value> {
+        self.0.tools()
+    }
+
+    fn tool_choice(&self) -> Option<minijinja::value::Value> {
+        self.0.tool_choice()
+    }
+
+    fn response_format(&self) -> Option<minijinja::value::Value> {
+        self.0.response_format()
+    }
+
+    fn should_add_generation_prompt(&self) -> bool {
+        self.0.should_add_generation_prompt()
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        self.0.extract_text()
+    }
+
+    fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.0.chat_template_args()
+    }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.0.mm_processor_kwargs()
+    }
+}
+
+impl<R: AnnotationsProvider> AnnotationsProvider for NormalizedArgsRequest<'_, R> {
+    fn annotations(&self) -> Option<Vec<String>> {
+        self.0.annotations()
+    }
+}
+
+impl<R: SamplingOptionsProvider> SamplingOptionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_sampling_options(
+        &self,
+    ) -> anyhow::Result<crate::protocols::common::SamplingOptions> {
+        self.0.extract_sampling_options()
+    }
+}
+
+impl<R: StopConditionsProvider> StopConditionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_stop_conditions(&self) -> anyhow::Result<crate::protocols::common::StopConditions> {
+        self.0.extract_stop_conditions()
+    }
+}
+
+impl<R: OutputOptionsProvider> OutputOptionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_output_options(&self) -> anyhow::Result<crate::protocols::common::OutputOptions> {
+        self.0.extract_output_options()
+    }
+}
+
+impl<R: NvExtProvider> NvExtProvider for NormalizedArgsRequest<'_, R> {
+    fn nvext(&self) -> Option<&crate::protocols::common::extensions::NvExt> {
+        self.0.nvext()
+    }
+
+    fn raw_prompt(&self) -> Option<String> {
+        self.0.raw_prompt()
+    }
+
+    fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.0.unsupported_fields()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
@@ -431,9 +545,14 @@ pub struct OpenAIPreprocessor {
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
+    /// Normalize historical tool-call `function.arguments` from a JSON string
+    /// to an object before MiniJinja rendering.  Enabled for GLM-5.2 (glm47
+    /// parser) and any model that sets `normalize_tool_call_args: true` in its
+    /// ModelRuntimeConfig; disabled for all other models.
+    normalize_tool_call_args: bool,
     media_loader: Option<MediaLoader>,
-    /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
-    context_length: u32,
+    /// Engine-published request-token admission policy.
+    token_budget: Option<TokenBudget>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -459,32 +578,127 @@ pub struct OpenAIPreprocessor {
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
 
+pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
         prompt_len: usize,
-        context_length: u32,
+        token_limit: Option<u32>,
         options: PreprocessRequestOptions,
     ) -> Option<u32> {
-        if context_length == 0 || options.preserve_omitted_max_tokens {
+        if options.preserve_omitted_max_tokens {
             return None;
         }
-        Some(context_length.saturating_sub(prompt_len as u32))
+        token_limit.map(|limit| limit.saturating_sub(prompt_len as u32))
     }
 
-    /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
-    /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
-    /// images but no expanded length, defers to the backend (`None`); text-only
-    /// uses `token_ids_len`.
-    fn effective_prompt_len_for_cap(
-        expanded_prompt_len: Option<usize>,
-        has_images: bool,
+    /// Return the exact prompt length when the frontend can prove it.
+    ///
+    /// MM routing currently expands image placeholders only. Therefore any
+    /// other non-empty media modality makes even an image-expanded length
+    /// incomplete and forces backend validation.
+    fn exact_prompt_len(
+        expanded_image_prompt_len: Option<usize>,
+        multi_modal_data: Option<&MultimodalDataMap>,
         token_ids_len: usize,
     ) -> Option<usize> {
-        match expanded_prompt_len {
-            Some(n) if n > 0 => Some(n),
-            _ if has_images => None,
-            _ => Some(token_ids_len),
+        let has_images = multi_modal_data
+            .and_then(|media| media.get("image_url"))
+            .is_some_and(|items| !items.is_empty());
+        let has_other_media = multi_modal_data.is_some_and(|media| {
+            media
+                .iter()
+                .any(|(kind, items)| kind != "image_url" && !items.is_empty())
+        });
+
+        if has_other_media {
+            None
+        } else if let Some(expanded_prompt_len) =
+            expanded_image_prompt_len.filter(|length| *length > 0)
+        {
+            Some(expanded_prompt_len)
+        } else if has_images {
+            None
+        } else {
+            Some(token_ids_len)
         }
+    }
+
+    /// Apply the engine-published rejection policy to an exact request length.
+    fn validate_requested_token_budget(
+        prompt_len: usize,
+        max_tokens: Option<u32>,
+        token_budget: Option<&TokenBudget>,
+    ) -> Result<()> {
+        let Some(token_budget) = token_budget else {
+            return Ok(());
+        };
+        let combined_limit = token_budget.combined_limit as usize;
+
+        // A prompt that fills the combined budget leaves no room for generation.
+        // When prompt overflow is backend-owned, its effective length may change.
+        if prompt_len >= combined_limit {
+            if !token_budget.reject_prompt_overflow {
+                return Ok(());
+            }
+            return Err(Self::prompt_overflow_error(prompt_len, combined_limit).into());
+        }
+
+        // Generation requires at least one output token when the cap is omitted.
+        let requested_tokens = prompt_len.saturating_add(max_tokens.unwrap_or(1) as usize);
+        if requested_tokens > combined_limit && token_budget.reject_total_overflow {
+            let request_description = match max_tokens {
+                Some(max_tokens) => format!(
+                    "your request has {prompt_len} input tokens and asks for {max_tokens} output \
+                     tokens ({requested_tokens} tokens total)"
+                ),
+                None => format!(
+                    "your request has {prompt_len} input tokens and requires room for at least one \
+                     output token ({requested_tokens} tokens minimum)"
+                ),
+            };
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!(
+                    "This model configuration accepts at most {} combined input and output \
+                     tokens. However, {}. Please reduce the input length or requested output \
+                     length.",
+                    combined_limit, request_description,
+                ))
+                .build()
+                .into());
+        }
+
+        Ok(())
+    }
+
+    /// Validate a preprocessed request when its frontend-visible prompt length
+    /// is exact, returning that length for other context-budget decisions.
+    fn validate_preprocessed_token_budget(
+        request: &PreprocessedRequest,
+        token_budget: Option<&TokenBudget>,
+    ) -> Result<Option<usize>> {
+        if request.prompt_embeds.is_some() {
+            return Ok(None);
+        }
+
+        let exact_prompt_len = Self::exact_prompt_len(
+            request
+                .mm_routing_info
+                .as_ref()
+                .map(|mm| mm.expanded_prompt_len),
+            request.multi_modal_data.as_ref(),
+            request.token_ids.len(),
+        );
+        if let Some(prompt_len) = exact_prompt_len {
+            Self::validate_requested_token_budget(
+                prompt_len,
+                request.stop_conditions.max_tokens,
+                token_budget,
+            )?;
+        }
+
+        Ok(exact_prompt_len)
     }
 
     fn nvext_passthrough_args<R: NvExtProvider>(
@@ -582,6 +796,70 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn has_request_thinking_control(
+        chat_template_args: Option<&HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        chat_template_args.is_some_and(|args| {
+            [
+                "thinking",
+                "enable_thinking",
+                "thinking_mode",
+                "reasoning_effort",
+            ]
+            .iter()
+            .any(|key| args.contains_key(*key))
+        })
+    }
+
+    fn request_has_client_thinking_control(request: &NvCreateChatCompletionRequest) -> bool {
+        request.thinking.is_some()
+            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
+    }
+
+    fn apply_default_thinking_mode_from_runtime_config(
+        runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+        request: &mut NvCreateChatCompletionRequest,
+    ) {
+        if Self::request_has_client_thinking_control(request) {
+            return;
+        }
+
+        let Some(default_mode) = runtime_config
+            .runtime_data
+            .get(DEFAULT_THINKING_MODE_RUNTIME_KEY)
+            .and_then(|value| value.as_str())
+        else {
+            return;
+        };
+
+        let enabled = match default_mode {
+            "enabled" => true,
+            "disabled" => false,
+            other => {
+                tracing::warn!(
+                    default_thinking_mode = other,
+                    "Ignoring invalid runtime_config default_thinking_mode; expected 'enabled' or 'disabled'"
+                );
+                return;
+            }
+        };
+
+        let args = request.chat_template_args.get_or_insert_with(HashMap::new);
+        args.insert("thinking".to_string(), serde_json::Value::Bool(enabled));
+        args.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(enabled),
+        );
+        args.insert(
+            "thinking_mode".to_string(),
+            serde_json::Value::String(if enabled { "enabled" } else { "disabled" }.to_string()),
+        );
+    }
+
+    fn apply_default_thinking_mode(&self, request: &mut NvCreateChatCompletionRequest) {
+        Self::apply_default_thinking_mode_from_runtime_config(&self.runtime_config, request);
+    }
+
     fn guided_output_requires_reasoning<R: OAIChatLikeRequest>(
         request: &R,
         reasoning_parser: Option<&str>,
@@ -590,14 +868,7 @@ impl OpenAIPreprocessor {
             return false;
         }
 
-        let is_guided_tool_choice = request.tool_choice().is_some_and(|tool_choice| {
-            match tool_choice.as_str() {
-                Some("required") => true,
-                Some(_) => false,
-                // The only supported non-string tool choice is a named function.
-                None => true,
-            }
-        });
+        let is_guided_tool_choice = Self::has_guided_tool_choice(request);
         let is_structured_response = Self::has_structured_response_format(request);
         let structured_response_requires_reasoning = is_structured_response
             && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
@@ -638,7 +909,7 @@ impl OpenAIPreprocessor {
             Some("qwen3" | "glm45" | "nemotron_nano" | "nemotron3" | "nemotron_v3") => {
                 thinking_enabled != Some(false)
             }
-            Some("kimi_k25") => thinking_enabled != Some(false),
+            Some("kimi_k25" | "kimi_k3" | "kimi-k3") => thinking_enabled != Some(false),
             Some("minimax_m2") => {
                 Self::deepseek_renderer_reasoning_enabled(chat_template_args, true)
             }
@@ -689,23 +960,79 @@ impl OpenAIPreprocessor {
         default_enabled
     }
 
+    #[cfg(test)]
     fn normalize_thinking_arg(
         request: &mut NvCreateChatCompletionRequest,
         reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
     ) {
-        let normalized = request
+        let thinking_control_from_client = Self::request_has_client_thinking_control(request);
+        Self::normalize_thinking_arg_with_source(
+            request,
+            reasoning_parser,
+            tool_call_parser,
+            thinking_control_from_client,
+        );
+    }
+
+    fn normalize_thinking_arg_with_source(
+        request: &mut NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
+        thinking_control_from_client: bool,
+    ) {
+        let normalized = Self::normalize_thinking_aliases(request, reasoning_parser);
+
+        if Self::is_minimax_m3_family(reasoning_parser, tool_call_parser) {
+            Self::normalize_minimax_m3_thinking_mode(
+                request,
+                normalized,
+                thinking_control_from_client,
+            );
+            return;
+        }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
+    }
+
+    fn normalize_thinking_aliases(
+        request: &NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+    ) -> Option<bool> {
+        request
             .chat_template_args
             .as_ref()
             .and_then(|args| {
-                // Match thinking_bool_from_args precedence: when both aliases
-                // are present, `thinking` wins and its normalized value is
-                // written back to both keys below.
-                for key in ["thinking", "enable_thinking"] {
+                // Normalize public aliases in array order: `thinking`,
+                // `enable_thinking`, then `thinking_mode`.
+                // Preserve "adaptive" as tri-state by returning None.
+                for key in ["thinking", "enable_thinking", "thinking_mode"] {
                     match args.get(key) {
-                        Some(serde_json::Value::Bool(_)) => {
+                        Some(serde_json::Value::Bool(b)) => {
+                            // `thinking_bool_from_args` ignores `thinking_mode`,
+                            // so read that bool directly.
+                            if key == "thinking_mode" {
+                                return Some(*b);
+                            }
                             return dynamo_renderer::thinking_bool_from_args(Some(args));
                         }
                         Some(serde_json::Value::String(value)) => {
+                            // Parse `thinking_mode` explicitly so
+                            // "enabled"/"disabled" and boolean spellings
+                            // behave predictably. Preserve unrecognized strings
+                            // such as "adaptive" or DeepSeek's "chat"/"thinking".
+                            if key == "thinking_mode" {
+                                if value.eq_ignore_ascii_case("enabled") {
+                                    return Some(true);
+                                }
+                                if value.eq_ignore_ascii_case("disabled") {
+                                    return Some(false);
+                                }
+                                if let Some(b) = parse_bool_opt(value) {
+                                    return Some(b);
+                                }
+                                return None;
+                            }
                             return Some(is_truthy(value));
                         }
                         Some(serde_json::Value::Number(value)) => {
@@ -718,8 +1045,62 @@ impl OpenAIPreprocessor {
                 }
                 None
             })
-            .or_else(|| matches!(reasoning_parser, Some("kimi_k25")).then_some(true));
+            .or_else(|| {
+                matches!(reasoning_parser, Some("kimi_k25" | "kimi_k3" | "kimi-k3")).then_some(true)
+            })
+    }
 
+    fn normalize_minimax_m3_thinking_mode(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+        thinking_control_from_client: bool,
+    ) {
+        // MiniMax M3 defaults `thinking_mode` to "adaptive", which breaks
+        // constrained JSON/schema and forced-tool generation. If the client
+        // did not set thinking controls, force "disabled" for those requests.
+        let explicit_thinking_mode_is_adaptive = request
+            .chat_template_args
+            .as_ref()
+            .and_then(|args| args.get("thinking_mode"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("adaptive"));
+        if !thinking_control_from_client && Self::has_minimax_m3_constrained_generation(request) {
+            let args = request.chat_template_args.get_or_insert_default();
+            args.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("disabled".to_string()),
+            );
+            args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            args.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            return;
+        }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
+
+        let Some(normalized) = normalized else {
+            return;
+        };
+
+        // Canonicalize for M3 because its template only treats exact
+        // "disabled" as off. Preserve explicit "adaptive" as client intent.
+        if !explicit_thinking_mode_is_adaptive {
+            let args = request.chat_template_args.get_or_insert_default();
+            args.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String(
+                    if normalized { "enabled" } else { "disabled" }.to_string(),
+                ),
+            );
+        }
+    }
+
+    fn apply_normalized_thinking_aliases(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+    ) {
         let Some(normalized) = normalized else {
             return;
         };
@@ -728,6 +1109,71 @@ impl OpenAIPreprocessor {
         args.insert(
             "enable_thinking".to_string(),
             serde_json::Value::Bool(normalized),
+        );
+    }
+
+    /// True when the deployment renders MiniMax M3's `thinking_mode` template.
+    /// Either parser is sufficient, and tool-call aliases include `_nom`.
+    fn is_minimax_m3_family(
+        reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
+    ) -> bool {
+        matches!(reasoning_parser, Some("minimax_m3") | Some("minimax-m3"))
+            || matches!(
+                tool_call_parser,
+                Some("minimax_m3")
+                    | Some("minimax-m3")
+                    | Some("minimax_m3_nom")
+                    | Some("minimax-m3-nom")
+            )
+    }
+
+    fn has_minimax_m3_constrained_generation<R: OAIChatLikeRequest>(request: &R) -> bool {
+        Self::has_structured_response_format(request) || Self::has_guided_tool_choice(request)
+    }
+
+    /// True when `tool_choice` forces a tool call.
+    /// Shared by guided-output reasoning checks and the M3 default.
+    fn has_guided_tool_choice<R: OAIChatLikeRequest>(request: &R) -> bool {
+        request.tool_choice().is_some_and(|tool_choice| {
+            match tool_choice.as_str() {
+                Some("required") => true,
+                Some(_) => false,
+                // The only supported non-string tool choice is a named function.
+                None => true,
+            }
+        })
+    }
+
+    /// Apply Moonshot's named-tool exception for Kimi K3.
+    ///
+    /// The public K3 API treats a specified function as incompatible with
+    /// thinking. Normalize that rule onto the request before prompt rendering
+    /// so every downstream consumer observes the same effective mode:
+    ///
+    /// - the K3 renderer omits current and preserved thinking channels,
+    /// - prompt-injected reasoning detection stays false,
+    /// - backend reasoning-parser kwargs carry the disabled state, and
+    /// - response postprocessing does not try to parse a reasoning stream.
+    fn normalize_kimi_k3_named_tool_choice(
+        request: &mut NvCreateChatCompletionRequest,
+        tool_call_parser: Option<&str>,
+    ) {
+        let uses_kimi_k3_parser =
+            tool_call_parser.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        let is_named = matches!(
+            request.inner.tool_choice.as_ref(),
+            Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        if !uses_kimi_k3_parser || !is_named {
+            return;
+        }
+
+        let args = request.chat_template_args.get_or_insert_default();
+        args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+        args.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(false),
         );
     }
 
@@ -763,6 +1209,9 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
+            == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
+            || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -770,6 +1219,19 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let token_budget = match runtime_config
+            .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
+        {
+            Ok(token_budget) => token_budget,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    key = TOKEN_BUDGET_RUNTIME_KEY,
+                    "Ignoring invalid runtime metadata; token overflow handling will be delegated to the backend"
+                );
+                None
+            }
+        };
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
@@ -803,8 +1265,6 @@ impl OpenAIPreprocessor {
                 )
             })
         };
-
-        let context_length = mdc.effective_context_length();
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -955,8 +1415,9 @@ impl OpenAIPreprocessor {
             runtime_config,
             kv_cache_block_size,
             tool_call_parser,
+            normalize_tool_call_args,
             media_loader,
-            context_length,
+            token_budget,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(feature = "mm-routing")]
@@ -969,6 +1430,15 @@ impl OpenAIPreprocessor {
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
         self.tokenizer.encode(s)
+    }
+
+    /// Encode a rendered prompt while preserving model-specific special-token
+    /// boundaries.
+    pub fn tokenize_rendered_prompt(&self, prompt: &RenderedPrompt) -> anyhow::Result<Encoding> {
+        match prompt.encode_segments() {
+            Some(segments) => self.tokenizer.encode_segments(&segments),
+            None => self.tokenize(prompt.as_str()),
+        }
     }
 
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
@@ -993,7 +1463,12 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let (request, annotations, prompt_injected_reasoning, _image_tokens) = self
-            .preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .preprocess_request_with_options(
+                request,
+                tracker,
+                PreprocessRequestOptions::default(),
+                None,
+            )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
     }
@@ -1011,6 +1486,7 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
+        lora_name: Option<String>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -1019,7 +1495,7 @@ impl OpenAIPreprocessor {
     )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
-        let mut builder = self.builder(request)?;
+        let mut builder = self.builder_with_lora(request, lora_name)?;
 
         let template_start = Instant::now();
         let formatted_prompt = {
@@ -1034,13 +1510,13 @@ impl OpenAIPreprocessor {
         // end of the prompt, the model completion starts mid-reasoning.
         let prompt_injected_reasoning = Self::prompt_injected_reasoning_start(
             self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_deref(),
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
         );
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
-            self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
+            self.gather_tokens(request, formatted_prompt.as_ref(), tracker)
                 .await
                 .with_context(|| "Failed to gather tokens")?
         };
@@ -1050,7 +1526,7 @@ impl OpenAIPreprocessor {
             .gather_multi_modal_data_with_image_tokens(
                 request,
                 &mut builder,
-                formatted_prompt.as_deref(),
+                formatted_prompt.as_ref().map(RenderedPrompt::as_str),
                 &token_ids,
             )
             .await
@@ -1081,7 +1557,7 @@ impl OpenAIPreprocessor {
         let mut preprocessed = builder.build()?;
         if let Some(reasoning_ended) = Self::prompt_injected_reasoning_ended_arg(
             self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_deref(),
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
         ) {
             let extra_args = preprocessed
                 .extra_args
@@ -1098,25 +1574,29 @@ impl OpenAIPreprocessor {
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
         // the MM-expanded length when available, else defer to the backend.
-        let has_images = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|m| m.get("image_url"))
-            .is_some_and(|v| !v.is_empty());
-        let effective_prompt_len = Self::effective_prompt_len_for_cap(
-            preprocessed
-                .mm_routing_info
-                .as_ref()
-                .map(|mm| mm.expanded_prompt_len),
-            has_images,
-            preprocessed.token_ids.len(),
-        );
+        let exact_prompt_len =
+            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && let Some(prompt_len) = effective_prompt_len
-            && let Some(max_tokens) =
-                Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
+            && let Some(prompt_len) = exact_prompt_len
+            // Preserve omission when the prompt itself is backend-owned. In
+            // particular, setting a saturating zero here would interfere with
+            // SGLang's auto-truncation before the backend sees the request.
+            && !self.token_budget.is_some_and(|token_budget| {
+                prompt_len >= token_budget.combined_limit as usize
+                    && !token_budget.reject_prompt_overflow
+            })
+            && let Some(max_tokens) = Self::omitted_max_tokens_default(
+                prompt_len,
+                self.token_budget
+                    .map(|token_budget| token_budget.combined_limit),
+                options,
+            )
         {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
+            // A strict limit may be smaller than the raw context window because
+            // the engine reserves tokens. Revalidate the derived budget so an
+            // already-over-limit prompt fails before streaming begins.
+            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
         }
 
         Ok((
@@ -1137,6 +1617,21 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
+    ) -> Result<PreprocessedRequestBuilder> {
+        self.builder_with_lora(request, None)
+    }
+
+    fn builder_with_lora<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        lora_name_override: Option<String>,
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
@@ -1222,7 +1717,7 @@ impl OpenAIPreprocessor {
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        let lora_name = self.lora_name.clone();
+        let lora_name = self.lora_name.clone().or(lora_name_override);
         let cache_namespace = request_cache_salt(request).map(str::to_owned);
 
         // Extract routing hints from nvext if present
@@ -1356,6 +1851,19 @@ impl OpenAIPreprocessor {
         hidden_eos_token_ids.len() != before
     }
 
+    /// Rendering is driven by the request, so its failures are reported as 400 rather than
+    /// 500, matching vLLM. A misconfigured template can also fail here, for instance a
+    /// `chat_template` map that omits the `tool_use` key, so log the cause chain before it
+    /// is flattened into the client-facing message.
+    fn map_prompt_render_error(error: anyhow::Error) -> anyhow::Error {
+        tracing::debug!(?error, "Chat template rendering failed");
+        let message = match error.downcast_ref::<PromptRenderError>() {
+            Some(PromptRenderError::InvalidRequest(message)) => message.clone(),
+            None => format!("{error:#}"),
+        };
+        invalid_argument_error(message)
+    }
+
     pub fn apply_template<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -1366,7 +1874,24 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<RenderedPrompt>> {
+        if self.normalize_tool_call_args {
+            return self.apply_template_inner(&NormalizedArgsRequest(request));
+        }
+        self.apply_template_inner(request)
+    }
+
+    fn apply_template_inner<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<Option<RenderedPrompt>> {
         if let PromptInput::Text(_) = request.prompt_input_type()
             && let Some(TextInput::Single(_)) = request.extract_text()
         {
@@ -1376,14 +1901,18 @@ impl OpenAIPreprocessor {
 
             let formatted_prompt = if use_raw_prompt {
                 match request.raw_prompt() {
-                    Some(prompt) => prompt,
+                    Some(prompt) => RenderedPrompt::text(prompt),
                     None => {
                         tracing::warn!("Raw prompt requested but not available");
-                        self.formatter.render(request)?
+                        self.formatter
+                            .render_prompt(request)
+                            .map_err(Self::map_prompt_render_error)?
                     }
                 }
             } else {
-                self.formatter.render(request)?
+                self.formatter
+                    .render_prompt(request)
+                    .map_err(Self::map_prompt_render_error)?
             };
             Ok(Some(formatted_prompt))
         } else {
@@ -2119,11 +2648,10 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-        formatted_prompt: Option<&str>,
+        formatted_prompt: Option<&RenderedPrompt>,
         tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
-        let mut token_count: Option<usize> = None;
         let mut tokens_out: Vec<crate::protocols::TokenIdType> = Vec::new();
         // match request type before any conversion/processing
         match request.prompt_input_type() {
@@ -2131,12 +2659,10 @@ impl OpenAIPreprocessor {
                 if let Some(token_input) = request.extract_tokens() {
                     match token_input {
                         TokenInput::Single(tokens) => {
-                            token_count = Some(tokens.len());
                             tokens_out = tokens;
                         }
                         TokenInput::Batch(token_batches) => {
                             if token_batches.len() == 1 {
-                                token_count = Some(token_batches[0].len());
                                 tokens_out = token_batches[0].clone();
                             } else {
                                 bail!(
@@ -2155,14 +2681,15 @@ impl OpenAIPreprocessor {
                             if let Some(f) = formatted_prompt
                                 && request.has_annotation(ANNOTATION_FORMATTED_PROMPT)
                             {
-                                annotations
-                                    .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
+                                annotations.insert(
+                                    ANNOTATION_FORMATTED_PROMPT.to_string(),
+                                    f.as_str().to_string(),
+                                );
                             }
 
                             // Completions will use raw_prompt, no template.
-                            // Borrow either input — no allocation needed; the
-                            // tokenizer accepts `&str`.
-                            let prompt: &str = formatted_prompt.unwrap_or(raw_prompt.as_str());
+                            // K3 keeps control-token spans distinct from user text until
+                            // tokenization; all other renderers use the plain text path.
 
                             // If nvext.token_data is present, use the pre-computed tokens
                             // directly and skip tokenization.  This avoids redundant
@@ -2192,10 +2719,22 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(prompt, tracker).await?;
+                                let encoding = self
+                                    .encode_prompt_with_timing(
+                                        formatted_prompt,
+                                        raw_prompt.as_str(),
+                                        tracker,
+                                    )
+                                    .await?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(prompt, tracker).await?;
+                                let encoding = self
+                                    .encode_prompt_with_timing(
+                                        formatted_prompt,
+                                        raw_prompt.as_str(),
+                                        tracker,
+                                    )
+                                    .await?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -2208,14 +2747,12 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
-                            token_count = Some(tokens_vec.len());
                             tokens_out = tokens_vec;
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
                                 let encoding = self.encode_with_timing(&texts[0], tracker).await?;
                                 let tokens = encoding.token_ids().to_vec();
-                                token_count = Some(tokens.len());
                                 tokens_out = tokens;
                             } else {
                                 bail!(
@@ -2229,35 +2766,19 @@ impl OpenAIPreprocessor {
             }
         }
 
-        // Validate prompt token count against model's context length
-        if let Some(count) = token_count {
-            Self::validate_token_count(count, self.context_length)?;
-        }
-
         Ok((tokens_out, annotations))
     }
 
-    /// Validate that the prompt token count does not consume the model's entire context length.
-    /// Returns an error if the prompt leaves no room for output tokens.
-    fn validate_token_count(token_count: usize, context_length: u32) -> Result<()> {
-        let max_len = context_length as usize;
-        // max_len == 0 means context_length was not configured (model_card.rs defaults
-        // to 0 when max_position_embeddings is absent), so skip validation.
-        // Use >= because context_length is the total budget (input + output): if the
-        // prompt alone fills it, there is zero room for output tokens.
-        if max_len > 0 && token_count >= max_len {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::InvalidArgument)
-                .message(format!(
-                    "This model's maximum context length is {} tokens. \
-                     However, your messages resulted in {} tokens. \
-                     Please reduce the length of the messages.",
-                    max_len, token_count,
-                ))
-                .build()
-                .into());
-        }
-        Ok(())
+    fn prompt_overflow_error(token_count: usize, combined_limit: usize) -> DynamoError {
+        DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(format!(
+                "This model's maximum context length is {} tokens. \
+                 However, your messages resulted in {} tokens. \
+                 Please reduce the length of the messages.",
+                combined_limit, token_count,
+            ))
+            .build()
     }
 
     async fn encode_with_timing(
@@ -2279,6 +2800,41 @@ impl OpenAIPreprocessor {
         };
         let tokenizer = self.tokenizer.clone();
         let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        if let Some(t) = tracker {
+            t.record_tokenize_latency(encode_start.elapsed());
+        }
+        Ok(encoding)
+    }
+
+    async fn encode_prompt_with_timing(
+        &self,
+        formatted_prompt: Option<&RenderedPrompt>,
+        raw_prompt: &str,
+        tracker: Option<&RequestTracker>,
+    ) -> anyhow::Result<Encoding> {
+        let Some(prompt) = formatted_prompt
+            .filter(|prompt| prompt.segments().is_some())
+            .cloned()
+        else {
+            return self
+                .encode_with_timing(
+                    formatted_prompt
+                        .map(RenderedPrompt::as_str)
+                        .unwrap_or(raw_prompt),
+                    tracker,
+                )
+                .await;
+        };
+
+        let encode_start = Instant::now();
+        let tokenizer = self.tokenizer.clone();
+        let encoding = tokio::task::spawn_blocking(move || {
+            let segments = prompt
+                .encode_segments()
+                .expect("prompt was checked for rendered segments");
+            tokenizer.encode_segments(&segments)
+        })
+        .await??;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -2456,9 +3012,21 @@ impl OpenAIPreprocessor {
             .as_ref()
             .is_some_and(|tools| !tools.is_empty());
 
+        // K3's reasoning-only path still emits XTML response/message wrappers.
+        // vLLM strips those in its K3 reasoner when no tool parser is active;
+        // reuse the Rust K3 tool parser as the wrapper decoder so configuring
+        // only `--dyn-reasoning-parser kimi_k3` remains safe too.
+        let effective_tool_call_parser = self.tool_call_parser.clone().or_else(|| {
+            self.runtime_config
+                .reasoning_parser
+                .as_deref()
+                .filter(|parser| matches!(*parser, "kimi_k3" | "kimi-k3"))
+                .map(str::to_string)
+        });
+
         // Determine if we should apply jail (do this before moving request)
         let should_jail = Self::should_apply_tool_jail(
-            self.tool_call_parser.as_ref(),
+            effective_tool_call_parser.as_ref(),
             request.inner.tool_choice.as_ref(),
             has_tools,
         )?;
@@ -2482,7 +3050,7 @@ impl OpenAIPreprocessor {
         // Immediate mode, since those rely on guided-decoded JSON rather than the
         // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
         use crate::protocols::openai::chat_completions::tool_parser_v2;
-        let parser_name = self.tool_call_parser.as_deref();
+        let parser_name = effective_tool_call_parser.as_deref();
         let use_parsers_v2 = tool_parser_v2::enabled()
             && parser_name.is_some_and(tool_parser_v2::supports_family)
             && !uses_tool_call_structural_tag
@@ -2503,7 +3071,7 @@ impl OpenAIPreprocessor {
                 ))
             } else if should_jail {
                 Box::pin(Self::apply_tool_calling_jail(
-                    self.tool_call_parser.clone(),
+                    effective_tool_call_parser,
                     request.inner.tool_choice.clone(),
                     tool_definitions,
                     uses_tool_call_structural_tag,
@@ -2514,6 +3082,30 @@ impl OpenAIPreprocessor {
             };
 
         Ok(transformed_stream)
+    }
+
+    /// Ensure the first emitted delta for each choice carries the assistant role.
+    ///
+    /// This runs after reasoning and tool-call parsing so a parser that buffers the
+    /// original role-bearing delta cannot leave downstream consumers without a role.
+    fn normalize_chat_stream_roles<S>(
+        stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        let mut role_emitted_choices = HashSet::new();
+
+        stream.map(move |mut response| {
+            if let Some(data) = response.data.as_mut() {
+                for choice in &mut data.inner.choices {
+                    choice.delta.role = role_emitted_choices
+                        .insert(choice.index)
+                        .then_some(dynamo_protocols::types::Role::Assistant);
+                }
+            }
+            response
+        })
     }
 
     pub fn transform_postprocessor_stream<S, Resp>(
@@ -2945,6 +3537,13 @@ impl OpenAIPreprocessor {
         tool_choice: Option<&ChatCompletionToolChoiceOption>,
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
+        // K3 wraps every assistant response in XTML, even when the request has
+        // no tools. Keep its parser active so response/message wrappers never
+        // leak into OpenAI `content`.
+        if tool_call_parser.is_some_and(|parser| matches!(parser.as_str(), "kimi_k3" | "kimi-k3")) {
+            return Ok(true);
+        }
+
         match (tool_call_parser, tool_choice, has_tools) {
             // tool_choice=required/named work without parser (use Immediate jail mode)
             (None, Some(ChatCompletionToolChoiceOption::Required), true) => Ok(true),
@@ -3021,12 +3620,70 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Buffers raw input and tracks what the jail emitted per choice.index
+        // so n > 1 is handled correctly and double-emit is avoided.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+            emitted_text: String,
+            recovered: bool,
+        }
+        // Named so the bool in the recoveries tuple is legible at each use site.
+        struct PendingRecovery {
+            choice_idx: u32,
+            tail: String,
+            tail_already_emitted: bool,
+        }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
+        // Token strings from the parser config so recovery matches the parser
+        // even if the defaults are ever overridden.
+        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+        let glm47_start = glm47_cfg.tool_call_start;
+        let glm47_end = glm47_cfg.tool_call_end;
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
+        let glm47_start_jail = glm47_start.clone();
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Buffer input content only for glm47 (truncation recovery).
+            // Only retain from the last <tool_call> marker onward to bound
+            // memory on long responses.
+            if is_glm47 && let Some(data) = &a.data {
+                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
+                    {
+                        let state = cr.entry(choice.index).or_default();
+                        state.input_text.push_str(content);
+                        // Drop everything before the last marker to keep
+                        // the buffer small. Walk back to a char boundary
+                        // before draining so a multi-byte char split
+                        // across chunks never triggers a panic.
+                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
+                        {
+                            Some(pos) => pos,
+                            // No marker yet — keep enough tail to
+                            // catch a marker split across two chunks.
+                            None => state
+                                .input_text
+                                .len()
+                                .saturating_sub(glm47_start_jail.len() - 1),
+                        };
+                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
+                            keep_from -= 1;
+                        }
+                        state.input_text.drain(..keep_from);
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -3045,7 +3702,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -3057,7 +3714,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -3067,7 +3724,145 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // glm47: on finish_reason=length, recover the last incomplete
+            // <tool_call> block. rfind skips complete blocks so earlier parsed
+            // calls are never duplicated. Recovered content WILL contain raw
+            // markup — callers that require "no tool tags in content" must
+            // filter on finish_reason=length.
+            //
+            // TODO: this recovery runs inside apply_tool_calling_jail, which
+            // the v2 path bypasses (use_parsers_v2 branch above). Adding
+            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+            // streaming recovery while aggregator.rs keeps running. At that
+            // point hoist this above the jail/v2 branch — it only needs
+            // buffered input text + finish_reason, both available there.
+            // Pass 1 (immutable): compute the recovery tail per choice and
+            // whether the jail already released it as content on this chunk.
+            // We collect into a Vec so we can release the immutable borrow on
+            // nv_chunk before mutating it in pass 2.
+            let recoveries: Vec<PendingRecovery> = if is_glm47 {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                nv_chunk
+                    .data
+                    .iter()
+                    .flat_map(|data| data.inner.choices.iter())
+                    .filter_map(|choice| {
+                        let state = cr.entry(choice.index).or_default();
+                        if !state.recovered
+                            && let Some(ChatCompletionMessageContent::Text(t)) =
+                                &choice.delta.content
+                        {
+                            state.emitted_text.push_str(t);
+                            // Bound like input_text: retain only the suffix from
+                            // the last marker onward — all the contains(&tail)
+                            // check needs.
+                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
+                            {
+                                Some(pos) => pos,
+                                None => state
+                                    .emitted_text
+                                    .len()
+                                    .saturating_sub(glm47_start.len() - 1),
+                            };
+                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
+                                keep_from -= 1;
+                            }
+                            state.emitted_text.drain(..keep_from);
+                        }
+                        if state.recovered
+                            || !matches!(
+                                choice.finish_reason,
+                                Some(dynamo_protocols::types::FinishReason::Length)
+                            )
+                        {
+                            return None;
+                        }
+                        let tail =
+                            state
+                                .input_text
+                                .rfind(glm47_start.as_str())
+                                .and_then(|pos| {
+                                    let t = &state.input_text[pos..];
+                                    if !t.contains(glm47_end.as_str()) {
+                                        Some(t.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })?;
+                        let tail_already_emitted = state.emitted_text.contains(&tail);
+                        state.recovered = true;
+                        Some(PendingRecovery {
+                            choice_idx: choice.index,
+                            tail,
+                            tail_already_emitted,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            // Pass 2 (mutable): when the jail already released the tail verbatim,
+            // suppress the finish chunk's content entirely. The recovery chunk
+            // carries just the marker-onwards tail, matching the non-streaming
+            // path (rfind result only, no post-call prose).
+            for pr in &recoveries {
+                if !pr.tail_already_emitted {
+                    continue;
+                }
+                if let Some(ref mut data) = nv_chunk.data {
+                    for rc in data
+                        .inner
+                        .choices
+                        .iter_mut()
+                        .filter(|c| c.index == pr.choice_idx)
+                    {
+                        // The jail released the truncated block verbatim as content
+                        // on this chunk, potentially preceded by post-call prose.
+                        // glm47's parser drops post-call prose deliberately, so
+                        // suppress the whole content here and let the recovery
+                        // chunk carry just the marker-onwards tail — matching batch.
+                        rc.delta.content = None;
+                    }
+                }
             }
+
+            // Pass 3: emit a recovery chunk per affected choice carrying just
+            // the truncated tail (marker onwards, no post-call prose).
+            let recovery_chunks: Vec<_> = recoveries
+                .into_iter()
+                .filter_map(|pr| {
+                    let PendingRecovery {
+                        choice_idx, tail, ..
+                    } = pr;
+                    tracing::warn!(
+                        choice_index = choice_idx,
+                        recovered_bytes = tail.len(),
+                        "glm47 streaming: partial <tool_call> emitted as content \
+                         on length finish"
+                    );
+                    let mut rec = nv_chunk.clone();
+                    rec.id = None;
+                    rec.event = None;
+                    rec.comment = None;
+                    rec.error = None;
+                    let rd = rec.data.as_mut()?;
+                    rd.inner.usage = None;
+                    rd.llm_metrics = None;
+                    rd.inner.choices.retain(|c| c.index == choice_idx);
+                    for rc in &mut rd.inner.choices {
+                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
+                        rc.delta.tool_calls = None;
+                        rc.finish_reason = None;
+                        rc.logprobs = None;
+                    }
+                    Some(rec)
+                })
+                .collect();
+
+            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
         })
     }
 
@@ -3092,6 +3887,7 @@ impl OpenAIPreprocessor {
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
+        // - kimi_k3: `<|open|>` / `<|close|>` / `<|sep|>` XTML markers.
         // - mistral: `[THINK]` / `[/THINK]` reasoning markers.
         // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
         //   `<mm:think>` reasoning markers.
@@ -3104,6 +3900,8 @@ impl OpenAIPreprocessor {
                 | Some("gemma-4")
                 | Some("harmony")
                 | Some("kimi_k2")
+                | Some("kimi_k3")
+                | Some("kimi-k3")
                 | Some("minimax_m3")
                 | Some("minimax-m3")
                 | Some("minimax_m3_nom")
@@ -3115,6 +3913,8 @@ impl OpenAIPreprocessor {
                 | Some("gemma-4")
                 | Some("gpt_oss")
                 | Some("kimi_k25")
+                | Some("kimi_k3")
+                | Some("kimi-k3")
                 | Some("mistral")
                 | Some("minimax_m3")
                 | Some("minimax-m3")
@@ -3213,7 +4013,7 @@ impl OpenAIPreprocessor {
     }
 
     fn skips_structured_response_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
-        matches!(reasoning_parser, Some("qwen3"))
+        matches!(reasoning_parser, Some("qwen3" | "kimi_k3" | "kimi-k3"))
             || Self::skips_guided_json_when_prompt_injected(reasoning_parser)
     }
 
@@ -3227,6 +4027,7 @@ impl OpenAIPreprocessor {
 
         match reasoning_parser {
             Some("minimax_m3") | Some("minimax-m3") => prompt.ends_with("<mm:think>"),
+            Some("kimi_k3") | Some("kimi-k3") => prompt.ends_with("<|open|>think<|sep|>"),
             _ => prompt.ends_with("<think>"),
         }
     }
@@ -3237,7 +4038,7 @@ impl OpenAIPreprocessor {
     ) -> Option<bool> {
         let should_forward = matches!(
             reasoning_parser,
-            Some("minimax_m2" | "minimax_m3" | "minimax-m3")
+            Some("minimax_m2" | "minimax_m3" | "minimax-m3" | "kimi_k3" | "kimi-k3")
         );
         if should_forward
             && Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt)
@@ -3249,7 +4050,7 @@ impl OpenAIPreprocessor {
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
-    /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
+    /// For kimi_k25/K3: disabled when chat_template_args contains "thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
     ///   contains "enable_thinking": false or "force_nonempty_content": true.
     /// For DeepSeek: follows the same effective mode used by the prompt renderer.
@@ -3267,7 +4068,7 @@ impl OpenAIPreprocessor {
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
         match reasoning_parser {
-            Some("kimi_k25") => {
+            Some("kimi_k25" | "kimi_k3" | "kimi-k3") => {
                 dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
             }
             parser if Self::is_nemotron_force_reasoning(parser) => {
@@ -3344,81 +4145,100 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Initialize reasoning parser from parser_name
-        let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
-            parser_name.as_ref(),
-        )) as Box<dyn ReasoningParser>;
-
-        if prompt_injected_reasoning {
-            reasoning_parser.set_in_reasoning(true);
-        }
-
+        // Parsers and bypass decisions are created lazily per `choice.index`
+        // inside the unfold loop, so `n > 1` choices never share state.
         let state = ReasoningState {
             stream: Box::pin(stream),
-            reasoning_parser: Some(reasoning_parser),
+            parser_name,
+            prompt_injected_reasoning,
             bypass_bare_guided_json,
-            guided_json_bypass_decision: None,
+            choices: HashMap::new(),
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
-                let guided_json_bypass_decision = if state.bypass_bare_guided_json {
-                    match state.guided_json_bypass_decision {
-                        Some(decision) => Some(decision),
-                        None => {
-                            // Decide once from the first non-whitespace content.
-                            let decision = response.data.as_ref().and_then(|data| {
-                                data.inner.choices.iter().find_map(|choice| {
-                                    if let Some(ChatCompletionMessageContent::Text(text)) =
-                                        choice.delta.content.as_ref()
-                                    {
-                                        let text = text.trim_start();
-                                        if text.is_empty() {
-                                            return None;
-                                        }
-                                        return Some(matches!(text.as_bytes()[0], b'[' | b'{'));
-                                    }
-                                    None
-                                })
-                            });
-                            if let Some(decision) = decision {
-                                state.guided_json_bypass_decision = Some(decision);
-                            }
-                            decision
-                        }
-                    }
-                } else {
-                    Some(false)
-                };
+                // Split disjoint field borrows so the per-choice map and the
+                // parser-factory inputs can be used together inside map_data.
+                // Scoped in a block so the borrows end before `state` moves.
+                let processed_response = {
+                    let ReasoningState {
+                        parser_name,
+                        prompt_injected_reasoning,
+                        bypass_bare_guided_json,
+                        choices,
+                        ..
+                    } = &mut state;
+                    let parser_name = &*parser_name;
+                    let prompt_injected_reasoning = *prompt_injected_reasoning;
+                    let bypass_bare_guided_json = *bypass_bare_guided_json;
 
-                // Process the response through reasoning parser if available
-                let processed_response = if guided_json_bypass_decision != Some(false) {
-                    // Keep bare JSON and leading whitespace available to the tool jail.
-                    response
-                } else if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
-                        // Process all choices, not just the first one
                         for choice in data.inner.choices.iter_mut() {
-                            // Reasoning parsing only applies to text content
-                            if let Some(ChatCompletionMessageContent::Text(text)) =
-                                choice.delta.content.as_ref()
-                            {
-                                let parser_result =
-                                    parser.parse_reasoning_streaming_incremental(text, &[]);
+                            let choice_state = choices.entry(choice.index).or_insert_with(|| {
+                                let mut parser =
+                                    Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+                                        parser_name,
+                                    ))
+                                        as Box<dyn ReasoningParser>;
+                                if prompt_injected_reasoning {
+                                    parser.set_in_reasoning(true);
+                                }
+                                ChoiceReasoningState {
+                                    parser,
+                                    guided_json_bypass_decision: None,
+                                }
+                            });
 
-                                // Update this specific choice with parsed content
+                            // Decide once per choice, from ITS OWN first
+                            // non-whitespace content, whether the backend
+                            // emitted bare guided JSON (`[`/`{`) that must reach
+                            // the tool jail unparsed.
+                            let bypass_decision = if bypass_bare_guided_json {
+                                match choice_state.guided_json_bypass_decision {
+                                    Some(decision) => Some(decision),
+                                    None => {
+                                        let decision = match choice.delta.content.as_ref() {
+                                            Some(ChatCompletionMessageContent::Text(text)) => {
+                                                let text = text.trim_start();
+                                                if text.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(matches!(text.as_bytes()[0], b'[' | b'{'))
+                                                }
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some(decision) = decision {
+                                            choice_state.guided_json_bypass_decision =
+                                                Some(decision);
+                                        }
+                                        decision
+                                    }
+                                }
+                            } else {
+                                Some(false)
+                            };
+
+                            // Only a choice decided NOT to bypass is parsed. A
+                            // bare-JSON or still-undecided (whitespace-only)
+                            // choice keeps its content untouched for the jail.
+                            // Reasoning parsing only applies to text content;
+                            // multimodal content passes through unchanged.
+                            if bypass_decision == Some(false)
+                                && let Some(ChatCompletionMessageContent::Text(text)) =
+                                    choice.delta.content.as_ref()
+                            {
+                                let parser_result = choice_state
+                                    .parser
+                                    .parse_reasoning_streaming_incremental(text, &[]);
                                 choice.delta.content = parser_result
                                     .get_some_normal_text()
                                     .map(ChatCompletionMessageContent::Text);
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
-                            // For multimodal content, pass through unchanged
                         }
                         Ok(data)
                     })
-                } else {
-                    // No reasoning parser configured, pass through unchanged
-                    response
                 };
 
                 Some((processed_response, state))
@@ -3630,10 +4450,18 @@ impl
 
         // Set stream=true for internal processing (after request payload capture)
         request.inner.stream = Some(true);
-        Self::normalize_thinking_arg(
+        // Apply the deployment default before parser-specific normalization so
+        // it can override an implicit model default (for example Kimi K2.5),
+        // while explicit request controls still take precedence.
+        let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
+        self.apply_default_thinking_mode(&mut request);
+        Self::normalize_thinking_arg_with_source(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
+            self.tool_call_parser.as_deref(),
+            thinking_control_from_client,
         );
+        Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -3647,7 +4475,16 @@ impl
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
-            .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
+            .preprocess_request_with_options(
+                &request,
+                tracker.as_deref(),
+                preprocess_options,
+                context
+                    .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|name| name.as_ref().clone()),
+            )
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
 
@@ -3715,6 +4552,7 @@ impl
             prompt_injected_reasoning,
             uses_tool_call_structural_tag,
         )?;
+        let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
         // Apply request payload aggregation strategy.
         // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
@@ -3811,7 +4649,14 @@ impl
         let mut response_generator = Box::new(response_generator);
         let tracker = Some(response_generator.tracker());
         // convert the chat completion request to a common completion request
-        let mut builder = self.builder(&request)?;
+        let mut builder = self.builder_with_lora(
+            &request,
+            context
+                .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+                .ok()
+                .flatten()
+                .map(|name| name.as_ref().clone()),
+        )?;
 
         // Check if embeddings are provided - skip tokenization path
         let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
@@ -3838,6 +4683,7 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
         attach_agent_context_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -4019,6 +4865,94 @@ mod tests {
     use super::*;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        Role,
+    };
+
+    fn chat_stream_chunk(
+        index: u32,
+        role: Option<Role>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                role,
+                content: Some(ChatCompletionMessageContent::Text("content".to_string())),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "test".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
+        let input = stream::iter(vec![
+            // Mirrors a parser releasing buffered content without the role that
+            // arrived on the original, swallowed chunk.
+            chat_stream_chunk(0, None),
+            chat_stream_chunk(1, None),
+            chat_stream_chunk(0, Some(Role::Assistant)),
+            chat_stream_chunk(1, Some(Role::Assistant)),
+        ]);
+
+        let output: Vec<_> = OpenAIPreprocessor::normalize_chat_stream_roles(input)
+            .collect()
+            .await;
+        let roles: Vec<_> = output
+            .iter()
+            .map(|response| response.data.as_ref().unwrap().inner.choices[0].delta.role)
+            .collect();
+
+        assert_eq!(
+            roles,
+            vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
+
+    #[test]
+    fn prompt_invalid_request_maps_to_invalid_argument() {
+        let error = PromptRenderError::invalid_request("unsupported model parameter").into();
+        let mapped = OpenAIPreprocessor::map_prompt_render_error(error);
+        let mapped = mapped
+            .downcast_ref::<DynamoError>()
+            .expect("prompt validation should map to a DynamoError");
+
+        assert!(matches!(mapped.error_type(), ErrorType::InvalidArgument));
+        assert_eq!(mapped.message(), "unsupported model parameter");
+    }
+
+    #[test]
+    fn ordinary_prompt_error_maps_to_invalid_argument() {
+        let mapped = OpenAIPreprocessor::map_prompt_render_error(anyhow::anyhow!(
+            "template configuration failed"
+        ));
+        let mapped = mapped
+            .downcast_ref::<DynamoError>()
+            .expect("any prompt render failure should map to a DynamoError");
+
+        assert!(matches!(mapped.error_type(), ErrorType::InvalidArgument));
+        assert_eq!(mapped.message(), "template configuration failed");
+    }
 
     fn url_entry(u: &str) -> MultimodalData {
         MultimodalData::Url(url::Url::parse(u).unwrap())
@@ -4341,6 +5275,18 @@ mod tests {
                 "kimi_k25 reasoning only → required (`</think>` is special token id 163607)",
             ),
             (
+                Some("kimi_k3"),
+                Some("kimi_k3"),
+                true,
+                "kimi_k3 paired XTML parsers → required",
+            ),
+            (
+                Some("kimi-k3"),
+                Some("kimi-k3"),
+                true,
+                "kimi-k3 aliases → required",
+            ),
+            (
                 None,
                 Some("mistral"),
                 true,
@@ -4388,6 +5334,7 @@ mod tests {
         assert!(f(Some(true), Some("harmony"), None));
         assert!(f(Some(true), None, Some("gpt_oss")));
         assert!(f(Some(true), Some("kimi_k2"), None));
+        assert!(f(Some(true), Some("kimi_k3"), Some("kimi_k3")));
         assert!(f(Some(true), None, Some("mistral")));
         // false / unset → never (default path keeps the markers)
         assert!(!f(Some(false), Some("harmony"), None));
@@ -4395,6 +5342,22 @@ mod tests {
         // forced-true but parser doesn't need special tokens → fine
         assert!(!f(Some(true), Some("hermes"), None));
         assert!(!f(Some(true), None, None));
+    }
+
+    #[test]
+    fn test_kimi_k3_jail_always_unwraps_xtml_response_channels() {
+        let parser = "kimi_k3".to_string();
+        assert!(OpenAIPreprocessor::should_apply_tool_jail(Some(&parser), None, false).unwrap());
+
+        let alias = "kimi-k3".to_string();
+        assert!(
+            OpenAIPreprocessor::should_apply_tool_jail(
+                Some(&alias),
+                Some(&ChatCompletionToolChoiceOption::None),
+                true,
+            )
+            .unwrap()
+        );
     }
 
     /// Verifies which force-reasoning parsers use guided-output shape detection.
@@ -4468,6 +5431,18 @@ mod tests {
                 "Qwen-style templated <think> behavior remains",
             ),
             (
+                Some("kimi_k3"),
+                Some("...<|open|>think<|sep|>\n"),
+                true,
+                "Kimi K3 starts inside its XTML think channel",
+            ),
+            (
+                Some("kimi-k3"),
+                Some("...<think>\n"),
+                false,
+                "Kimi K3 must not use the generic think marker",
+            ),
+            (
                 Some("deepseek_v4"),
                 Some("...<think>\n"),
                 true,
@@ -4505,6 +5480,12 @@ mod tests {
                 Some("...<mm:think>\n"),
                 Some(false),
                 "MiniMax M3 needs native backend reasoning state aligned with the prompt",
+            ),
+            (
+                Some("kimi_k3"),
+                Some("...<|open|>think<|sep|>\n"),
+                Some(false),
+                "Kimi K3 guided decoding must start after its prompt-opened think channel",
             ),
             (
                 Some("deepseek_v4"),
@@ -4581,6 +5562,132 @@ mod tests {
             extra_args["sampling_options"]["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
         );
+    }
+
+    fn chat_request_with_args(
+        chat_template_args: Option<HashMap<String, serde_json::Value>>,
+    ) -> NvCreateChatCompletionRequest {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap();
+        request.chat_template_args = chat_template_args;
+        request
+    }
+
+    fn runtime_config_with_default_thinking_mode(
+        mode: &str,
+    ) -> crate::local_model::runtime_config::ModelRuntimeConfig {
+        let mut runtime_config = crate::local_model::runtime_config::ModelRuntimeConfig::new();
+        runtime_config
+            .set_engine_specific(DEFAULT_THINKING_MODE_RUNTIME_KEY, mode)
+            .unwrap();
+        runtime_config
+    }
+
+    #[test]
+    fn test_default_thinking_mode_disabled_adds_template_args() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_default_thinking_mode_enabled_adds_template_args() {
+        let runtime_config = runtime_config_with_default_thinking_mode("enabled");
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+    }
+
+    #[test]
+    fn test_default_thinking_mode_does_not_override_request() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "thinking_mode".to_string(),
+            serde_json::json!("enabled"),
+        )])));
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_default_thinking_mode_precedes_parser_implicit_default() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), None);
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_default_thinking_mode_does_not_override_reasoning_effort() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("high"),
+        )])));
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("reasoning_effort"),
+            Some(&serde_json::json!("high"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+        assert!(!args.contains_key("thinking_mode"));
     }
 
     /// Verifies template reasoning controls are forwarded to a configured parser.
@@ -4827,6 +5934,8 @@ mod tests {
                 true,
             ),
             ("kimi_k25", serde_json::json!({"thinking": false}), false),
+            ("kimi_k3", serde_json::json!({}), true),
+            ("kimi-k3", serde_json::json!({"thinking": false}), false),
             ("minimax_m2", serde_json::json!({}), true),
             ("minimax_m2", serde_json::json!({"thinking": false}), false),
             ("mistral", serde_json::json!({}), false),
@@ -4883,7 +5992,7 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                100,
+                Some(100),
                 PreprocessRequestOptions::default()
             ),
             Some(90)
@@ -4891,7 +6000,7 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                100,
+                Some(100),
                 PreprocessRequestOptions {
                     preserve_omitted_max_tokens: true,
                 },
@@ -4901,40 +6010,322 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                0,
+                None,
                 PreprocessRequestOptions::default()
             ),
             None
         );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                Some(0),
+                PreprocessRequestOptions::default()
+            ),
+            Some(0)
+        );
     }
 
     #[test]
-    fn test_effective_prompt_len_for_cap() {
-        // MM-expanded length present: use it, ignoring the unexpanded token count.
+    fn test_exact_prompt_len() {
+        let images = MultimodalDataMap::from([(
+            "image_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/image.png").unwrap(),
+            )],
+        )]);
+        let videos = MultimodalDataMap::from([(
+            "video_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/video.mp4").unwrap(),
+            )],
+        )]);
+        let mixed = MultimodalDataMap::from([
+            (
+                "image_url".to_string(),
+                vec![MultimodalData::Url(
+                    url::Url::parse("https://example.com/image.png").unwrap(),
+                )],
+            ),
+            (
+                "audio_url".to_string(),
+                vec![MultimodalData::Url(
+                    url::Url::parse("https://example.com/audio.wav").unwrap(),
+                )],
+            ),
+        ]);
+
+        // Image-expanded length present: use it instead of placeholder tokens.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(500), true, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(500), Some(&images), 12),
             Some(500)
         );
         // Expanded length 0 (serde-default / absent) with images: defer to backend.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), true, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(0), Some(&images), 12),
             None
         );
         // No routing info but images present: defer to backend.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(None, true, 12),
+            OpenAIPreprocessor::exact_prompt_len(None, Some(&images), 12),
+            None
+        );
+        // Video/audio expansion is backend-owned, including mixed requests
+        // whose routing metadata expands only the image portion.
+        assert_eq!(
+            OpenAIPreprocessor::exact_prompt_len(None, Some(&videos), 12),
+            None
+        );
+        assert_eq!(
+            OpenAIPreprocessor::exact_prompt_len(Some(500), Some(&mixed), 12),
             None
         );
         // Text-only: use the token count.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(None, false, 12),
+            OpenAIPreprocessor::exact_prompt_len(None, None, 12),
             Some(12)
         );
-        // Expanded length 0 without images: fall back to the token count.
+        // Expanded length 0 without media: fall back to the token count.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(0), None, 12),
             Some(12)
         );
+    }
+
+    fn token_budget(
+        combined_limit: u32,
+        reject_prompt_overflow: bool,
+        reject_total_overflow: bool,
+    ) -> TokenBudget {
+        TokenBudget {
+            combined_limit,
+            reject_prompt_overflow,
+            reject_total_overflow,
+        }
+    }
+
+    #[test]
+    fn test_requested_token_budget_policy_matrix() {
+        let cases = [
+            // Exact combined limit is accepted.
+            (3, Some(7), true, true, false),
+            // One token beyond the combined limit is rejected.
+            (3, Some(8), true, true, true),
+            // A full prompt leaves no room for generation.
+            (10, None, true, true, true),
+            // Each rejection dimension can be delegated independently.
+            (3, Some(8), true, false, false),
+            (10, Some(8), false, true, false),
+        ];
+
+        for (
+            prompt_len,
+            max_tokens,
+            reject_prompt_overflow,
+            reject_total_overflow,
+            should_reject,
+        ) in cases
+        {
+            let budget = token_budget(10, reject_prompt_overflow, reject_total_overflow);
+            assert_eq!(
+                OpenAIPreprocessor::validate_requested_token_budget(
+                    prompt_len,
+                    max_tokens,
+                    Some(&budget),
+                )
+                .is_err(),
+                should_reject,
+            );
+        }
+    }
+
+    fn preprocessed_budget_request(max_tokens: Option<u32>) -> PreprocessedRequest {
+        let stop_conditions = crate::protocols::common::StopConditions {
+            max_tokens,
+            ..Default::default()
+        };
+
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(stop_conditions)
+            .sampling_options(crate::protocols::common::SamplingOptions::default())
+            .output_options(crate::protocols::common::OutputOptions::default())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_preprocessed_completion_budget_validation_and_deferral() {
+        let text_request = preprocessed_budget_request(Some(8));
+        let reject = token_budget(10, true, true);
+        assert!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(&text_request, Some(&reject))
+                .is_err()
+        );
+
+        let defer_total = token_budget(10, true, false);
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &text_request,
+                Some(&defer_total),
+            )
+            .unwrap(),
+            Some(3)
+        );
+
+        // Prompt embeddings do not expose their sequence length as token_ids.
+        let mut embeddings_request = text_request.clone();
+        embeddings_request.prompt_embeds = Some("opaque-tensor".to_string());
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &embeddings_request,
+                Some(&reject),
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    struct UnreachableCompletionBackend;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for UnreachableCompletionBackend
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            panic!("over-budget completion must be rejected before backend dispatch")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completion_operator_rejects_token_budget_overflow() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.context_length = Some(100);
+        mdc.runtime_config
+            .set_engine_specific(TOKEN_BUDGET_RUNTIME_KEY, token_budget(10, true, true))
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        let request = NvCreateCompletionRequest {
+            inner: dynamo_protocols::types::CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: dynamo_protocols::types::Prompt::IntegerArray(vec![1, 2, 3]),
+                max_tokens: Some(8),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            metadata: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        };
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableCompletionBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("over-budget completion should fail admission");
+        };
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+    }
+
+    fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
+        let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+        match dynamo_renderer::PromptFormatter::from_parts(
+            template,
+            dynamo_renderer::ContextMixins::default(),
+            false,
+        )
+        .unwrap()
+        {
+            dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    fn assistant_only_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "assistant", "content": "prefill"}]
+        }))
+        .unwrap()
+    }
+
+    const REQUIRES_USER_TEMPLATE: &str = "\
+        {% set ns = namespace(has_user=false) %}\
+        {% for message in messages %}\
+            {% if message['role'] == 'user' %}{% set ns.has_user = true %}{% endif %}\
+        {% endfor %}\
+        {% if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
+        {{ messages[0]['content'] }}";
+
+    fn render_through_preprocessor(
+        formatter: &dyn OAIPromptFormatter,
+        request: &dyn OAIChatLikeRequest,
+    ) -> Result<RenderedPrompt> {
+        formatter
+            .render_prompt(request)
+            .map_err(OpenAIPreprocessor::map_prompt_render_error)
+    }
+
+    #[test]
+    fn test_assistant_only_request_accepted_when_template_accepts_it() {
+        let formatter = test_prompt_formatter(
+            "{% for message in messages %}{{ message['role'] }}:{{ message['content'] }}{% endfor %}",
+        );
+
+        let rendered =
+            render_through_preprocessor(formatter.as_ref(), &assistant_only_request()).unwrap();
+
+        assert_eq!(rendered.as_str(), "assistant:prefill");
+    }
+
+    #[test]
+    fn test_assistant_only_template_error_is_invalid_argument() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+
+        let error = render_through_preprocessor(formatter.as_ref(), &assistant_only_request())
+            .context("Failed to apply prompt template")
+            .unwrap_err();
+        let dynamo_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<DynamoError>())
+            .expect("template render error should be classified as a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            dynamo_error
+                .message()
+                .contains("No user query found in messages.")
+        );
+    }
+
+    #[test]
+    fn test_restrictive_template_accepts_request_with_user_message() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
+
+        assert_eq!(rendered.as_str(), "hello");
     }
 
     #[test]
@@ -4979,7 +6370,7 @@ mod tests {
                     )]));
                 }
 
-                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"));
+                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), None);
                 let args = request.chat_template_args.as_ref();
                 assert_eq!(
                     dynamo_renderer::thinking_bool_from_args(args),
@@ -5016,6 +6407,21 @@ mod tests {
         }
         assert_case(None, None, true, "omitted Kimi default");
 
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "model": "moonshotai/Kimi-K3"
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            assert_eq!(
+                dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
+                Some(true),
+                "{parser} should default to thinking mode",
+            );
+        }
+
         let mut conflicting_request: NvCreateChatCompletionRequest =
             serde_json::from_value(serde_json::json!({
                 "messages": [{"role": "user", "content": "hello"}],
@@ -5026,7 +6432,11 @@ mod tests {
                 }
             }))
             .unwrap();
-        OpenAIPreprocessor::normalize_thinking_arg(&mut conflicting_request, Some("kimi_k25"));
+        OpenAIPreprocessor::normalize_thinking_arg(
+            &mut conflicting_request,
+            Some("kimi_k25"),
+            None,
+        );
         let args = conflicting_request.chat_template_args.as_ref().unwrap();
         assert_eq!(args.get("thinking"), Some(&serde_json::Value::Bool(true)));
         assert_eq!(
@@ -5039,6 +6449,513 @@ mod tests {
             }
         };
         assert_eq!(rendered, "<think>");
+    }
+
+    #[test]
+    fn test_named_kimi_k3_normalizes_every_reasoning_consumer_to_disabled() {
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "messages": [{"role": "user", "content": "Weather in Berlin?"}],
+                    "model": "moonshotai/Kimi-K3",
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}}
+                            }
+                        }
+                    }],
+                    "tool_choice": {
+                        "type": "function",
+                        "function": {"name": "get_weather"}
+                    },
+                    "reasoning_effort": "high",
+                    "chat_template_args": {
+                        "thinking": true,
+                        "enable_thinking": true
+                    }
+                }))
+                .unwrap();
+
+            request.normalize_reasoning_template_args().unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            OpenAIPreprocessor::normalize_kimi_k3_named_tool_choice(&mut request, Some(parser));
+
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::Value::Bool(false)));
+            assert_eq!(
+                args.get("enable_thinking"),
+                Some(&serde_json::Value::Bool(false))
+            );
+            assert_eq!(
+                args.get("reasoning_effort"),
+                Some(&serde_json::Value::String("high".to_string())),
+                "the public effort value is preserved while the named-call exception disables thinking"
+            );
+            assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some(parser),
+                Some(args)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_named_kimi_k3_override_is_scoped_to_k3_tool_parser() {
+        let request_json = serde_json::json!({
+            "messages": [{"role": "user", "content": "Weather?"}],
+            "model": "test",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object"}
+                }
+            }],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            },
+            "chat_template_args": {"thinking": true}
+        });
+
+        for parser in [None, Some("hermes"), Some("kimi_k2")] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json.clone()).unwrap();
+            OpenAIPreprocessor::normalize_kimi_k3_named_tool_choice(&mut request, parser);
+            assert_eq!(
+                dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
+                Some(true),
+                "parser {parser:?} must retain its existing policy"
+            );
+        }
+    }
+
+    fn minimax_m3_request(body: serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut base = serde_json::json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let base_obj = base.as_object_mut().unwrap();
+        for (k, v) in body.as_object().unwrap() {
+            base_obj.insert(k.clone(), v.clone());
+        }
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_json_schema() {
+        for parser in ["minimax_m3", "minimax-m3"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "s", "schema": {"type": "object"}}
+                }
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled"))
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_tool_choice_required() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+            "tool_choice": "required"
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_named_tool_choice() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+            "tool_choice": {"type": "function", "function": {"name": "f"}}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_tool_call_only_deployment_gets_default() {
+        // Tool-call-only M3 deployments still render the M3 template.
+        // Guided-output requests therefore still need "adaptive" overridden.
+        for tool_call_parser in [
+            "minimax_m3",
+            "minimax-m3",
+            "minimax_m3_nom",
+            "minimax-m3-nom",
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                "tool_choice": "required"
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, None, Some(tool_call_parser));
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled")),
+                "tool_call_parser={tool_call_parser:?} + tool_choice=required with no reasoning parser must still default thinking_mode=disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_preserves_client_adaptive() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "s", "schema": {"type": "object"}}
+            },
+            "chat_template_kwargs": {"thinking_mode": "adaptive"}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("adaptive"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_bridges_thinking_bool_to_mode() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "chat_template_kwargs": {"thinking": true}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_bridges_enable_thinking_to_mode() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "chat_template_kwargs": {"enable_thinking": false}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_enabled_is_thinking_on() {
+        // `thinking_mode` strings must bypass `is_truthy`, which would map
+        // "enabled" to false. M3 inputs are canonicalized to exact values.
+        for value in ["enabled", "ENABLED", "Enabled"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking"),
+                Some(&serde_json::json!(true)),
+                "thinking_mode={value:?} must map to thinking=true"
+            );
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("enabled"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_disabled_is_thinking_off() {
+        for value in ["disabled", "DISABLED"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_canonicalizes_non_canonical_thinking_mode() {
+        // M3 only treats exact "disabled" as off.
+        // Canonicalize falsy aliases so `thinking=false` and the template gate agree.
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!("false"),
+            serde_json::json!("no"),
+            serde_json::json!("off"),
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value.clone()}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled")),
+                "input={value} must canonicalize to \"disabled\""
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        }
+
+        // Truthy non-canonical values must canonicalize to "enabled".
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!("true"),
+            serde_json::json!("yes"),
+            serde_json::json!("on"),
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value.clone()}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("enabled")),
+                "input={value} must canonicalize to \"enabled\""
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_deepseek_thinking_mode_words_preserved() {
+        // DeepSeek V3.1 uses `thinking_mode` values "chat" and "thinking".
+        // Preserve them verbatim without writing boolean aliases.
+        for value in ["thinking", "chat"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "deepseek/DeepSeek-V3.1",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"thinking_mode": value}
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v3_1"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode").and_then(|v| v.as_str()),
+                Some(value),
+                "DeepSeek {value:?} must survive verbatim"
+            );
+            assert!(
+                !args.contains_key("thinking"),
+                "no boolean coercion for DeepSeek {value:?}"
+            );
+            assert!(!args.contains_key("enable_thinking"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_not_written_for_non_m3_parsers() {
+        // Only M3-family templates use the "enabled"/"disabled" vocabulary.
+        // Other parsers may treat an injected value as out-of-vocabulary.
+        for parser in [
+            "deepseek_v3_1",
+            "deepseek_v3_2",
+            "minimax_m2",
+            "qwen3",
+            "kimi_k25",
+            "kimi_k3",
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"thinking": true}
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+            assert!(
+                !args.contains_key("thinking_mode"),
+                "parser {parser:?} must not receive an injected thinking_mode value"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_kimi_or_else_does_not_write_thinking_mode() {
+        // Kimi parsers synthesize `Some(true)` with no client input.
+        // Write boolean aliases only; Kimi does not read `thinking_mode`.
+        for parser in ["kimi_k25", "kimi_k3", "kimi-k3"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert!(!args.contains_key("thinking_mode"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_leaves_plain_chat_untouched() {
+        let mut request = minimax_m3_request(serde_json::json!({}));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        assert!(request.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_non_m3_adaptive_is_no_op() {
+        // Preserve non-M3 `thinking_mode: "adaptive"` verbatim by leaving
+        // normalization as `None`.
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"thinking_mode": "adaptive"}
+            }))
+            .unwrap();
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("qwen3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("adaptive"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_operator_default_forces_m3_constrained_disabled() {
+        // Runtime defaults are operator policy, not client intent. When the
+        // client sends no thinking control, constrained M3 requests force
+        // "disabled" even if the operator default is "enabled" — otherwise
+        // the deployment default silently propagates a mode M3 cannot honor
+        // with a constrained decoder attached.
+        let runtime_config = runtime_config_with_default_thinking_mode("enabled");
+        let mut request = minimax_m3_request(serde_json::json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "s", "schema": {"type": "object"}}
+            }
+        }));
+        let thinking_control_from_client =
+            OpenAIPreprocessor::request_has_client_thinking_control(&request);
+        assert!(
+            !thinking_control_from_client,
+            "no chat_template_kwargs → not client intent"
+        );
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+        OpenAIPreprocessor::normalize_thinking_arg_with_source(
+            &mut request,
+            Some("minimax_m3"),
+            None,
+            thinking_control_from_client,
+        );
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_preserves_explicit_thinking_for_constrained() {
+        // Explicit client thinking intent is respected for constrained M3
+        // requests. The runtime attempts the combination even though the
+        // template's adaptive/enabled path is known to conflict with the
+        // constrained decoder — this is the client's opt-in, and returning
+        // possibly-degraded content is preferred to a hard reject at the
+        // API boundary (which would break provider-compatibility probes
+        // that expect the request to be attempted).
+        for (body, expected_mode, desc) in [
+            (
+                serde_json::json!({
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "s", "schema": {"type": "object"}}
+                    },
+                    "chat_template_kwargs": {"thinking_mode": "enabled"}
+                }),
+                "enabled",
+                "json_schema + explicit thinking_mode=enabled",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": "required",
+                    "chat_template_kwargs": {"thinking_mode": "adaptive"}
+                }),
+                "adaptive",
+                "required tool + explicit thinking_mode=adaptive",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": {"type": "function", "function": {"name": "f"}},
+                    "chat_template_kwargs": {"thinking": true}
+                }),
+                "enabled",
+                "named tool + explicit thinking=true",
+            ),
+        ] {
+            let mut request = minimax_m3_request(body);
+            let thinking_control_from_client =
+                OpenAIPreprocessor::request_has_client_thinking_control(&request);
+            assert!(
+                thinking_control_from_client,
+                "{desc} must be classified as client thinking intent"
+            );
+            OpenAIPreprocessor::normalize_thinking_arg_with_source(
+                &mut request,
+                Some("minimax_m3"),
+                None,
+                thinking_control_from_client,
+            );
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!(expected_mode)),
+                "{desc} must preserve explicit client thinking"
+            );
+        }
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
@@ -5142,6 +7059,18 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "kimi_k25 + empty args → enabled",
+            ),
+            (
+                Some("kimi_k3"),
+                Some(&thinking_false),
+                true,
+                "kimi_k3 + thinking=false → disabled",
+            ),
+            (
+                Some("kimi-k3"),
+                Some(&thinking_true),
+                false,
+                "kimi-k3 + thinking=true → enabled",
             ),
             // deepseek_r1 uses "thinking" bool or "thinking_mode" string
             (

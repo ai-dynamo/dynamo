@@ -79,15 +79,17 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 }
 
 // GetGPUUUIDsViaNvidiaSmi discovers GPU UUIDs by running nvidia-smi inside the
-// container's mount namespace. This is the fallback path when the kubelet
+// container's mount and PID namespaces. This is the fallback path when the kubelet
 // PodResources API does not report GPU devices (e.g. when GPUs are allocated
 // via DRA instead of the NVIDIA device plugin).
 func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
 	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
+	pidPath := fmt.Sprintf("%s/%d/ns/pid", strings.TrimRight(hostProcPath, "/"), pid)
 	cmd := exec.CommandContext(
 		ctx,
 		"nsenter",
 		fmt.Sprintf("--mount=%s", mountPath),
+		fmt.Sprintf("--pid=%s", pidPath),
 		"--",
 		"nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader",
 	)

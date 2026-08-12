@@ -10,6 +10,13 @@
 //!
 //! Gated behind `#[cfg(feature = "kvbm-offload")]`.
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum KvbmDriveMode {
+    #[default]
+    Live,
+    OfflineDeterministic,
+}
+
 pub mod bandwidth_sharing_model;
 pub(crate) mod capacity_reservation;
 pub mod config;

@@ -1,0 +1,293 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Deploy on Intel GPUs with DRA
+subtitle: Adapt a DynamoGraphDeployment for Intel GPUs by building an XPU runtime image and allocating devices with Kubernetes Dynamic Resource Allocation.
+---
+
+This tutorial adapts the aggregated vLLM deployment from [Deploy with DGD](deploy-with-dgd.md) to run on
+Intel GPUs. It focuses only on what changes for Intel XPU: cluster device support, the runtime image,
+and GPU allocation with Kubernetes Dynamic Resource Allocation (DRA).
+
+The result is a two-document manifest:
+
+1. A `ResourceClaimTemplate` that requests an Intel GPU from the `gpu.intel.com` `DeviceClass`.
+2. A `DynamoGraphDeployment` (DGD) whose vLLM worker consumes that claim.
+
+<Info>
+This tutorial follows the checked-in vLLM XPU DRA manifests. Dynamo also supports running SGLang on
+Intel XPU locally, but this tutorial stays with the Kubernetes path represented by the repository's
+XPU deployment examples.
+</Info>
+
+## Before you begin
+
+Complete the base [Deploy with DGD](deploy-with-dgd.md) tutorial first, or be familiar with its Frontend,
+worker, image, Secret, and `podTemplate` structure. You also need:
+
+- A Kubernetes 1.34 or later cluster with Intel GPU nodes and the `resource.k8s.io/v1` DRA API.
+- The [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes)
+  installed with a `DeviceClass` named `gpu.intel.com`.
+- The Dynamo Platform installed in the cluster.
+- Docker, access to a container registry, and a local Dynamo checkout.
+
+<Warning>
+The Dynamo Platform Helm chart does not install the Intel GPU node driver or the Intel resource
+driver. Install the Intel device support before deploying the DGD. The Dynamo operator detects the
+`resource.k8s.io/v1` API automatically; you do not need a Dynamo Helm flag to enable DRA.
+</Warning>
+
+<Steps toc={true} tocDepth={2}>
+
+<Step title="Verify Intel GPU allocation support">
+
+Confirm that the cluster serves the DRA v1 API and that the Intel resource driver publishes the
+expected `DeviceClass` and device inventory:
+
+```bash
+kubectl api-resources --api-group=resource.k8s.io | grep -E 'deviceclasses|resourceclaims|resourceslices'
+kubectl get deviceclass gpu.intel.com
+kubectl get resourceslices
+```
+
+Do not continue until `gpu.intel.com` exists and at least one `ResourceSlice` describes the Intel GPU
+nodes. Installing Dynamo alone does not create either resource.
+
+</Step>
+
+<Step title="Build the vLLM XPU runtime image">
+
+Dynamo does not publish a prebuilt Intel XPU runtime image. From the root of your Dynamo checkout,
+render the vLLM XPU Dockerfile, build it, and push it to a registry your cluster can pull from:
+
+```bash
+export DYNAMO_VERSION="<version>"
+export XPU_IMAGE="registry.example.com/vllm-runtime-xpu:${DYNAMO_VERSION}"
+
+python3 container/render.py \
+  --framework=vllm \
+  --device=xpu \
+  --target=runtime \
+  --output-short-filename
+
+docker build --tag "${XPU_IMAGE}" --file container/rendered.Dockerfile .
+docker push "${XPU_IMAGE}"
+```
+
+Use the same Dynamo source revision for the XPU worker image and the Frontend image. Export the
+Frontend image and deployment namespace for the manifest:
+
+```bash
+export NAMESPACE=dynamo-system
+export FRONTEND_IMAGE="nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}"
+```
+
+If the registry is private, create its image-pull Secret in `${NAMESPACE}`. The operator can discover
+matching registry credentials in the namespace, as described in [Deploy with DGD](deploy-with-dgd.md#choose-your-backend).
+
+</Step>
+
+<Step title="Create the model access Secret">
+
+This tutorial serves the public `Qwen/Qwen3-0.6B` model. The example worker still imports a Secret
+named `hf-token-secret`, so create it with an empty token. Replace the value for a gated or private
+model:
+
+```bash
+kubectl create secret generic hf-token-secret \
+  --namespace "${NAMESPACE}" \
+  --from-literal=HF_TOKEN= \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+</Step>
+
+<Step title="Request an Intel GPU with DRA">
+
+Start `qwen3-xpu.yaml` with a `ResourceClaimTemplate`. The request selects one device from the
+`gpu.intel.com` class:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: qwen3-xpu-gpu
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.intel.com
+          count: 1
+```
+
+The `ResourceClaimTemplate` is a Kubernetes resource alongside the DGD, not a DGD field. A worker pod
+that references it receives its own generated `ResourceClaim`.
+
+</Step>
+
+<Step title="Attach the claim to the XPU worker">
+
+Add the DGD as the second YAML document. The Frontend does not need a GPU and uses the regular Dynamo
+vLLM runtime image. The worker uses the XPU image and connects the claim at two levels:
+
+- `podTemplate.spec.resourceClaims` attaches a claim generated from `qwen3-xpu-gpu` to the pod.
+- `containers[].resources.claims` grants the `main` container access to that claim.
+
+The XPU worker also sets `VLLM_TARGET_DEVICE=xpu`. The `--block-size 64` argument matches the
+checked-in Intel XPU deployment examples.
+
+```yaml
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-xpu
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${FRONTEND_IMAGE}
+  - name: VllmWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: qwen3-xpu-gpu
+        containers:
+        - name: main
+          image: ${XPU_IMAGE}
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --block-size
+          - "64"
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+```
+
+Your complete `qwen3-xpu.yaml` now contains the `ResourceClaimTemplate`, the `---` separator, and the
+DGD.
+
+</Step>
+
+<Step title="Apply the manifest">
+
+Expand the image variables, validate both resources with the API server, and apply them:
+
+```bash
+envsubst < qwen3-xpu.yaml \
+  | kubectl apply --namespace "${NAMESPACE}" --dry-run=server -f -
+
+envsubst < qwen3-xpu.yaml \
+  | kubectl apply --namespace "${NAMESPACE}" -f -
+```
+
+The namespace passed to `kubectl` applies to both namespaced resources in the multi-document file.
+
+</Step>
+
+<Step title="Verify the DRA claim and deployment">
+
+Confirm that Kubernetes created and allocated the worker's claim:
+
+```bash
+kubectl get resourceclaimtemplate qwen3-xpu-gpu --namespace "${NAMESPACE}"
+kubectl get resourceclaims --namespace "${NAMESPACE}"
+kubectl get pods --namespace "${NAMESPACE}"
+```
+
+Then wait for the DGD:
+
+```bash
+kubectl wait \
+  --for=condition=Ready \
+  dynamographdeployment/qwen3-xpu \
+  --namespace "${NAMESPACE}" \
+  --timeout=600s
+```
+
+If the worker remains pending, inspect the pod and claim:
+
+```bash
+kubectl describe pod <worker-pod> --namespace "${NAMESPACE}"
+kubectl describe resourceclaim <claim-name> --namespace "${NAMESPACE}"
+kubectl get resourceslices
+```
+
+A missing `gpu.intel.com` class, no matching devices, or an unallocated claim indicates a cluster
+DRA/resource-driver problem rather than a DGD reconciliation problem.
+
+</Step>
+
+<Step title="Send a request">
+
+Port-forward the Frontend service:
+
+```bash
+kubectl port-forward service/qwen3-xpu-frontend 8000:8000 \
+  --namespace "${NAMESPACE}"
+```
+
+In another terminal, send a completion request:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Explain dynamic resource allocation."}],
+    "max_tokens": 100
+  }' | python3 -m json.tool
+```
+
+</Step>
+
+<Step title="Clean up">
+
+Delete both resources from the same manifest:
+
+```bash
+envsubst < qwen3-xpu.yaml \
+  | kubectl delete --namespace "${NAMESPACE}" -f -
+```
+
+</Step>
+
+</Steps>
+
+## Extend the deployment
+
+Once the aggregated deployment works, you can apply the same Intel-specific changes to other vLLM
+DGD patterns:
+
+- Give each GPU worker a DRA claim.
+- Keep `VLLM_TARGET_DEVICE=xpu` on every vLLM worker.
+- For disaggregated serving, set `kv_buffer_device` to `xpu` in the vLLM NIXL connector configuration.
+
+See [Disaggregated Serving](../disaggregated-serving/overview.md) for the DGD topology and
+[Disaggregated Communication](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) for the network requirements. Validate
+an aggregated deployment first so device allocation and the XPU runtime are known to work before you
+add KV transfer.

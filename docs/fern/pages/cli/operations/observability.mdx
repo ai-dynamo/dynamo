@@ -1,0 +1,351 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Observe a Local Deployment
+subtitle: Inspect metrics, traces, logs, request captures, scheduler telemetry, and process health
+---
+
+Use the stack from [Install Observability](../installation/observability.mdx) to inspect a local Dynamo
+deployment. This guide covers the common operational workflows; configuration fields and signal
+internals live in Reference and Design Documents.
+
+## View Metrics and Dashboards
+
+<Steps toc={true}>
+<Step title="Start the frontend" id="start-the-frontend">
+
+Start the frontend on port `8000`:
+
+```bash
+python -m dynamo.frontend
+```
+
+</Step>
+<Step title="Start a worker" id="start-a-worker">
+
+In another terminal, start a vLLM worker and expose its system metrics on port `8081`:
+
+```bash
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enforce-eager
+```
+
+The supplied Prometheus configuration scrapes the frontend at `host.docker.internal:8000` and
+workers at `host.docker.internal:8081` and `host.docker.internal:8082`.
+
+</Step>
+<Step title="Generate traffic" id="generate-metrics">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_completion_tokens": 100
+  }'
+```
+
+</Step>
+<Step title="Inspect the metrics" id="inspect-metrics">
+
+Check the frontend at `http://localhost:8000/metrics` and the worker at
+`http://localhost:8081/metrics`. Then open Grafana at `http://localhost:3000`, sign in with username
+`dynamo` and password `dynamo`, and open **Dashboards > Dynamo Dashboard**.
+
+Prometheus registers labeled series after the first matching request, so some metric families remain
+empty until the deployment serves traffic.
+
+</Step>
+</Steps>
+
+For metric definitions and labels, see the [Metrics Catalog](../../reference/observability/metrics-catalog.mdx)
+and [Metric Labels](../../reference/observability/metric-labels.mdx).
+
+## Inspect Traces and Exported Logs
+
+Dynamo exports traces and logs together when OpenTelemetry Protocol (OTLP) export is enabled. The
+local OpenTelemetry Collector sends traces to Tempo and logs to Loki.
+
+<Steps toc={true}>
+<Step title="Launch a traced deployment" id="launch-a-traced-deployment">
+
+Run the aggregated vLLM tracing example:
+
+```bash
+cd examples/backends/vllm/launch
+./agg_tracing.sh
+```
+
+For a two-GPU prefill/decode deployment, use `./disagg_tracing.sh` instead. The scripts enable JSONL
+logging and OTLP export over gRPC and assign service names to the Dynamo processes.
+
+</Step>
+<Step title="Send an identifiable request" id="send-an-identifiable-request">
+
+Use the model name printed by the launch script. Add `x-request-id` to correlate the request across
+traces and logs:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'x-request-id: test-trace-001' \
+  -d '{
+    "model": "<MODEL>",
+    "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    "max_completion_tokens": 100
+  }'
+```
+
+</Step>
+<Step title="Find the trace" id="find-the-trace">
+
+In Grafana, open **Explore**, select **Tempo**, and use **Search**. Filter by a service name such as
+`dynamo-frontend`, a span name such as `http-request`, or the request attribute
+`x_request_id=test-trace-001`.
+
+</Step>
+<Step title="Find the logs" id="find-the-logs">
+
+In **Explore**, select **Loki** and search for the same `x_request_id` or `trace_id`. The provisioned
+Loki data source links trace IDs back to Tempo.
+
+</Step>
+</Steps>
+
+To configure export endpoints, sampling, service names, or logging levels, see
+[Environment Variables](../../reference/observability/environment-variables.mdx). For log formats and
+fields, see [Logging Reference](../../reference/observability/logging.mdx). For the signal pipeline and
+span relationships, see [Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md).
+
+
+## Capture Forward Pass Metrics
+
+Forward Pass Metrics (FPM) tracing records backend scheduler telemetry to rotating gzip JSONL files.
+It is a best-effort observability stream: Dynamo continues publishing FPM events to the event plane
+while writing a local copy for analysis.
+
+<Warning>
+FPM trace files can contain detailed workload-shape information. Store them according to your
+organization's telemetry retention and access policies.
+</Warning>
+
+<Steps toc={true}>
+<Step title="Choose a trace path" id="choose-fpm-trace-path">
+
+Set a writable output prefix. The default, `/tmp/dynamo-fpm`, is suitable for temporary local
+analysis:
+
+```bash
+export DYN_FPM_OUTPUT_PATH=/tmp/dynamo-fpm
+```
+
+Each worker writes a producer-specific sequence such as
+`/tmp/dynamo-fpm.4192.000000.jsonl.gz`.
+
+</Step>
+<Step title="Start a worker with FPM tracing" id="start-fpm-tracing">
+
+Use the worker CLI switch:
+
+```bash
+python -m dynamo.vllm \
+  --fpm-trace \
+  --model Qwen/Qwen3-0.6B
+```
+
+Or set `DYN_FPM_TRACE=1` before starting a supported worker. The default `sampled` mode keeps the
+latest changed record per worker and data-parallel rank every five seconds. To capture every valid
+payload, including idle heartbeats, set `DYN_FPM_MODE=full`; full mode can generate substantially
+more I/O.
+
+</Step>
+<Step title="Inspect the trace" id="inspect-fpm-trace">
+
+Generate representative traffic, list the segments, and decompress one producer's files in index
+order:
+
+```bash
+ls -1 /tmp/dynamo-fpm.*.jsonl.gz
+gzip -cd /tmp/dynamo-fpm.4192.*.jsonl.gz | jq -c '.event'
+```
+
+Replace `4192` with the producer ID in the file name. Use `worker_id`, `dp_rank`, and `counter_id`
+together when checking continuity. Gaps can result from sampling, queue pressure, transport loss, or
+worker termination.
+
+</Step>
+</Steps>
+
+For the complete variable list, supported topologies, record schema, capacity planning, and rotation
+behavior, see [Forward Pass Metrics Trace Reference](../../reference/observability/forward-pass-metrics-traces.mdx).
+For the publication and persistence flow, see
+[Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#forward-pass-metrics-persistence).
+
+## Capture and Replay Requests
+
+Request tracing records replay metadata for eligible OpenAI chat and completion requests. It can
+also capture chat request and response payloads and export records through the OpenTelemetry Protocol
+(OTLP) log pipeline.
+
+<Warning>
+Request payloads and captured HTTP headers can contain sensitive data. Restrict access to trace
+sinks and do not allowlist credential-bearing headers.
+</Warning>
+
+### Capture Replay Metadata
+
+Enable the default rotating gzip file sink before starting the frontend:
+
+```bash
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-request-trace
+```
+
+After sending representative traffic, confirm that Dynamo writes segments such as
+`/tmp/dynamo-request-trace.000000.jsonl.gz`. The default record selection is `request_end,tool`.
+Session headers enrich supported rows with session identity and dependencies; they do not enable
+sticky routing.
+
+### Capture Request and Response Payloads
+
+Select the payload record and one or more sinks:
+
+```bash
+export DYN_REQUEST_TRACE_RECORDS=request_payload
+export DYN_REQUEST_TRACE_SINKS=file
+export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-request-payloads
+```
+
+To retain replay metadata and payloads in one stream, set
+`DYN_REQUEST_TRACE_RECORDS=request_end,request_payload,tool`. Canceled and failed chat requests
+retain the request body and omit the response body.
+
+To capture selected request headers, provide a comma- or whitespace-separated allowlist:
+
+```bash
+export DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST='x-request-id,x-tenant-id'
+```
+
+Header matching is case-insensitive. Dynamo does not redact captured values.
+
+### Export Payloads over OTLP
+
+Include the `otel` sink and configure the logs endpoint and protocol:
+
+```bash
+export DYN_REQUEST_TRACE_RECORDS=request_payload
+export DYN_REQUEST_TRACE_SINKS=otel
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
+```
+
+Use `file,otel` to retain a local copy. Setting an OTLP logs endpoint without including `otel` does
+not export request trace records. In Grafana, query Loki for scope `dynamo.request_trace` or body
+`request_payload`.
+
+### Replay a Capture
+
+Pass `dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly to DynoSim:
+
+```bash
+python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
+  --trace-format dynamo \
+  --replay-mode offline \
+  --router-mode kv_router \
+  --num-workers 4 \
+  --report-json /tmp/request-trace-replay-report.json
+```
+
+No Mooncake conversion is required. DynoSim derives and validates the trace block size. It preserves
+session dependencies and tool waits when every request has session context and rejects mixed
+session-aware and context-free trace sets.
+
+For all variables, compatibility aliases, sinks, record schemas, and supported request shapes, see
+[Request Trace Reference](../../reference/observability/request-traces.mdx).
+
+## Check Deployment Health
+
+Use Dynamo's HTTP health endpoints to check local processes or configure an external supervisor. The
+frontend serves its endpoints on the HTTP port. Workers and standalone routers serve health endpoints
+through the system-status server when `DYN_SYSTEM_PORT` is enabled.
+
+<Steps toc={true}>
+<Step title="Start Dynamo components" id="start-health-components">
+
+```bash
+python -m dynamo.frontend &
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enforce-eager &
+```
+
+</Step>
+<Step title="Check the frontend" id="check-frontend-health">
+
+```bash
+curl --silent --show-error http://localhost:8000/live | jq
+curl --silent --show-error http://localhost:8000/health | jq
+```
+
+`/live` reports whether the HTTP service is running. `/health` reports frontend readiness and the
+worker endpoints and instances currently visible through discovery.
+
+</Step>
+<Step title="Check a worker" id="check-worker-health">
+
+```bash
+curl --silent --show-error http://localhost:8081/live | jq
+curl --silent --show-error http://localhost:8081/health | jq
+```
+
+A worker returns `503 Service Unavailable` while its status is `notready` and `200 OK` after it
+becomes `ready`.
+
+</Step>
+</Steps>
+
+### Enable Active Worker Checks
+
+Canary checks send a small inference request through an idle worker endpoint. Enable them when you
+need active failure detection:
+
+```bash
+export DYN_HEALTH_CHECK_ENABLED=true
+export DYN_CANARY_WAIT_TIME=10
+export DYN_HEALTH_CHECK_REQUEST_TIMEOUT=3
+
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enforce-eager
+```
+
+Normal successful traffic resets the idle timer. After the configured idle period, Dynamo sends a
+canary request; a timeout marks the endpoint unhealthy.
+
+### Troubleshoot Health Checks
+
+- **Connection refused:** Set `DYN_SYSTEM_PORT` before starting a worker and query that port.
+- **Worker remains `notready`:** Inspect startup logs and confirm the engine registered its serving
+  endpoint.
+- **Canary checks do not run:** Confirm `DYN_HEALTH_CHECK_ENABLED=true` was set before startup.
+- **Canary checks time out:** Inspect engine errors and increase `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`
+  only when normal inference latency requires it.
+
+For response fields, status codes, custom paths, active-check defaults, and endpoint differences, see
+[Health Check Reference](../../reference/observability/health-checks.mdx). For the canary lifecycle, see
+[Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#active-worker-health-checks).
+
+## Troubleshoot Collection
+
+- **Prometheus target is down:** Open `http://localhost:9090/targets`, confirm the process uses the
+  configured port, and confirm it is reachable through `host.docker.internal`.
+- **Tempo or Loki is empty:** Set `OTEL_EXPORT_ENABLED=true` on every process. For gRPC, use the Collector endpoint `http://localhost:4317`. For HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` and use the Collector HTTP endpoint. Logs do not fall back to the traces-only endpoint.
+- **Only some components appear:** Environment variables are process-local. Export the OTLP and
+  logging variables before starting the frontend, router, and each worker.
+- **Stack service is unhealthy:** Run `docker compose -f dev/docker-observability.yml ps` and inspect
+  the relevant service with `docker compose -f dev/docker-observability.yml logs <service>`.
+
+Service ports, configuration files, and optional profiles are listed in the
+[Local Observability Stack Reference](../../reference/observability/local-stack.mdx).

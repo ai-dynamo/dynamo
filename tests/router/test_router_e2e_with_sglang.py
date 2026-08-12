@@ -39,12 +39,13 @@ pytestmark = [
 ]
 PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
 
-# Shared SGLang configuration for all tests
-# mem_fraction_static limits actual VRAM allocation (required for multi-worker on same GPU)
+# Shared SGLang configuration for all tests.
+# Memory is budgeted with the token-cap form (--max-total-tokens +
+# --mem-fraction-static 0.9, see tests/README.md "SGLang KV tokens").
 SGLANG_ARGS: Dict[str, Any] = {
     "page_size": PAGE_SIZE,
     "model": MODEL_NAME,
-    "mem_fraction_static": 0.4,  # Limit VRAM allocation per worker (equivalent to vLLM's gpu_memory_utilization)
+    "max_total_tokens": 2048,  # matches the requested_sglang_kv_tokens(2048) markers
     "context_length": 1024,  # Limit context length to reduce KV cache size (equivalent to vLLM's max_model_len)
     "disable_cuda_graph": True,  # Disable CUDA graphs for faster startup & lower memory (equivalent to vLLM's enforce_eager)
 }
@@ -81,6 +82,9 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 - page_size: KV cache page size (default: 16)
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - mem_fraction_static: Fraction of GPU memory to allocate (optional)
+                - max_total_tokens: Max KV cache tokens; takes precedence over
+                  mem_fraction_static and is emitted with --mem-fraction-static 0.9
+                  (see tests/README.md "SGLang KV tokens")
                 - context_length: Maximum sequence length (optional)
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
             num_workers: Number of SGLang worker processes
@@ -125,8 +129,15 @@ class SGLangProcess(ManagedEngineProcessMixin):
         page_size = sglang_args.get("page_size", PAGE_SIZE)
         model = sglang_args.get("model", MODEL_NAME)
         mem_fraction_static = sglang_args.get("mem_fraction_static")
+        max_total_tokens = sglang_args.get("max_total_tokens")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
+        # Resolved memory budget, for startup logs (mirrors the command flags).
+        mem_budget = (
+            f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
+            if max_total_tokens is not None
+            else f"mem_frac={mem_fraction_static}"
+        )
 
         self.model_name = model
 
@@ -166,8 +177,18 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 command.append("--disable-cuda-graph")
                 command.append("--disable-piecewise-cuda-graph")
 
-            # Limit VRAM allocation (required for multi-worker on same GPU)
-            if mem_fraction_static is not None:
+            # Limit VRAM allocation (required for multi-worker on same GPU).
+            # Prefer the token-cap form; see the SGLANG_ARGS comment.
+            if max_total_tokens is not None:
+                command.extend(
+                    [
+                        "--max-total-tokens",
+                        str(max_total_tokens),
+                        "--mem-fraction-static",
+                        "0.9",
+                    ]
+                )
+            elif mem_fraction_static is not None:
                 command.extend(["--mem-fraction-static", str(mem_fraction_static)])
 
             # Add optional context_length if specified
@@ -234,13 +255,13 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
@@ -381,12 +402,30 @@ def test_router_decisions_sglang_disagg(
     )
 
 
-# DYN-2784: Fixture setup hangs silently in nightly only (worker #2 dies
-# in SGLangProcess launch, KvRouter blocks forever on min_initial_workers=2;
-# pytest.mark.timeout signal gets swallowed at the C-level syscall).
-# Passes reliably in pre_merge/post_merge runs, so scope the skip to the
-# nightly pipeline via skip_in_nightly, which nightly-ci.yml excludes from
-# its sglang single-GPU marker filter. Remove once DYN-2784 lands a real fix.
+# DYN-2784: fixture setup hangs instead of failing. Worker #2 dies during
+# SGLangProcess launch and KvRouter then blocks forever on
+# min_initial_workers=2; the timeout below cannot fire because the signal is
+# swallowed at a C-level syscall.
+#
+# Skipped outright, because the containment this previously relied on does not
+# hold. The note here used to read "passes reliably in pre_merge/post_merge, so
+# scope the skip to nightly" -- measured over five days that is 82% of nightly
+# runs but also 63% of post_merge, and the runs that do hang burn a whole job:
+# observed hangs of 3659s, 4235s and 6077s, each holding a 12 GiB reservation
+# with three more workers queued behind it, because the VRAM-aware parallel
+# orchestrator has no hard-kill for a child that outlives its declared timeout.
+# That came to roughly 220 runner-hours in five days.
+#
+# skip_in_nightly is kept but is not what makes this safe: it only drops the
+# test from the nightly marker filter, and the hang is not nightly-specific.
+#
+# Re-enable once the launch race is fixed, or once the orchestrator can kill a
+# hung child -- either one alone turns this from a lost job into a normal
+# failure. The scenario itself is worth keeping; it is the hang that is not
+# affordable.
+@pytest.mark.skip(
+    reason="hangs to the job step cap instead of failing; see the note above"
+)
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip_in_nightly

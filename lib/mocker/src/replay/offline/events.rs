@@ -3,20 +3,34 @@
 
 use std::cmp::Ordering;
 
-use super::core::EngineEventBatch;
+use super::core::{EngineEventBatch, EngineProgress};
 use crate::common::handoff::HandoffId;
-use crate::common::protocols::OutputSignal;
+use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
 use crate::scheduler::SchedulerLifecycleEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SimulationWorkerStage {
+pub(in crate::replay::offline) enum SimulationWorkerStage {
     Aggregated,
     Prefill,
     Decode,
 }
 
 #[derive(Debug)]
-pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
+pub(in crate::replay::offline) struct WorkerCompletionPayload<Events: EngineEventBatch = ()> {
+    pub(in crate::replay::offline) stage: SimulationWorkerStage,
+    pub(in crate::replay::offline) worker_idx: usize,
+    pub(in crate::replay::offline) completed_requests: usize,
+    pub(in crate::replay::offline) output_signals: Vec<OutputSignal>,
+    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+    pub(in crate::replay::offline) progress: EngineProgress,
+    pub(in crate::replay::offline) fpm: Option<ForwardPassSnapshot>,
+    pub(in crate::replay::offline) accept_length_output_tokens: usize,
+    pub(in crate::replay::offline) accept_length_decode_forwards: usize,
+}
+
+#[derive(Debug)]
+pub(in crate::replay::offline) enum SimulationEventKind<Events: EngineEventBatch = ()> {
     WorkerCompletion {
         stage: SimulationWorkerStage,
         worker_idx: usize,
@@ -30,6 +44,9 @@ pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     },
+    WorkerCompletionBatch {
+        payloads: Box<[WorkerCompletionPayload<Events>]>,
+    },
     TransferComplete {
         handoff_id: HandoffId,
     },
@@ -37,31 +54,31 @@ pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
         stage: SimulationWorkerStage,
         worker_id: usize,
     },
-    /// A recurring planner heartbeat. Payload-free: the planner metrics are
+    /// A recurring scaling heartbeat. Payload-free: the scaling snapshot is
     /// gathered from live runtime state when the tick fires. Re-enqueues itself
-    /// at the time the planner hook returns (see `apply_planner_ticks`).
-    PlannerTick,
+    /// at the time the scaling policy returns.
+    ScalingTick,
 }
 
 impl<Events: EngineEventBatch> SimulationEventKind<Events> {
-    /// Tie-breaker among events at the *same* `at_ms`: a `PlannerTick` always
-    /// sorts after every other kind, so the planner observes a fully settled
+    /// Tie-breaker among events at the *same* `at_ms`: a `ScalingTick` always
+    /// sorts after every other kind, so the policy observes a fully settled
     /// timestamp (all worker completions / ready / handoff events at that time
     /// drain first). `seq_no` is globally unique, so this only ever reorders a
     /// tick relative to same-timestamp events — never two real events.
     fn ordering_rank(&self) -> u8 {
         match self {
-            SimulationEventKind::PlannerTick => 1,
+            SimulationEventKind::ScalingTick => 1,
             _ => 0,
         }
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct SimulationEvent<Events: EngineEventBatch = ()> {
-    pub(crate) at_ms: f64,
-    pub(crate) seq_no: u64,
-    pub(crate) kind: SimulationEventKind<Events>,
+pub(in crate::replay::offline) struct SimulationEvent<Events: EngineEventBatch = ()> {
+    pub(in crate::replay::offline) at_ms: f64,
+    pub(in crate::replay::offline) seq_no: u64,
+    pub(in crate::replay::offline) kind: SimulationEventKind<Events>,
 }
 
 impl<Events: EngineEventBatch> PartialEq for SimulationEvent<Events> {

@@ -241,6 +241,7 @@ mod tests {
                 parent_session_id: None,
                 session_final: None,
                 kv_hints: None,
+                input_trigger: None,
             }),
             request: None,
             tool: Some(RequestTraceToolEvent {

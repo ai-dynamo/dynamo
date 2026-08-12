@@ -40,8 +40,15 @@ use tokio_util::sync::CancellationToken;
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
-/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
-/// communication protocols and transports.
+/// Distributed [Runtime] providing cluster-wide communication, transport, and discovery resources.
+///
+/// `DistributedRuntime` is not a process singleton. Calling [`DistributedRuntime::new`] more than
+/// once creates independent DRT instances with distinct discovery connection IDs, even when they
+/// share a process. Cloning a DRT continues to share the original instance and connection ID.
+///
+/// Production services should normally treat one DRT per service replica/process as a soft
+/// invariant. Multiple DRTs in one process are primarily supported for single-process test
+/// topologies and for the mocker, which models multiple isolated workers in one process.
 #[derive(Clone)]
 pub struct DistributedRuntime {
     // local runtime
@@ -342,6 +349,10 @@ impl DistributedRuntime {
         &self.metadata_artifacts
     }
 
+    /// Returns this DRT instance's discovery identity.
+    ///
+    /// This identifies the DRT, not the operating-system process. Multiple DRTs in one process
+    /// receive distinct connection IDs.
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }

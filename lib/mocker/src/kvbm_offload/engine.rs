@@ -13,6 +13,11 @@
 //! the caller — live replay feeds wall-clock time, offline replay feeds
 //! virtual time.
 
+use std::cell::{Cell, RefCell};
+#[cfg(feature = "replay-bench")]
+use std::cmp::Reverse;
+#[cfg(feature = "replay-bench")]
+use std::collections::BinaryHeap;
 use std::future::Future;
 use std::net::TcpListener;
 use std::pin::Pin;
@@ -22,8 +27,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_tokens::{BlockHash, SequenceHash as RouterSequenceHash};
-use futures::Stream;
 use futures::task::noop_waker_ref;
+use futures::{Stream, StreamExt};
 
 use kvbm_engine::leader::{
     FindMatchesOptions, FindMatchesResult, InstanceLeader, Leader, OnboardingStatus, StagingMode,
@@ -46,6 +51,7 @@ use tokio::sync::watch;
 
 use crate::common::protocols::G1 as MockerG1;
 
+use super::KvbmDriveMode;
 use super::capacity_reservation::{
     CapacityReservationGuard, CapacityReservationPolicy, CapacityReservations,
 };
@@ -56,7 +62,7 @@ use super::coordinator::{
 };
 use super::shared_g3::SharedG3Pool;
 use super::shared_g4::SharedG4Store;
-use super::worker::MockWorker;
+use super::worker::{MockWorker, TransferDirection};
 
 // Successful offline barriers wake via watch channels. The timeout is only a
 // hang guard for pipeline bugs.
@@ -67,6 +73,11 @@ enum ReservationBlocker {
     LocalOffload,
     SharedG3Offload,
     SharedG4Offload,
+}
+
+enum G2EventStream {
+    BestEffort(Pin<Box<dyn Stream<Item = LogicalKvCacheEvent> + Send>>),
+    LossAware(Pin<Box<dyn Stream<Item = std::result::Result<LogicalKvCacheEvent, String>> + Send>>),
 }
 
 /// Lower-tier lookup prepared while the caller reserves destination G1 slots.
@@ -166,6 +177,84 @@ pub(crate) enum G2RouterEvent {
     Removed { seq_hash: RouterSequenceHash },
 }
 
+#[cfg(feature = "replay-bench")]
+fn g2_router_event_hash(event: &G2RouterEvent) -> RouterSequenceHash {
+    match event {
+        G2RouterEvent::Stored(metadata) => metadata.seq_hash,
+        G2RouterEvent::Removed { seq_hash } => *seq_hash,
+    }
+}
+
+#[cfg(feature = "replay-bench")]
+fn order_g2_router_events(router_events: &mut Vec<G2RouterEvent>) {
+    let event_count = router_events.len();
+    let mut events = std::mem::take(router_events)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    let mut stored_by_hash = FxHashMap::default();
+    for (index, event) in events.iter().enumerate() {
+        let Some(G2RouterEvent::Stored(metadata)) = event else {
+            continue;
+        };
+        stored_by_hash.entry(metadata.seq_hash).or_insert(index);
+    }
+
+    let mut successors = vec![Vec::new(); event_count];
+    let mut incoming_edges = vec![0; event_count];
+    for (index, event) in events.iter().enumerate() {
+        let Some(G2RouterEvent::Stored(metadata)) = event else {
+            continue;
+        };
+        let Some(parent_hash) = metadata.parent_hash else {
+            continue;
+        };
+        let Some(&parent_index) = stored_by_hash.get(&parent_hash) else {
+            continue;
+        };
+        if parent_index == index {
+            continue;
+        }
+        successors[parent_index].push(index);
+        incoming_edges[index] += 1;
+    }
+
+    let mut ready = BinaryHeap::new();
+    for (index, event) in events.iter().enumerate() {
+        if incoming_edges[index] == 0 {
+            ready.push(Reverse((
+                g2_router_event_hash(event.as_ref().unwrap()),
+                index,
+            )));
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(event_count);
+    while let Some(Reverse((_, index))) = ready.pop() {
+        ordered.push(events[index].take().unwrap());
+        for successor in successors[index].drain(..) {
+            incoming_edges[successor] -= 1;
+            if incoming_edges[successor] == 0 {
+                ready.push(Reverse((
+                    g2_router_event_hash(events[successor].as_ref().unwrap()),
+                    successor,
+                )));
+            }
+        }
+    }
+
+    if ordered.len() < event_count {
+        let mut remaining = events
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, event)| event.map(|event| (index, event)))
+            .collect::<Vec<_>>();
+        remaining.sort_by_key(|(index, event)| (g2_router_event_hash(event), *index));
+        ordered.extend(remaining.into_iter().map(|(_, event)| event));
+    }
+    *router_events = ordered;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AdvanceAcknowledgement(u64);
 
@@ -185,9 +274,17 @@ pub(crate) struct PreparedAdvance {
 }
 
 #[derive(Default)]
+enum AdvancePhase {
+    #[default]
+    Idle,
+    Prepared(PreparedAdvance),
+    Committing(AdvanceAcknowledgement),
+}
+
+#[derive(Default)]
 struct AdvanceState {
     next_id: u64,
-    pending: Option<PreparedAdvance>,
+    phase: AdvancePhase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -216,6 +313,7 @@ pub(crate) enum G1EvictionOutcome {
 #[allow(dead_code)]
 pub struct MockOffloadEngine {
     config: KvbmOffloadConfig,
+    drive_mode: KvbmDriveMode,
 
     engine: OffloadEngine,
     leader: Arc<InstanceLeader>,
@@ -227,7 +325,7 @@ pub struct MockOffloadEngine {
     g3_manager: Option<Arc<BlockManager<G3>>>,
     shared_g4: Option<Arc<SharedG4Store>>,
     coordinator: OffloadCoordinator,
-    g2_event_stream: Mutex<Pin<Box<dyn Stream<Item = LogicalKvCacheEvent> + Send>>>,
+    g2_event_stream: Mutex<G2EventStream>,
     g2_event_metadata: Mutex<FxHashMap<SequenceHash, G2BlockEventMetadata>>,
     pending_router_events: Mutex<Vec<G2RouterEvent>>,
     advance_state: Mutex<AdvanceState>,
@@ -245,18 +343,46 @@ impl MockOffloadEngine {
     /// mode, `init_kvbm_offline` constructs a one-worker multi-thread
     /// runtime and calls this via `block_on`.
     pub async fn new(config: KvbmOffloadConfig) -> Result<Self> {
+        Self::new_with_drive_mode(config, KvbmDriveMode::Live).await
+    }
+
+    pub(crate) async fn new_with_drive_mode(
+        config: KvbmOffloadConfig,
+        drive_mode: KvbmDriveMode,
+    ) -> Result<Self> {
         let messenger = create_local_messenger().await?;
-        let g2_events_manager = Arc::new(EventsManager::builder().build());
-        let g2_event_stream = Box::pin(g2_events_manager.subscribe());
-        let registry = Arc::new(build_registry(g2_events_manager));
+        let g2_events_manager = Arc::new(match drive_mode {
+            KvbmDriveMode::Live => EventsManager::builder().build(),
+            // A single completion can replace the whole tier, emitting one
+            // removal and one creation per slot before the boundary drains it.
+            KvbmDriveMode::OfflineDeterministic => EventsManager::builder()
+                .channel_capacity(config.num_g2_blocks.saturating_mul(2).max(1024))
+                .build(),
+        });
+        let g2_event_stream = match drive_mode {
+            KvbmDriveMode::Live => Some(G2EventStream::BestEffort(Box::pin(
+                g2_events_manager.subscribe(),
+            ))),
+            KvbmDriveMode::OfflineDeterministic => None,
+        };
+        let registry = Arc::new(build_registry(g2_events_manager.clone()));
         let g2_manager = Arc::new(build_g2_block_manager(
             config.num_g2_blocks,
             config.block_size_tokens,
             &registry,
         ));
-        let shared_g3 = SharedG3Pool::get_or_create(&config)?;
+        // The Option keeps offline subscription after registry/G2 initialization;
+        // startup lifecycle events must not consume the bounded loss-aware channel.
+        let g2_event_stream = g2_event_stream.unwrap_or_else(|| {
+            G2EventStream::LossAware(Box::pin(
+                g2_events_manager
+                    .subscribe_loss_aware()
+                    .map(|result| result.map_err(|error| error.to_string())),
+            ))
+        });
+        let shared_g3 = SharedG3Pool::get_or_create_with_mode(&config, drive_mode)?;
         let g3_manager = shared_g3.as_ref().map(|pool| pool.manager());
-        let shared_g4 = SharedG4Store::get_or_create(&config)?;
+        let shared_g4 = SharedG4Store::get_or_create_with_mode(&config, drive_mode)?;
         tracing::debug!(
             num_g2_blocks = config.num_g2_blocks,
             num_g3_blocks = config.num_g3_blocks,
@@ -265,7 +391,7 @@ impl MockOffloadEngine {
             "kvbm-offload: building mock offload engine"
         );
 
-        let worker = Arc::new(MockWorker::new(
+        let worker = Arc::new(MockWorker::new_with_drive_mode(
             config.block_size_bytes.unwrap_or(0),
             config.bandwidth_g1_to_g2_gbps,
             config.bandwidth_g2_to_g1_gbps,
@@ -273,6 +399,7 @@ impl MockOffloadEngine {
             None,
             shared_g3.clone(),
             shared_g4.clone(),
+            drive_mode,
         ));
         let worker_for_leader: Arc<dyn Worker> = worker.clone();
         let object_ops: Option<Arc<dyn ObjectBlockOps>> = shared_g4
@@ -308,6 +435,7 @@ impl MockOffloadEngine {
             .pending_tracker(g1_to_g2_pending)
             .batch_size(config.offload_batch_size)
             .max_concurrent_transfers(config.offload_batch_size)
+            .ordered_transfer_starts(cfg!(feature = "replay-bench"))
             .build();
 
         let mut engine_builder = OffloadEngine::builder(leader.clone())
@@ -365,6 +493,7 @@ impl MockOffloadEngine {
 
         Ok(Self {
             config,
+            drive_mode,
             engine,
             leader,
             worker,
@@ -396,6 +525,22 @@ impl MockOffloadEngine {
         self._runtime = Some(rt);
     }
 
+    fn assert_offline_mutation_allowed(&self, operation: &str) {
+        if self.drive_mode == KvbmDriveMode::Live {
+            return;
+        }
+        let state = self
+            .advance_state
+            .lock()
+            .expect("offload advance mutex poisoned");
+        let allowed = matches!(&state.phase, AdvancePhase::Idle);
+        drop(state);
+        assert!(
+            allowed,
+            "offline KVBM cannot {operation} while an advance is prepared or committing"
+        );
+    }
+
     fn remember_g2_event_metadata(&self, blocks: &[G2OffloadBlock]) {
         let mut metadata = self
             .g2_event_metadata
@@ -413,15 +558,29 @@ impl MockOffloadEngine {
             .expect("G2 event stream mutex poisoned");
         let mut events = Vec::new();
         let mut cx = Context::from_waker(noop_waker_ref());
-        while let Poll::Ready(Some(event)) = stream.as_mut().poll_next(&mut cx) {
-            events.push(event);
+        match &mut *stream {
+            G2EventStream::BestEffort(stream) => {
+                while let Poll::Ready(Some(event)) = stream.as_mut().poll_next(&mut cx) {
+                    events.push(event);
+                }
+            }
+            G2EventStream::LossAware(stream) => loop {
+                match stream.as_mut().poll_next(&mut cx) {
+                    Poll::Ready(Some(Ok(event))) => events.push(event),
+                    Poll::Ready(Some(Err(error))) => {
+                        panic!("offline KVBM lifecycle stream lost events: {error}")
+                    }
+                    Poll::Ready(None) => {
+                        panic!("offline KVBM lifecycle stream closed unexpectedly")
+                    }
+                    Poll::Pending => break,
+                }
+            },
         }
         events
     }
 
-    /// Drain kvbm-logical G2 lifecycle notifications and translate them into
-    /// router-tier events. The caller owns event IDs and publishing.
-    fn collect_g2_router_events(&self) -> Vec<G2RouterEvent> {
+    fn translate_g2_lifecycle_events(&self) -> Vec<G2RouterEvent> {
         let lifecycle_events = self.drain_g2_lifecycle_events();
         if lifecycle_events.is_empty() {
             return Vec::new();
@@ -448,6 +607,15 @@ impl MockOffloadEngine {
                 }
             }
         }
+        router_events
+    }
+
+    /// Drain kvbm-logical G2 lifecycle notifications and translate them into
+    /// router-tier events. The caller owns event IDs and publishing.
+    fn collect_g2_router_events(&self) -> Vec<G2RouterEvent> {
+        let mut router_events = self.translate_g2_lifecycle_events();
+        #[cfg(feature = "replay-bench")]
+        order_g2_router_events(&mut router_events);
         router_events
     }
 
@@ -938,8 +1106,9 @@ impl MockOffloadEngine {
     /// Advance PS state to `now_ms` and fire awaiters for any transfers
     /// that completed in the interval. Caller picks `now_ms`: live mode
     /// passes wall-clock (`Instant::elapsed`-derived); offline replay
-    /// passes the runtime's virtual time. Hot-path logic is identical
-    /// in both — only the source of `now_ms` differs.
+    /// passes the runtime's virtual time. Live mode keeps its existing
+    /// best-effort drain; offline mode fires one completion at a time and
+    /// settles its pipeline publication before exposing the next completion.
     ///
     /// # Per-worker virtual-time containment
     ///
@@ -955,24 +1124,116 @@ impl MockOffloadEngine {
     /// worker, so lower-tier transfers contend globally while G1↔G2 remains
     /// worker-local.
     fn prepare_tick(&self, now_ms: f64) -> PreparedAdvance {
-        if let Some(pending) = self
-            .advance_state
-            .lock()
-            .expect("offload advance mutex poisoned")
-            .pending
-            .clone()
         {
-            return pending;
+            let state = self
+                .advance_state
+                .lock()
+                .expect("offload advance mutex poisoned");
+            match &state.phase {
+                AdvancePhase::Idle => {}
+                AdvancePhase::Prepared(pending) => return pending.clone(),
+                AdvancePhase::Committing(acknowledgement) => {
+                    panic!("offload advance {:?} is still committing", acknowledgement)
+                }
+            }
         }
         self.worker.set_now_ms(now_ms);
         let g2_registrations_before = Self::tier_registrations(&self.g2_manager);
         let local_token = self.engine.settlement_token();
-        let drained = self.worker.drain_completions_summary(now_ms);
+        let ordered_router_events = RefCell::new(Vec::new());
+        let drained = if self.drive_mode == KvbmDriveMode::OfflineDeterministic {
+            let mut local_completed_batches = 0u64;
+            let expected_g2_registrations = Cell::new(g2_registrations_before);
+            self.worker.drain_completions_summary_ordered(
+                now_ms,
+                |completion| {
+                    if completion.direction == TransferDirection::G1ToG2 {
+                        local_completed_batches = local_completed_batches
+                            .checked_add(1)
+                            .expect("G1→G2 settlement target overflow");
+                        let mut target = SettlementTarget::new();
+                        target
+                            .add_completed_batches(PipelineLane::G1ToG2, local_completed_batches)
+                            .expect("G1→G2 settlement target overflow");
+                        self.settle_or_panic(local_token.clone(), target);
+                        expected_g2_registrations.set(Self::tier_registrations(&self.g2_manager));
+                    }
+                    ordered_router_events
+                        .borrow_mut()
+                        .extend(self.translate_g2_lifecycle_events());
+                },
+                |completion| {
+                    match completion.direction {
+                        TransferDirection::G2ToG3 => {
+                            if let Some(settlement) =
+                                self.coordinator.shared_settlement(PipelineLane::G2ToG3, 1)
+                            {
+                                self.settle_or_panic(settlement.token, settlement.target);
+                            }
+                        }
+                        TransferDirection::G3ToG2 => {
+                            let target = expected_g2_registrations
+                                .get()
+                                .checked_add(
+                                    u64::try_from(completion.num_blocks)
+                                        .expect("G3→G2 block count exceeds u64"),
+                                )
+                                .expect("G2 registration target overflow");
+                            expected_g2_registrations.set(target);
+                            assert!(
+                                self.wait_for_tier_registrations(self.g2_manager.clone(), target,),
+                                "offline G3→G2 completion did not publish its G2 registrations"
+                            );
+                            expected_g2_registrations
+                                .set(Self::tier_registrations(&self.g2_manager));
+                        }
+                        _ => unreachable!("shared G3 completion used an unexpected direction"),
+                    }
+                    ordered_router_events
+                        .borrow_mut()
+                        .extend(self.translate_g2_lifecycle_events());
+                },
+                |completion| {
+                    match completion.direction {
+                        TransferDirection::G2ToG4 => {
+                            if let Some(settlement) =
+                                self.coordinator.shared_settlement(PipelineLane::G2ToG4, 1)
+                            {
+                                self.settle_or_panic(settlement.token, settlement.target);
+                            }
+                        }
+                        TransferDirection::G4ToG2 => {
+                            let target = expected_g2_registrations
+                                .get()
+                                .checked_add(
+                                    u64::try_from(completion.num_blocks)
+                                        .expect("G4→G2 block count exceeds u64"),
+                                )
+                                .expect("G2 registration target overflow");
+                            expected_g2_registrations.set(target);
+                            assert!(
+                                self.wait_for_tier_registrations(self.g2_manager.clone(), target,),
+                                "offline G4→G2 completion did not publish its G2 registrations"
+                            );
+                            expected_g2_registrations
+                                .set(Self::tier_registrations(&self.g2_manager));
+                        }
+                        _ => unreachable!("shared G4 completion used an unexpected direction"),
+                    }
+                    ordered_router_events
+                        .borrow_mut()
+                        .extend(self.translate_g2_lifecycle_events());
+                },
+            )
+        } else {
+            self.worker.drain_completions_summary(now_ms)
+        };
+        let mut ordered_router_events = ordered_router_events.into_inner();
         let offload_drained = drained.local.offload_transfers;
         let offload_drained_blocks = drained.local.offload_blocks;
         let shared_g3 = drained.shared_g3.counts;
         let shared_g4 = drained.shared_g4.counts;
-        if offload_drained > 0 {
+        if self.drive_mode == KvbmDriveMode::Live && offload_drained > 0 {
             let mut target = SettlementTarget::new();
             target
                 .add_completed_batches(
@@ -982,17 +1243,19 @@ impl MockOffloadEngine {
                 .expect("G1→G2 settlement target overflow");
             self.settle_or_panic(local_token, target);
         }
-        if let Some(settlement) = self
-            .coordinator
-            .shared_settlement(PipelineLane::G2ToG3, shared_g3.offload_transfers)
-        {
-            self.settle_or_panic(settlement.token, settlement.target);
-        }
-        if let Some(settlement) = self
-            .coordinator
-            .shared_settlement(PipelineLane::G2ToG4, shared_g4.offload_transfers)
-        {
-            self.settle_or_panic(settlement.token, settlement.target);
+        if self.drive_mode == KvbmDriveMode::Live {
+            if let Some(settlement) = self
+                .coordinator
+                .shared_settlement(PipelineLane::G2ToG3, shared_g3.offload_transfers)
+            {
+                self.settle_or_panic(settlement.token, settlement.target);
+            }
+            if let Some(settlement) = self
+                .coordinator
+                .shared_settlement(PipelineLane::G2ToG4, shared_g4.offload_transfers)
+            {
+                self.settle_or_panic(settlement.token, settlement.target);
+            }
         }
 
         let current_shared_g3_onboard_blocks = shared_g3
@@ -1017,7 +1280,7 @@ impl MockOffloadEngine {
             );
         }
 
-        if g2_publish_blocks > 0 {
+        if self.drive_mode == KvbmDriveMode::Live && g2_publish_blocks > 0 {
             let (published, registrations_after) = self.wait_for_tier_publish_blocks(
                 self.g2_manager.clone(),
                 g2_registrations_before,
@@ -1068,7 +1331,14 @@ impl MockOffloadEngine {
         }
 
         self.pump_pending_staged_swap_ins(now_ms);
-        let router_events = self.collect_g2_router_events();
+        let router_events = if self.drive_mode == KvbmDriveMode::OfflineDeterministic {
+            ordered_router_events.extend(self.translate_g2_lifecycle_events());
+            #[cfg(feature = "replay-bench")]
+            order_g2_router_events(&mut ordered_router_events);
+            ordered_router_events
+        } else {
+            self.collect_g2_router_events()
+        };
         let mut state = self
             .advance_state
             .lock()
@@ -1082,7 +1352,7 @@ impl MockOffloadEngine {
             router_events,
             acknowledgement,
         };
-        state.pending = Some(prepared.clone());
+        state.phase = AdvancePhase::Prepared(prepared.clone());
         prepared
     }
 
@@ -1091,19 +1361,24 @@ impl MockOffloadEngine {
         acknowledgement: AdvanceAcknowledgement,
     ) -> std::result::Result<usize, AdvanceAcknowledgementError> {
         {
-            let state = self
+            let mut state = self
                 .advance_state
                 .lock()
                 .expect("offload advance mutex poisoned");
-            let Some(pending) = state.pending.as_ref() else {
-                return Err(AdvanceAcknowledgementError::NoPreparedAdvance);
-            };
-            if pending.acknowledgement != acknowledgement {
-                return Err(AdvanceAcknowledgementError::Stale {
-                    expected: pending.acknowledgement,
-                    actual: acknowledgement,
-                });
+            match &state.phase {
+                AdvancePhase::Prepared(pending) => {
+                    if pending.acknowledgement != acknowledgement {
+                        return Err(AdvanceAcknowledgementError::Stale {
+                            expected: pending.acknowledgement,
+                            actual: acknowledgement,
+                        });
+                    }
+                }
+                AdvancePhase::Idle | AdvancePhase::Committing(_) => {
+                    return Err(AdvanceAcknowledgementError::NoPreparedAdvance);
+                }
             }
+            state.phase = AdvancePhase::Committing(acknowledgement);
         }
         let acknowledged = self.coordinator.acknowledge_prepared();
         if !acknowledged.abandoned_visibility.is_empty() {
@@ -1126,14 +1401,16 @@ impl MockOffloadEngine {
         let released = acknowledged
             .released_g1_slots
             .saturating_add(self.coordinator.reap_terminal_swap_ins());
-        let removed = self
+        let mut state = self
             .advance_state
             .lock()
-            .expect("offload advance mutex poisoned")
-            .pending
-            .take()
-            .expect("prepared offload advance disappeared during acknowledgement");
-        assert_eq!(removed.acknowledgement, acknowledgement);
+            .expect("offload advance mutex poisoned");
+        let actual = match &state.phase {
+            AdvancePhase::Committing(actual) => *actual,
+            _ => panic!("prepared offload advance changed phase during acknowledgement"),
+        };
+        assert_eq!(actual, acknowledgement);
+        state.phase = AdvancePhase::Idle;
         Ok(released)
     }
 
@@ -1195,6 +1472,7 @@ impl MockOffloadEngine {
         source_slots: Vec<MutableBlock<MockerG1>>,
         now_ms: Option<f64>,
     ) -> Option<G1EvictionOutcome> {
+        self.assert_offline_mutation_allowed("enqueue G1 evictions");
         if evicted.is_empty() {
             drop(source_slots);
             return None;
@@ -1321,6 +1599,7 @@ impl MockOffloadEngine {
         &mut self,
         plhs: &[SequenceHash],
     ) -> Option<PreparedSwapIn> {
+        self.assert_offline_mutation_allowed("prepare a swap-in");
         if plhs.is_empty() {
             return None;
         }
@@ -1399,6 +1678,7 @@ impl MockOffloadEngine {
         prefix_pins: Vec<ImmutableBlock<MockerG1>>,
         now_ms: Option<f64>,
     ) -> SwapInHandle {
+        self.assert_offline_mutation_allowed("start a swap-in");
         let now_ms = now_ms.unwrap_or_else(|| self.worker.now_ms());
         self.worker.set_now_ms(now_ms);
         match prepared {
@@ -1479,6 +1759,7 @@ impl MockOffloadEngine {
     }
 
     pub(crate) fn cancel_swap_in(&self, id: OffloadId) -> bool {
+        self.assert_offline_mutation_allowed("cancel a swap-in");
         self.coordinator.cancel_swap_in(id)
     }
 
@@ -1486,7 +1767,13 @@ impl MockOffloadEngine {
         &self,
         id: OffloadId,
     ) -> Option<(Vec<MutableBlock<MockerG1>>, Vec<ImmutableBlock<MockerG1>>)> {
+        self.assert_offline_mutation_allowed("take a completed swap-in");
         self.coordinator.take_completed_swap_in(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drive_mode(&self) -> KvbmDriveMode {
+        self.drive_mode
     }
 
     /// Test-only accessor: integration tests outside this module
@@ -1512,12 +1799,14 @@ impl MockOffloadEngine {
 impl Drop for MockOffloadEngine {
     fn drop(&mut self) {
         let live_leases = self.coordinator.live_lease_count();
-        let prepared_advance = self
+        let advance_state = self
             .advance_state
             .get_mut()
-            .expect("offload advance mutex poisoned")
-            .pending
-            .is_some();
+            .expect("offload advance mutex poisoned");
+        let prepared_advance = matches!(
+            &advance_state.phase,
+            AdvancePhase::Prepared(_) | AdvancePhase::Committing(_)
+        );
         if live_leases > 0 || prepared_advance {
             tracing::warn!(
                 live_leases,
@@ -1640,6 +1929,30 @@ mod tests {
             .expect("allocate G1 slots");
         assert!(evicted.is_empty());
         (manager, slots)
+    }
+
+    #[cfg(feature = "replay-bench")]
+    #[test]
+    fn replay_router_event_order_preserves_parent_chain() {
+        let stored = |seq_hash, parent_hash| {
+            G2RouterEvent::Stored(G2BlockEventMetadata {
+                seq_hash,
+                parent_hash,
+                local_hash: None,
+                token_ids: None,
+            })
+        };
+        let mut events = vec![
+            stored(10, Some(100)),
+            stored(50, None),
+            stored(100, None),
+            stored(1, Some(10)),
+        ];
+
+        order_g2_router_events(&mut events);
+
+        let seq_hashes = events.iter().map(g2_router_event_hash).collect::<Vec<_>>();
+        assert_eq!(seq_hashes, vec![50, 100, 10, 1]);
     }
 
     #[tokio::test]
@@ -1856,6 +2169,30 @@ mod tests {
             engine.acknowledge_tick_for_kv_manager(prepared.acknowledgement),
             Err(AdvanceAcknowledgementError::NoPreparedAdvance)
         );
+    }
+
+    #[tokio::test]
+    async fn offline_advance_rejects_mutation_until_acknowledged() {
+        let mut engine = MockOffloadEngine::new_with_drive_mode(
+            KvbmOffloadConfig::default(),
+            KvbmDriveMode::OfflineDeterministic,
+        )
+        .await
+        .expect("engine build");
+        let prepared = engine.prepare_tick_for_kv_manager(0.0);
+
+        let mutation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.prepare_onboard_prefix(&[])
+        }));
+        assert!(
+            mutation.is_err(),
+            "offline mutation must not interleave with a prepared advance"
+        );
+
+        engine
+            .acknowledge_tick_for_kv_manager(prepared.acknowledgement)
+            .expect("matching acknowledgement");
+        assert!(engine.prepare_onboard_prefix(&[]).is_none());
     }
 
     #[tokio::test]
