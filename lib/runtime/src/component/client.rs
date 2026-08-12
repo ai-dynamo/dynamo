@@ -764,6 +764,15 @@ impl Client {
         }
     }
 
+    /// Current unfiltered endpoint membership from the shared discovery
+    /// source. This stays independent of admission-filtered client views.
+    pub(crate) fn discovered_instances(&self) -> Vec<Instance> {
+        self.endpoint_discovery_source
+            .instance_source
+            .borrow()
+            .clone()
+    }
+
     /// Wait for at least one Instance to be available for this Endpoint
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
         tracing::trace!(
@@ -965,48 +974,71 @@ impl Client {
             tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
             let mut map: HashMap<u64, Instance> = HashMap::new();
 
-            loop {
-                let discovery_event = tokio::select! {
-                    _ = watch_tx.closed() => {
-                        break;
-                    }
-                    discovery_event = discovery_stream.next() => {
-                        match discovery_event {
-                            Some(Ok(event)) => {
-                                event
-                            },
-                            Some(Err(e)) => {
-                                tracing::error!("endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}", e, discovery_query);
-                                break;
+            const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+            'reconnect: loop {
+                loop {
+                    let discovery_event = tokio::select! {
+                        _ = watch_tx.closed() => {
+                            break 'reconnect;
+                        }
+                        discovery_event = discovery_stream.next() => {
+                            match discovery_event {
+                                Some(Ok(event)) => event,
+                                Some(Err(e)) => {
+                                    tracing::warn!("endpoint_watcher: discovery stream error: {}; reconnecting for discovery query: {:?}", e, discovery_query);
+                                    break;
+                                }
+                                None => {
+                                    tracing::warn!("endpoint_watcher: discovery stream ended; reconnecting for discovery query: {:?}", discovery_query);
+                                    break;
+                                }
                             }
-                            None => {
-                                break;
+                        }
+                    };
+
+                    match &discovery_event {
+                        DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
+                            map.insert(instance.instance_id, instance.clone());
+                        }
+                        DiscoveryEvent::Added(_) => {}
+                        DiscoveryEvent::ModelTaintsUpdated(_) => {}
+                        DiscoveryEvent::Removed(id) => {
+                            if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
+                                map.remove(&endpoint_id.instance_id);
+                            }
+                        }
+                    }
+
+                    let instances: Vec<Instance> = map.values().cloned().collect();
+                    if watch_tx.send(instances).is_err() {
+                        break 'reconnect;
+                    }
+
+                    // Publish the snapshot before the raw event. A consumer that
+                    // subscribes between these operations sees either the updated
+                    // snapshot or the event (possibly both), never neither.
+                    if let Some(discovery_source) = discovery_source_task.upgrade() {
+                        discovery_source.broadcast_event(&discovery_event);
+                    }
+                }
+
+                tokio::select! {
+                    _ = watch_tx.closed() => break 'reconnect,
+                    _ = tokio::time::sleep(RECONNECT_BACKOFF) => {}
+                }
+
+                discovery_stream = loop {
+                    match discovery.list_and_watch(discovery_query.clone(), None).await {
+                        Ok(stream) => break stream,
+                        Err(e) => {
+                            tracing::warn!("endpoint_watcher: failed to reconnect discovery stream: {}; retrying for discovery query: {:?}", e, discovery_query);
+                            tokio::select! {
+                                _ = watch_tx.closed() => break 'reconnect,
+                                _ = tokio::time::sleep(RECONNECT_BACKOFF) => {}
                             }
                         }
                     }
                 };
-
-                if let Some(discovery_source) = discovery_source_task.upgrade() {
-                    discovery_source.broadcast_event(&discovery_event);
-                }
-
-                match discovery_event {
-                    DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
-                        map.insert(instance.instance_id, instance);
-                    }
-                    DiscoveryEvent::Added(_) => {}
-                    DiscoveryEvent::ModelTaintsUpdated(_) => {}
-                    DiscoveryEvent::Removed(id) => {
-                        if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
-                            map.remove(&endpoint_id.instance_id);
-                        }
-                    }
-                }
-
-                let instances: Vec<Instance> = map.values().cloned().collect();
-                if watch_tx.send(instances).is_err() {
-                    break;
-                }
             }
             let _ = watch_tx.send(vec![]);
         });

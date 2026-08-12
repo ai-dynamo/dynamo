@@ -281,9 +281,9 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
         .worker_id
 }
 
-/// At most one `list_and_watch` per endpoint, across all `PushRouter`
+/// At most one discovery watcher per runtime endpoint, across all `PushRouter`
 /// instances. Entry removed on watcher exit so a later router can re-arm.
-static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<RuntimeEndpointId, ()>> =
     std::sync::OnceLock::new();
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -306,41 +306,43 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
     dashmap::DashMap<RuntimeEndpointId, ()>,
 > = std::sync::OnceLock::new();
 
-/// Watch discovery for instance removals and cancel pending response-stream
-/// registrations on the removed instance, unblocking queued requests with
-/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
-/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
-/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
+/// Watch explicit discovery events, cancelling response handshakes on removal
+/// and clearing the instance tombstone on add. Both operations are idempotent,
+/// so they do not depend on the client's potentially admission-filtered view.
 fn spawn_instance_removal_watcher<T, U>(
-    endpoint: Endpoint,
+    client: &Client,
     dispatch: Arc<dyn StreamingDispatch<T, U>>,
     cancel_token: tokio_util::sync::CancellationToken,
 ) where
     T: Data + Serialize + 'static,
     U: Data + for<'de> Deserialize<'de> + MaybeError + 'static,
 {
-    use crate::discovery::{
-        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    };
-    use tokio_stream::StreamExt as _;
+    use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 
     // One watcher per endpoint: if one is already running, skip.
     let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-    let endpoint_id = endpoint.id();
-    if guard.insert(endpoint_id.clone(), ()).is_some() {
+    let endpoint = &client.endpoint;
+    let watcher_id = RuntimeEndpointId::for_endpoint(endpoint);
+    if guard.insert(watcher_id.clone(), ()).is_some() {
         tracing::debug!(
-            ?endpoint_id,
-            "Instance removal watcher already running for this endpoint, skipping"
+            connection_id = watcher_id.connection_id,
+            ?watcher_id.endpoint_id,
+            "Instance removal watcher already running for this runtime endpoint, skipping"
         );
         return;
     }
 
     let endpoint_name = endpoint.name().to_string();
+    // Subscribe before yielding to the scheduler. The shared discovery source
+    // buffers every subsequent event in this receiver, closing the startup
+    // race that a separately spawned list_and_watch task would have.
+    let mut events = client.subscribe_discovery_events();
+    let initial_instances = client.discovered_instances();
 
     tokio::spawn(async move {
         // Release on every exit path (including panic); a leaked entry
         // silently disables removal cancellation until process restart.
-        struct GuardRelease(EndpointId);
+        struct GuardRelease(RuntimeEndpointId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
                 if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
@@ -348,66 +350,31 @@ fn spawn_instance_removal_watcher<T, U>(
                 }
             }
         }
-        let _release = GuardRelease(endpoint_id);
+        let _release = GuardRelease(watcher_id);
 
-        let namespace = endpoint.component().namespace().name();
-        let component = endpoint.component().name().to_string();
+        for instance in initial_instances {
+            dispatch
+                .on_instance_added(&instance.endpoint_instance_id())
+                .await;
+        }
 
-        // Reconnect on transient discovery failure; cancel-aware backoff.
-        const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
-        'reconnect: loop {
-            let query = DiscoveryQuery::Endpoint {
-                namespace: namespace.clone(),
-                component: component.clone(),
-                endpoint: endpoint_name.clone(),
-            };
-
-            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        endpoint = %endpoint_name,
-                        "Failed to start instance removal watcher (will retry): {e}"
-                    );
-                    tokio::select! {
-                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
-                        _ = cancel_token.cancelled() => break 'reconnect,
+        loop {
+            tokio::select! {
+                event = events.recv() => {
+                    match event {
+                        Some(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid))) => {
+                            dispatch.on_instance_removed(&eid).await;
+                        }
+                        Some(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst))) => {
+                            let id = inst.endpoint_instance_id();
+                            dispatch.on_instance_added(&id).await;
+                        }
+                        Some(_) => {}
+                        None => break,
                     }
                 }
-            };
-
-            loop {
-                tokio::select! {
-                    event = stream.next() => {
-                        match event {
-                            Some(Ok(DiscoveryEvent::Removed(id))) => {
-                                if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    dispatch.on_instance_removed(eid).await;
-                                }
-                            }
-                            Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
-                                let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                                dispatch.on_instance_added(&eid).await;
-                            }
-                            Some(Ok(_)) => {}
-                            Some(Err(e)) => {
-                                tracing::warn!(
-                                    endpoint = %endpoint_name,
-                                    "Instance removal watcher stream error: {e}"
-                                );
-                            }
-                            None => {
-                                tracing::warn!(
-                                    endpoint = %endpoint_name,
-                                    "Instance removal watcher stream ended; reconnecting"
-                                );
-                                continue 'reconnect;
-                            }
-                        }
-                    }
-                    _ = cancel_token.cancelled() => {
-                        break 'reconnect;
-                    }
+                _ = cancel_token.cancelled() => {
+                    break;
                 }
             }
         }
@@ -545,7 +512,7 @@ where
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
-            client.endpoint.clone(),
+            &client,
             addressed.clone(),
             client.endpoint.drt().primary_token(),
         );
@@ -610,7 +577,7 @@ where
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
-            client.endpoint.clone(),
+            &client,
             addressed.clone(),
             client.endpoint.drt().primary_token(),
         );
@@ -667,7 +634,7 @@ where
         };
 
         spawn_instance_removal_watcher(
-            client.endpoint.clone(),
+            &client,
             dispatch.clone(),
             client.endpoint.drt().primary_token(),
         );
@@ -2950,20 +2917,23 @@ mod tests {
     /// orphan-cancellation tests would fail.
     #[tokio::test]
     async fn watcher_dedup_guard_released_on_panic() {
-        let endpoint_id = EndpointId {
-            namespace: "panic-test-ns".to_string(),
-            component: "panic-test-comp".to_string(),
-            name: "panic-test-endpoint".to_string(),
+        let watcher_id = RuntimeEndpointId {
+            connection_id: 1,
+            endpoint_id: EndpointId {
+                namespace: "panic-test-ns".to_string(),
+                component: "panic-test-comp".to_string(),
+                name: "panic-test-endpoint".to_string(),
+            },
         };
 
         // Mimic the production code's pre-spawn dedup insert.
         let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
+        map.insert(watcher_id.clone(), ());
 
-        let endpoint_id_clone = endpoint_id.clone();
+        let watcher_id_clone = watcher_id.clone();
         let join = tokio::spawn(async move {
             // Same shape as in spawn_instance_removal_watcher.
-            struct GuardRelease(EndpointId);
+            struct GuardRelease(RuntimeEndpointId);
             impl Drop for GuardRelease {
                 fn drop(&mut self) {
                     if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
@@ -2971,14 +2941,14 @@ mod tests {
                     }
                 }
             }
-            let _release = GuardRelease(endpoint_id_clone);
+            let _release = GuardRelease(watcher_id_clone);
             panic!("simulated watcher-task panic");
         });
 
         let result = join.await;
         assert!(result.is_err() && result.unwrap_err().is_panic());
         assert!(
-            !map.contains_key(&endpoint_id),
+            !map.contains_key(&watcher_id),
             "Drop guard must release the dedup entry even on panic"
         );
     }
@@ -2988,18 +2958,21 @@ mod tests {
     /// fires or discovery stream closes).
     #[tokio::test]
     async fn watcher_dedup_guard_released_on_normal_exit() {
-        let endpoint_id = EndpointId {
-            namespace: "normal-test-ns".to_string(),
-            component: "normal-test-comp".to_string(),
-            name: "normal-test-endpoint".to_string(),
+        let watcher_id = RuntimeEndpointId {
+            connection_id: 2,
+            endpoint_id: EndpointId {
+                namespace: "normal-test-ns".to_string(),
+                component: "normal-test-comp".to_string(),
+                name: "normal-test-endpoint".to_string(),
+            },
         };
 
         let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
+        map.insert(watcher_id.clone(), ());
 
-        let endpoint_id_clone = endpoint_id.clone();
+        let watcher_id_clone = watcher_id.clone();
         tokio::spawn(async move {
-            struct GuardRelease(EndpointId);
+            struct GuardRelease(RuntimeEndpointId);
             impl Drop for GuardRelease {
                 fn drop(&mut self) {
                     if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
@@ -3007,13 +2980,13 @@ mod tests {
                     }
                 }
             }
-            let _release = GuardRelease(endpoint_id_clone);
+            let _release = GuardRelease(watcher_id_clone);
             // task body returns normally
         })
         .await
         .unwrap();
 
-        assert!(!map.contains_key(&endpoint_id));
+        assert!(!map.contains_key(&watcher_id));
     }
 
     #[tokio::test]
@@ -3174,6 +3147,53 @@ mod tests {
         assert!(
             poll_until(|| dispatch.added.lock().unwrap().len() > adds_before).await,
             "on_instance_added (re-registration) not delivered to the supplied dispatch"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Removal handling must use the shared, unfiltered discovery source. The
+    /// frontend constructs routers while their admission view is still empty,
+    /// so using that derived view would miss workers that already exist.
+    #[tokio::test]
+    async fn removal_watcher_ignores_admission_filter_for_membership() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_removal_unfiltered_discovery".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(Vec::new());
+        let admitted_client = client.with_admitted_instances(admission_rx);
+        assert!(admitted_client.instances().is_empty());
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let _router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            admitted_client,
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().contains(&instance_id)).await,
+            "unfiltered initial discovery membership was not delivered"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch.removed.lock().unwrap().contains(&instance_id)).await,
+            "removal was lost while the admitted client view was empty"
         );
 
         rt.shutdown();

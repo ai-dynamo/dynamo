@@ -244,6 +244,14 @@ impl<T> RegisteredStream<T> {
         cleanup.0.take();
         (connection_info, stream_provider)
     }
+
+    /// Await the stream provider while keeping registration cleanup armed.
+    ///
+    /// If the returned future is dropped before the provider resolves, the
+    /// registration is removed from the transport's pending-subject tables.
+    pub async fn wait(self) -> Result<Result<T, String>, tokio::sync::oneshot::error::RecvError> {
+        self.stream_provider.await
+    }
 }
 
 /// After registering a stream, the [`PendingConnections`] object is returned to the caller. This
@@ -321,6 +329,27 @@ mod registered_stream_tests {
         assert!(
             !flag.load(Ordering::SeqCst),
             "into_parts() must disarm the cleanup closure"
+        );
+    }
+
+    /// Cancelling a wait must retain the cleanup responsibility that
+    /// `into_parts()` deliberately transfers to its caller.
+    #[tokio::test]
+    async fn dropped_wait_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        let wait = stream.wait();
+        drop(wait);
+
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "dropping the wait future must clean up the registration"
         );
     }
 
