@@ -2931,6 +2931,123 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.force_reasoning is expected
         assert result.reasoning_parser.force_reasoning is expected
 
+    @pytest.mark.parametrize(
+        ("reasoning_effort", "chat_template_kwargs", "expected_effort"),
+        [
+            ("low", {}, "low"),
+            ("high", {}, "high"),
+            ("low", {"thinking_effort": "max"}, "max"),
+            (None, {"reasoning_effort": "low"}, "low"),
+            (None, {"thinking_effort": "max"}, "max"),
+        ],
+    )
+    def test_kimi_k3_maps_reasoning_effort_to_thinking_effort(
+        self, reasoning_effort, chat_template_kwargs, expected_effort
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": reasoning_effort,
+                "chat_template_kwargs": chat_template_kwargs,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name="kimi_k3",
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert captured["kwargs"]["thinking_effort"] == expected_effort
+        assert "reasoning_effort" not in captured["kwargs"]
+        assert "thinking" not in captured["kwargs"]
+        assert "enable_thinking" not in captured["kwargs"]
+
+    def test_kimi_k3_warns_for_unsupported_reasoning_effort(self, caplog):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "medium",
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name="kimi_k3",
+            reasoning_parser_name=None,
+        )
+
+        assert "thinking_effort" not in captured["kwargs"]
+        assert "reasoning_effort" not in captured["kwargs"]
+        assert "Kimi K3 does not support reasoning_effort='medium'" in caplog.text
+
+    def test_kimi_k3_forwards_response_format_to_chat_template(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "city",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        }
+        result = preprocess_chat_request(
+            {
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": response_format,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name="kimi_k3",
+            reasoning_parser_name=None,
+        )
+
+        assert captured["kwargs"]["response_format"] == response_format
+        assert result.guided_decoding == {
+            "json": response_format["json_schema"]["schema"]
+        }
+
+        template_response_format = {"type": "json_object"}
+        preprocess_chat_request(
+            {
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": response_format,
+                "chat_template_kwargs": {"response_format": template_response_format},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name="kimi_k3",
+            reasoning_parser_name=None,
+        )
+
+        assert captured["kwargs"]["response_format"] == template_response_format
+
     @pytest.mark.multimodal
     def test_kimi_k3_normalizes_template_media_but_forwards_original_url(
         self,
