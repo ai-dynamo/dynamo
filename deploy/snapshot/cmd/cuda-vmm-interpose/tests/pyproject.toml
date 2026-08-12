@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "snapshot-cuda-vmm-interposer-tests"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+  "cuda-bindings>=13.0.3,<14",
+  "pytest",
+  "torch>=2.11,<2.12",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["."]

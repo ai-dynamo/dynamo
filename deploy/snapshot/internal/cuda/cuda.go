@@ -354,10 +354,10 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	return timings, nil
 }
 
-// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
+// RestoreProcessTree restores CUDA state for the given PIDs while keeping them locked.
 // helperBinaryPath must be the absolute path to cuda-checkpoint-helper: DefaultHelperBinaryPath
 // on the agent, or filepath.Join(bundleDir, HelperBinaryName) inside the placeholder namespace.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
+func RestoreProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
@@ -367,19 +367,22 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 			return timings, err
 		}
 	}
+	timings.TotalDuration = time.Since(start)
 
+	return timings, nil
+}
+
+// UnlockProcessTree resumes restored CUDA processes.
+func UnlockProcessTree(ctx context.Context, cudaPIDs []int, helperBinaryPath string, log logr.Logger) error {
 	for _, pid := range cudaPIDs {
 		if err := unlock(ctx, pid, helperBinaryPath, log); err != nil {
-			timings.TotalDuration = time.Since(start)
 			state, stateErr := getState(ctx, pid, helperBinaryPath)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue
 			}
-			return timings, err
+			return err
 		}
 	}
-	timings.TotalDuration = time.Since(start)
-
-	return timings, nil
+	return nil
 }
