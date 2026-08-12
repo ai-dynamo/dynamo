@@ -20,7 +20,6 @@ The main TRT-LLM recipe entrypoints are:
 - [Qwen3-235B-A22B-FP8 aggregated, Hopper](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 aggregated, Blackwell](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 disaggregated, Hopper](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 disaggregated, Blackwell](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml)
 - [Qwen3-32B-FP8 aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml)
 - [Qwen3-32B-FP8 disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml)
 - [GPT-OSS-120B aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/deploy.yaml)
