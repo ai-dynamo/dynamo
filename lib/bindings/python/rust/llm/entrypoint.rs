@@ -69,6 +69,7 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
+    InProcessTokens = 4,
 }
 
 #[pyclass]
@@ -553,7 +554,7 @@ impl std::fmt::Debug for PyEngineFactory {
 }
 
 #[pyclass]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct EntrypointArgs {
     engine_type: EngineType,
     model_path: Option<PathBuf>,
@@ -579,6 +580,7 @@ pub(crate) struct EntrypointArgs {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
+    in_process_token_engine: Option<PythonAsyncEngine>,
     aic_perf_config: Option<AicPerfConfig>,
 }
 
@@ -586,7 +588,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, in_process_token_engine=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -611,6 +613,7 @@ impl EntrypointArgs {
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
+        in_process_token_engine: Option<PythonAsyncEngine>,
         aic_perf_config: Option<AicPerfConfig>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
@@ -673,6 +676,20 @@ impl EntrypointArgs {
         }
         runtime_config.validate_config()?;
 
+        match (&engine_type, &in_process_token_engine) {
+            (EngineType::InProcessTokens, None) => {
+                return Err(PyValueError::new_err(
+                    "EngineType.InProcessTokens requires in_process_token_engine",
+                ));
+            }
+            (EngineType::InProcessTokens, Some(_)) | (_, None) => {}
+            (_, Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "in_process_token_engine requires EngineType.InProcessTokens",
+                ));
+            }
+        }
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -704,6 +721,7 @@ impl EntrypointArgs {
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
+            in_process_token_engine,
             aic_perf_config,
         })
     }
@@ -974,6 +992,17 @@ async fn select_engine(
 
             RsEngineConfig::InProcessTokens {
                 engine,
+                model: Box::new(local_model),
+                is_prefill: args.is_prefill,
+                is_decode: args.is_decode,
+            }
+        }
+        EngineType::InProcessTokens => {
+            let engine = args.in_process_token_engine.ok_or_else(|| {
+                anyhow::anyhow!("EngineType.InProcessTokens requires in_process_token_engine")
+            })?;
+            RsEngineConfig::InProcessTokens {
+                engine: Arc::new(engine),
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
                 is_decode: args.is_decode,

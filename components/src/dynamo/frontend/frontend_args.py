@@ -96,6 +96,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    workflow_provider: Optional[str]
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -133,6 +134,27 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        if self.workflow_provider is not None:
+            if ":" not in self.workflow_provider:
+                raise ValueError(
+                    "--workflow-provider must use a 'module:callable' path"
+                )
+            if self.chat_processor != "dynamo":
+                raise ValueError(
+                    "--workflow-provider currently requires --dyn-chat-processor=dynamo"
+                )
+            if self.interactive or self.kserve_grpc_server:
+                raise ValueError(
+                    "--workflow-provider currently supports HTTP frontend mode only"
+                )
+            if self.router_mode != "round-robin":
+                raise ValueError(
+                    "--workflow-provider currently requires --router-mode=round-robin"
+                )
+            if self.migration_limit != 0:
+                raise ValueError(
+                    "--workflow-provider currently requires --migration-limit=0"
+                )
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
                 raise ValueError(
@@ -444,6 +466,17 @@ class FrontendArgGroup(ArgGroup):
                 "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
                 "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
                 "whitespace-separated values."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--workflow-provider",
+            env_var="DYN_WORKFLOW_PROVIDER",
+            default=None,
+            help=(
+                "Trusted 'module:callable' that authors and hydrates a workflow "
+                "for in-process token execution."
             ),
         )
 

@@ -35,11 +35,13 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     FrontendRoute,
+    PythonAsyncEngine,
     make_engine,
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.workflow import WorkflowTokenEngine, load_workflow_frontend_application
 
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
@@ -440,7 +442,21 @@ async def async_main():
     if config.router_prefill_load_model == "aic":
         kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
-    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
+    engine_type = EngineType.Dynamic
+    if config.workflow_provider is not None:
+        application = await load_workflow_frontend_application(
+            config.workflow_provider, runtime, config
+        )
+        kwargs["model_path"] = application.model_path
+        if config.model_name is None and application.model_name is not None:
+            kwargs["model_name"] = application.model_name
+        token_engine = WorkflowTokenEngine(application)
+        kwargs["in_process_token_engine"] = PythonAsyncEngine(
+            token_engine.generate, loop
+        )
+        engine_type = EngineType.InProcessTokens
+
+    e = EntrypointArgs(engine_type, **kwargs)
     engine = await make_engine(runtime, e)
     # Validate mode compatibility before loading extensions, so an incompatible
     # mode fails fast without importing/executing third-party provider code.
