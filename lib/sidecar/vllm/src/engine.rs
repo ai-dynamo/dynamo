@@ -8,15 +8,22 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, WorkerConfig, usage,
 };
+use dynamo_llm::lora::LoRADownloader;
+use dynamo_runtime::component::Endpoint;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::stream::BoxStream;
-use tokio::sync::OnceCell;
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, OnceCell};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request, data_parallel_rank};
+use crate::lora::{
+    build_downloader, parse_load_lora, parse_lora_name, publish_lora_model, resolve_source_path,
+    unpublish_lora_model,
+};
 use crate::model::DiscoveredModel;
 
 pub struct VllmSidecarEngine {
@@ -25,6 +32,10 @@ pub struct VllmSidecarEngine {
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
     client: OnceCell<VllmClient>,
+    runtime_endpoint: OnceCell<Endpoint>,
+    lora_downloader: OnceCell<LoRADownloader>,
+    lora_reconciled: OnceCell<()>,
+    lora_update_lock: Mutex<()>,
     cancel: CancellationToken,
 }
 
@@ -48,6 +59,10 @@ impl VllmSidecarEngine {
             mode,
             transport,
             client: OnceCell::new(),
+            runtime_endpoint: OnceCell::new(),
+            lora_downloader: OnceCell::new(),
+            lora_reconciled: OnceCell::new(),
+            lora_update_lock: Mutex::new(()),
             cancel: CancellationToken::new(),
         }
     }
@@ -136,6 +151,325 @@ impl VllmSidecarEngine {
             ..Default::default()
         };
         Ok((engine, config))
+    }
+
+    fn ready_client(&self) -> Result<&VllmClient, DynamoError> {
+        self.client
+            .get()
+            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))
+    }
+
+    fn ready_endpoint(&self) -> Result<&Endpoint, DynamoError> {
+        self.runtime_endpoint
+            .get()
+            .ok_or_else(|| client::engine_shutdown("vLLM sidecar runtime endpoint is not ready"))
+    }
+
+    async fn rollback_loaded_adapter(
+        client: &VllmClient,
+        adapter: &crate::proto::LoraAdapter,
+    ) -> Result<(), DynamoError> {
+        let response = client.unload_lora(adapter.lora_name.clone()).await?;
+        match response.adapter {
+            Some(removed) if removed == *adapter => Ok(()),
+            observed => Err(client::protocol_error(format!(
+                "native load rollback returned a different adapter identity: expected {adapter:?}, observed {observed:?}"
+            ))),
+        }
+    }
+
+    async fn restore_unloaded_adapter(
+        &self,
+        client: &VllmClient,
+        endpoint: &Endpoint,
+        adapter: &crate::proto::LoraAdapter,
+    ) -> Result<(), DynamoError> {
+        let response = client.load_lora(adapter.clone()).await?;
+        match response.adapter {
+            Some(restored) if restored == *adapter => {
+                publish_lora_model(endpoint, adapter, self.model.max_loras()).await
+            }
+            observed => Err(client::protocol_error(format!(
+                "native unload rollback returned a different adapter identity: expected {adapter:?}, observed {observed:?}"
+            ))),
+        }
+    }
+
+    fn validate_adapter_inventory(
+        adapters: &[crate::proto::LoraAdapter],
+    ) -> Result<(), DynamoError> {
+        for (index, adapter) in adapters.iter().enumerate() {
+            if adapter.lora_name.trim().is_empty() || adapter.lora_id <= 0 {
+                return Err(client::protocol_error(format!(
+                    "ListLoras returned an invalid adapter identity: {adapter:?}"
+                )));
+            }
+            if let Some(conflict) = adapters[index + 1..].iter().find(|candidate| {
+                candidate.lora_name == adapter.lora_name || candidate.lora_id == adapter.lora_id
+            }) {
+                return Err(client::protocol_error(format!(
+                    "ListLoras returned conflicting adapter identities: {adapter:?} and {conflict:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_loaded_loras(&self) -> Result<(), DynamoError> {
+        self.lora_reconciled
+            .get_or_try_init(|| async {
+                let _guard = self.lora_update_lock.lock().await;
+                let endpoint = self.ready_endpoint()?;
+                let adapters = self.ready_client()?.list_loras().await?;
+                Self::validate_adapter_inventory(&adapters)?;
+                let mut published: Vec<String> = Vec::new();
+                for adapter in &adapters {
+                    if let Err(publish_error) =
+                        publish_lora_model(endpoint, adapter, self.model.max_loras()).await
+                    {
+                        let mut rollback_errors = Vec::new();
+                        for name in published.iter().rev() {
+                            if let Err(error) = unpublish_lora_model(endpoint, name).await {
+                                rollback_errors.push(format!("{name}: {error}"));
+                            }
+                        }
+                        return if rollback_errors.is_empty() {
+                            Err(publish_error)
+                        } else {
+                            Err(client::protocol_error(format!(
+                                "failed to reconcile loaded LoRA adapters ({publish_error}); discovery rollback also failed: {}",
+                                rollback_errors.join(", ")
+                            )))
+                        };
+                    }
+                    published.push(adapter.lora_name.clone());
+                }
+                tracing::info!(
+                    adapter_count = adapters.len(),
+                    "reconciled vLLM LoRA inventory into discovery"
+                );
+                Ok(())
+            })
+            .await
+            .copied()
+    }
+
+    async fn load_lora(&self, body: &Value) -> Result<Value, DynamoError> {
+        let request = parse_load_lora(body)?;
+        if self.model.is_base_model_name(&request.name) {
+            return Err(client::invalid_argument(format!(
+                "LoRA adapter name `{}` conflicts with a served base model",
+                request.name
+            )));
+        }
+        let client = self.ready_client()?;
+        let endpoint = self.ready_endpoint()?;
+        let _guard = self.lora_update_lock.lock().await;
+        let downloader = self
+            .lora_downloader
+            .get_or_try_init(|| async { build_downloader() })
+            .await?;
+        let source_path = resolve_source_path(downloader, &request.uri).await?;
+        let source_path = source_path
+            .to_str()
+            .ok_or_else(|| client::invalid_argument("the resolved LoRA path is not valid UTF-8"))?;
+        let lora_id = i64::from(dynamo_llm::utils::lora_name_to_id(&request.name));
+        let requested = crate::proto::LoraAdapter {
+            lora_id,
+            lora_name: request.name.clone(),
+            source_path: source_path.to_string(),
+        };
+
+        let loaded = client.list_loras().await?;
+        if let Some(existing) = loaded
+            .iter()
+            .find(|adapter| adapter.lora_name == request.name)
+        {
+            if existing != &requested {
+                return Err(client::invalid_argument(format!(
+                    "LoRA adapter `{}` is already loaded with different identity",
+                    request.name
+                )));
+            }
+            publish_lora_model(endpoint, existing, self.model.max_loras()).await?;
+            return Ok(json!({
+                "status": "success",
+                "message": format!("LoRA adapter '{}' is already loaded", request.name),
+                "lora_name": existing.lora_name,
+                "lora_id": existing.lora_id,
+                "already_loaded": true,
+            }));
+        }
+        if let Some(existing) = loaded
+            .iter()
+            .find(|adapter| adapter.lora_id == requested.lora_id)
+        {
+            return Err(client::invalid_argument(format!(
+                "LoRA adapter ID {} for `{}` conflicts with loaded adapter `{}`",
+                requested.lora_id, requested.lora_name, existing.lora_name
+            )));
+        }
+
+        let response = match client.load_lora(requested.clone()).await {
+            Ok(response) => response,
+            Err(load_error) => match client.list_loras().await {
+                Ok(adapters) => {
+                    Self::validate_adapter_inventory(&adapters)?;
+                    if adapters.iter().any(|adapter| adapter == &requested) {
+                        tracing::warn!(
+                            lora_name = %requested.lora_name,
+                            %load_error,
+                            "LoadLora failed after the adapter committed; reconciled with ListLoras"
+                        );
+                        crate::proto::LoadLoraResponse {
+                            adapter: Some(requested.clone()),
+                            already_loaded: false,
+                        }
+                    } else if let Some(conflict) = adapters.iter().find(|adapter| {
+                        adapter.lora_name == requested.lora_name
+                            || adapter.lora_id == requested.lora_id
+                    }) {
+                        return Err(client::protocol_error(format!(
+                            "LoadLora failed ({load_error}) and reconciliation found a conflicting adapter: requested {requested:?}, observed {conflict:?}"
+                        )));
+                    } else {
+                        return Err(load_error);
+                    }
+                }
+                Err(list_error) => {
+                    return Err(client::protocol_error(format!(
+                        "LoadLora outcome is unknown: the request failed ({load_error}) and ListLoras reconciliation also failed ({list_error})"
+                    )));
+                }
+            },
+        };
+        let adapter = match response.adapter {
+            Some(adapter) if adapter == requested => adapter,
+            observed => {
+                let identity_error = client::protocol_error(format!(
+                    "LoadLora returned a different adapter identity: expected {requested:?}, observed {observed:?}"
+                ));
+                return match Self::rollback_loaded_adapter(client, &requested).await {
+                    Ok(()) => Err(identity_error),
+                    Err(rollback_error) => Err(client::protocol_error(format!(
+                        "{identity_error}; native rollback also failed: {rollback_error}"
+                    ))),
+                };
+            }
+        };
+        if let Err(publish_error) =
+            publish_lora_model(endpoint, &adapter, self.model.max_loras()).await
+        {
+            return match Self::rollback_loaded_adapter(client, &adapter).await {
+                Ok(()) => Err(publish_error),
+                Err(rollback_error) => Err(client::protocol_error(format!(
+                    "failed to publish LoRA `{}` ({publish_error}); native rollback also failed: {rollback_error}",
+                    adapter.lora_name
+                ))),
+            };
+        }
+        Ok(json!({
+            "status": "success",
+            "message": format!("LoRA adapter '{}' loaded successfully", adapter.lora_name),
+            "lora_name": adapter.lora_name,
+            "lora_id": adapter.lora_id,
+            "already_loaded": response.already_loaded,
+        }))
+    }
+
+    async fn unload_lora(&self, body: &Value) -> Result<Value, DynamoError> {
+        let lora_name = parse_lora_name(body)?;
+        let client = self.ready_client()?;
+        let endpoint = self.ready_endpoint()?;
+        let _guard = self.lora_update_lock.lock().await;
+        let loaded = client.list_loras().await?;
+        let adapter = loaded
+            .into_iter()
+            .find(|adapter| adapter.lora_name == lora_name)
+            .ok_or_else(|| {
+                client::invalid_argument(format!("LoRA adapter `{lora_name}` is not loaded"))
+            })?;
+        let unpublished = unpublish_lora_model(endpoint, &lora_name).await?;
+        let response = match client.unload_lora(lora_name.clone()).await {
+            Ok(response) => response,
+            Err(unload_error) => match client.list_loras().await {
+                Ok(adapters) => {
+                    Self::validate_adapter_inventory(&adapters)?;
+                    if let Some(observed) = adapters
+                        .iter()
+                        .find(|candidate| candidate.lora_name == lora_name)
+                    {
+                        if unpublished {
+                            publish_lora_model(endpoint, observed, self.model.max_loras())
+                                .await
+                                .map_err(|restore_error| {
+                                    client::protocol_error(format!(
+                                        "UnloadLora failed ({unload_error}); the adapter remains loaded, but discovery restore also failed: {restore_error}"
+                                    ))
+                                })?;
+                        }
+                        if observed == &adapter {
+                            return Err(unload_error);
+                        }
+                        return Err(client::protocol_error(format!(
+                            "UnloadLora failed ({unload_error}) and reconciliation found a different adapter identity: expected {adapter:?}, observed {observed:?}"
+                        )));
+                    }
+                    tracing::warn!(
+                        %lora_name,
+                        %unload_error,
+                        "UnloadLora failed after the adapter committed; reconciled with ListLoras"
+                    );
+                    crate::proto::UnloadLoraResponse {
+                        adapter: Some(adapter.clone()),
+                    }
+                }
+                Err(list_error) => {
+                    return Err(client::protocol_error(format!(
+                        "UnloadLora outcome is unknown: the request failed ({unload_error}) and ListLoras reconciliation also failed ({list_error})"
+                    )));
+                }
+            },
+        };
+        let removed = match response.adapter {
+            Some(removed) if removed == adapter => removed,
+            observed => {
+                let identity_error = client::protocol_error(format!(
+                    "UnloadLora returned a different adapter identity: expected {adapter:?}, observed {observed:?}"
+                ));
+                return match self
+                    .restore_unloaded_adapter(client, endpoint, &adapter)
+                    .await
+                {
+                    Ok(()) => Err(identity_error),
+                    Err(restore_error) => Err(client::protocol_error(format!(
+                        "{identity_error}; native and discovery restore also failed: {restore_error}"
+                    ))),
+                };
+            }
+        };
+        Ok(json!({
+            "status": "success",
+            "message": format!("LoRA adapter '{lora_name}' unloaded successfully"),
+            "lora_name": lora_name,
+            "lora_id": removed.lora_id,
+        }))
+    }
+
+    async fn list_loras(&self) -> Result<Value, DynamoError> {
+        let client = self.ready_client()?;
+        let _guard = self.lora_update_lock.lock().await;
+        let mut adapters = client.list_loras().await?;
+        adapters.sort_by(|left, right| left.lora_name.cmp(&right.lora_name));
+        let loras: serde_json::Map<String, Value> = adapters
+            .into_iter()
+            .map(|adapter| (adapter.lora_name, json!(adapter.lora_id)))
+            .collect();
+        Ok(json!({
+            "status": "success",
+            "count": loras.len(),
+            "loras": loras,
+        }))
     }
 }
 
@@ -318,6 +652,57 @@ impl LLMEngine for VllmSidecarEngine {
                 }
             }
         }))
+    }
+
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(if self.model.supports_lora() {
+            // Worker calls this after attaching the base model but before
+            // exposing update routes, which makes this the first lifecycle
+            // point where restart reconciliation can safely publish siblings.
+            self.reconcile_loaded_loras().await?;
+            vec![
+                "load_lora".to_string(),
+                "unload_lora".to_string(),
+                "list_loras".to_string(),
+            ]
+        } else {
+            Vec::new()
+        })
+    }
+
+    async fn engine_update(&self, update: String, body: Value) -> Result<Value, DynamoError> {
+        let lora_name = body
+            .get("lora_name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let result = if !self.model.supports_lora() {
+            Err(client::invalid_argument(
+                "vLLM did not advertise native LoRA lifecycle support",
+            ))
+        } else {
+            match update.as_str() {
+                "load_lora" => self.load_lora(&body).await,
+                "unload_lora" => self.unload_lora(&body).await,
+                "list_loras" => self.list_loras().await,
+                _ => Err(client::invalid_argument(format!(
+                    "unsupported engine update: {update}"
+                ))),
+            }
+        };
+        Ok(match result {
+            Ok(response) => response,
+            Err(error) => json!({
+                "status": "error",
+                "message": error.to_string(),
+                "lora_name": lora_name,
+            }),
+        })
+    }
+
+    async fn on_endpoint_ready(&self, endpoint: Endpoint) -> Result<(), DynamoError> {
+        self.runtime_endpoint.set(endpoint).map_err(|_| {
+            client::engine_shutdown("vLLM sidecar runtime endpoint was already initialized")
+        })
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

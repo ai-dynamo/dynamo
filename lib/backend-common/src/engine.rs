@@ -125,6 +125,10 @@ pub struct LlmRegistration {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Maximum number of LoRA adapters the engine can keep resident on GPU.
+    /// Published on the base model so the LoRA router can place the first
+    /// adapter before any adapter-specific discovery siblings exist.
+    pub max_gpu_lora_count: Option<u32>,
     /// DP ranks this worker hosts (default 1); the router enumerates per-rank
     /// load from it.
     pub data_parallel_size: Option<u32>,

@@ -15,6 +15,8 @@ struct ModelIdentity {
     aliases: Vec<String>,
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
+    supports_lora: bool,
+    max_loras: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -58,12 +60,16 @@ impl DiscoveredModel {
         }
         let reasoning_parser = nonempty(model.reasoning_parser);
         let tool_call_parser = nonempty(model.tool_call_parser);
+        let supports_lora = model.supports_lora;
+        let max_loras = server.max_loras;
         let identity = ModelIdentity {
             source: source.clone(),
             served_name: served_name.clone(),
             aliases: model.served_model_aliases,
             reasoning_parser: reasoning_parser.clone(),
             tool_call_parser: tool_call_parser.clone(),
+            supports_lora,
+            max_loras,
         };
         Ok(Self {
             source,
@@ -103,6 +109,7 @@ impl DiscoveredModel {
                 total_kv_blocks: nonzero(self.server.total_kv_blocks),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
+                max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
                 data_parallel_size: parallelism
                     .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
                 data_parallel_start_rank: parallelism.map(|_| 0),
@@ -116,6 +123,20 @@ impl DiscoveredModel {
             .parallelism
             .as_ref()
             .map_or(1, |parallelism| parallelism.data_parallel_size)
+    }
+
+    pub(crate) fn supports_lora(&self) -> bool {
+        self.identity.supports_lora && self.identity.max_loras > 0
+    }
+
+    pub(crate) fn max_loras(&self) -> u32 {
+        self.identity.max_loras
+    }
+
+    pub(crate) fn is_base_model_name(&self, name: &str) -> bool {
+        name == self.identity.source
+            || name == self.identity.served_name
+            || self.identity.aliases.iter().any(|alias| alias == name)
     }
 }
 

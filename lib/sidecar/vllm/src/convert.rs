@@ -37,6 +37,10 @@ pub(crate) fn build_generate_request(
         .as_ref()
         .and_then(|routing| routing.priority)
         .unwrap_or(0);
+    let lora_name = routing
+        .as_mut()
+        .and_then(|routing| routing.lora_name.take())
+        .unwrap_or_default();
     let cache_salt = routing
         .as_mut()
         .and_then(|routing| routing.cache_namespace.take());
@@ -94,6 +98,7 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media: Vec::new(),
+        lora_name,
     })
 }
 
@@ -378,16 +383,6 @@ fn validate_request(
     if mode.is_encode() {
         return Err(client::invalid_argument(
             "encode mode is not supported by the vLLM sidecar",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.lora_name.as_deref())
-        .is_some_and(|name| !name.is_empty())
-    {
-        return Err(client::invalid_argument(
-            "LoRA request selection is not supported by vLLM gRPC v0.25.1",
         ));
     }
     if request.bootstrap_info.is_some() {

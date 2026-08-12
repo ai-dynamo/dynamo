@@ -8,6 +8,9 @@ service Control {
   rpc GetServerInfo (GetServerInfoRequest) returns (ServerInfo) {}
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
   rpc Abort (AbortRequest) returns (AbortResponse) {}
+  rpc LoadLora (LoadLoraRequest) returns (LoadLoraResponse) {}
+  rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) {}
+  rpc ListLoras (ListLorasRequest) returns (ListLorasResponse) {}
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
 }
 
@@ -23,6 +26,7 @@ message ServerInfo {
   uint64 total_kv_blocks = 7;
   uint64 max_running_requests = 8;
   uint64 max_batched_tokens = 9;
+  uint32 max_loras = 11;
 }
 
 message ParallelismInfo {
@@ -42,6 +46,7 @@ message ModelInfo {
 
   bool supports_text_input = 20;
   bool supports_token_ids_input = 21;
+  bool supports_lora = 22;
   bool supports_multimodal = 23;
   string reasoning_parser = 24;
   string tool_call_parser = 25;
@@ -52,6 +57,26 @@ message AbortRequest {
 }
 
 message AbortResponse {}
+
+// ======================================================================================
+// LoRA lifecycle
+// ======================================================================================
+
+message LoraAdapter {
+  int64 lora_id = 1;
+  string lora_name = 2;
+  string source_path = 3;
+}
+
+message LoadLoraRequest { LoraAdapter adapter = 1; }
+message LoadLoraResponse {
+  LoraAdapter adapter = 1;
+  bool already_loaded = 2;
+}
+message UnloadLoraRequest { string lora_name = 1; }
+message UnloadLoraResponse { LoraAdapter adapter = 1; }
+message ListLorasRequest {}
+message ListLorasResponse { repeated LoraAdapter adapters = 1; }
 
 // ======================================================================================
 // KV discovery
