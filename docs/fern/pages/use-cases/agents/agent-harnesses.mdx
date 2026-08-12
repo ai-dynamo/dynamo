@@ -209,13 +209,15 @@ The skill pins the Claude Code and Codex ACP adapters. If a harness release chan
 
 An agent harness can compact older conversation history into a summary when its context approaches a limit. The harness creates the summary request and keeps the logical session ID stable. Dynamo observes supported compaction signals but does not start compaction.
 
-| Harness | Signal recognized by Dynamo | Normalized agent context |
+| Harness | Signal recognized by Dynamo | Request-trace field |
 | --- | --- | --- |
-| Codex | `x-codex-turn-metadata` with `request_kind` set to `compaction` | `agent_context.compaction` |
+| Codex | `x-codex-turn-metadata` with `request_kind` set to `compaction` | `request_end.agent_context.compaction` |
 | Claude Code | No supported mapping | Unset |
 | OpenCode | No supported mapping | Unset |
 
 For Codex, Dynamo preserves the optional `trigger`, `reason`, `implementation`, `phase`, and `strategy` values. The object appears only on the inference request that creates the summary. Invalid JSON and other request kinds leave it unset.
+
+Compaction stays in frontend pipeline context for request tracing. It is not serialized in `PreprocessedRequest.agent_context` or sent to workers.
 
 Compaction metadata is passive. It does not rotate `session_id`, change request routing, or evict KV cache blocks. See [Agent Tracing](agent-tracing.md#compaction-metadata) for the request-trace format.
 

@@ -105,8 +105,10 @@ pub struct AgentCompaction {
 }
 
 /// Identity metadata for agentic workloads.
+// Not `deny_unknown_fields`: `AgentContext` is part of the frontend->worker wire
+// format (`PreprocessedRequest.agent_context`), so additive fields must be tolerated
+// across the N-2 mixed-version compatibility window.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentContext {
     /// Stable reasoning/tool session identifier.
     pub session_id: String,
@@ -773,12 +775,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_rejects_nested_compaction() {
-        let error = serde_json::from_str::<AgentContext>(
+    fn agent_context_ignores_nested_compaction() {
+        let context = serde_json::from_str::<AgentContext>(
             r#"{"session_id":"root","compaction":{"trigger":"manual"}}"#,
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown field `compaction`"));
+        .unwrap();
+        assert_eq!(context.session_id, "root");
     }
 
     #[test]
