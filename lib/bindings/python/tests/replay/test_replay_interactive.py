@@ -465,7 +465,7 @@ def test_interactive_static_heterogeneous_pools_serialize_and_route_both_forms()
     assert candidates[0]["taints"] == ["fast"]
     assert candidates[0]["capabilities"] == ["chat"]
 
-    with pytest.raises(Exception, match="no current policy observation"):
+    with pytest.raises(Exception, match="not awaiting placement"):
         session.assign_pool("pool-slow", "slow")
     session.assign(
         "exact-fast",
