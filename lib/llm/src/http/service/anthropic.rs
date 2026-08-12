@@ -18,7 +18,10 @@ use axum::{
     extract::State,
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response, sse::Sse},
+    response::{
+        IntoResponse, Response,
+        sse::{KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
@@ -28,7 +31,7 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{
-        ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_keep_alive,
+        ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_activity,
     },
     metrics::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
@@ -677,16 +680,19 @@ async fn anthropic_messages(
         let keep_alive = state.sse_keep_alive_for_response(
             move_reasoning_to_content_when_empty && parsing_options.reasoning_parser.is_some(),
         );
-        let stream = monitor_for_disconnects_with_keep_alive(
+        let stream = monitor_for_disconnects_with_activity(
             full_stream,
             ctx,
             inflight_guard,
             stream_handle,
-            keep_alive,
             activity_rx,
         );
 
-        Ok(Sse::new(stream).into_response())
+        let mut sse_stream = Sse::new(stream);
+        if let Some(keep_alive) = keep_alive {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        Ok(sse_stream.into_response())
     } else {
         // Non-streaming path: aggregate stream into single response
 

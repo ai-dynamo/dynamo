@@ -186,11 +186,6 @@ async fn connection_monitor(
 
 type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
 
-struct StreamActivity {
-    keep_alive: Option<Duration>,
-    receiver: mpsc::UnboundedReceiver<()>,
-}
-
 fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     let error = SanitizedError::Internal;
     let body = serde_json::json!({
@@ -249,12 +244,11 @@ pub(crate) fn monitor_for_disconnects_with_error(
     )
 }
 
-pub fn monitor_for_disconnects_with_keep_alive(
+pub fn monitor_for_disconnects_with_activity(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    keep_alive: Option<Duration>,
     activity_rx: mpsc::UnboundedReceiver<()>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
@@ -264,10 +258,7 @@ pub fn monitor_for_disconnects_with_keep_alive(
         stream_handle,
         backend_stream_timeout(),
         openai_stream_error,
-        Some(StreamActivity {
-            keep_alive,
-            receiver: activity_rx,
-        }),
+        Some(activity_rx),
     )
 }
 
@@ -297,7 +288,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
     error_formatter: StreamErrorFormatter,
-    activity: Option<StreamActivity>,
+    mut activity_rx: Option<mpsc::UnboundedReceiver<()>>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -308,16 +299,10 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 
     async_stream::try_stream! {
         tokio::pin!(stream);
-        let (keep_alive, mut activity_rx) = match activity {
-            Some(activity) => (activity.keep_alive, Some(activity.receiver)),
-            None => (None, None),
-        };
         // Keep the context's watch-backed cancellation future alive across body frames.
         // Recreating it for every token repeatedly clones a receiver and churns Notify state.
         let stopped = context.stopped();
         tokio::pin!(stopped);
-        let mut keep_alive_deadline =
-            keep_alive.map(|interval| tokio::time::Instant::now() + interval);
         let mut inactivity_deadline =
             inactivity_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
@@ -331,8 +316,6 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
-                            keep_alive_deadline = keep_alive
-                                .map(|interval| tokio::time::Instant::now() + interval);
                             inactivity_deadline = inactivity_timeout
                                 .map(|timeout| tokio::time::Instant::now() + timeout);
                             yield event;
@@ -378,16 +361,6 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                         "request cancelled"
                     );
                     break;
-                }
-                _ = async {
-                    match keep_alive_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending::<()>().await,
-                    }
-                } => {
-                    keep_alive_deadline = keep_alive
-                        .map(|interval| tokio::time::Instant::now() + interval);
-                    yield Event::default().comment("");
                 }
                 activity = async {
                     match activity_rx.as_mut() {
@@ -757,10 +730,7 @@ mod tests {
             handle,
             Some(Duration::from_secs(10)),
             openai_stream_error,
-            Some(StreamActivity {
-                keep_alive: Some(Duration::from_secs(5)),
-                receiver: activity_rx,
-            }),
+            Some(activity_rx),
         );
         tokio::pin!(monitored);
 
@@ -771,17 +741,7 @@ mod tests {
             }
         });
 
-        let start = tokio::time::Instant::now();
-        let mut heartbeat_times = Vec::new();
-        while let Some(event) = monitored.next().await {
-            assert!(event.is_ok());
-            heartbeat_times.push(start.elapsed());
-            assert!(
-                heartbeat_times.len() < 10,
-                "heartbeat loop did not time out"
-            );
-        }
-        assert_eq!(heartbeat_times.first(), Some(&Duration::from_secs(5)));
+        assert!(monitored.next().await.is_none());
         assert!(tracked_context.is_killed());
         assert_eq!(metrics.get_inflight_count(model), 0);
     }

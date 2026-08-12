@@ -784,10 +784,7 @@ async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
         body.extend_from_slice(&chunk);
 
         let body_text = String::from_utf8_lossy(&body);
-        if body_text
-            .split("\n\n")
-            .any(|frame| frame.trim_end().starts_with(':'))
-        {
+        if body_text.contains(":\n\n") {
             assert!(
                 !body_text.contains("data:"),
                 "model data arrived before the keep-alive comment: {body_text}"

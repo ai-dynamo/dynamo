@@ -35,7 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{
         ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_keep_alive,
+        monitor_for_disconnects_with_activity,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -2797,16 +2797,19 @@ async fn chat_completions(
         let keep_alive = state.sse_keep_alive_for_response(
             move_reasoning_to_content_when_empty && parsing_options.reasoning_parser.is_some(),
         );
-        let stream = monitor_for_disconnects_with_keep_alive(
+        let stream = monitor_for_disconnects_with_activity(
             stream,
             ctx,
             inflight_guard,
             stream_handle,
-            keep_alive,
             activity_rx,
         );
 
-        Ok(Sse::new(stream).into_response())
+        let mut sse_stream = Sse::new(stream);
+        if let Some(keep_alive) = keep_alive {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        Ok(sse_stream.into_response())
     } else {
         // Check first event for backend errors before aggregating (non-streaming only)
         let stream_with_check =
