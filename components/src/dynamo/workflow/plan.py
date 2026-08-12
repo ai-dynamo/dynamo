@@ -65,10 +65,6 @@ class RemoteBinding:
                 f"unsupported remote tensor carrier {self.tensor_carrier!r}"
             )
 
-@dataclass(frozen=True)
-class GenerateEndpointBinding(RemoteBinding):
-    """Bind a contracted stage to Dynamo's stock token Generate endpoint."""
-
 
 Binding = Union[InlineBinding, RemoteBinding]
 
