@@ -292,6 +292,30 @@ async def test_runtime_rejects_bad_inputs_and_worker_outputs():
         await bad_plan.run({"text": "hello"})
 
 
+async def test_runtime_enforces_json_data_model() -> None:
+    workflow = Workflow("json-values")
+    value = workflow.input("value", type="json")
+    workflow.output("value", value)
+    plan = compile_workflow(workflow)
+
+    shared = [1, 2]
+    valid = {"none": None, "bool": True, "number": 1.5, "shared": [shared, shared]}
+    assert await plan.run({"value": valid}) == {"value": valid}
+
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    invalid_values: list[object] = [
+        (1, 2),
+        {1: "non-string key"},
+        float("nan"),
+        float("inf"),
+        cyclic,
+    ]
+    for invalid in invalid_values:
+        with pytest.raises(WorkflowExecutionError, match="JSON data model"):
+            await plan.run({"value": invalid})
+
+
 async def test_tensor_and_image_constraints_are_checked_without_framework_imports():
     tensor_contract = StageContract(
         id="tensor",
