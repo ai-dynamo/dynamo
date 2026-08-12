@@ -576,9 +576,54 @@ pub struct OpenAIPreprocessor {
     /// doesn't round-trip to a single id.
     #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
+    /// True when the DeepSeek V4 or V3.2 native Rust renderer was selected for
+    /// this model, meaning `dynamo-renderer` defaults to `ThinkingMode::Thinking`.
+    /// Used to apply the TRT-LLM-matching default of `thinking=false` when the
+    /// client and deployment config are both silent on thinking mode.
+    deepseek_v4_native_renderer: bool,
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
+/// Mirror of `dynamo-renderer`'s private `is_deepseek_v4` / `is_deepseek_v3_2_non_exp`
+/// detection logic. Returns true when the native Rust renderer that defaults to
+/// `ThinkingMode::Thinking` would be selected (i.e., the model is DeepSeek V4 or V3.2).
+/// Used to inject `thinking=false` at the frontend level to match TRT-LLM's default.
+fn is_deepseek_thinking_default_renderer(model_type: &str, display_name: &str) -> bool {
+    let model_type_lower = model_type.to_lowercase();
+    let display_name_lower = display_name.to_lowercase();
+
+    // DeepSeek V4: model_type == "deepseek_v4", or anchored display-name match.
+    let is_v4 = match model_type_lower.as_str() {
+        "deepseek_v4" => true,
+        "" => {
+            // No model_type — fall back to display name (same rule as dynamo-renderer).
+            let rest = display_name_lower.strip_prefix("deepseek").map(|r| {
+                r.strip_prefix(|c: char| matches!(c, '-' | '_' | '.'))
+                    .unwrap_or(r)
+            });
+            rest.is_some_and(|r| {
+                r.strip_prefix("v4")
+                    .is_some_and(|after| after.is_empty() || after.starts_with(['-', '_', '.']))
+            })
+        }
+        _ => false,
+    };
+    if is_v4 {
+        return true;
+    }
+
+    // DeepSeek V3.2 (non-Exp): model_type "deepseek_v3_2" / "deepseek_v32", or name match.
+    match model_type_lower.as_str() {
+        "deepseek_v3_2" | "deepseek_v32" => !display_name_lower.contains("exp"),
+        "" => {
+            display_name_lower.contains("deepseek")
+                && display_name_lower.contains("v3.2")
+                && !display_name_lower.contains("exp")
+        }
+        _ => false,
+    }
+}
 
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
@@ -858,6 +903,25 @@ impl OpenAIPreprocessor {
 
     fn apply_default_thinking_mode(&self, request: &mut NvCreateChatCompletionRequest) {
         Self::apply_default_thinking_mode_from_runtime_config(&self.runtime_config, request);
+        Self::apply_deepseek_v4_thinking_default(self.deepseek_v4_native_renderer, request);
+    }
+
+    /// Inject `thinking=false` for DeepSeek V4/V3.2 when the client and
+    /// runtime config are both silent, matching TRT-LLM serve's default.
+    fn apply_deepseek_v4_thinking_default(
+        deepseek_v4_native_renderer: bool,
+        request: &mut NvCreateChatCompletionRequest,
+    ) {
+        if !deepseek_v4_native_renderer || Self::request_has_client_thinking_control(request) {
+            return;
+        }
+        let args = request.chat_template_args.get_or_insert_with(HashMap::new);
+        args.entry("thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+        args.entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+        args.entry("thinking_mode".to_string())
+            .or_insert_with(|| serde_json::Value::String("disabled".to_string()));
     }
 
     fn guided_output_requires_reasoning<R: OAIChatLikeRequest>(
@@ -1208,6 +1272,10 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
+        let deepseek_v4_native_renderer = is_deepseek_thinking_default_renderer(
+            &model_info.model_type(),
+            &mdc.display_name,
+        );
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
@@ -1424,6 +1492,7 @@ impl OpenAIPreprocessor {
             routing_image_token_id,
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
+            deepseek_v4_native_renderer,
         }))
     }
 
@@ -7418,6 +7487,168 @@ mod tests {
         assert_ne!(
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // DeepSeek V4 thinking-off-by-default tests
+    // -------------------------------------------------------------------------
+
+    /// Model-type detection: canonical `model_type = "deepseek_v4"` in config.json
+    /// (the typical case when the model folder is mounted at e.g. /model).
+    #[test]
+    fn test_deepseek_v4_detected_by_model_type() {
+        assert!(is_deepseek_thinking_default_renderer("deepseek_v4", "/model"));
+        assert!(is_deepseek_thinking_default_renderer("deepseek_v4", "model"));
+        assert!(is_deepseek_thinking_default_renderer("deepseek_v4", "DeepSeek-V4-Pro"));
+    }
+
+    /// Model-type detection: V3.2 also uses a thinking-default renderer.
+    #[test]
+    fn test_deepseek_v32_detected_by_model_type() {
+        assert!(is_deepseek_thinking_default_renderer("deepseek_v3_2", "anything"));
+        assert!(is_deepseek_thinking_default_renderer("deepseek_v32", "anything"));
+        // Exp variant is excluded.
+        assert!(!is_deepseek_thinking_default_renderer(
+            "deepseek_v3_2",
+            "DeepSeek-V3.2-Exp"
+        ));
+    }
+
+    /// Display-name fallback: no model_type but name matches the anchored pattern.
+    #[test]
+    fn test_deepseek_v4_detected_by_display_name_fallback() {
+        // Empty model_type → use display name.
+        assert!(is_deepseek_thinking_default_renderer("", "deepseek-v4"));
+        assert!(is_deepseek_thinking_default_renderer("", "deepseek-v4-pro"));
+        assert!(is_deepseek_thinking_default_renderer("", "DeepSeek-V4-Pro"));
+        assert!(is_deepseek_thinking_default_renderer("", "deepseek_v4_flash"));
+        // Must not fire for unrelated models.
+        assert!(!is_deepseek_thinking_default_renderer("", "model"));
+        assert!(!is_deepseek_thinking_default_renderer("", "deepseek-v3"));
+        assert!(!is_deepseek_thinking_default_renderer("", "deepseek-v40"));
+        assert!(!is_deepseek_thinking_default_renderer("", "my-deepseek-v4")); // prefix mismatch
+    }
+
+    /// An explicit non-deepseek_v4 model_type suppresses the display-name fallback.
+    #[test]
+    fn test_non_deepseek_model_type_suppresses_v4_detection() {
+        assert!(!is_deepseek_thinking_default_renderer(
+            "deepseek_r1",
+            "deepseek-v4-pro"
+        ));
+        assert!(!is_deepseek_thinking_default_renderer(
+            "llama",
+            "deepseek-v4"
+        ));
+    }
+
+    /// Core behaviour: DeepSeek V4 renderer injects thinking=false when the
+    /// request has no client thinking control.
+    #[test]
+    fn test_deepseek_v4_thinking_default_is_off() {
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_deepseek_v4_thinking_default(true, &mut request);
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking"),
+            Some(&serde_json::json!(false)),
+            "thinking must default to false for DeepSeek V4"
+        );
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    /// Non-DeepSeek V4 renderer: no injection.
+    #[test]
+    fn test_non_deepseek_renderer_leaves_thinking_unset() {
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_deepseek_v4_thinking_default(false, &mut request);
+
+        assert!(
+            request.chat_template_args.is_none(),
+            "thinking must not be injected for non-DeepSeek-V4 models"
+        );
+    }
+
+    /// Client opt-in wins: explicit `thinking=true` in the request is preserved.
+    #[test]
+    fn test_deepseek_v4_client_thinking_true_not_overridden() {
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "thinking".to_string(),
+            serde_json::json!(true),
+        )])));
+
+        OpenAIPreprocessor::apply_deepseek_v4_thinking_default(true, &mut request);
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking"),
+            Some(&serde_json::json!(true)),
+            "client thinking=true must not be overridden"
+        );
+    }
+
+    /// Client opt-in via `enable_thinking` key is also respected.
+    #[test]
+    fn test_deepseek_v4_client_enable_thinking_not_overridden() {
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "enable_thinking".to_string(),
+            serde_json::json!(true),
+        )])));
+
+        OpenAIPreprocessor::apply_deepseek_v4_thinking_default(true, &mut request);
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        // enable_thinking=true is client control — default must not add thinking=false.
+        assert_eq!(
+            args.get("enable_thinking"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(!args.contains_key("thinking"));
+    }
+
+    /// Runtime config "enabled" wins over the model-specific default.
+    #[test]
+    fn test_deepseek_v4_runtime_config_enabled_wins() {
+        let runtime_config = runtime_config_with_default_thinking_mode("enabled");
+        let mut request = chat_request_with_args(None);
+
+        // Simulate the full apply_default_thinking_mode sequence.
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+        OpenAIPreprocessor::apply_deepseek_v4_thinking_default(true, &mut request);
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking"),
+            Some(&serde_json::json!(true)),
+            "operator runtime config 'enabled' must win over model-specific default"
+        );
+    }
+
+    /// `reasoning_effort` in chat_template_args counts as client thinking control.
+    #[test]
+    fn test_deepseek_v4_reasoning_effort_counts_as_client_control() {
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("high"),
+        )])));
+
+        OpenAIPreprocessor::apply_deepseek_v4_thinking_default(true, &mut request);
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert!(
+            !args.contains_key("thinking"),
+            "reasoning_effort is client thinking control; thinking key must not be injected"
         );
     }
 }
