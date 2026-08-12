@@ -614,7 +614,7 @@ impl DisaggFlowState {
     ) -> Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         let input_length = request.input_length();
-        let output_length = request.metadata().max_output_tokens;
+        let output_length = request.metadata().effective_max_output_tokens();
         request.metadata_mut().uuid = Some(uuid);
         request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
@@ -803,7 +803,10 @@ impl DisaggFlowState {
             let (input_tokens, requested_output_tokens) = {
                 let state = self.state(signal.uuid)?;
                 let original = state.original_request()?;
-                (original.tokens.len(), original.max_output_tokens)
+                (
+                    original.tokens.len(),
+                    original.effective_max_output_tokens(),
+                )
             };
             let actual_output_tokens =
                 collector.actual_output_length(signal.uuid).ok_or_else(|| {

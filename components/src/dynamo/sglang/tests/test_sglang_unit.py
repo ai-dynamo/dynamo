@@ -126,6 +126,34 @@ def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
     assert registered_routes == []
 
 
+@pytest.mark.parametrize(
+    ("input_name", "output_name", "worker_name", "expected"),
+    [
+        ("Tokens", "Prefill", "Prefill", True),
+        ("Tokens", "Chat", "Decode", True),
+        ("Tokens", "Completions", "Aggregated", True),
+        ("Tokens", "Empty", "Prefill", False),
+        ("Tokens", "Empty", "Decode", False),
+        ("Text", "Chat", "Aggregated", False),
+        ("Tokens", "Embedding", "Aggregated", False),
+    ],
+)
+def test_engine_generate_capability_registration_gate(
+    input_name, output_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    assert (
+        sglang_register._supports_engine_generate(
+            getattr(sglang_register.ModelInput, input_name),
+            getattr(sglang_register.ModelType, output_name),
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
 def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     handler = object.__new__(DecodeWorkerHandler)
     handler.engine = SimpleNamespace()
@@ -1191,7 +1219,8 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
         model_path="Qwen/Qwen3-0.6B",
         served_model_name="Qwen/Qwen3-0.6B",
         context_length=4096,
-        page_size=1,
+        page_size=64,
+        dcp_size=8,
         load_format="remote_instance",
         remote_instance_weight_loader_backend="modelexpress",
     )
@@ -1211,6 +1240,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
 
     assert result is True
     assert captured["kwargs"]["ignore_weights"] is True
+    assert captured["kwargs"]["kv_cache_block_size"] == 512
 
 
 @pytest.mark.asyncio
@@ -1368,6 +1398,7 @@ async def test_lora_registration_model_type_gate(
     config.serving_mode = DisaggregationMode(serving_mode)
     config.server_args.model_path = "/models/base"
     config.server_args.page_size = 16
+    config.server_args.dcp_size = 2
     config.dynamo_args.endpoint_types = endpoint_types
     handler.config = config
 
@@ -1390,5 +1421,6 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data

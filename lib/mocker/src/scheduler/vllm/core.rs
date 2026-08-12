@@ -1054,18 +1054,16 @@ impl VllmCore {
         let priority = request.priority;
         let arrival_order = self.state.next_arrival_order();
         let prompt_len = request.tokens.len();
-        let mut max_output_tokens = request.max_output_tokens;
+        let requested_max_output_tokens = request.max_output_tokens;
+        let mut max_output_tokens = request.effective_max_output_tokens();
         let planned_output_ids = request.output_token_ids;
-        if let Some(planned_output_ids) = planned_output_ids.as_ref()
-            && planned_output_ids.len() != max_output_tokens
-        {
+        if planned_output_ids.is_some() && max_output_tokens != requested_max_output_tokens {
             tracing::warn!(
                 %uuid,
-                requested = max_output_tokens,
-                planned = planned_output_ids.len(),
+                requested = requested_max_output_tokens,
+                planned = max_output_tokens,
                 "planned output token count differs from max_output_tokens; using planned count"
             );
-            max_output_tokens = planned_output_ids.len();
         }
         if let Some(clamped) = policy::normalize_max_output_tokens(
             self.args.scheduling_policy(),

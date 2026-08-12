@@ -32,7 +32,7 @@ pub(crate) struct AggRequestState {
 impl AggRequestState {
     pub(crate) fn new_queued(request: ReplayRequestPayload) -> Self {
         let input_tokens = request.input_length();
-        let output_tokens = request.metadata().max_output_tokens;
+        let output_tokens = request.metadata().effective_max_output_tokens();
         Self {
             request: Some(request),
             phase: AggRequestPhase::QueuedAtRouter,
@@ -188,9 +188,9 @@ impl DisaggRequestState {
     }
 
     pub(crate) fn build_prefill_request(&mut self) -> Result<DirectRequest> {
-        let mut request = self.materialize_original_request()?.clone();
-        request.max_output_tokens = request.max_output_tokens.min(1);
-        Ok(request)
+        Ok(self
+            .materialize_original_request()?
+            .clone_with_output_limit(1))
     }
 
     pub(crate) fn take_replay_hashes(&mut self) -> Option<ReplayRequestHashes> {
@@ -676,6 +676,8 @@ mod tests {
         };
         let mut driver = WorkloadDriver::new_trace(trace, 64).unwrap();
         let compact = driver.pop_ready_compact(0.0, 1).pop().unwrap();
+        let original_output_token_ids =
+            compact.request.metadata().output_token_ids.clone().unwrap();
         let mut state = DisaggRequestState::new(
             compact.request,
             0.0,
@@ -691,6 +693,22 @@ mod tests {
         let request = state.build_prefill_request().unwrap();
 
         assert_eq!(request.max_output_tokens, 1);
+        assert_eq!(
+            request.output_token_ids.as_deref(),
+            Some(&original_output_token_ids[..1]),
+            "prefill request must retain the original first planned output token"
+        );
+        let prefill_plan = request.output_token_ids.as_ref().unwrap();
+        assert_eq!(prefill_plan.capacity(), prefill_plan.len());
+        assert_eq!(
+            state
+                .original_request()
+                .unwrap()
+                .output_token_ids
+                .as_deref(),
+            Some(original_output_token_ids.as_slice()),
+            "decode must retain the complete original output plan"
+        );
         assert!(request.tokens[..64].iter().all(|token| *token == 21));
         assert!(request.tokens[64..].iter().all(|token| *token == 22));
         assert!(state.materialized_tokens().unwrap().is_some());

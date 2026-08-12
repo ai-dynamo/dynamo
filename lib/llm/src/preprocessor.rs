@@ -431,6 +431,104 @@ fn attach_agent_context_from_context(
     }
 }
 
+/// Thin wrapper that normalizes `function.arguments` in historical tool-calls
+/// from a JSON string to an object before passing messages to a MiniJinja
+/// template.  Only used when `OpenAIPreprocessor::normalize_tool_call_args` is
+/// true (e.g. GLM-5.2); all other trait methods delegate directly to the inner
+/// request so routing, sampling, and annotation behavior is unchanged.
+struct NormalizedArgsRequest<'a, R>(&'a R);
+
+impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
+    fn model(&self) -> String {
+        self.0.model()
+    }
+
+    fn messages(&self) -> minijinja::value::Value {
+        let mut json =
+            serde_json::to_value(self.0.typed_messages().unwrap_or_default()).unwrap_or_default();
+        if let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json) {
+            tracing::error!(
+                error = %e,
+                "tool_call arguments normalization failed; template rendering may fail \
+                 if it calls .items() on a string"
+            );
+        }
+        minijinja::value::Value::from_serialize(&json)
+    }
+
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
+        self.0.typed_messages()
+    }
+
+    fn tools(&self) -> Option<minijinja::value::Value> {
+        self.0.tools()
+    }
+
+    fn tool_choice(&self) -> Option<minijinja::value::Value> {
+        self.0.tool_choice()
+    }
+
+    fn response_format(&self) -> Option<minijinja::value::Value> {
+        self.0.response_format()
+    }
+
+    fn should_add_generation_prompt(&self) -> bool {
+        self.0.should_add_generation_prompt()
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        self.0.extract_text()
+    }
+
+    fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.0.chat_template_args()
+    }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.0.mm_processor_kwargs()
+    }
+}
+
+impl<R: AnnotationsProvider> AnnotationsProvider for NormalizedArgsRequest<'_, R> {
+    fn annotations(&self) -> Option<Vec<String>> {
+        self.0.annotations()
+    }
+}
+
+impl<R: SamplingOptionsProvider> SamplingOptionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_sampling_options(
+        &self,
+    ) -> anyhow::Result<crate::protocols::common::SamplingOptions> {
+        self.0.extract_sampling_options()
+    }
+}
+
+impl<R: StopConditionsProvider> StopConditionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_stop_conditions(&self) -> anyhow::Result<crate::protocols::common::StopConditions> {
+        self.0.extract_stop_conditions()
+    }
+}
+
+impl<R: OutputOptionsProvider> OutputOptionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_output_options(&self) -> anyhow::Result<crate::protocols::common::OutputOptions> {
+        self.0.extract_output_options()
+    }
+}
+
+impl<R: NvExtProvider> NvExtProvider for NormalizedArgsRequest<'_, R> {
+    fn nvext(&self) -> Option<&crate::protocols::common::extensions::NvExt> {
+        self.0.nvext()
+    }
+
+    fn raw_prompt(&self) -> Option<String> {
+        self.0.raw_prompt()
+    }
+
+    fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.0.unsupported_fields()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
@@ -447,6 +545,11 @@ pub struct OpenAIPreprocessor {
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
+    /// Normalize historical tool-call `function.arguments` from a JSON string
+    /// to an object before MiniJinja rendering.  Enabled for GLM-5.2 (glm47
+    /// parser) and any model that sets `normalize_tool_call_args: true` in its
+    /// ModelRuntimeConfig; disabled for all other models.
+    normalize_tool_call_args: bool,
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
@@ -1106,6 +1209,9 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
+            == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
+            || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -1309,6 +1415,7 @@ impl OpenAIPreprocessor {
             runtime_config,
             kv_cache_block_size,
             tool_call_parser,
+            normalize_tool_call_args,
             media_loader,
             token_budget,
             #[cfg(feature = "mm-routing")]
@@ -1758,6 +1865,23 @@ impl OpenAIPreprocessor {
     }
 
     pub fn apply_template<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<Option<RenderedPrompt>> {
+        if self.normalize_tool_call_args {
+            return self.apply_template_inner(&NormalizedArgsRequest(request));
+        }
+        self.apply_template_inner(request)
+    }
+
+    fn apply_template_inner<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider

@@ -12,7 +12,9 @@ use super::{
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::scheduling::types::{
+    KvSchedulerError, SchedulingRequest, SessionContext, WorkerSelectionPolicyError,
+};
 
 pub struct WorkerSelectionContext<'a> {
     pub(super) request: &'a SchedulingRequest,
@@ -48,10 +50,11 @@ impl WorkerInputs {
     pub const CACHE: Self = Self(1 << 0);
     pub const LOAD: Self = Self(1 << 1);
     pub const ROUTING: Self = Self(1 << 2);
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
+    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
+    pub(super) const DEFAULT_POLICY_CACHE: Self = Self(1 << 4);
 
-    pub const fn contains(self, other: Self) -> bool {
+    pub(super) const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
@@ -71,9 +74,11 @@ impl BitOr for WorkerInputs {
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
     pub(super) effective_overlap_blocks: f64,
+    pub(super) default_device_overlap_blocks: f64,
     pub(super) device_overlap_blocks: f64,
     pub(super) host_overlap_blocks: f64,
     pub(super) disk_overlap_blocks: f64,
+    pub(super) default_shared_beyond_device_blocks: u32,
     pub(super) shared_beyond_device_blocks: u32,
 }
 
@@ -146,10 +151,6 @@ pub trait WorkerPicker: Send {
 }
 
 impl WorkerSelectionContext<'_> {
-    pub fn request_id(&self) -> &str {
-        self.request_id
-    }
-
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
     }
@@ -162,8 +163,9 @@ impl WorkerSelectionContext<'_> {
         self.track_prefill_tokens
     }
 
-    pub fn session_id(&self) -> Option<&str> {
-        self.request.session_id.as_deref()
+    /// Return the session metadata available to worker selection.
+    pub fn session_context(&self) -> Option<&SessionContext> {
+        self.request.session_context.as_ref()
     }
 
     pub fn expected_output_tokens(&self) -> Option<u32> {
@@ -253,10 +255,6 @@ impl ScoredWorkerCandidate {
 }
 
 impl WorkerCacheInput {
-    pub fn effective_overlap_blocks(&self) -> f64 {
-        self.effective_overlap_blocks
-    }
-
     pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks
     }
@@ -275,10 +273,6 @@ impl WorkerCacheInput {
 }
 
 impl WorkerLoadInput {
-    pub fn raw_prefill_blocks(&self) -> f64 {
-        self.raw_prefill_blocks
-    }
-
     pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
     }
@@ -625,9 +619,10 @@ mod tests {
     use super::super::test_support::*;
     use super::super::{DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector};
     use super::*;
+    use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
     #[test]
-    fn public_default_policy_matches_default_selector() {
+    fn default_policy_components_match_default_selector() {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let workers = HashMap::from([
@@ -688,8 +683,8 @@ mod tests {
                     .iter()
                     .enumerate()
                     .max_by(|(_, left), (_, right)| {
-                        left.effective_overlap_blocks()
-                            .total_cmp(&right.effective_overlap_blocks())
+                        left.device_overlap_blocks()
+                            .total_cmp(&right.device_overlap_blocks())
                     })
                     .map(|(row, _)| row)
                     .expect("eligible candidate"))
@@ -703,8 +698,8 @@ mod tests {
             (1, TaintedWorkerConfig::default()),
         ]);
         let mut request = base_request(16);
-        request.overlap.effective_overlap_blocks =
-            HashMap::from([(worker0, 0.25), (worker1, 0.75)]);
+        request.overlap.tier_overlap_blocks.device =
+            FxHashMap::from_iter([(worker0, 1), (worker1, 3)]);
         let policy = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
@@ -719,7 +714,45 @@ mod tests {
     }
 
     #[test]
-    fn custom_picker_receives_agent_metadata() {
+    fn custom_policy_does_not_receive_effective_overlap_as_device_overlap() {
+        struct RawDeviceOverlapPicker;
+
+        impl WorkerPicker for RawDeviceOverlapPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(
+                    input.cache().expect("cache input")[0].device_overlap_blocks(),
+                    0.0
+                );
+                Ok(0)
+            }
+        }
+
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request.overlap.effective_overlap_blocks.insert(worker, 3.5);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(RawDeviceOverlapPicker),
+        );
+
+        policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+    }
+
+    #[test]
+    fn custom_picker_receives_session_metadata() {
         struct ContextPicker;
 
         impl WorkerPicker for ContextPicker {
@@ -728,7 +761,15 @@ mod tests {
                 context: &WorkerSelectionContext<'_>,
                 _input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                assert_eq!(context.session_id(), Some("session-1"));
+                let session = context.session_context().expect("session context");
+                assert_eq!(session.session_id(), "session-1");
+                assert_eq!(session.parent_session_id(), Some("root"));
+                assert_eq!(session.session_final(), Some(false));
+                assert!(session.kv_hints().expect("KV hints").evict_session());
+                assert_eq!(
+                    session.input_trigger(),
+                    Some(WorkerSelectionInputTrigger::ToolResult)
+                );
                 assert_eq!(context.expected_output_tokens(), Some(128));
                 assert_eq!(context.priority_jump(), 3.0);
                 assert_eq!(context.strict_priority(), 2);
@@ -738,7 +779,13 @@ mod tests {
 
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
         let mut request = base_request(16);
-        request.session_id = Some("session-1".into());
+        request.session_context = Some(SessionContext::new(
+            "session-1".into(),
+            Some("root".into()),
+            Some(false),
+            Some(WorkerSelectionKvHints::new(true)),
+            Some(WorkerSelectionInputTrigger::ToolResult),
+        ));
         request.expected_output_tokens = Some(128);
         request.priority_jump = 3.0;
         request.strict_priority = 2;

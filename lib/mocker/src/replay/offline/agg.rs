@@ -850,7 +850,7 @@ where
     ) -> anyhow::Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         let input_length = request.input_length();
-        let output_length = request.metadata().max_output_tokens;
+        let output_length = request.metadata().effective_max_output_tokens();
         request.metadata_mut().uuid = Some(uuid);
         // The source is authoritative for logical arrival time. This also removes
         // the runtime's dependency on the concrete AdmissionQueue replay mode.
@@ -2811,6 +2811,39 @@ mod tests {
         let report = collector.finish();
         assert_eq!(report.request_counts.completed_requests, 2);
         assert_eq!(report.request_counts.total_output_tokens, 1);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    fn planned_output_length_controls_aggregate_accounting(#[case] engine_type: EngineType) {
+        let args = match engine_type {
+            EngineType::Vllm => MockEngineArgs::builder()
+                .block_size(4)
+                .num_gpu_blocks(32)
+                .max_num_batched_tokens(Some(16))
+                .max_num_seqs(Some(1))
+                .speedup_ratio(1000.0)
+                .build()
+                .unwrap(),
+            EngineType::Sglang => sglang_replay_args(),
+            EngineType::Trtllm => unreachable!(),
+        };
+        let requests = vec![DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![7, 8, 9]),
+            uuid: Some(Uuid::from_u128(9_002)),
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }];
+
+        let (collector, _) =
+            run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
+        let snapshot = collector.snapshot(Uuid::from_u128(9_002)).unwrap();
+        assert_eq!(snapshot.requested_output_length, 3);
+        assert_eq!(snapshot.output_length, 3);
+        assert_eq!(collector.finish().request_counts.total_output_tokens, 3);
     }
 
     #[test]
