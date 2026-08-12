@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Aggregated execution for authored workflows."""
+"""Hydration and execution for compiled Dynamo workflows."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ import math
 import uuid
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping, Optional, Protocol, Union, cast, runtime_checkable
+from typing import Any, Mapping, Optional, Protocol, cast, runtime_checkable
 
-from dynamo.workflow.builder import StageDefinition, WorkflowBuilder
-from dynamo.workflow.ir import StageIR, WorkflowIR
+from dynamo.workflow.builder import StageDefinition
+from dynamo.workflow.ir import StageIR
+from dynamo.workflow.plan import ExecutionPlan, LocalBinding
 from dynamo.workflow.types import (
     StageContract,
     ValueRef,
@@ -72,13 +73,6 @@ class StageRunner(StageDefinition, Protocol):
         ...
 
 
-@dataclass(frozen=True)
-class LocalBinding:
-    """Bind one logical stage to an in-process worker."""
-
-    runner: StageRunner
-
-
 @runtime_checkable
 class _TensorValue(Protocol):
     shape: Any
@@ -91,20 +85,58 @@ class _ImageValue(Protocol):
     size: Any
 
 
-class ExecutionPlan:
-    """A compiled aggregated workflow ready to execute requests."""
+class WorkflowExecutor:
+    """Hydrate and execute one compiled workflow plan."""
 
     def __init__(
-        self, workflow: WorkflowIR, bindings: Mapping[str, LocalBinding]
+        self,
+        plan: ExecutionPlan,
+        local_runners: Mapping[str, StageRunner],
     ) -> None:
-        self._workflow = workflow
-        self._bindings = MappingProxyType(dict(bindings))
+        if not isinstance(plan, ExecutionPlan):
+            raise TypeError("plan must use ExecutionPlan")
+        if not isinstance(local_runners, Mapping):
+            raise TypeError("local_runners must be a mapping")
+
+        expected_keys = {
+            binding.runner_key
+            for binding in plan.bindings.values()
+            if isinstance(binding, LocalBinding)
+        }
+        actual_keys = set(local_runners)
+        if actual_keys != expected_keys:
+            raise WorkflowValidationError(
+                "local runners differ from execution plan; "
+                f"missing={sorted(expected_keys - actual_keys)}, "
+                f"extra={sorted(actual_keys - expected_keys)}"
+            )
+
+        runners = dict(local_runners)
+        for stage in plan.workflow.stages:
+            binding = plan.bindings[stage.id]
+            if not isinstance(binding, LocalBinding):
+                raise WorkflowValidationError(
+                    f"executor does not support binding for stage {stage.id!r}"
+                )
+            runner = runners[binding.runner_key]
+            if not isinstance(runner, StageRunner):
+                raise WorkflowValidationError(
+                    f"runner {binding.runner_key!r} must implement StageRunner"
+                )
+            if runner.contract != stage.contract:
+                raise WorkflowValidationError(
+                    f"runner {binding.runner_key!r} for stage {stage.id!r} "
+                    "does not match its authored contract"
+                )
+
+        self._plan = plan
+        self._local_runners = MappingProxyType(runners)
 
     @property
-    def workflow(self) -> WorkflowIR:
-        """Return the logical workflow compiled into this plan."""
+    def plan(self) -> ExecutionPlan:
+        """Return the portable plan hydrated by this executor."""
 
-        return self._workflow
+        return self._plan
 
     async def run(
         self,
@@ -118,7 +150,8 @@ class ExecutionPlan:
         if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be positive")
         input_values = dict(inputs)
-        expected_inputs = set(self._workflow.inputs)
+        workflow = self._plan.workflow
+        expected_inputs = set(workflow.inputs)
         actual_inputs = set(input_values)
         if actual_inputs != expected_inputs:
             raise WorkflowExecutionError(
@@ -126,7 +159,7 @@ class ExecutionPlan:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
-        for name, spec in self._workflow.inputs.items():
+        for name, spec in workflow.inputs.items():
             _validate_value(spec, input_values[name], f"workflow input {name!r}")
 
         loop = asyncio.get_running_loop()
@@ -142,13 +175,18 @@ class ExecutionPlan:
                 for port_name, reference in stage.inputs.items():
                     stage_inputs[port_name] = await resolve(reference)
                 context = StageContext(
-                    workflow_name=self._workflow.name,
+                    workflow_name=workflow.name,
                     stage_id=stage.id,
                     attempt_id=resolved_attempt_id,
                     deadline=deadline,
                     _cancelled=cancelled,
                 )
-                result = await self._bindings[stage.id].runner.run(
+                binding = self._plan.bindings[stage.id]
+                if not isinstance(binding, LocalBinding):
+                    raise WorkflowExecutionError(
+                        f"unsupported binding for stage {stage.id!r}"
+                    )
+                result = await self._local_runners[binding.runner_key].run(
                     MappingProxyType(stage_inputs), context
                 )
                 if not isinstance(result, Mapping):
@@ -180,19 +218,16 @@ class ExecutionPlan:
                 stage_outputs = await asyncio.shield(tasks[stage_id])
                 return stage_outputs[output_name]
 
-            for stage in self._workflow.stages:
+            for stage in workflow.stages:
                 tasks[stage.id] = asyncio.create_task(
                     run_stage(stage), name=f"workflow:{stage.id}"
                 )
 
             try:
                 output_values = await asyncio.gather(
-                    *(
-                        resolve(reference)
-                        for reference in self._workflow.outputs.values()
-                    )
+                    *(resolve(reference) for reference in workflow.outputs.values())
                 )
-                return dict(zip(self._workflow.outputs, output_values))
+                return dict(zip(workflow.outputs, output_values))
             except BaseException:
                 cancelled.set()
                 for task in tasks.values():
@@ -204,63 +239,6 @@ class ExecutionPlan:
         if timeout is None:
             return await execute()
         return await asyncio.wait_for(execute(), timeout=timeout)
-
-
-def compile_workflow(
-    workflow: Union[WorkflowBuilder, WorkflowIR],
-    bindings: Optional[Mapping[str, Union[StageRunner, LocalBinding]]] = None,
-    **workers: StageRunner,
-) -> ExecutionPlan:
-    """Compile a workflow by binding each stage to a reusable local worker.
-
-    Keyword workers are the concise path when stage IDs are valid Python names::
-
-        plan = compile_workflow(workflow, encoder=encoder, decoder=decoder)
-
-    The ``bindings`` mapping supports all portable stage names.
-    """
-
-    workflow_ir = (
-        workflow.build() if isinstance(workflow, WorkflowBuilder) else workflow
-    )
-    if not isinstance(workflow_ir, WorkflowIR):
-        raise TypeError("workflow must be a Workflow or WorkflowIR")
-
-    combined: dict[str, Union[StageRunner, LocalBinding]] = dict(bindings or {})
-    overlap = set(combined) & set(workers)
-    if overlap:
-        raise WorkflowValidationError(
-            f"duplicate local bindings for stages {sorted(overlap)}"
-        )
-    combined.update(workers)
-
-    expected = {stage.id for stage in workflow_ir.stages}
-    actual = set(combined)
-    if actual != expected:
-        raise WorkflowValidationError(
-            "local bindings differ from workflow stages; "
-            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-        )
-
-    local_bindings: dict[str, LocalBinding] = {}
-    for stage in workflow_ir.stages:
-        candidate = combined[stage.id]
-        binding = (
-            candidate
-            if isinstance(candidate, LocalBinding)
-            else LocalBinding(candidate)
-        )
-        if not isinstance(binding.runner, StageRunner):
-            raise WorkflowValidationError(
-                f"binding for stage {stage.id!r} must implement StageRunner"
-            )
-        if binding.runner.contract != stage.contract:
-            raise WorkflowValidationError(
-                f"binding for stage {stage.id!r} does not match its authored contract"
-            )
-        local_bindings[stage.id] = binding
-
-    return ExecutionPlan(workflow_ir, local_bindings)
 
 
 def _validate_value(spec: ValueSpec, value: Any, location: str) -> None:
