@@ -822,9 +822,6 @@ mod tests {
     use super::*;
     use tokio::time::Duration;
 
-    #[cfg(unix)]
-    use std::os::fd::AsRawFd;
-
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
     async fn test_http_server_lifecycle() {
@@ -859,21 +856,35 @@ mod tests {
     /// way a connection can be served afterwards is if the listener rebound.
     ///
     /// `shutdown(2)` on a listening socket is the closest stand-in for what
-    /// CRIU does to it. On platforms where that leaves the socket accepting,
-    /// the original listener answers and the test still passes — it just
-    /// stops proving the recovery path, so it is worth keeping honest by
-    /// checking the returned peer address belongs to our own connection.
+    /// CRIU does to it, and only some platforms allow it. Linux shuts the
+    /// listener down and every later `accept` fails, which is the case this
+    /// test exists for. Darwin instead rejects the call with `ENOTCONN`,
+    /// because it only shuts down connected sockets, so there is no failure to
+    /// recover from and the test returns early rather than asserting on a
+    /// recovery that was never provoked.
+    ///
+    /// `socket2::SockRef` issues the same syscall as a raw `libc::shutdown`
+    /// without an `unsafe` block or a raw descriptor, and `socket2` is already
+    /// a dependency of this crate.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_rebinding_listener_serves_again_after_listener_shutdown() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let listener_fd = listener.as_raw_fd();
+
+        // Take the reference before the listener moves into the wrapper.
+        let shutdown_result = socket2::SockRef::from(&listener).shutdown(std::net::Shutdown::Both);
 
         let mut rebinding = RebindingTcpListener::new(listener, address, Duration::from_millis(10));
 
-        let shutdown_result = unsafe { libc::shutdown(listener_fd, libc::SHUT_RDWR) };
-        assert_eq!(shutdown_result, 0, "listener shutdown should succeed");
+        if let Err(error) = shutdown_result {
+            // Nothing broke the listener, so `accept` still works and the
+            // rebind path is never reached. Asserting anything past this point
+            // would test the ordinary accept path under a name that promises
+            // otherwise.
+            eprintln!("skipping: this platform refused shutdown on a listening socket: {error}");
+            return;
+        }
 
         let accepted = tokio::spawn(async move { rebinding.accept().await });
 

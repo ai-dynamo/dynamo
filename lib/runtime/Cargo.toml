@@ -117,9 +117,6 @@ k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
-# Used only by the unix-gated system_status_server test that calls shutdown(2)
-# on a listening socket to stand in for what CRIU does to it.
-libc = { workspace = true }
 rcgen = { workspace = true }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" , features=["async_closure"] }
