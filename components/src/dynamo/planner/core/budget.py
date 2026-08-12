@@ -148,7 +148,12 @@ def proportional_clamp_pair(
         max_p = math.floor((target - decode_min_endpoint * d_gpu) / p_gpu)
         new_p = max(prefill_min_endpoint, min(max_p, math.floor(num_p * scale)))
         remaining = target - new_p * p_gpu
-        new_d = max(decode_min_endpoint, math.floor(remaining / d_gpu))
+        # Cap new_d at num_d, mirroring _shrink_pair: when p_gpu >> d_gpu the
+        # proportional shrink lands new_p near decode_min_endpoint, leaving a
+        # large remaining budget that would push floor(remaining / d_gpu) above
+        # the requested num_d. This is the strict-shrink path, so it must never
+        # hand back more decode replicas than were asked for.
+        new_d = min(num_d, max(decode_min_endpoint, math.floor(remaining / d_gpu)))
         return new_p, new_d
 
     # Floor path — proportional grow toward min_gpus.
