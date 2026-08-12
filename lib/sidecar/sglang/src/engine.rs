@@ -602,6 +602,7 @@ fn build_engine_config(
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
+            max_gpu_lora_count: None,
             data_parallel_size,
             data_parallel_start_rank,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),

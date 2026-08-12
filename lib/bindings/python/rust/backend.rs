@@ -157,6 +157,7 @@ impl LlmRegistration {
         total_kv_blocks = None,
         max_num_seqs = None,
         max_num_batched_tokens = None,
+        max_gpu_lora_count = None,
         data_parallel_size = None,
         data_parallel_start_rank = None,
         bootstrap_host = None,
@@ -169,6 +170,7 @@ impl LlmRegistration {
         total_kv_blocks: Option<u64>,
         max_num_seqs: Option<u64>,
         max_num_batched_tokens: Option<u64>,
+        max_gpu_lora_count: Option<u32>,
         data_parallel_size: Option<u32>,
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
@@ -181,6 +183,7 @@ impl LlmRegistration {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                max_gpu_lora_count,
                 data_parallel_size,
                 data_parallel_start_rank,
                 bootstrap_host,
@@ -208,6 +211,10 @@ impl LlmRegistration {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn max_gpu_lora_count(&self) -> Option<u32> {
+        self.inner.max_gpu_lora_count
     }
     #[getter]
     fn data_parallel_size(&self) -> Option<u32> {
@@ -856,6 +863,7 @@ impl PyEngineCore {
                     total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
                     max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    max_gpu_lora_count: opt_attr::<u32>(&v, "max_gpu_lora_count")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,

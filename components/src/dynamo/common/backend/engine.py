@@ -118,6 +118,9 @@ class LlmRegistration:
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
+    # Maximum adapters the engine can keep resident on GPU. The base-model
+    # registration advertises this before adapter-specific siblings exist.
+    max_gpu_lora_count: Optional[int] = None
     # DP ranks this worker hosts (default 1); attention-DP engines set it from
     # the engine count.
     data_parallel_size: Optional[int] = None

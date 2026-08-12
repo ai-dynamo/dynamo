@@ -83,6 +83,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
             total_kv_blocks=1000,
             max_num_seqs=64,
             max_num_batched_tokens=2048,
+            max_gpu_lora_count=4,
         ),
     )
     assert cfg.model == "m2"
@@ -95,6 +96,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert llm.total_kv_blocks == 1000
     assert llm.max_num_seqs == 64
     assert llm.max_num_batched_tokens == 2048
+    assert llm.max_gpu_lora_count == 4
 
 
 def test_worker_config_minimum_args():
