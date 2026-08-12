@@ -18,6 +18,10 @@ skips vLLM disagg). Run it explicitly, e.g.:
     pytest tests/deploy/test_deploy_efa.py -m framework_with_efa \
         --image=<efa-vllm-runtime-image> --namespace=<ns> -v -s
 
+The deployment name is fixed, so the namespace must be clear of a previous
+run before starting a new one -- back-to-back manual runs collide with the
+prior teardown. CI is unaffected: every nightly gets a fresh vCluster.
+
 Runs nightly, against the nightly -efa image. EFA changes are sparse, so a
 cluster-backed test on every commit would cost far more than the risk warrants;
 tests/container/test_efa_image.py is the cheap per-image packaging gate and this
@@ -25,6 +29,7 @@ is the functional one.
 """
 
 import logging
+import time
 from pathlib import Path
 
 import pytest
@@ -278,6 +283,36 @@ def assert_efa_rdma_traffic(rx_before: float | None, rx_after: float | None) -> 
     )
 
 
+def assert_deployment_cleaned_up(
+    deployment: ManagedDeployment, timeout: int = 180
+) -> None:
+    """Fail if the worker pods survive teardown.
+
+    A pod wedged in Terminating keeps both its GPU and its VPC IP until the
+    sandbox is torn down, so a teardown that quietly leaves pods behind degrades
+    the shared cluster for everyone else on it -- later runs hit
+    "failed to assign an IP address" or simply cannot get GPUs, and none of it
+    points back here. This has been observed taking 20+ minutes on these
+    clusters (Grove podclique finalizers), so it is a real failure mode, not a
+    theoretical one. Better to fail this test loudly than to leak quietly.
+    """
+    deadline = time.monotonic() + timeout
+    remaining: list[str] = []
+    while time.monotonic() < deadline:
+        pods = deployment.get_pods([PREFILL_SERVICE, DECODE_SERVICE])
+        remaining = [pod.name for pod_list in pods.values() for pod in pod_list]
+        if not remaining:
+            logger.info("Teardown verified: no worker pods remain")
+            return
+        time.sleep(5)
+
+    pytest.fail(
+        f"Deployment teardown left {len(remaining)} worker pod(s) after {timeout}s: "
+        f"{remaining}. They hold GPUs and VPC IPs until removed; force-delete them "
+        "before re-running."
+    )
+
+
 @pytest.mark.framework_with_efa
 @pytest.mark.vllm
 @pytest.mark.k8s
@@ -391,6 +426,12 @@ async def test_efa_deployment(
         assert_efa_rdma_traffic(rx_before, rx_after)
 
         logger.info(
-            f"EFA deployment test PASSED (image: {image}, model: {EFA_MODEL_NAME}, "
-            f"namespace: {namespace})"
+            "EFA deployment test PASSED (image: %s, model: %s, namespace: %s)",
+            image,
+            EFA_MODEL_NAME,
+            namespace,
         )
+
+    # Outside the context manager: ManagedDeployment has now torn the deployment
+    # down, so verify it actually went away rather than assuming it did.
+    assert_deployment_cleaned_up(deployment)
