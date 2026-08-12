@@ -18,10 +18,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
-    response::{
-        IntoResponse, Response,
-        sse::{KeepAlive, Sse},
-    },
+    response::{IntoResponse, Response, sse::Sse},
     routing::{get, post},
 };
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
@@ -30,7 +27,9 @@ use tracing::Instrument;
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::{
+        ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_keep_alive,
+    },
     metrics::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
         process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
@@ -510,6 +509,15 @@ async fn anthropic_messages(
         ),
     );
 
+    // Same backstop as the chat handler, so the two aggregation entry points
+    // cannot drift. See `wants_reasoning_as_content_when_empty`.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
@@ -664,14 +672,16 @@ async fn anthropic_messages(
             }
         };
 
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let keep_alive = state.sse_keep_alive_for_response(move_reasoning_to_content_when_empty);
+        let stream = monitor_for_disconnects_with_keep_alive(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            keep_alive,
+        );
 
-        let mut sse_stream = Sse::new(stream);
-        if let Some(keep_alive) = state.sse_keep_alive() {
-            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
-        }
-
-        Ok(sse_stream.into_response())
+        Ok(Sse::new(stream).into_response())
     } else {
         // Non-streaming path: aggregate stream into single response
 

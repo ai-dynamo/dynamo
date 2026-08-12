@@ -214,13 +214,14 @@ pub fn monitor_for_disconnects(
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout_and_error(
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
         context,
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
         openai_stream_error,
+        None,
     )
 }
 
@@ -231,13 +232,32 @@ pub(crate) fn monitor_for_disconnects_with_error(
     stream_handle: ConnectionHandle,
     error_formatter: StreamErrorFormatter,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout_and_error(
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
         context,
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
         error_formatter,
+        None,
+    )
+}
+
+pub fn monitor_for_disconnects_with_keep_alive(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    keep_alive: Option<Duration>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        keep_alive,
     )
 }
 
@@ -249,23 +269,25 @@ fn monitor_for_disconnects_with_timeout(
     stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout_and_error(
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
         context,
         inflight_guard,
         stream_handle,
         inactivity_timeout,
         openai_stream_error,
+        None,
     )
 }
 
-fn monitor_for_disconnects_with_timeout_and_error(
+fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
     error_formatter: StreamErrorFormatter,
+    keep_alive: Option<Duration>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -334,6 +356,14 @@ fn monitor_for_disconnects_with_timeout_and_error(
                         "request cancelled"
                     );
                     break;
+                }
+                _ = async {
+                    match keep_alive {
+                        Some(d) => tokio::time::sleep(d).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    yield Event::default().comment("");
                 }
                 // Circuit breaker for zombie backend workers: if the backend holds a live TCP
                 // connection but produces no output for `inactivity_timeout`, kill the engine
@@ -674,6 +704,37 @@ mod tests {
             0,
             "inflight gauge leaked in phase 2"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_keep_alive_resets_inactivity_timeout() {
+        let model = "keep-alive-model";
+        let (metrics, guard, _context, handle) = setup_test(model, "req-keep-alive");
+        let tracked_context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = tracked_context.clone();
+
+        let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            hanging_stream(),
+            engine_context,
+            guard,
+            handle,
+            Some(Duration::from_secs(10)),
+            openai_stream_error,
+            Some(Duration::from_secs(5)),
+        );
+        tokio::pin!(monitored);
+
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(6)).await;
+            let _ = monitored
+                .next()
+                .await
+                .expect("heartbeat stream must stay open")
+                .expect("heartbeat must be valid");
+        }
+
+        assert!(!tracked_context.is_killed());
+        assert_eq!(metrics.get_inflight_count(model), 1);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
