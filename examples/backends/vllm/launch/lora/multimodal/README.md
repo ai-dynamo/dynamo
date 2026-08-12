@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Multimodal LoRA Serving Guide
 
 Serve vision-language models (VLMs) with dynamically loadable LoRA adapters using Dynamo's aggregated architecture.

@@ -462,6 +462,9 @@ navigation:
           - page: Kimi-K2.6
             path: pages/recipes/model-recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
+          - page: Nemotron-3.5-Lightning
+            path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
+            slug: nemotron-3-5-lightning
           - page: Nemotron 3 Ultra
             path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
             slug: nemotron-3-ultra
@@ -874,7 +877,7 @@ navigation:
         contents:
           - page: Building from Source
             path: pages/developer-guide/advanced-customizations/building-from-source.md
-          - page: Custom Worker Selection
+          - page: Write Custom Routing Strategies
             path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
@@ -1165,10 +1168,23 @@ navigation:
 
   - tab: blog
     layout:
-      - page: Latest
+      # Three siblings at the top of the tab: the partner list, the papers, and
+      # the team's own writing.
+      - page: External publications
+        path: pages/blog/external-publications.mdx
+        slug: external-publications
+
+      - page: Research publications
+        path: pages/blog/research-publications.mdx
+        slug: research-publications
+
+      # "Latest" is no longer its own sidebar entry. The page it pointed at is
+      # this section's overview instead, so the page is not orphaned and every
+      # URL is unchanged: the section keeps `slug: digest`, so the overview
+      # stays at /dynamo/dev/digest and each article at
+      # /dynamo/dev/digest/<slug>.
+      - section: Dynamo blogs
         path: pages/blog/latest.mdx
-        slug: digest
-      - section: "2026"
         slug: digest
         collapsed: open-by-default
         contents:

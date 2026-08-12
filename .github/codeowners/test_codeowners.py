@@ -299,12 +299,9 @@ class TestComputeResolution:
             "shared": [
                 {"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]},
             ],
-            "advisory": [],
             "classify": {
                 "keyword_rules": [],
-                "filetype_rules": [
-                    {"pattern": "*.md", "coowner": "docs", "advisory": True},
-                ],
+                "filetype_rules": [],
             },
         }
 
@@ -315,7 +312,7 @@ class TestComputeResolution:
             "lib/llm/shared/x.rs",
             "lib/kvbm/foo.rs",  # unowned in the new tree-independent resolver
             "docs/intro.md",
-            "README.md",  # filetype_rule advisory only, falls to catch-all
+            "README.md",  # no filetype rule covers it; falls to catch-all
         ]
 
     def test_explicit_paths_resolved(self) -> None:
@@ -341,6 +338,45 @@ class TestComputeResolution:
         with pytest.raises(SystemExit, match="keyword_rules is no longer supported"):
             compute_resolution(spec)
 
+    @pytest.mark.parametrize(
+        "value", [[{"glob": "docs/", "owners": ["docs"]}], [], None, False, {}]
+    )
+    def test_legacy_advisory_block_is_rejected(self, value: object) -> None:
+        # Advisory routing is gone. A silently ignored block would read as
+        # non-blocking routing that is in fact doing nothing at all.
+        # Keyed on presence, not truthiness: `advisory: []` is the shape the
+        # fixtures carried and `advisory: false` the shape areas.yaml did, so
+        # a truthiness check would wave through exactly the leftovers most
+        # likely to exist.
+        spec = self._spec()
+        spec["advisory"] = value
+        with pytest.raises(SystemExit, match="advisory is no longer supported"):
+            compute_resolution(spec)
+
+    def test_legacy_advisory_on_shared_entry_is_rejected(self) -> None:
+        # shared: is where the migration message points, and it took the same
+        # {glob, owners} shape advisory did -- so pasting a block across is the
+        # natural move. Unguarded, the entry its author marked non-blocking
+        # becomes a blocking required approver.
+        spec = self._spec()
+        spec["shared"] = [
+            {"glob": "docs/design/", "owners": ["docs"], "advisory": True}
+        ]
+        with pytest.raises(SystemExit, match="stale 'advisory' key"):
+            compute_resolution(spec)
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_legacy_advisory_filetype_key_is_rejected(self, flag: bool) -> None:
+        # Worse than ignored: dropping the key would promote the rule to a
+        # *blocking* owner, the opposite of what its author asked for. Both
+        # values are rejected, since 'advisory: false' is equally stale.
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "*.md", "coowner": "docs", "advisory": flag}
+        ]
+        with pytest.raises(SystemExit, match="no longer supports"):
+            compute_resolution(spec)
+
     def test_resolution_ignores_tree_argument(self) -> None:
         # Two trees that differ only under an already-owned prefix must
         # produce byte-identical resolutions, because ``tree`` is deprecated
@@ -356,8 +392,8 @@ class TestComputeResolution:
 
     def test_catch_all_only_uncovered(self) -> None:
         model = compute_resolution(self._spec())
-        # README.md only gets an advisory rule (non-blocking); should not
-        # count as explicitly owned for the coverage gate.
+        # No rule covers README.md, so it must not count as explicitly
+        # owned for the coverage gate.
         unmatched = model.unmatched_paths(self._tree())
         assert "README.md" in unmatched
 
@@ -386,7 +422,7 @@ class TestComputeResolution:
         # base-branch race.
         spec = self._spec()
         spec["classify"]["filetype_rules"] = [
-            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "docs"},
         ]
         model = compute_resolution(spec)
         assert len(model.filetype_shared) == 1
@@ -397,8 +433,8 @@ class TestComputeResolution:
     @pytest.mark.parametrize(
         "rule",
         [
-            {"coowner": "docs", "advisory": False},
-            {"pattern": "Dockerfile", "advisory": False},
+            {"coowner": "docs"},
+            {"pattern": "Dockerfile"},
         ],
     )
     def test_blocking_filetype_rule_requires_pattern_and_coowner(
@@ -415,24 +451,13 @@ class TestComputeResolution:
         # matching it, regardless of directory depth.
         spec = self._spec()
         spec["classify"]["filetype_rules"] = [
-            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "docs"},
         ]
         tree = self._tree() + ["lib/llm/Dockerfile", "stray/Dockerfile"]
         model = compute_resolution(spec)
         unmatched = set(model.unmatched_paths(tree))
         assert "lib/llm/Dockerfile" not in unmatched
         assert "stray/Dockerfile" not in unmatched
-
-    def test_filetype_advisory_rule_not_promoted_to_blocking(self) -> None:
-        # `advisory: true` filetype rules must NOT show up as blocking
-        # filetype_shared rows; they belong in filetype_advisory.
-        spec = self._spec()
-        spec["classify"]["filetype_rules"] = [
-            {"pattern": "*.md", "coowner": "docs", "advisory": True},
-        ]
-        model = compute_resolution(spec)
-        assert model.filetype_shared == []
-        assert [r["pattern"] for r in model.filetype_advisory] == ["*.md"]
 
     def test_explicit_shared_entry_still_wins(self) -> None:
         # Hand-declared shared: entries are still emitted verbatim; they
@@ -465,7 +490,7 @@ class TestEmissionIsTreeIndependent:
 
     def _spec(self) -> dict:
         # Realistic-shaped spec: nested area overrides + shared + a
-        # blocking filetype rule + advisory-only filetype rule.
+        # blocking filetype rule.
         return {
             "meta": {"catch_all": "@root"},
             "areas": [
@@ -493,12 +518,10 @@ class TestEmissionIsTreeIndependent:
             "shared": [
                 {"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]},
             ],
-            "advisory": [],
             "classify": {
                 "keyword_rules": [],
                 "filetype_rules": [
-                    {"pattern": "Dockerfile", "coowner": "ops", "advisory": False},
-                    {"pattern": "*.md", "coowner": "docs", "advisory": True},
+                    {"pattern": "Dockerfile", "coowner": "ops"},
                 ],
             },
         }
@@ -647,8 +670,8 @@ class TestEmissionIsTreeIndependent:
     def test_overlapping_filetype_rules_preserve_declaration_order(self) -> None:
         spec = self._spec()
         spec["classify"]["filetype_rules"] = [
-            {"pattern": "*Dockerfile*", "coowner": "ops", "advisory": False},
-            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+            {"pattern": "*Dockerfile*", "coowner": "ops"},
+            {"pattern": "Dockerfile", "coowner": "docs"},
         ]
 
         rules = parse_codeowners(self._render(spec))
@@ -1055,7 +1078,6 @@ class TestRenderCodeownersWithExternals:
                 {"label": "kvbm", "github_team": "@kvbm", "path_globs": []},
             ],
             "shared": [{"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]}],
-            "advisory": [],
             "classify": {"keyword_rules": [], "filetype_rules": []},
         }
         return compute_resolution(spec)

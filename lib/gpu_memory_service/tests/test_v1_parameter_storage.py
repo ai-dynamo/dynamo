@@ -56,6 +56,8 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
         (4,),
         (1,),
     )
+    outside = torch.arange(8, dtype=torch.float32)
+    outside_storage = int(outside.untyped_storage()._cdata)
     del source
 
     mapping = LocalMapping(
@@ -120,6 +122,8 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
     )
     assert int(workspace.untyped_storage()._cdata) != original_storage
     assert workspace.untyped_storage()._cdata != model.disjoint.untyped_storage()._cdata
+    assert int(outside.untyped_storage()._cdata) == outside_storage
+    assert outside.tolist() == list(map(float, range(8)))
     assert model.weight.tolist() == list(map(float, range(32)))
     assert model.overlap.tolist() == list(map(float, range(8, 24)))
     assert model.disjoint.tolist() == [48.0, 49.0, 50.0, 51.0]

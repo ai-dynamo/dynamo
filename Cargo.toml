@@ -13,9 +13,11 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/router-plugins/catalog",
-    "examples/router/custom-policy-example/basic",
+    "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
+    "examples/router/custom-policy-example/disagg-filter-score-pick",
     "examples/router/custom-policy-example/epp",
+    "examples/router/custom-policy-example/simple-stacked-score-pick",
     "lib/memory",
     "lib/kvbm-common",
     "lib/kvbm-config",
@@ -111,6 +113,7 @@ either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.17.0", features = ["tls"] }
 futures = { version = "0.3" }
 futures-util = { version = "0.3.32" }
+fs4 = { version = "0.13.1" }
 hf-hub = { version = "0.4.2", default-features = false }
 
 # ModelExpress for model downloading

@@ -75,20 +75,24 @@ class GMSV1SleepModeBackend(SleepModeBackend):
 
     def __init__(self) -> None:
         super().__init__()
+        weights: GMSClientMemoryManager | None = None
+        kv_cache: GMSClientMemoryManager | None = None
         _reserve_allocator(self)
         try:
             self._device = torch.cuda.current_device()
             vmm = get_vmm()
-            self._weights = GMSClientMemoryManager(
+            weights = GMSClientMemoryManager(
                 get_socket_path(self._device, _WEIGHTS),
                 vmm,
                 self._device,
             )
-            self._kv_cache = GMSClientMemoryManager(
+            kv_cache = GMSClientMemoryManager(
                 get_socket_path(self._device, _KV_CACHE),
                 vmm,
                 self._device,
             )
+            self._weights = weights
+            self._kv_cache = kv_cache
             self._active_domain: ContextVar[str | None] = ContextVar(
                 "gms_v1_active_domain",
                 default=None,
@@ -115,7 +119,7 @@ class GMSV1SleepModeBackend(SleepModeBackend):
             self._free_callback = self._free
             _claim_allocator(self, self._malloc_callback, self._free_callback)
         except BaseException:
-            self._disconnect_after_failure()
+            self._disconnect_managers_after_failure(kv_cache, weights)
             _release_allocator_reservation(self)
             raise
 
@@ -162,12 +166,12 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         try:
             gc.collect()
             self._raise_if_allocator_failed()
+            torch.cuda.empty_cache()
+            self._raise_if_allocator_failed()
             self._weights.unmap_all_vas()
             self._weights.disconnect()
             self._kv_cache.unmap_all_vas()
             self._kv_cache.disconnect()
-            torch.cuda.empty_cache()
-            self._raise_if_allocator_failed()
             self._state = "SUSPENDED"
         except Exception:  # noqa: BLE001
             common_utils.fail(
@@ -276,10 +280,13 @@ class GMSV1SleepModeBackend(SleepModeBackend):
             raise RuntimeError("allocator callback failed") from failure
 
     def _disconnect_after_failure(self) -> None:
-        for manager in (
-            getattr(self, "_kv_cache", None),
-            getattr(self, "_weights", None),
-        ):
+        self._disconnect_managers_after_failure(self._kv_cache, self._weights)
+
+    @staticmethod
+    def _disconnect_managers_after_failure(
+        *managers: GMSClientMemoryManager | None,
+    ) -> None:
+        for manager in managers:
             if manager is None:
                 continue
             try:

@@ -222,18 +222,19 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
             let replay_hashes = ready_turn
                 .replay_hashes
                 .ok_or_else(|| anyhow::anyhow!("offline artifacts require synthesized hashes"))?;
+            let output_length = ready_turn.request.effective_max_output_tokens();
             collector.on_arrival(
                 ready_turn.request_uuid,
                 ready_turn.scheduled_ready_at_ms,
                 ready_turn.request.tokens.len(),
-                ready_turn.request.max_output_tokens,
+                output_length,
             );
             artifacts.requests.push(ReplayTimedRequest {
                 uuid: ready_turn.request_uuid,
                 timestamp_us: timestamp_us_from_ms(current_time_ms),
                 scheduled_ready_at_ms: ready_turn.scheduled_ready_at_ms,
                 input_length: ready_turn.request.tokens.len(),
-                output_length: ready_turn.request.max_output_tokens,
+                output_length,
                 replay_hashes,
             });
             worker.receive(ready_turn.request);

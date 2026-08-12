@@ -15,7 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,7 +43,7 @@ const (
 // considered; see failoverCascadePredicate.
 type failoverCascadeReconciler struct {
 	client.Client
-	recorder record.EventRecorder
+	recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete;deletecollection
@@ -138,7 +138,7 @@ func (r *failoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		"pcsgReplica", pcsgReplica,
 		"podIndex", podIndex,
 	)
-	r.recorder.Eventf(&pod, corev1.EventTypeWarning, "FailoverCascade",
+	r.recorder.Eventf(&pod, nil, corev1.EventTypeWarning, "FailoverCascade", "Delete",
 		"Pod %s terminated (phase=%s); cascade-deleted engine group (pcsg=%s, replica=%s, index=%s)",
 		pod.Name, pod.Status.Phase, pcsg, pcsgReplica, podIndex,
 	)

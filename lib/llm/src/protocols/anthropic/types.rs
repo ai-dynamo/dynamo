@@ -549,6 +549,11 @@ pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> Anthropi
     }
 }
 
+/// Generate an Anthropic-native `tool_use` id.
+pub(super) fn new_tool_use_id() -> String {
+    format!("toolu_{}", Uuid::new_v4().simple())
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -577,8 +582,14 @@ pub fn chat_completion_to_anthropic_response(
             for tc in tool_calls {
                 let input: serde_json::Value =
                     serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                let emitted_id = new_tool_use_id();
+                tracing::debug!(
+                    backend_id = %tc.id,
+                    emitted_id = %emitted_id,
+                    "minting Anthropic tool_use id"
+                );
                 content.push(AnthropicResponseContentBlock::ToolUse {
-                    id: tc.id,
+                    id: emitted_id,
                     name: tc.function.name,
                     input,
                 });

@@ -20,7 +20,10 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
+        to_worker_selection_session_context,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -55,6 +58,10 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
     if let Some(operation) = operation.take() {
         operation.invalidate();
     }
+}
+
+fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
+    AffinityTarget::new(worker.worker_id, Some(worker.dp_rank))
 }
 
 fn monitor_response_stream<Sel>(
@@ -178,10 +185,10 @@ where
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
-        let session_id = request
+        let session_context = request
             .agent_context
             .as_ref()
-            .map(|context| context.session_id.clone());
+            .map(to_worker_selection_session_context);
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let selection_future = self
@@ -194,7 +201,7 @@ where
                 SelectionOptions {
                     affinity_worker,
                     policy_class,
-                    session_id,
+                    session_context,
                 },
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
@@ -274,7 +281,7 @@ where
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let block_size = self.chooser.block_size() as usize;
-        let selected_worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
+        let selected_worker = selection.worker;
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
             self.request_metrics.clone(),
@@ -316,8 +323,8 @@ where
                 if let Err(error) = record_result {
                     tracing::warn!(
                         request_id = %context_id,
-                        worker_id = selection.instance_id,
-                        dp_rank = selection.dp_rank,
+                        worker_id = selection.worker.worker_id,
+                        dp_rank = selection.worker.dp_rank,
                         error = %error,
                         "Failed to record routing decision"
                     );
@@ -329,8 +336,8 @@ where
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
                 tracker.record_worker(
-                    selection.instance_id,
-                    Some(selection.dp_rank),
+                    selection.worker.worker_id,
+                    Some(selection.worker.dp_rank),
                     self.chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(self.chooser.pending_count());
@@ -372,7 +379,7 @@ where
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
+        backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         let _ = backend_input
             .extra_args
             .as_mut()
@@ -385,7 +392,7 @@ where
         {
             tracing::warn!(
                 request_id = %context_id,
-                worker_id = selection.instance_id,
+                worker_id = selection.worker.worker_id,
                 error = %error,
                 "Failed to attach router_hint to backend request"
             );
@@ -396,11 +403,11 @@ where
         let dispatch = async {
             if exact {
                 self.inner
-                    .dispatch_exact(updated_request, selection.instance_id)
+                    .dispatch_exact(updated_request, selection.worker.worker_id)
                     .await
             } else {
                 self.inner
-                    .direct(updated_request, selection.instance_id)
+                    .direct(updated_request, selection.worker.worker_id)
                     .await
             }
         };
@@ -409,8 +416,8 @@ where
             dispatch.instrument(tracing::info_span!(
                 "kv_router.route_request",
                 request_id = %context_id,
-                worker_id = selection.instance_id,
-                dp_rank = selection.dp_rank,
+                worker_id = selection.worker.worker_id,
+                dp_rank = selection.worker.dp_rank,
                 overlap_blocks = selection.overlap_amount,
                 phase = ?phase,
             )),
@@ -451,7 +458,7 @@ where
             .chooser
             .workers_with_configs
             .borrow()
-            .get(&selection.instance_id)
+            .get(&selection.worker.worker_id)
             .and_then(|config| {
                 config
                     .get_engine_specific::<bool>(OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY)
@@ -465,8 +472,8 @@ where
 
         tracing::warn!(
             replay_key,
-            worker_id = selection.instance_id,
-            dp_rank = selection.dp_rank,
+            worker_id = selection.worker.worker_id,
+            dp_rank = selection.worker.dp_rank,
             "request has output token replay annotation but selected worker has not declared replay-token consumption"
         );
     }
@@ -496,10 +503,7 @@ where
                 return Err(error);
             }
         };
-        let selected_target = AffinityTarget {
-            worker_id: selection.instance_id,
-            dp_rank: Some(selection.dp_rank),
-        };
+        let selected_target = route_target(selection.worker);
         let metadata = match prepare(&mut request, selected_target) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -576,8 +580,8 @@ where
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
                 tracker.record_worker(
-                    selection.instance_id,
-                    Some(selection.dp_rank),
+                    selection.worker.worker_id,
+                    Some(selection.worker.dp_rank),
                     self.chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(self.chooser.pending_count());
@@ -593,7 +597,7 @@ where
 
             tracing::trace!(
                 ?phase,
-                worker_id = selection.instance_id,
+                worker_id = selection.worker.worker_id,
                 ?worker_id_info,
                 "Returning worker selection (query-only mode)"
             );
@@ -619,10 +623,7 @@ where
             }
         };
         drop(route_guard);
-        let selected_target = AffinityTarget {
-            worker_id: selection.instance_id,
-            dp_rank: Some(selection.dp_rank),
-        };
+        let selected_target = route_target(selection.worker);
         let stream = match self
             .dispatch_selection(request, selection, guard, operation.is_some())
             .await
@@ -775,7 +776,6 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-
     async fn terminal_item_does_not_skip_transport_eof() {
         let (router, runtime) = router(None).await;
         let context = Context::new(()).context();
@@ -821,8 +821,7 @@ mod tests {
             .select_with_affinity(&failed_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        let failed_worker =
-            WorkerWithDpRank::new(failed_selection.instance_id, failed_selection.dp_rank);
+        let failed_worker = failed_selection.worker;
         let failed_guard = router
             .track_selection(&failed_request, &mut failed_selection, false)
             .await
@@ -859,10 +858,7 @@ mod tests {
             .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        assert_eq!(
-            WorkerWithDpRank::new(retry_selection.instance_id, retry_selection.dp_rank),
-            failed_worker
-        );
+        assert_eq!(retry_selection.worker, failed_worker);
         let mut retry_guard = router
             .track_selection(&retry_request, &mut retry_selection, false)
             .await
@@ -1004,7 +1000,7 @@ mod tests {
             .select_with_affinity(&failed_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        let failed_worker = failed_selection.instance_id;
+        let failed_worker = failed_selection.worker.worker_id;
         let failed_dispatch_guard = router
             .track_selection(&failed_request, &mut failed_selection, false)
             .await
@@ -1229,7 +1225,7 @@ mod tests {
             .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
             .await
             .unwrap();
-        assert_eq!(selection.instance_id, 8);
+        assert_eq!(selection.worker.worker_id, 8);
         router.chooser.free(retry_request.id()).await.unwrap();
         drop(operation);
 
@@ -1309,7 +1305,7 @@ mod tests {
             .select_with_affinity(&pinned_request, RequestPhase::Aggregated, true)
             .await
             .unwrap();
-        assert_eq!(selection.instance_id, 7);
+        assert_eq!(selection.worker.worker_id, 7);
 
         drop(router);
         runtime.shutdown();
@@ -1341,11 +1337,22 @@ mod tests {
             };
 
             if attempt == 1 {
-                return Err(DynamoError::builder()
-                    .error_type(ErrorType::WorkerOverloaded)
-                    .message("selected worker is overloaded")
-                    .build()
-                    .into());
+                let output = Annotated {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(
+                        DynamoError::builder()
+                            .error_type(ErrorType::WorkerOverloaded)
+                            .message("selected worker is overloaded")
+                            .build(),
+                    ),
+                };
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::once(async move { output })),
+                    context.context(),
+                ));
             }
 
             let output = Annotated::from_data(LLMEngineOutput {
@@ -1371,7 +1378,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn worker_overload_migration_reselects_another_kv_worker() {
+    async fn worker_overload_stream_migration_releases_and_reselects() {
         async fn shared_drt(runtime: Runtime, store_path: &std::path::Path) -> DistributedRuntime {
             DistributedRuntime::new(
                 runtime,
@@ -1466,7 +1473,8 @@ mod tests {
             PushRouter::from_client_with_dispatch(client.clone(), RouterMode::KV, dispatch.clone())
                 .await
                 .unwrap();
-        let kv_router = Arc::new(KvPushRouter::new(push_router, Arc::new(chooser), None).unwrap());
+        let chooser = Arc::new(chooser);
+        let kv_router = Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap());
         let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             kv_router;
         let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
@@ -1481,7 +1489,10 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert!(responses[0].error.is_none());
         assert_eq!(responses[0].data.as_ref().unwrap().token_ids, vec![2]);
-        let attempts = dispatch.attempts.lock().unwrap();
+        let attempts = {
+            let attempts = dispatch.attempts.lock().unwrap();
+            attempts.clone()
+        };
         assert_eq!(attempts.len(), 2);
         let failed_worker = attempts[0].0;
         let retried_worker = attempts[1].0;
@@ -1490,12 +1501,14 @@ mod tests {
         assert!(registered_ids.contains(&retried_worker));
         assert!(attempts[0].1.is_empty());
         assert_eq!(attempts[1].1, vec![failed_worker]);
-        assert_eq!(
-            client.overloaded_instance_ids(),
-            Some(HashSet::from([failed_worker]))
+        let loads = chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads.iter().all(|load| load.active_requests == 0),
+            "all scheduler bookings must be released after migration: {loads:?}"
         );
-
-        drop(attempts);
         runtime.shutdown();
     }
 }

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Qwen3-32B-FP8 Recipes
 
 Production-ready deployments for **Qwen3-32B-FP8** with FP8 quantization using TensorRT-LLM and vLLM.
