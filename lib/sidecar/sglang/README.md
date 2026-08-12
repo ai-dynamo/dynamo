@@ -22,6 +22,23 @@ cargo build --release -p dynamo-sglang-sidecar
 There is no published image yet; the "Deploy on Kubernetes" section below builds
 a minimal one from `Dockerfile`. Official packaging is deferred to a follow-up.
 
+## Configure the sidecar
+
+The SGLang sidecar uses the same Dynamo worker and gRPC transport arguments as the vLLM and TensorRT-LLM sidecars. Common worker options include `--namespace`, `--component`, `--endpoint`, `--endpoint-types`, `--custom-jinja-template`, `--dyn-tool-call-parser`, and `--dyn-reasoning-parser`. Explicit Dynamo parser options override parser names discovered from SGLang.
+
+SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
+
+The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`. Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a five-minute deadline for establishing the full pool. Override these settings with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
+
+The previous SGLang-specific transport options are not accepted:
+
+| Previous option | Replacement |
+|---|---|
+| `--sglang-connections` / `SGLANG_GRPC_CONNECTIONS` | `--grpc-connections` / `DYN_SIDECAR_GRPC_CONNECTIONS` |
+| `--connect-timeout-secs` | `--grpc-connect-attempt-timeout-secs` |
+| `--health-poll-interval-secs` | `--grpc-retry-interval-secs` |
+| `--health-deadline-secs` | `--grpc-startup-deadline-secs` |
+
 ## SGLang-managed module contract
 
 SGLang can load the Python entry point and supply the gRPC endpoint arguments:
