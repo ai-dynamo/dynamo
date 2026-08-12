@@ -74,6 +74,12 @@ where
     live_worker_count: usize,
     total_in_flight: usize,
     ready_workers: BTreeSet<usize>,
+    /// Ready workers whose prior pass changed no externally visible state.
+    ///
+    /// Keep them out of the current drive scan so a lower worker ID cannot
+    /// starve later workers. They are reconsidered on the next coordinator
+    /// drive at the same or a later virtual timestamp.
+    deferred_ready_workers: BTreeSet<usize>,
     pending_removal: BTreeSet<usize>,
     pending_startup: BTreeSet<usize>,
     factory: ReplayRoleFactory,
@@ -103,6 +109,7 @@ where
             live_worker_count: 0,
             total_in_flight: 0,
             ready_workers: BTreeSet::new(),
+            deferred_ready_workers: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
             factory,
@@ -224,6 +231,7 @@ where
         // planner-triggered removal fails, Replay can now return the error
         // without leaving a half-tombstoned worker behind.
         self.ready_workers.remove(&worker_id);
+        self.deferred_ready_workers.remove(&worker_id);
         self.workers
             .get_mut(worker_id)
             .context("worker disappeared during removal")?
@@ -494,6 +502,14 @@ where
         now_ms: f64,
         _collector: Option<&mut TraceCollector>,
     ) -> Result<EngineEffects<Observation::Batch>> {
+        // A serial coordinator may make a previously effect-free worker
+        // observable without advancing virtual time. Retry those workers on
+        // the next coordinator drive, while allowing every other ready worker
+        // a turn in this scan.
+        let deferred = std::mem::take(&mut self.deferred_ready_workers);
+        for worker_id in deferred {
+            self.refresh_worker(worker_id);
+        }
         while let Some(worker_id) = self.ready_workers.pop_first() {
             let started = {
                 let worker = self.required_worker_mut(worker_id)?;
@@ -617,6 +633,12 @@ where
             }
             self.required_worker_mut(worker_id)?
                 .consecutive_same_timestamp_retries = 0;
+            if effects.is_empty() {
+                if self.ready_workers.remove(&worker_id) {
+                    self.deferred_ready_workers.insert(worker_id);
+                }
+                continue;
+            }
             return Ok(effects);
         }
         Ok(EngineEffects::default())
@@ -711,7 +733,7 @@ where
     /// livelock from a legitimate externally blocked handoff when no future
     /// virtual-time event exists.
     pub(crate) fn has_runnable_worker(&self) -> bool {
-        !self.ready_workers.is_empty()
+        !self.ready_workers.is_empty() || !self.deferred_ready_workers.is_empty()
     }
 
     /// Whether Replay still owns requests that the scheduler silently dropped
@@ -891,6 +913,32 @@ mod tests {
         .unwrap()
     }
 
+    fn decode_component(num_workers: usize) -> EngineComponent {
+        let config = ReplayEngineConfig {
+            rank: EngineConfig {
+                backend: Backend::Vllm,
+                num_gpu_blocks: 16,
+                block_size: 4,
+                max_num_batched_tokens: 4,
+                max_num_seqs: 1,
+                enable_chunked_prefill: false,
+                ..EngineConfig::for_backend(Backend::Vllm)
+            },
+            ..ReplayEngineConfig::default()
+        };
+        let factory = ReplayEngineFactory::new()
+            .role_factory(&config, WorkerStage::Decode, false)
+            .unwrap();
+        EngineComponent::new_with_factory(
+            SimulationWorkerStage::Decode,
+            EnginePassMode::Visible,
+            factory,
+            num_workers,
+            None,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn canceling_busy_startup_worker_returns_error_without_losing_worker() {
         let mut component = component(1, Some(10.0));
@@ -940,6 +988,72 @@ mod tests {
         );
         assert_eq!(component.draining_group_ids(), vec![0]);
         assert!(component.worker_topology(0).is_some());
+    }
+
+    #[test]
+    fn effect_free_worker_does_not_starve_later_ready_worker() {
+        let mut component = decode_component(2);
+        component
+            .dispatch(
+                0,
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(20)),
+                    ..Default::default()
+                },
+                0.0,
+            )
+            .unwrap();
+        component
+            .dispatch(
+                1,
+                DirectRequest {
+                    tokens: vec![2; 4],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(21)),
+                    ..Default::default()
+                },
+                0.0,
+            )
+            .unwrap();
+
+        let effects = component.drive_ready(0.0, None).unwrap();
+
+        assert!(!effects.is_empty());
+        assert_eq!(component.deferred_ready_workers, BTreeSet::from([0]));
+        assert!(
+            effects
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == Uuid::from_u128(21)),
+            "the later ready worker must run after the lower ID produces no effects"
+        );
+    }
+
+    #[test]
+    fn effect_free_worker_is_retried_on_the_next_coordinator_drive() {
+        let mut component = decode_component(1);
+        component
+            .dispatch(
+                0,
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(22)),
+                    ..Default::default()
+                },
+                0.0,
+            )
+            .unwrap();
+
+        assert!(component.drive_ready(0.0, None).unwrap().is_empty());
+        assert!(component.ready_workers.is_empty());
+        assert_eq!(component.deferred_ready_workers, BTreeSet::from([0]));
+        assert!(component.has_runnable_worker());
+
+        assert!(component.drive_ready(0.0, None).unwrap().is_empty());
+        assert_eq!(component.deferred_ready_workers, BTreeSet::from([0]));
     }
 
     #[test]
