@@ -87,7 +87,7 @@ Dynamo + SGLang chat deployment profiles:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx).
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **DRA / ComputeDomain controller** for the cross-node NVLink channel:
    ```bash
    kubectl get crd | grep computedomain

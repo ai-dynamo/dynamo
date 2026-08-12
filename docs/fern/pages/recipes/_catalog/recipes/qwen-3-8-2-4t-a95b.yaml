@@ -4,7 +4,7 @@
 id: qwen-3-8-2-4t-a95b
 title: Qwen3.8-2.4T-A95B
 page: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b.mdx
-provider: nvidia
+provider: qwen
 model:
   name: Qwen3.8-2.4T-A95B
   hf_id: Qwen/Qwen3.8-2.4T-A95B
