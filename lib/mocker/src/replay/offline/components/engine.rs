@@ -17,8 +17,8 @@ use super::super::state::OfflineWorkerState;
 use super::ObservedOffloadEffects;
 use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
-use crate::replay::TraceCollector;
 use crate::replay::offline::interactive::ReplayWorkerSnapshot;
+use crate::replay::{ReplayWorkerLifecycleStatus, TraceCollector};
 use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
@@ -83,6 +83,10 @@ where
     pending_removal: BTreeSet<usize>,
     /// Mocker workers still starting up — excluded from active set until ready.
     pending_startup: BTreeSet<usize>,
+    /// Statically provisioned workers that are unavailable for this complete
+    /// session. They remain live (and billed) but never enter startup or the
+    /// active placement set.
+    static_inactive: BTreeSet<usize>,
     /// Engine args used to construct new DP-rank schedulers during scale-up.
     args: MockEngineArgs,
     /// Whether dynamically added workers capture raw engine/router events.
@@ -121,6 +125,7 @@ where
             deferred_ready_groups: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
+            static_inactive: BTreeSet::new(),
             args: MockEngineArgs::default(),
             capture_raw: Observation::CAPTURE_RAW,
             observation: PhantomData,
@@ -192,6 +197,7 @@ where
             deferred_ready_groups: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
+            static_inactive: BTreeSet::new(),
             args: scaling_args,
             capture_raw: Observation::CAPTURE_RAW,
             observation: PhantomData,
@@ -250,6 +256,9 @@ where
     }
 
     fn group_is_ready(&self, worker_id: usize) -> bool {
+        if self.pending_startup.contains(&worker_id) || self.static_inactive.contains(&worker_id) {
+            return false;
+        }
         let Some(rank_ids) = self.worker_groups.get(worker_id).and_then(Option::as_ref) else {
             return false;
         };
@@ -363,6 +372,9 @@ where
     fn tombstone_group(&mut self, worker_id: usize) -> bool {
         self.ready_groups.remove(&worker_id);
         self.deferred_ready_groups.remove(&worker_id);
+        self.pending_startup.remove(&worker_id);
+        self.static_inactive.remove(&worker_id);
+        self.pending_removal.remove(&worker_id);
         let Some(rank_ids) = self.worker_groups.get_mut(worker_id).and_then(Option::take) else {
             return false;
         };
@@ -403,7 +415,18 @@ where
     /// startup transition. The worker remains visible in controller snapshots
     /// but is ineligible for placement for the lifetime of the P0 session.
     pub(in crate::replay::offline) fn mark_static_inactive(&mut self, worker_id: usize) {
-        self.pending_startup.insert(worker_id);
+        debug_assert!(
+            !self.pending_removal.contains(&worker_id),
+            "static-inactive and draining are mutually exclusive lifecycle states"
+        );
+        if self
+            .worker_groups
+            .get(worker_id)
+            .is_some_and(Option::is_some)
+        {
+            self.pending_startup.remove(&worker_id);
+            self.static_inactive.insert(worker_id);
+        }
         self.refresh_group(worker_id);
     }
 
@@ -460,6 +483,7 @@ where
                 let id = self.add_worker();
                 if has_startup_delay {
                     self.pending_startup.insert(id);
+                    self.refresh_group(id);
                 }
                 added.push(id);
             }
@@ -507,6 +531,7 @@ where
                 group.is_some()
                     && !self.pending_removal.contains(id)
                     && !self.pending_startup.contains(id)
+                    && !self.static_inactive.contains(id)
             })
             .map(|(id, _)| id)
             .collect()
@@ -516,11 +541,18 @@ where
         self.pending_startup.iter().copied().collect()
     }
 
+    #[cfg(test)]
+    pub(in crate::replay::offline) fn static_inactive_group_ids(&self) -> Vec<usize> {
+        self.static_inactive.iter().copied().collect()
+    }
+
     pub(in crate::replay::offline) fn draining_group_ids(&self) -> Vec<usize> {
         self.pending_removal.iter().copied().collect()
     }
 
     pub(in crate::replay::offline) fn non_draining_group_count(&self) -> usize {
+        // Static-inactive workers are provisioned capacity, not serving
+        // capacity, and therefore do not satisfy an autoscaling target.
         self.active_group_ids().len() + self.pending_startup.len()
     }
 
@@ -563,6 +595,16 @@ where
             .collect()
     }
 
+    /// Stable IDs of every currently provisioned logical worker, including
+    /// active, starting, draining, and static-inactive workers.
+    pub(in crate::replay::offline) fn provisioned_group_ids(&self) -> Vec<usize> {
+        self.worker_groups
+            .iter()
+            .enumerate()
+            .filter_map(|(worker_id, group)| group.as_ref().map(|_| worker_id))
+            .collect()
+    }
+
     pub(in crate::replay::offline) fn dp_size(&self) -> u32 {
         self.args.dp_size.max(1)
     }
@@ -584,7 +626,17 @@ where
                 continue;
             };
             let starting = self.pending_startup.contains(&worker_id);
+            let static_inactive = self.static_inactive.contains(&worker_id);
             let draining = self.pending_removal.contains(&worker_id);
+            let lifecycle_status = if static_inactive {
+                ReplayWorkerLifecycleStatus::StaticInactive
+            } else if starting {
+                ReplayWorkerLifecycleStatus::Starting
+            } else if draining {
+                ReplayWorkerLifecycleStatus::Draining
+            } else {
+                ReplayWorkerLifecycleStatus::Active
+            };
             for (dp_rank, rank_id) in rank_ids.iter().copied().enumerate() {
                 let Some(worker) = self.worker(rank_id) else {
                     continue;
@@ -594,7 +646,9 @@ where
                     pool_id: crate::replay::offline::topology::DEFAULT_REPLAY_POOL_ID.to_string(),
                     worker_id,
                     dp_rank,
-                    active: !starting && !draining,
+                    lifecycle_status,
+                    provisioned: true,
+                    active: lifecycle_status == ReplayWorkerLifecycleStatus::Active,
                     draining,
                     in_flight_requests: worker.in_flight(),
                     queued_requests: observation.map(|state| state.queued_requests),
@@ -602,6 +656,7 @@ where
                     queued_tokens: observation.map(|state| state.queued_tokens),
                     running_tokens: observation.map(|state| state.running_tokens),
                     max_num_seqs: observation.and_then(|state| state.max_num_seqs),
+                    preemption_count: observation.map(|state| state.preemption_count),
                     kv_capacity_blocks: observation.map(|state| state.kv_capacity_blocks),
                     kv_occupied_blocks: observation.map(|state| state.kv_occupied_blocks),
                     kv_free_blocks: observation.map(|state| state.kv_free_blocks),
@@ -654,6 +709,15 @@ where
         rank_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
+        let (worker_id, _) = self
+            .rank_identity(rank_id)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
+        anyhow::ensure!(
+            !self.pending_startup.contains(&worker_id)
+                && !self.static_inactive.contains(&worker_id)
+                && !self.pending_removal.contains(&worker_id),
+            "offline replay selected ineligible worker {worker_id} for rank {rank_id}"
+        );
         self.update_worker(rank_id, |worker| worker.receive_request(request))
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
         self.refresh_rank(rank_id);
@@ -1200,6 +1264,7 @@ mod tests {
         assert_eq!(queued.queued_tokens, Some(10));
         assert_eq!(queued.running_tokens, Some(0));
         assert_eq!(queued.max_num_seqs, Some(1));
+        assert_eq!(queued.preemption_count, Some(0));
         assert_eq!(queued.kv_capacity_blocks, Some(16));
         assert_eq!(queued.kv_occupied_blocks, Some(0));
         assert_eq!(queued.kv_free_blocks, Some(16));
@@ -1373,6 +1438,11 @@ mod tests {
         );
         engine.set_scaling_args(args, false);
         assert_eq!(engine.in_flight(), 0);
+        assert_eq!(
+            engine.interactive_snapshots()[0].preemption_count,
+            None,
+            "unsupported scheduler observations must not fabricate zero preemptions"
+        );
 
         let cancelled = Uuid::from_u128(501);
         engine.dispatch(0, timed_request(cancelled, 4)).unwrap();
@@ -1499,6 +1569,8 @@ mod tests {
         // New workers are in pending_startup.
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 4);
+        assert!(!engine.ready_groups.contains(&2));
+        assert!(!engine.ready_groups.contains(&3));
     }
 
     #[test]
@@ -1620,6 +1692,52 @@ mod tests {
         assert!(engine.mark_worker_ready(new_id));
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert!(engine.ready_groups.contains(&new_id));
+    }
+
+    #[test]
+    fn static_inactive_is_provisioned_but_never_starts_or_accepts_work() {
+        let mut engine = engine_with_startup(2, Some(5.0));
+        engine.mark_static_inactive(1);
+
+        assert_eq!(engine.worker_count(), 2);
+        assert_eq!(engine.provisioned_group_ids(), vec![0, 1]);
+        assert_eq!(engine.active_group_ids(), vec![0]);
+        assert_eq!(engine.static_inactive_group_ids(), vec![1]);
+        assert!(engine.starting_group_ids().is_empty());
+        assert_eq!(engine.non_draining_group_count(), 1);
+        assert!(!engine.mark_worker_ready(1));
+        assert_eq!(engine.static_inactive_group_ids(), vec![1]);
+
+        let error = engine
+            .dispatch(
+                1,
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(61)),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("ineligible worker 1"));
+        assert_eq!(engine.in_flight(), 0);
+
+        let snapshots = engine.interactive_snapshots();
+        assert_eq!(
+            snapshots[1].lifecycle_status,
+            ReplayWorkerLifecycleStatus::StaticInactive
+        );
+        assert!(snapshots[1].provisioned);
+        assert!(!snapshots[1].active);
+        assert!(!snapshots[1].draining);
+
+        // A target of two serving workers adds replacement capacity. The
+        // static-inactive worker stays provisioned and never becomes startup.
+        let delta = engine.apply_target_count(2);
+        assert_eq!(delta.added, vec![2]);
+        assert_eq!(engine.static_inactive_group_ids(), vec![1]);
+        assert_eq!(engine.starting_group_ids(), vec![2]);
+        assert_eq!(engine.worker_count(), 3);
     }
 
     #[test]

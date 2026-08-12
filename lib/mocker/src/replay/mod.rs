@@ -27,9 +27,11 @@ pub(crate) use collector::TraceCollector;
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
     PerRequestAdmissionRecord, PerRequestRecord, PerRequestRoutingRecord, ReplayRequestPool,
-    ReplayRoutingOutcome, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
-    TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
-    TraceSimulationReport, TraceThroughputStats,
+    ReplayRoutingOutcome, ReplayTerminalStatus, ReplayWorkerLifecycleStatus, SlaThresholds,
+    TraceAccountingReconciliation, TraceDistributionStats, TraceGlobalTopologyAccounting,
+    TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TracePoolAccounting,
+    TraceRequestCounts, TraceSimulationReport, TraceTerminalCounts, TraceThroughputStats,
+    TraceTokenStatusCounts, TraceTopologyAccounting, TraceWorkerAccounting,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {

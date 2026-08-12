@@ -283,6 +283,41 @@ Both harnesses emit request timing into `TraceCollector` in `lib/mocker/src/repl
 
 The harness itself does not compute final throughput/latency metrics incrementally. It records events, then `TraceCollector::finish()` derives the final `TraceSimulationReport` from `lib/mocker/src/replay/collector.rs`.
 
+## Interactive static-pool policy contract
+
+Interactive aggregated replay exposes one external placement boundary at a
+time. `pending_placements()` returns the request's authored identity, input
+length, priority, strict priority, policy class, routing constraints, and a
+fresh candidate observation. Recorded output length, future completion timing,
+and recorded latency fields are not part of that view. After an assignment,
+the next same-time boundary is rebuilt from the mutated scheduler and KV state.
+
+`required_taints` is a hard eligibility constraint in external placement,
+pool round-robin, native round-robin, and native KV routing. An exact invalid
+external target remains pending and can be corrected. Because this milestone
+uses a static topology, a workflow containing a request for which no active
+worker can satisfy the hard constraints is rejected atomically before any
+authored identity or admission state is registered. `preferred_taints` is
+advisory: native KV scoring and an external controller may consume it, while
+round-robin does not treat it as a hard requirement. Worker `tags` and
+`capabilities` are descriptive observation fields only. Request-side tag or
+capability constraints are unsupported and rejected by strict schema parsing.
+Taint names must be non-empty and already trimmed, required names must be
+unique, and preferred weights must be finite; negative advisory weights are
+supported. `prefix_reset=true` is unsupported and rejected before authored
+identity registration because this kernel does not implement cache reset.
+Offline native-KV replay uses the built-in deterministic selector. Configured
+custom `worker_selection` instances are rejected rather than silently ignored;
+use external placement to evaluate controller-authored selection policies.
+
+Aggregated routing-history records carry the stable authored `pool_id`,
+`worker_id`, and `dp_rank` in addition to the runtime-private dense worker and
+scheduler identifiers. Topology accounting classifies completed, rejected,
+canceled, failed, and incomplete work by worker and pool. Reused-input-token
+counts come from physical worker admission rather than policy overlap evidence;
+workers sum to pools and pools sum to the topology `global` object. Requests
+that never acquired a target remain explicit under `unassigned_*`.
+
 ## Python result model
 
 The public `dynamo.replay.run_trace_replay` and

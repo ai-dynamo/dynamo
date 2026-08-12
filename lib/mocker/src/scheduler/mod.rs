@@ -187,6 +187,8 @@ pub(crate) struct SchedulerObservation {
     pub(crate) running_tokens: usize,
     /// `None` means the scheduler has no configured finite sequence cap.
     pub(crate) max_num_seqs: Option<usize>,
+    /// Cumulative rank-local scheduler preemptions committed by this time.
+    pub(crate) preemption_count: u64,
     pub(crate) kv_capacity_blocks: usize,
     pub(crate) kv_occupied_blocks: usize,
     pub(crate) kv_free_blocks: usize,

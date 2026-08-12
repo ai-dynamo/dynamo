@@ -5,6 +5,7 @@ use ddsketchy::DDSketch;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
@@ -29,6 +30,9 @@ pub struct TraceSimulationReport {
     /// (via `set_sla_thresholds`); `None` otherwise — goodput is undefined
     /// without an SLA, so the `goodput_*` keys are omitted from the report.
     pub goodput: Option<TraceGoodputStats>,
+    /// Deterministic pool/worker accounting for static heterogeneous replay.
+    /// `None` for replay modes that do not register an authored topology.
+    pub topology_accounting: Option<TraceTopologyAccounting>,
     /// Per-request records, one per admitted request. Populated by
     /// `TraceCollector::finish`. Intentionally NOT serialized into the summary
     /// JSON (see custom `Serialize` impl below) — consumers that want per-
@@ -37,12 +41,209 @@ pub struct TraceSimulationReport {
     pub per_request: Vec<PerRequestRecord>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TraceRequestCounts {
     pub num_requests: usize,
     pub completed_requests: usize,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+}
+
+impl TraceRequestCounts {
+    fn record(&mut self, stats: &TraceRequestStats) {
+        self.num_requests += 1;
+        if stats.first_admit_ms.is_some()
+            && stats.terminal_status == Some(ReplayTerminalStatus::Completed)
+            && stats.terminal_time_ms.is_some()
+        {
+            self.completed_requests += 1;
+            self.total_input_tokens += stats.input_length;
+            self.total_output_tokens += stats.actual_output_length();
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.num_requests += other.num_requests;
+        self.completed_requests += other.completed_requests;
+        self.total_input_tokens += other.total_input_tokens;
+        self.total_output_tokens += other.total_output_tokens;
+    }
+}
+
+/// Final lifecycle state of a provisioned replay worker.
+///
+/// `StaticInactive` is deliberately distinct from `Starting`: it is a
+/// provisioned, billed worker that is unavailable for the entire session and
+/// never transitions to `Active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayWorkerLifecycleStatus {
+    Active,
+    StaticInactive,
+    Starting,
+    Draining,
+    Removed,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TraceTerminalCounts {
+    pub completed: usize,
+    pub rejected: usize,
+    pub canceled: usize,
+    pub failed: usize,
+    pub incomplete: usize,
+}
+
+impl TraceTerminalCounts {
+    fn record(&mut self, status: Option<ReplayTerminalStatus>) {
+        match status {
+            Some(ReplayTerminalStatus::Completed) => self.completed += 1,
+            Some(ReplayTerminalStatus::Rejected) => self.rejected += 1,
+            Some(ReplayTerminalStatus::Canceled) => self.canceled += 1,
+            Some(ReplayTerminalStatus::Failed) => self.failed += 1,
+            None => self.incomplete += 1,
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.completed += other.completed;
+        self.rejected += other.rejected;
+        self.canceled += other.canceled;
+        self.failed += other.failed;
+        self.incomplete += other.incomplete;
+    }
+
+    fn total(&self) -> usize {
+        self.completed + self.rejected + self.canceled + self.failed + self.incomplete
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TraceWorkerAccounting {
+    pub pool_id: String,
+    pub worker_id: usize,
+    pub dp_rank: usize,
+    pub lifecycle_status: ReplayWorkerLifecycleStatus,
+    pub provisioned: bool,
+    pub request_counts: TraceRequestCounts,
+    pub terminal_counts: TraceTerminalCounts,
+    pub input_tokens_by_status: TraceTokenStatusCounts,
+    pub output_tokens_by_status: TraceTokenStatusCounts,
+    /// Per-request physically reused prompt tokens, classified by the final
+    /// lifecycle status. This comes from worker admission, never route overlap.
+    pub reused_input_tokens_by_status: TraceTokenStatusCounts,
+    pub worker_seconds: f64,
+    pub gpus_per_worker: usize,
+    pub gpu_hours: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TracePoolAccounting {
+    pub pool_id: String,
+    pub provisioned_workers: usize,
+    pub active_workers: usize,
+    pub static_inactive_workers: usize,
+    pub starting_workers: usize,
+    pub draining_workers: usize,
+    pub removed_workers: usize,
+    pub request_counts: TraceRequestCounts,
+    pub terminal_counts: TraceTerminalCounts,
+    pub input_tokens_by_status: TraceTokenStatusCounts,
+    pub output_tokens_by_status: TraceTokenStatusCounts,
+    pub reused_input_tokens_by_status: TraceTokenStatusCounts,
+    pub worker_seconds: f64,
+    pub gpu_hours: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TraceTokenStatusCounts {
+    pub completed: usize,
+    pub rejected: usize,
+    pub canceled: usize,
+    pub failed: usize,
+    pub incomplete: usize,
+}
+
+impl TraceTokenStatusCounts {
+    fn record(&mut self, status: Option<ReplayTerminalStatus>, tokens: usize) {
+        match status {
+            Some(ReplayTerminalStatus::Completed) => self.completed += tokens,
+            Some(ReplayTerminalStatus::Rejected) => self.rejected += tokens,
+            Some(ReplayTerminalStatus::Canceled) => self.canceled += tokens,
+            Some(ReplayTerminalStatus::Failed) => self.failed += tokens,
+            None => self.incomplete += tokens,
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.completed += other.completed;
+        self.rejected += other.rejected;
+        self.canceled += other.canceled;
+        self.failed += other.failed;
+        self.incomplete += other.incomplete;
+    }
+}
+
+/// Accounting for requests assigned to the authored static topology. Pool
+/// values sum exactly to this object; requests that never acquired a target
+/// remain explicit in the adjacent `unassigned_*` fields.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TraceGlobalTopologyAccounting {
+    pub request_counts: TraceRequestCounts,
+    pub terminal_counts: TraceTerminalCounts,
+    pub input_tokens_by_status: TraceTokenStatusCounts,
+    pub output_tokens_by_status: TraceTokenStatusCounts,
+    pub reused_input_tokens_by_status: TraceTokenStatusCounts,
+    pub worker_seconds: f64,
+    pub gpu_hours: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TraceAccountingReconciliation {
+    pub global_request_counts_match: bool,
+    pub global_topology_counts_match: bool,
+    pub pool_request_counts_match: bool,
+    pub terminal_counts_match: bool,
+    pub pool_terminal_counts_match: bool,
+    pub pool_token_counts_match: bool,
+    pub reused_input_tokens_match: bool,
+    pub worker_seconds_match: bool,
+    pub pool_worker_seconds_match: bool,
+    pub gpu_hours_match: bool,
+    pub pool_gpu_hours_match: bool,
+}
+
+impl TraceAccountingReconciliation {
+    pub fn all_reconciled(&self) -> bool {
+        self.global_request_counts_match
+            && self.global_topology_counts_match
+            && self.pool_request_counts_match
+            && self.terminal_counts_match
+            && self.pool_terminal_counts_match
+            && self.pool_token_counts_match
+            && self.reused_input_tokens_match
+            && self.worker_seconds_match
+            && self.pool_worker_seconds_match
+            && self.gpu_hours_match
+            && self.pool_gpu_hours_match
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TraceTopologyAccounting {
+    /// Sorted lexicographically by `(pool_id, worker_id, dp_rank)`.
+    pub workers: Vec<TraceWorkerAccounting>,
+    /// Sorted lexicographically by `pool_id`.
+    pub pools: Vec<TracePoolAccounting>,
+    /// Sum of every pool. Unassigned requests are intentionally separate.
+    pub global: TraceGlobalTopologyAccounting,
+    /// Requests that reached terminal accounting without a static assignment.
+    pub unassigned_request_counts: TraceRequestCounts,
+    pub unassigned_terminal_counts: TraceTerminalCounts,
+    pub unassigned_input_tokens_by_status: TraceTokenStatusCounts,
+    pub unassigned_output_tokens_by_status: TraceTokenStatusCounts,
+    pub unassigned_reused_input_tokens_by_status: TraceTokenStatusCounts,
+    pub reconciliation: TraceAccountingReconciliation,
 }
 
 #[derive(Debug, Clone)]
@@ -56,8 +257,9 @@ pub struct TraceThroughputStats {
     /// Provisioned worker-time per role, in **worker-seconds**: the time-integral
     /// of the *provisioned* worker count over the whole simulated run. The
     /// provisioned count is every worker physically holding a GPU (active +
-    /// starting-up + draining), so this captures the startup ramp and the
-    /// scale-down drain tail, unlike a snapshot of the active/serving count.
+    /// starting-up + draining + static-inactive), so this captures the startup
+    /// ramp, scale-down drain tail, and intentionally unavailable capacity,
+    /// unlike a snapshot of the active/serving count.
     /// Populated on the collector by the runtime: `add_worker_seconds` accrues
     /// the integral each clock advance (agg / disagg), and
     /// `set_static_worker_count` covers the single-worker path; 0.0 otherwise.
@@ -263,6 +465,9 @@ impl Serialize for TraceSimulationReport {
                 "goodput_output_throughput_tok_s",
                 &goodput.output_throughput_tok_s,
             )?;
+        }
+        if let Some(accounting) = &self.topology_accounting {
+            map.serialize_entry("topology_accounting", accounting)?;
         }
         map.serialize_entry("processed_tokens", &self.processed_tokens())?;
         map.serialize_entry("processed_tokens_per_s", &self.processed_tokens_per_s())?;
@@ -512,9 +717,17 @@ pub enum ReplayRoutingOutcome {
 pub struct PerRequestRoutingRecord {
     pub pool: ReplayRequestPool,
     pub outcome: ReplayRoutingOutcome,
+    /// Timestamp at which this route acquired its effective worker target.
+    pub routed_at_ms: Option<f64>,
     pub queue_entered_at_ms: Option<f64>,
     pub released_at_ms: Option<f64>,
     pub queue_wait_ms: Option<f64>,
+    /// Authored static-topology pool/worker selected for aggregated replay.
+    /// These remain separate from the runtime-private dense worker and
+    /// scheduler identifiers below. `dp_rank` is the authored rank as well as
+    /// the scheduler-local rank for the bounded aggregated topology.
+    pub pool_id: Option<String>,
+    pub worker_id: Option<usize>,
     pub logical_worker_id: Option<usize>,
     pub scheduler_id: Option<usize>,
     pub dp_rank: Option<u32>,
@@ -733,6 +946,23 @@ pub(crate) struct TraceCollector {
     /// `finish()` to turn worker-seconds into gpu_hours.
     prefill_gpus_per_worker: usize,
     decode_gpus_per_worker: usize,
+    /// Registered static/dynamic aggregated workers keyed by authored identity.
+    /// A `BTreeMap` makes final report ordering independent of insertion order.
+    worker_accounting: BTreeMap<TraceWorkerAccountingKey, TraceWorkerAccountingState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TraceWorkerAccountingKey {
+    pool_id: String,
+    worker_id: usize,
+    dp_rank: usize,
+}
+
+#[derive(Debug)]
+struct TraceWorkerAccountingState {
+    lifecycle_status: ReplayWorkerLifecycleStatus,
+    worker_seconds: f64,
+    gpus_per_worker: usize,
 }
 
 impl TraceRequestStats {
@@ -836,9 +1066,10 @@ impl TraceCollector {
     /// Add provisioned worker-seconds for the interval just elapsed. The runtime
     /// calls this each time it advances the sim clock, with
     /// `provisioned_count × dt_ms / 1000` per role — the time-integral of the
-    /// *provisioned* worker count (active + starting-up + draining), so the
-    /// startup ramp and drain tail are included. Agg replay passes `prefill = 0`
-    /// and reports through `decode`.
+    /// *provisioned* worker count (active + starting-up + draining +
+    /// static-inactive), so the startup ramp, drain tail, and unavailable
+    /// static capacity are included. Agg replay passes `prefill = 0` and
+    /// reports through `decode`.
     pub(crate) fn add_worker_seconds(&mut self, prefill: f64, decode: f64) {
         self.prefill_worker_seconds += prefill;
         self.decode_worker_seconds += decode;
@@ -860,6 +1091,79 @@ impl TraceCollector {
     pub(crate) fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
         self.prefill_gpus_per_worker = prefill;
         self.decode_gpus_per_worker = decode;
+    }
+
+    /// Register one aggregated replay worker under its stable authored
+    /// `(pool_id, worker_id, dp_rank)` identity. Re-registering an existing
+    /// identity updates lifecycle/GPU metadata without resetting accrued time.
+    pub(crate) fn register_decode_worker(
+        &mut self,
+        pool_id: String,
+        worker_id: usize,
+        dp_rank: usize,
+        lifecycle_status: ReplayWorkerLifecycleStatus,
+        gpus_per_worker: usize,
+    ) {
+        let key = TraceWorkerAccountingKey {
+            pool_id,
+            worker_id,
+            dp_rank,
+        };
+        self.worker_accounting
+            .entry(key)
+            .and_modify(|state| {
+                state.lifecycle_status = lifecycle_status;
+                state.gpus_per_worker = gpus_per_worker;
+            })
+            .or_insert(TraceWorkerAccountingState {
+                lifecycle_status,
+                worker_seconds: 0.0,
+                gpus_per_worker,
+            });
+    }
+
+    pub(crate) fn set_decode_worker_lifecycle_status(
+        &mut self,
+        pool_id: &str,
+        worker_id: usize,
+        dp_rank: usize,
+        lifecycle_status: ReplayWorkerLifecycleStatus,
+    ) {
+        let key = TraceWorkerAccountingKey {
+            pool_id: pool_id.to_string(),
+            worker_id,
+            dp_rank,
+        };
+        let state = self.worker_accounting.get_mut(&key).unwrap_or_else(|| {
+            panic!(
+                "offline replay updated lifecycle for unregistered worker ({pool_id:?}, {worker_id}, {dp_rank})"
+            )
+        });
+        state.lifecycle_status = lifecycle_status;
+    }
+
+    /// Accrue billed time for one provisioned aggregated worker. This updates
+    /// both the per-worker ledger and the legacy aggregate decode total so the
+    /// final reconciliation has a single accounting source.
+    pub(crate) fn add_decode_worker_seconds(
+        &mut self,
+        pool_id: &str,
+        worker_id: usize,
+        dp_rank: usize,
+        worker_seconds: f64,
+    ) {
+        let key = TraceWorkerAccountingKey {
+            pool_id: pool_id.to_string(),
+            worker_id,
+            dp_rank,
+        };
+        let state = self.worker_accounting.get_mut(&key).unwrap_or_else(|| {
+            panic!(
+                "offline replay accrued time for unregistered worker ({pool_id:?}, {worker_id}, {dp_rank})"
+            )
+        });
+        state.worker_seconds += worker_seconds;
+        self.decode_worker_seconds += worker_seconds;
     }
 
     pub(crate) fn on_arrival(
@@ -1116,10 +1420,11 @@ impl TraceCollector {
         &mut self,
         uuid: Uuid,
         pool: ReplayRequestPool,
+        at_ms: f64,
         logical_worker_id: usize,
         scheduler_id: usize,
         dp_rank: u32,
-        reported_overlap_tokens: usize,
+        reported_overlap_tokens: Option<usize>,
     ) {
         let Some(detail) = self.detail_mut(uuid) else {
             return;
@@ -1127,13 +1432,16 @@ impl TraceCollector {
         detail.routing_history.push(PerRequestRoutingRecord {
             pool,
             outcome: ReplayRoutingOutcome::Immediate,
+            routed_at_ms: Some(at_ms),
             queue_entered_at_ms: None,
             released_at_ms: None,
             queue_wait_ms: Some(0.0),
+            pool_id: None,
+            worker_id: None,
             logical_worker_id: Some(logical_worker_id),
             scheduler_id: Some(scheduler_id),
             dp_rank: Some(dp_rank),
-            reported_overlap_tokens: Some(reported_overlap_tokens),
+            reported_overlap_tokens,
         });
     }
 
@@ -1144,9 +1452,12 @@ impl TraceCollector {
         detail.routing_history.push(PerRequestRoutingRecord {
             pool,
             outcome: ReplayRoutingOutcome::Queued,
+            routed_at_ms: None,
             queue_entered_at_ms: Some(at_ms),
             released_at_ms: None,
             queue_wait_ms: None,
+            pool_id: None,
+            worker_id: None,
             logical_worker_id: None,
             scheduler_id: None,
             dp_rank: None,
@@ -1163,7 +1474,7 @@ impl TraceCollector {
         logical_worker_id: usize,
         scheduler_id: usize,
         dp_rank: u32,
-        reported_overlap_tokens: usize,
+        reported_overlap_tokens: Option<usize>,
     ) {
         let Some(detail) = self.detail_mut(uuid) else {
             return;
@@ -1177,11 +1488,40 @@ impl TraceCollector {
         };
         let entered_at_ms = route.queue_entered_at_ms.unwrap_or(at_ms);
         route.released_at_ms = Some(at_ms);
+        route.routed_at_ms = Some(at_ms);
         route.queue_wait_ms = Some((at_ms - entered_at_ms).max(0.0));
         route.logical_worker_id = Some(logical_worker_id);
         route.scheduler_id = Some(scheduler_id);
         route.dp_rank = Some(dp_rank);
-        route.reported_overlap_tokens = Some(reported_overlap_tokens);
+        route.reported_overlap_tokens = reported_overlap_tokens;
+    }
+
+    /// Attach the stable authored target to the effective aggregated route.
+    /// The route is created before worker dispatch, so this explicit update
+    /// prevents evidence consumers from having to reinterpret dense engine
+    /// worker or scheduler identifiers as topology identity.
+    pub(crate) fn on_route_static_target(
+        &mut self,
+        uuid: Uuid,
+        pool: ReplayRequestPool,
+        pool_id: String,
+        worker_id: usize,
+        dp_rank: usize,
+    ) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        let Some(route) = detail
+            .routing_history
+            .iter_mut()
+            .rev()
+            .find(|route| route.pool == pool && route.scheduler_id.is_some())
+        else {
+            return;
+        };
+        route.pool_id = Some(pool_id);
+        route.worker_id = Some(worker_id);
+        route.dp_rank = Some(dp_rank as u32);
     }
 
     pub(crate) fn on_pool_admission(
@@ -1387,6 +1727,250 @@ impl TraceCollector {
             .map(TraceRequestStats::actual_output_length)
     }
 
+    fn build_topology_accounting(
+        requests: &FxHashMap<Uuid, TraceRequestStats>,
+        worker_states: BTreeMap<TraceWorkerAccountingKey, TraceWorkerAccountingState>,
+        global_request_counts: &TraceRequestCounts,
+        decode_worker_seconds: f64,
+        global_gpu_hours: f64,
+    ) -> Option<TraceTopologyAccounting> {
+        if worker_states.is_empty() {
+            return None;
+        }
+
+        let mut worker_request_counts = worker_states
+            .keys()
+            .cloned()
+            .map(|key| (key, TraceRequestCounts::default()))
+            .collect::<BTreeMap<_, _>>();
+        let mut worker_terminal_counts = worker_states
+            .keys()
+            .cloned()
+            .map(|key| (key, TraceTerminalCounts::default()))
+            .collect::<BTreeMap<_, _>>();
+        let mut worker_input_tokens = worker_states
+            .keys()
+            .cloned()
+            .map(|key| (key, TraceTokenStatusCounts::default()))
+            .collect::<BTreeMap<_, _>>();
+        let mut worker_output_tokens = worker_states
+            .keys()
+            .cloned()
+            .map(|key| (key, TraceTokenStatusCounts::default()))
+            .collect::<BTreeMap<_, _>>();
+        let mut worker_reused_input_tokens = worker_states
+            .keys()
+            .cloned()
+            .map(|key| (key, TraceTokenStatusCounts::default()))
+            .collect::<BTreeMap<_, _>>();
+        let mut unassigned_request_counts = TraceRequestCounts::default();
+        let mut unassigned_terminal_counts = TraceTerminalCounts::default();
+        let mut unassigned_input_tokens_by_status = TraceTokenStatusCounts::default();
+        let mut unassigned_output_tokens_by_status = TraceTokenStatusCounts::default();
+        let mut unassigned_reused_input_tokens_by_status = TraceTokenStatusCounts::default();
+        let mut physical_reused_input_tokens_by_status = TraceTokenStatusCounts::default();
+
+        for stats in requests.values() {
+            // `reused_input_tokens` is updated exclusively by physical worker
+            // admission. Routing overlap observations never contribute here.
+            physical_reused_input_tokens_by_status
+                .record(stats.terminal_status, stats.reused_input_tokens);
+            let key = stats
+                .pool_id
+                .as_ref()
+                .zip(stats.authored_worker_id)
+                .zip(stats.authored_dp_rank)
+                .map(|((pool_id, worker_id), dp_rank)| TraceWorkerAccountingKey {
+                    pool_id: pool_id.clone(),
+                    worker_id,
+                    dp_rank,
+                });
+            if let Some(key) = key
+                && let (
+                    Some(request_counts),
+                    Some(terminal_counts),
+                    Some(input_tokens),
+                    Some(output_tokens),
+                    Some(reused_input_tokens),
+                ) = (
+                    worker_request_counts.get_mut(&key),
+                    worker_terminal_counts.get_mut(&key),
+                    worker_input_tokens.get_mut(&key),
+                    worker_output_tokens.get_mut(&key),
+                    worker_reused_input_tokens.get_mut(&key),
+                )
+            {
+                request_counts.record(stats);
+                terminal_counts.record(stats.terminal_status);
+                input_tokens.record(stats.terminal_status, stats.input_length);
+                output_tokens.record(stats.terminal_status, stats.actual_output_length());
+                reused_input_tokens.record(stats.terminal_status, stats.reused_input_tokens);
+            } else {
+                unassigned_request_counts.record(stats);
+                unassigned_terminal_counts.record(stats.terminal_status);
+                unassigned_input_tokens_by_status.record(stats.terminal_status, stats.input_length);
+                unassigned_output_tokens_by_status
+                    .record(stats.terminal_status, stats.actual_output_length());
+                unassigned_reused_input_tokens_by_status
+                    .record(stats.terminal_status, stats.reused_input_tokens);
+            }
+        }
+
+        let mut workers = Vec::with_capacity(worker_states.len());
+        for (key, state) in worker_states {
+            let request_counts = worker_request_counts.remove(&key).unwrap_or_default();
+            let terminal_counts = worker_terminal_counts.remove(&key).unwrap_or_default();
+            let input_tokens_by_status = worker_input_tokens.remove(&key).unwrap_or_default();
+            let output_tokens_by_status = worker_output_tokens.remove(&key).unwrap_or_default();
+            let reused_input_tokens_by_status =
+                worker_reused_input_tokens.remove(&key).unwrap_or_default();
+            workers.push(TraceWorkerAccounting {
+                pool_id: key.pool_id,
+                worker_id: key.worker_id,
+                dp_rank: key.dp_rank,
+                lifecycle_status: state.lifecycle_status,
+                provisioned: state.lifecycle_status != ReplayWorkerLifecycleStatus::Removed,
+                request_counts,
+                terminal_counts,
+                input_tokens_by_status,
+                output_tokens_by_status,
+                reused_input_tokens_by_status,
+                worker_seconds: state.worker_seconds,
+                gpus_per_worker: state.gpus_per_worker,
+                gpu_hours: state.worker_seconds * state.gpus_per_worker as f64 / 3600.0,
+            });
+        }
+
+        let mut pools = BTreeMap::<String, TracePoolAccounting>::new();
+        for worker in &workers {
+            let pool = pools
+                .entry(worker.pool_id.clone())
+                .or_insert_with(|| TracePoolAccounting {
+                    pool_id: worker.pool_id.clone(),
+                    provisioned_workers: 0,
+                    active_workers: 0,
+                    static_inactive_workers: 0,
+                    starting_workers: 0,
+                    draining_workers: 0,
+                    removed_workers: 0,
+                    request_counts: TraceRequestCounts::default(),
+                    terminal_counts: TraceTerminalCounts::default(),
+                    input_tokens_by_status: TraceTokenStatusCounts::default(),
+                    output_tokens_by_status: TraceTokenStatusCounts::default(),
+                    reused_input_tokens_by_status: TraceTokenStatusCounts::default(),
+                    worker_seconds: 0.0,
+                    gpu_hours: 0.0,
+                });
+            if worker.provisioned {
+                pool.provisioned_workers += 1;
+            }
+            match worker.lifecycle_status {
+                ReplayWorkerLifecycleStatus::Active => pool.active_workers += 1,
+                ReplayWorkerLifecycleStatus::StaticInactive => pool.static_inactive_workers += 1,
+                ReplayWorkerLifecycleStatus::Starting => pool.starting_workers += 1,
+                ReplayWorkerLifecycleStatus::Draining => pool.draining_workers += 1,
+                ReplayWorkerLifecycleStatus::Removed => pool.removed_workers += 1,
+            }
+            pool.request_counts.add_assign(&worker.request_counts);
+            pool.terminal_counts.add_assign(&worker.terminal_counts);
+            pool.input_tokens_by_status
+                .add_assign(&worker.input_tokens_by_status);
+            pool.output_tokens_by_status
+                .add_assign(&worker.output_tokens_by_status);
+            pool.reused_input_tokens_by_status
+                .add_assign(&worker.reused_input_tokens_by_status);
+            pool.worker_seconds += worker.worker_seconds;
+            pool.gpu_hours += worker.gpu_hours;
+        }
+        let pools = pools.into_values().collect::<Vec<_>>();
+
+        let mut accounted_request_counts = unassigned_request_counts.clone();
+        let mut accounted_terminal_counts = unassigned_terminal_counts.clone();
+        for worker in &workers {
+            accounted_request_counts.add_assign(&worker.request_counts);
+            accounted_terminal_counts.add_assign(&worker.terminal_counts);
+        }
+        let mut pooled_request_counts = TraceRequestCounts::default();
+        let mut pooled_terminal_counts = TraceTerminalCounts::default();
+        let mut pooled_input_tokens = TraceTokenStatusCounts::default();
+        let mut pooled_output_tokens = TraceTokenStatusCounts::default();
+        let mut pooled_reused_input_tokens = TraceTokenStatusCounts::default();
+        for pool in &pools {
+            pooled_request_counts.add_assign(&pool.request_counts);
+            pooled_terminal_counts.add_assign(&pool.terminal_counts);
+            pooled_input_tokens.add_assign(&pool.input_tokens_by_status);
+            pooled_output_tokens.add_assign(&pool.output_tokens_by_status);
+            pooled_reused_input_tokens.add_assign(&pool.reused_input_tokens_by_status);
+        }
+        let mut worker_only_request_counts = TraceRequestCounts::default();
+        let mut worker_only_terminal_counts = TraceTerminalCounts::default();
+        let mut worker_only_input_tokens = TraceTokenStatusCounts::default();
+        let mut worker_only_output_tokens = TraceTokenStatusCounts::default();
+        let mut worker_only_reused_input_tokens = TraceTokenStatusCounts::default();
+        for worker in &workers {
+            worker_only_request_counts.add_assign(&worker.request_counts);
+            worker_only_terminal_counts.add_assign(&worker.terminal_counts);
+            worker_only_input_tokens.add_assign(&worker.input_tokens_by_status);
+            worker_only_output_tokens.add_assign(&worker.output_tokens_by_status);
+            worker_only_reused_input_tokens.add_assign(&worker.reused_input_tokens_by_status);
+        }
+        let worker_seconds = workers
+            .iter()
+            .map(|worker| worker.worker_seconds)
+            .sum::<f64>();
+        let gpu_hours = workers.iter().map(|worker| worker.gpu_hours).sum::<f64>();
+        let pool_worker_seconds = pools.iter().map(|pool| pool.worker_seconds).sum::<f64>();
+        let pool_gpu_hours = pools.iter().map(|pool| pool.gpu_hours).sum::<f64>();
+        let global = TraceGlobalTopologyAccounting {
+            request_counts: pooled_request_counts.clone(),
+            terminal_counts: pooled_terminal_counts.clone(),
+            input_tokens_by_status: pooled_input_tokens.clone(),
+            output_tokens_by_status: pooled_output_tokens.clone(),
+            reused_input_tokens_by_status: pooled_reused_input_tokens.clone(),
+            worker_seconds: pool_worker_seconds,
+            gpu_hours: pool_gpu_hours,
+        };
+        let mut accounted_reused_input_tokens = global.reused_input_tokens_by_status.clone();
+        accounted_reused_input_tokens.add_assign(&unassigned_reused_input_tokens_by_status);
+        let close = |left: f64, right: f64| {
+            (left - right).abs() <= 1e-9 * left.abs().max(right.abs()).max(1.0)
+        };
+        let reconciliation = TraceAccountingReconciliation {
+            global_request_counts_match: &accounted_request_counts == global_request_counts,
+            global_topology_counts_match: global.request_counts == pooled_request_counts
+                && global.terminal_counts == pooled_terminal_counts
+                && global.input_tokens_by_status == pooled_input_tokens
+                && global.output_tokens_by_status == pooled_output_tokens
+                && global.reused_input_tokens_by_status == pooled_reused_input_tokens,
+            pool_request_counts_match: pooled_request_counts == worker_only_request_counts,
+            terminal_counts_match: accounted_terminal_counts.total()
+                == global_request_counts.num_requests
+                && accounted_terminal_counts.completed == global_request_counts.completed_requests,
+            pool_terminal_counts_match: pooled_terminal_counts == worker_only_terminal_counts,
+            pool_token_counts_match: pooled_input_tokens == worker_only_input_tokens
+                && pooled_output_tokens == worker_only_output_tokens
+                && pooled_reused_input_tokens == worker_only_reused_input_tokens,
+            reused_input_tokens_match: accounted_reused_input_tokens
+                == physical_reused_input_tokens_by_status,
+            worker_seconds_match: close(worker_seconds, decode_worker_seconds),
+            pool_worker_seconds_match: close(pool_worker_seconds, worker_seconds),
+            gpu_hours_match: close(gpu_hours, global_gpu_hours),
+            pool_gpu_hours_match: close(pool_gpu_hours, gpu_hours),
+        };
+
+        Some(TraceTopologyAccounting {
+            workers,
+            pools,
+            global,
+            unassigned_request_counts,
+            unassigned_terminal_counts,
+            unassigned_input_tokens_by_status,
+            unassigned_output_tokens_by_status,
+            unassigned_reused_input_tokens_by_status,
+            reconciliation,
+        })
+    }
+
     pub(crate) fn finish(mut self) -> TraceSimulationReport {
         let Self {
             requests,
@@ -1419,6 +2003,7 @@ impl TraceCollector {
         let accumulated_decode_worker_seconds = self.decode_worker_seconds;
         let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
         let decode_gpus_per_worker = self.decode_gpus_per_worker;
+        let worker_accounting = std::mem::take(&mut self.worker_accounting);
         let itl_distribution = self.itl_distribution.finish();
         let output_token_throughput_per_user = self.output_token_throughput_per_user.finish();
         let requests = self.requests;
@@ -1507,13 +2092,21 @@ impl TraceCollector {
             request_throughput_rps: goodput_requests as f64 / duration_s,
             output_throughput_tok_s: goodput_output_tokens as f64 / duration_s,
         });
+        let request_counts = TraceRequestCounts {
+            num_requests: request_count,
+            completed_requests,
+            total_input_tokens,
+            total_output_tokens,
+        };
+        let topology_accounting = Self::build_topology_accounting(
+            &requests,
+            worker_accounting,
+            &request_counts,
+            decode_worker_seconds,
+            gpu_hours,
+        );
         TraceSimulationReport {
-            request_counts: TraceRequestCounts {
-                num_requests: request_count,
-                completed_requests,
-                total_input_tokens,
-                total_output_tokens,
-            },
+            request_counts,
             throughput: TraceThroughputStats {
                 duration_ms,
                 wall_time_ms: 0.0,
@@ -1550,6 +2143,7 @@ impl TraceCollector {
                 output_token_throughput_per_user,
             },
             goodput,
+            topology_accounting,
             per_request,
         }
     }
@@ -2114,9 +2708,9 @@ mod tests {
         collector.on_session_metadata(uuid, "session".to_string(), 0);
         collector.on_prefill_route_overlap(uuid, 48);
         collector.on_decode_route_overlap(uuid, 24);
-        collector.on_route_immediate(uuid, ReplayRequestPool::Prefill, 7, 14, 1, 48);
+        collector.on_route_immediate(uuid, ReplayRequestPool::Prefill, 0.0, 7, 14, 1, Some(48));
         collector.on_route_queued(uuid, ReplayRequestPool::Decode, 1.0);
-        collector.on_route_released(uuid, ReplayRequestPool::Decode, 2.0, 8, 15, 2, 24);
+        collector.on_route_released(uuid, ReplayRequestPool::Decode, 2.0, 8, 15, 2, Some(24));
         collector.on_prefill_admit(uuid, 3.0, 48);
         collector.on_decode_admit(uuid, 5.0, 24);
         collector.on_pool_admission(uuid, ReplayRequestPool::Decode, 6.0, 24);
@@ -2262,6 +2856,131 @@ mod tests {
         assert_eq!(report.throughput.decode_gpus_per_worker, 4);
         // gpu_hours = (10*2 + 5*4) / 3600 = 40 / 3600
         assert!((report.throughput.gpu_hours - 40.0 / 3600.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn topology_accounting_is_deterministic_and_reconciles_static_inactive_time() {
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(0, 4);
+        // Register out of order to prove report ordering comes from authored
+        // identity rather than constructor order.
+        collector.register_decode_worker(
+            "pool-b".to_string(),
+            7,
+            0,
+            ReplayWorkerLifecycleStatus::StaticInactive,
+            4,
+        );
+        collector.register_decode_worker(
+            "pool-a".to_string(),
+            3,
+            0,
+            ReplayWorkerLifecycleStatus::Active,
+            4,
+        );
+        collector.add_decode_worker_seconds("pool-a", 3, 0, 2.0);
+        collector.add_decode_worker_seconds("pool-b", 7, 0, 2.0);
+
+        let completed = Uuid::from_u128(401);
+        collector.on_arrival(completed, 0.0, 8, 1);
+        collector.on_static_pool_assigned(completed, "pool-a".to_string(), 3, 0);
+        collector.on_admit(completed, 1.0, 3);
+        collector.on_token(completed, 10.0);
+        collector.on_terminal(completed, 10.0, ReplayTerminalStatus::Completed);
+
+        let failed = Uuid::from_u128(402);
+        collector.on_arrival(failed, 0.0, 5, 1);
+        collector.on_static_pool_assigned(failed, "pool-a".to_string(), 3, 0);
+        collector.on_terminal(failed, 2.0, ReplayTerminalStatus::Failed);
+
+        let canceled = Uuid::from_u128(403);
+        collector.on_arrival(canceled, 0.0, 7, 2);
+        collector.on_static_pool_assigned(canceled, "pool-a".to_string(), 3, 0);
+        collector.on_admit(canceled, 1.5, 2);
+        collector.on_terminal(canceled, 3.0, ReplayTerminalStatus::Canceled);
+
+        let rejected = Uuid::from_u128(404);
+        collector.on_arrival(rejected, 0.0, 6, 1);
+        collector.on_static_pool_assigned(rejected, "pool-a".to_string(), 3, 0);
+        collector.on_admit(rejected, 0.5, 1);
+        collector.on_terminal(rejected, 1.0, ReplayTerminalStatus::Rejected);
+
+        let report = collector.finish();
+        let accounting = report.topology_accounting.as_ref().unwrap();
+        assert_eq!(
+            accounting
+                .workers
+                .iter()
+                .map(|worker| (worker.pool_id.as_str(), worker.worker_id))
+                .collect::<Vec<_>>(),
+            vec![("pool-a", 3), ("pool-b", 7)]
+        );
+        assert_eq!(accounting.workers[0].request_counts.num_requests, 4);
+        assert_eq!(accounting.workers[0].terminal_counts.completed, 1);
+        assert_eq!(accounting.workers[0].terminal_counts.failed, 1);
+        assert_eq!(accounting.workers[0].terminal_counts.canceled, 1);
+        assert_eq!(accounting.workers[0].terminal_counts.rejected, 1);
+        assert_eq!(accounting.workers[0].input_tokens_by_status.completed, 8);
+        assert_eq!(accounting.workers[0].input_tokens_by_status.failed, 5);
+        assert_eq!(accounting.workers[0].output_tokens_by_status.completed, 1);
+        assert_eq!(accounting.workers[0].output_tokens_by_status.failed, 0);
+        assert_eq!(
+            accounting.workers[0]
+                .reused_input_tokens_by_status
+                .completed,
+            3
+        );
+        assert_eq!(
+            accounting.workers[0].reused_input_tokens_by_status.canceled,
+            2
+        );
+        assert_eq!(
+            accounting.workers[0].reused_input_tokens_by_status.rejected,
+            1
+        );
+        assert_eq!(
+            accounting.workers[0].reused_input_tokens_by_status.failed,
+            0
+        );
+        assert_eq!(accounting.workers[1].request_counts.num_requests, 0);
+        assert_eq!(
+            accounting.workers[1].lifecycle_status,
+            ReplayWorkerLifecycleStatus::StaticInactive
+        );
+        assert!(accounting.workers[1].provisioned);
+        assert_eq!(accounting.workers[1].worker_seconds, 2.0);
+        assert_eq!(accounting.pools[1].static_inactive_workers, 1);
+        assert_eq!(accounting.pools[1].provisioned_workers, 1);
+        assert_eq!(
+            accounting.pools[0].reused_input_tokens_by_status.completed,
+            3
+        );
+        assert_eq!(
+            accounting.pools[0].reused_input_tokens_by_status.canceled,
+            2
+        );
+        assert_eq!(
+            accounting.pools[0].reused_input_tokens_by_status.rejected,
+            1
+        );
+        assert_eq!(accounting.global.terminal_counts.completed, 1);
+        assert_eq!(accounting.global.terminal_counts.rejected, 1);
+        assert_eq!(accounting.global.terminal_counts.canceled, 1);
+        assert_eq!(accounting.global.terminal_counts.failed, 1);
+        assert_eq!(accounting.global.reused_input_tokens_by_status.completed, 3);
+        assert_eq!(accounting.global.reused_input_tokens_by_status.canceled, 2);
+        assert_eq!(accounting.global.reused_input_tokens_by_status.rejected, 1);
+        assert_eq!(
+            accounting.global.reused_input_tokens_by_status,
+            accounting.pools[0].reused_input_tokens_by_status
+        );
+        assert!(accounting.reconciliation.all_reconciled());
+
+        let summary = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            summary["topology_accounting"]["workers"][1]["lifecycle_status"],
+            "static_inactive"
+        );
     }
 
     /// Records emerge in arrival-time order, so the JSONL file produced from

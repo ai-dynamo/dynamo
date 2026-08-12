@@ -1326,6 +1326,7 @@ impl VllmCore {
             queued_tokens,
             running_tokens,
             max_num_seqs: self.args.max_num_seqs,
+            preemption_count: self.state.preemptions_total,
             kv_capacity_blocks,
             kv_occupied_blocks,
             kv_free_blocks,
