@@ -118,12 +118,6 @@ pub struct RequestTracePolicy {
     pub s3_prefix: Option<String>,
     pub s3_roll_uncompressed_bytes: u64,
     pub s3_flush_interval_ms: u64,
-    pub s3_attempt_timeout_ms: u64,
-    pub s3_operation_timeout_ms: u64,
-    pub s3_max_retries: usize,
-    pub s3_retry_initial_backoff_ms: u64,
-    pub s3_retry_max_backoff_ms: u64,
-    pub s3_retry_backoff_base: f64,
 }
 
 impl RequestTracePolicy {
@@ -149,10 +143,26 @@ impl RequestTracePolicy {
     }
 }
 
-static POLICY: OnceLock<RequestTracePolicy> = OnceLock::new();
+#[derive(Clone, Debug)]
+pub(super) struct S3UploadPolicy {
+    pub(super) attempt_timeout_ms: u64,
+    pub(super) operation_timeout_ms: u64,
+    pub(super) max_retries: usize,
+    pub(super) retry_initial_backoff_ms: u64,
+    pub(super) retry_max_backoff_ms: u64,
+    pub(super) retry_backoff_base: f64,
+}
+
+#[derive(Clone, Debug)]
+struct RequestTraceRuntimePolicy {
+    policy: RequestTracePolicy,
+    s3_upload: S3UploadPolicy,
+}
+
+static POLICY: OnceLock<RequestTraceRuntimePolicy> = OnceLock::new();
 static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_UNINITIALIZED);
 
-fn load_from_env() -> RequestTracePolicy {
+fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
     let legacy_audit_sinks = env_trimmed(env_audit::DYN_AUDIT_SINKS);
     let request_trace_enabled = env_is_truthy(env_request_trace::DYN_REQUEST_TRACE);
     let audit_force_logging = env_is_truthy(env_audit::DYN_AUDIT_FORCE_LOGGING);
@@ -316,33 +326,37 @@ fn load_from_env() -> RequestTracePolicy {
         MAX_S3_RETRY_BACKOFF_BASE,
     );
 
-    RequestTracePolicy {
-        enabled,
-        records,
-        sinks,
-        file_path,
-        file_format,
-        capacity,
-        file_buffer_bytes,
-        file_flush_interval_ms,
-        file_roll_bytes,
-        file_roll_lines,
-        nats_subject,
-        otel_max_payload_bytes,
-        http_header_capture_list,
-        tool_events_zmq_endpoint,
-        tool_events_zmq_topic,
-        s3_bucket,
-        s3_region,
-        s3_prefix,
-        s3_roll_uncompressed_bytes,
-        s3_flush_interval_ms,
-        s3_attempt_timeout_ms,
-        s3_operation_timeout_ms,
-        s3_max_retries,
-        s3_retry_initial_backoff_ms,
-        s3_retry_max_backoff_ms,
-        s3_retry_backoff_base,
+    RequestTraceRuntimePolicy {
+        policy: RequestTracePolicy {
+            enabled,
+            records,
+            sinks,
+            file_path,
+            file_format,
+            capacity,
+            file_buffer_bytes,
+            file_flush_interval_ms,
+            file_roll_bytes,
+            file_roll_lines,
+            nats_subject,
+            otel_max_payload_bytes,
+            http_header_capture_list,
+            tool_events_zmq_endpoint,
+            tool_events_zmq_topic,
+            s3_bucket,
+            s3_region,
+            s3_prefix,
+            s3_roll_uncompressed_bytes,
+            s3_flush_interval_ms,
+        },
+        s3_upload: S3UploadPolicy {
+            attempt_timeout_ms: s3_attempt_timeout_ms,
+            operation_timeout_ms: s3_operation_timeout_ms,
+            max_retries: s3_max_retries,
+            retry_initial_backoff_ms: s3_retry_initial_backoff_ms,
+            retry_max_backoff_ms: s3_retry_max_backoff_ms,
+            retry_backoff_base: s3_retry_backoff_base,
+        },
     }
 }
 
@@ -550,8 +564,20 @@ fn parse_file_format(value: &str) -> RequestTraceFileFormat {
     }
 }
 
+#[cfg(test)]
+fn load_from_env() -> RequestTracePolicy {
+    load_runtime_policy_from_env().policy
+}
+
 pub fn policy() -> &'static RequestTracePolicy {
-    POLICY.get_or_init(load_from_env)
+    &POLICY.get_or_init(load_runtime_policy_from_env).policy
+}
+
+pub(super) fn s3_upload_policy() -> S3UploadPolicy {
+    POLICY
+        .get_or_init(load_runtime_policy_from_env)
+        .s3_upload
+        .clone()
 }
 
 pub fn is_enabled() -> bool {
@@ -667,22 +693,22 @@ mod tests {
     #[serial_test::serial]
     fn s3_upload_policy_defaults_preserve_existing_behavior() {
         with_request_trace_env(&[], || {
-            let policy = load_from_env();
-            assert_eq!(policy.s3_attempt_timeout_ms, DEFAULT_S3_ATTEMPT_TIMEOUT_MS);
+            let s3_upload = load_runtime_policy_from_env().s3_upload;
+            assert_eq!(s3_upload.attempt_timeout_ms, DEFAULT_S3_ATTEMPT_TIMEOUT_MS);
             assert_eq!(
-                policy.s3_operation_timeout_ms,
+                s3_upload.operation_timeout_ms,
                 DEFAULT_S3_OPERATION_TIMEOUT_MS
             );
-            assert_eq!(policy.s3_max_retries, DEFAULT_S3_MAX_RETRIES);
+            assert_eq!(s3_upload.max_retries, DEFAULT_S3_MAX_RETRIES);
             assert_eq!(
-                policy.s3_retry_initial_backoff_ms,
+                s3_upload.retry_initial_backoff_ms,
                 DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS
             );
             assert_eq!(
-                policy.s3_retry_max_backoff_ms,
+                s3_upload.retry_max_backoff_ms,
                 DEFAULT_S3_RETRY_MAX_BACKOFF_MS
             );
-            assert_eq!(policy.s3_retry_backoff_base, DEFAULT_S3_RETRY_BACKOFF_BASE);
+            assert_eq!(s3_upload.retry_backoff_base, DEFAULT_S3_RETRY_BACKOFF_BASE);
         });
     }
 
@@ -714,13 +740,13 @@ mod tests {
                 ),
             ],
             || {
-                let policy = load_from_env();
-                assert_eq!(policy.s3_attempt_timeout_ms, 5_000);
-                assert_eq!(policy.s3_operation_timeout_ms, 12_000);
-                assert_eq!(policy.s3_max_retries, 0);
-                assert_eq!(policy.s3_retry_initial_backoff_ms, 250);
-                assert_eq!(policy.s3_retry_max_backoff_ms, 5_000);
-                assert_eq!(policy.s3_retry_backoff_base, 3.5);
+                let s3_upload = load_runtime_policy_from_env().s3_upload;
+                assert_eq!(s3_upload.attempt_timeout_ms, 5_000);
+                assert_eq!(s3_upload.operation_timeout_ms, 12_000);
+                assert_eq!(s3_upload.max_retries, 0);
+                assert_eq!(s3_upload.retry_initial_backoff_ms, 250);
+                assert_eq!(s3_upload.retry_max_backoff_ms, 5_000);
+                assert_eq!(s3_upload.retry_backoff_base, 3.5);
             },
         );
     }
@@ -753,22 +779,22 @@ mod tests {
                 ),
             ],
             || {
-                let policy = load_from_env();
-                assert_eq!(policy.s3_attempt_timeout_ms, DEFAULT_S3_ATTEMPT_TIMEOUT_MS);
+                let s3_upload = load_runtime_policy_from_env().s3_upload;
+                assert_eq!(s3_upload.attempt_timeout_ms, DEFAULT_S3_ATTEMPT_TIMEOUT_MS);
                 assert_eq!(
-                    policy.s3_operation_timeout_ms,
+                    s3_upload.operation_timeout_ms,
                     DEFAULT_S3_OPERATION_TIMEOUT_MS
                 );
-                assert_eq!(policy.s3_max_retries, DEFAULT_S3_MAX_RETRIES);
+                assert_eq!(s3_upload.max_retries, DEFAULT_S3_MAX_RETRIES);
                 assert_eq!(
-                    policy.s3_retry_initial_backoff_ms,
+                    s3_upload.retry_initial_backoff_ms,
                     DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS
                 );
                 assert_eq!(
-                    policy.s3_retry_max_backoff_ms,
+                    s3_upload.retry_max_backoff_ms,
                     DEFAULT_S3_RETRY_MAX_BACKOFF_MS
                 );
-                assert_eq!(policy.s3_retry_backoff_base, DEFAULT_S3_RETRY_BACKOFF_BASE);
+                assert_eq!(s3_upload.retry_backoff_base, DEFAULT_S3_RETRY_BACKOFF_BASE);
             },
         );
 
@@ -792,15 +818,15 @@ mod tests {
                 ),
             ],
             || {
-                let policy = load_from_env();
-                assert_eq!(policy.s3_attempt_timeout_ms, 5_000);
+                let s3_upload = load_runtime_policy_from_env().s3_upload;
+                assert_eq!(s3_upload.attempt_timeout_ms, 5_000);
                 assert_eq!(
-                    policy.s3_operation_timeout_ms,
+                    s3_upload.operation_timeout_ms,
                     DEFAULT_S3_OPERATION_TIMEOUT_MS
                 );
-                assert_eq!(policy.s3_retry_initial_backoff_ms, 5_000);
+                assert_eq!(s3_upload.retry_initial_backoff_ms, 5_000);
                 assert_eq!(
-                    policy.s3_retry_max_backoff_ms,
+                    s3_upload.retry_max_backoff_ms,
                     DEFAULT_S3_RETRY_MAX_BACKOFF_MS
                 );
             },

@@ -45,7 +45,7 @@ use uuid::Uuid;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
 
 use super::RequestTraceRecord;
-use super::config::RequestTracePolicy;
+use super::config::{RequestTracePolicy, s3_upload_policy};
 use super::sink::RequestTraceSink;
 
 const CHANNEL_CAPACITY: usize = 2048;
@@ -98,17 +98,18 @@ impl S3RequestTraceSink {
         let run_id = Uuid::new_v4().simple().to_string();
         let roll_uncompressed_bytes = policy.s3_roll_uncompressed_bytes;
         let flush_interval = Duration::from_millis(policy.s3_flush_interval_ms.max(1));
+        let s3_upload = s3_upload_policy();
         let upload_options = S3UploadOptions {
             bucket,
             prefix,
             host,
             run_id,
-            attempt_timeout: Duration::from_millis(policy.s3_attempt_timeout_ms),
-            operation_timeout: Duration::from_millis(policy.s3_operation_timeout_ms),
-            max_retries: policy.s3_max_retries,
-            retry_initial_backoff: Duration::from_millis(policy.s3_retry_initial_backoff_ms),
-            retry_max_backoff: Duration::from_millis(policy.s3_retry_max_backoff_ms),
-            retry_backoff_base: policy.s3_retry_backoff_base,
+            attempt_timeout: Duration::from_millis(s3_upload.attempt_timeout_ms),
+            operation_timeout: Duration::from_millis(s3_upload.operation_timeout_ms),
+            max_retries: s3_upload.max_retries,
+            retry_initial_backoff: Duration::from_millis(s3_upload.retry_initial_backoff_ms),
+            retry_max_backoff: Duration::from_millis(s3_upload.retry_max_backoff_ms),
+            retry_backoff_base: s3_upload.retry_backoff_base,
         };
 
         let store: Arc<dyn ObjectStore> = Arc::new(
@@ -297,8 +298,8 @@ async fn upload_ready_batch(uploader: &Arc<S3Uploader>, batch: &mut JsonlBatch, 
     let key = uploader.object_key(SystemTime::now(), this_seq);
     let batch_bytes = ready.len();
     if let Err(error) = uploader.put_object(key.clone(), ready).await {
-        // The client exhausted its retries (three total attempts, bounded by
-        // the operation timeout). The batch is dropped here rather
+        // The client exhausted its configured retry limit (bounded by the
+        // operation timeout). The batch is dropped here rather
         // than requeued; a persistent retry buffer is a follow-up concern
         // tracked in the S3 layout PR.
         tracing::warn!(
