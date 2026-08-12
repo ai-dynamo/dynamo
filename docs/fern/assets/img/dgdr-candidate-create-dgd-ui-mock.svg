@@ -3,8 +3,8 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 <svg viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Dynamo Search candidate deployment mock</title>
-  <desc id="desc">A deployment dialog showing the selected DynamoGraphDeploymentCandidate as syntax-highlighted YAML. New DGD is selected, Update existing is unavailable because the topology changed, Replace existing is disruptive, traffic routing remains external, and a Deploy button confirms the action.</desc>
+  <title id="title">Create a DGD from a Dynamo Search candidate</title>
+  <desc id="desc">A dialog showing a DynamoGraphDeploymentCandidate as syntax-highlighted YAML, fields for a new DGD name and namespace, a notice that traffic routing remains unchanged, and a Create DGD button.</desc>
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="8" stdDeviation="18" flood-color="#091425" flood-opacity="0.28"/>
@@ -58,7 +58,7 @@ SPDX-License-Identifier: Apache-2.0
   <g filter="url(#shadow)">
     <rect x="150" y="55" width="1140" height="790" rx="14" fill="#FFFFFF"/>
   </g>
-  <text x="190" y="105" font-family="Inter, Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#0F172A">Deploy candidate</text>
+  <text x="190" y="105" font-family="Inter, Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#0F172A">Create DGD from candidate</text>
   <text x="190" y="132" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" fill="#64748B">minimax-planner-search-g4-0 · rank 1 · evaluated successfully</text>
   <circle cx="1245" cy="98" r="18" fill="#F1F5F9"/>
   <path d="M1239 92 l12 12 M1251 92 l-12 12" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round"/>
@@ -74,7 +74,7 @@ SPDX-License-Identifier: Apache-2.0
   <text x="790" y="207" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">Copy</text>
 
   <g font-family="SFMono-Regular, Consolas, monospace" font-size="13.2" xml:space="preserve">
-    <text x="214" y="253"><tspan fill="#7DD3FC">apiVersion</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">nvidia.com/v1beta1</tspan></text>
+    <text x="214" y="253"><tspan fill="#7DD3FC">apiVersion</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">nvidia.com/v1beta2</tspan></text>
     <text x="214" y="276"><tspan fill="#7DD3FC">kind</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">DynamoGraphDeploymentCandidate</tspan></text>
     <text x="214" y="299"><tspan fill="#7DD3FC">metadata</tspan><tspan fill="#CBD5E1">:</tspan></text>
     <text x="214" y="322"><tspan fill="#64748B">  </tspan><tspan fill="#7DD3FC">name</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">minimax-planner-search-g4-0</tspan></text>
@@ -88,7 +88,7 @@ SPDX-License-Identifier: Apache-2.0
     <text x="214" y="506"><tspan fill="#64748B">        </tspan><tspan fill="#7DD3FC">spec</tspan><tspan fill="#CBD5E1">:</tspan></text>
     <text x="214" y="529"><tspan fill="#64748B">          </tspan><tspan fill="#7DD3FC">containers</tspan><tspan fill="#CBD5E1">:</tspan></text>
     <text x="214" y="552"><tspan fill="#CBD5E1">            - </tspan><tspan fill="#7DD3FC">name</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">main</tspan></text>
-    <text x="214" y="575"><tspan fill="#64748B">              </tspan><tspan fill="#7DD3FC">image</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">dynamo-frontend:latest</tspan></text>
+    <text x="214" y="575"><tspan fill="#64748B">              </tspan><tspan fill="#7DD3FC">image</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">dynamo-frontend:1.3.0</tspan></text>
     <text x="214" y="598"><tspan fill="#CBD5E1">    - </tspan><tspan fill="#7DD3FC">name</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">VllmDecodeWorker</tspan></text>
     <text x="214" y="621"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">type</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">worker</tspan></text>
     <text x="214" y="644"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">replicas</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#FDBA74">1</tspan></text>
@@ -97,47 +97,39 @@ SPDX-License-Identifier: Apache-2.0
     <text x="214" y="718" fill="#64748B">  ···</text>
   </g>
 
-  <text x="880" y="202" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">DEPLOYMENT ACTION</text>
+  <text x="880" y="202" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NEW DEPLOYMENT</text>
 
-  <rect x="880" y="214" width="370" height="92" rx="8" fill="#F3FAE8" stroke="#76B900" stroke-width="2"/>
-  <circle cx="906" cy="242" r="9" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="906" cy="242" r="5" fill="#76B900"/>
-  <text x="928" y="247" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">New DGD</text>
-  <rect x="1141" y="229" width="87" height="23" rx="11.5" fill="#DDF3BC"/>
-  <text x="1154" y="245" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#4D7C0F">SELECTED</text>
-  <text x="904" y="275" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Create minimax-production-g4. The existing</text>
-  <text x="904" y="293" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">DGD and its traffic route stay unchanged.</text>
+  <rect x="880" y="214" width="370" height="112" rx="8" fill="#F3FAE8" stroke="#76B900" stroke-width="2"/>
+  <circle cx="906" cy="243" r="10" fill="#76B900"/>
+  <path d="M901 243 l4 4 l7 -8" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="928" y="248" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">Create an independent DGD</text>
+  <text x="904" y="278" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Copy the candidate spec into a new resource.</text>
+  <text x="904" y="298" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">The DGDC and its run remain unchanged.</text>
 
-  <rect x="880" y="320" width="370" height="92" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
-  <circle cx="906" cy="348" r="9" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="2"/>
-  <text x="928" y="353" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#94A3B8">Update minimax-production</text>
-  <rect x="1137" y="335" width="91" height="23" rx="11.5" fill="#E2E8F0"/>
-  <text x="1148" y="351" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#64748B">UNAVAILABLE</text>
-  <text x="904" y="381" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">The candidate changes the graph topology and</text>
-  <text x="904" y="399" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">cannot be applied safely in place.</text>
+  <text x="880" y="365" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NEW DGD NAME</text>
+  <rect x="880" y="377" width="370" height="44" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="896" y="405" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#0F172A">minimax-production-g4</text>
 
-  <rect x="880" y="426" width="370" height="92" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
-  <circle cx="906" cy="454" r="9" fill="#FFFFFF" stroke="#94A3B8" stroke-width="2"/>
-  <text x="928" y="459" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">Replace minimax-production</text>
-  <text x="904" y="487" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Delete and recreate the DGD with this spec.</text>
-  <text x="904" y="505" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#B45309">Traffic interruption is expected.</text>
+  <text x="880" y="459" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NAMESPACE</text>
+  <rect x="880" y="471" width="370" height="44" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="896" y="499" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#0F172A">inference</text>
 
-  <text x="880" y="551" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NEW DGD NAME</text>
-  <rect x="880" y="563" width="370" height="44" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
-  <text x="896" y="591" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#0F172A">minimax-production-g4</text>
+  <rect x="880" y="551" width="370" height="105" rx="8" fill="#FFF7E6" stroke="#F59E0B"/>
+  <circle cx="905" cy="577" r="10" fill="#F59E0B"/>
+  <text x="902" y="582" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">!</text>
+  <text x="925" y="578" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#92400E">Traffic routing is unchanged</text>
+  <text x="904" y="606" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">Creating the DGD does not update an Ingress,</text>
+  <text x="904" y="626" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">LoadBalancer, or HTTPRoute. Route traffic after</text>
+  <text x="904" y="646" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">the new DGD reports Ready.</text>
 
-  <rect x="880" y="627" width="370" height="89" rx="8" fill="#FFF7E6" stroke="#F59E0B"/>
-  <circle cx="905" cy="653" r="10" fill="#F59E0B"/>
-  <text x="902" y="658" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">!</text>
-  <text x="925" y="654" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#92400E">Traffic routing is unchanged</text>
-  <text x="904" y="680" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">After the new DGD is Ready, update its Ingress,</text>
-  <text x="904" y="698" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">LoadBalancer, or HTTPRoute separately.</text>
+  <rect x="880" y="680" width="370" height="48" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <text x="904" y="709" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">The operation fails if this DGD name already exists.</text>
 
   <line x1="150" y1="768" x2="1290" y2="768" stroke="#E2E8F0"/>
   <rect x="1030" y="789" width="94" height="40" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
   <text x="1055" y="814" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#334155">Cancel</text>
-  <rect x="1138" y="789" width="112" height="40" rx="7" fill="#76B900"/>
-  <text x="1170" y="814" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#172400">Deploy</text>
+  <rect x="1122" y="789" width="128" height="40" rx="7" fill="#76B900"/>
+  <text x="1147" y="814" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#172400">Create DGD</text>
 
-  <text x="32" y="878" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">Mock interface for candidate promotion in the experimental DGDR v1beta2 workflow</text>
+  <text x="32" y="878" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">Mock interface for creating a DGD in the experimental DGDR v1beta2 workflow</text>
 </svg>

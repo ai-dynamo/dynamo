@@ -53,7 +53,7 @@ spec:
         mountPath: /opt/model-cache
 
   backend: vllm
-  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:latest
+  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
 
   hardware:
     gpu:
@@ -346,7 +346,7 @@ A candidate contains a complete DGD spec. Its status reports simulation results 
 deployment health:
 
 ```yaml
-apiVersion: nvidia.com/v1beta1
+apiVersion: nvidia.com/v1beta2
 kind: DynamoGraphDeploymentCandidate
 metadata:
   name: minimax-planner-search-g4-0
@@ -367,7 +367,7 @@ spec: # exactly DynamoGraphDeployment.spec
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
     - name: VllmDecodeWorker
       type: worker
       replicas: 1
@@ -375,7 +375,7 @@ spec: # exactly DynamoGraphDeployment.spec
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
               command:
                 - python3
                 - -m
@@ -407,20 +407,19 @@ status:
 The `experimental` status object is unstructured. Treat its metrics and diagnostics as specific to
 the Sweeper version that produced the candidate.
 
-## Promote a Candidate
+## Create a DGD from a Candidate
 
 Copy a candidate's `spec` into a DGD after the owning DGDR reports `Completed=True`:
 
-The Search UI shows the selected DGDC as syntax-highlighted YAML before deployment. Create a new DGD
-without modifying an existing deployment, update an existing DGD only when the candidate can be
-applied safely in place, or delete and recreate an existing DGD with **Replace**. Replace can cause
-downtime. Review the materialized DGD spec, then select **Deploy**.
+The Search UI shows the selected DGDC as syntax-highlighted YAML. Enter a name, review the
+materialized spec, and select **Create DGD**. The UI copies the candidate `spec` into a new,
+independent DGD. It does not modify or delete an existing deployment.
 
 The deployment action does not modify an Ingress, LoadBalancer, or HTTPRoute and does not shift
 traffic between two DGDs. After creating a new DGD, wait until it is ready and update external
 routing separately.
 
-![Mock candidate deployment dialog showing syntax-highlighted DGDC YAML, New DGD selected, an unavailable in-place update, a disruptive Replace option, unchanged traffic routing, and a Deploy button](../../../assets/img/dgdr-candidate-promotion-ui-mock.svg)
+![Mock dialog showing syntax-highlighted DGDC YAML, a new DGD name and namespace, unchanged traffic routing, and a Create DGD button](../../../assets/img/dgdr-candidate-create-dgd-ui-mock.svg)
 
 ```bash
 kubectl get dgdc minimax-planner-search-g4-0 -n inference -o json \
@@ -430,7 +429,7 @@ kubectl get dgdc minimax-planner-search-g4-0 -n inference -o json \
       metadata: {name: "minimax-production-g4", namespace: "inference"},
       spec: .spec
     }' \
-  | kubectl apply -f -
+  | kubectl create -f -
 ```
 
 The new DGD starts its own deployment lifecycle. DGDC `status.conditions` only confirms that Replay
