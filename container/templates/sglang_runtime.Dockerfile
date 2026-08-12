@@ -23,6 +23,26 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
 ENV PATH=/usr/local/bin/etcd:$PATH
 
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so each rebuild picks
+# up the newest patch level.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl && \
+    rm -rf /var/lib/apt/lists/*
+
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \

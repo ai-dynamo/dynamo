@@ -68,6 +68,28 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so each rebuild picks
+# up the newest patch level.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
