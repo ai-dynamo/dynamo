@@ -561,6 +561,7 @@ pub(crate) struct EntrypointArgs {
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
     template_file: Option<PathBuf>,
+    custom_template_path: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: Option<u32>,
     http_host: Option<String>,
@@ -588,7 +589,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, in_process_token_engine=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, in_process_token_engine=None, aic_perf_config=None, custom_template_path=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -615,6 +616,7 @@ impl EntrypointArgs {
         chat_engine_factory: Option<PyObject>,
         in_process_token_engine: Option<PythonAsyncEngine>,
         aic_perf_config: Option<AicPerfConfig>,
+        custom_template_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
         strip_anthropic_preamble: Option<bool>,
@@ -696,6 +698,7 @@ impl EntrypointArgs {
             model_name,
             endpoint_id: endpoint_id_obj,
             template_file,
+            custom_template_path,
             router_config,
             kv_cache_block_size,
             http_host,
@@ -751,6 +754,7 @@ pub fn make_engine<'p>(
         )
         .endpoint_id(args.endpoint_id.clone())
         .request_template(args.template_file.clone())
+        .custom_template_path(args.custom_template_path.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .migration_limit(Some(args.migration_limit))

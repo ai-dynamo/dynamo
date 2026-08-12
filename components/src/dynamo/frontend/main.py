@@ -450,6 +450,8 @@ async def async_main():
         kwargs["model_path"] = application.model_path
         if config.model_name is None and application.model_name is not None:
             kwargs["model_name"] = application.model_name
+        if application.custom_template_path is not None:
+            kwargs["custom_template_path"] = application.custom_template_path
         token_engine = WorkflowTokenEngine(application)
         kwargs["in_process_token_engine"] = PythonAsyncEngine(
             token_engine.generate, loop

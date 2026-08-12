@@ -3,6 +3,7 @@
 
 import asyncio
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -73,11 +74,27 @@ class _Context:
         return True
 
 
+class _FutureContext(_Context):
+    def async_killed_or_stopped(self):
+        return asyncio.get_running_loop().create_future()
+
+
 async def test_token_engine_adapts_preprocessed_request_to_one_workflow_chunk() -> None:
     chunks = [
         chunk
         async for chunk in WorkflowTokenEngine(_application()).generate(
             {"token_ids": [41]}, _Context()
+        )
+    ]
+
+    assert chunks == [{"token_ids": [42], "index": 0, "finish_reason": "stop"}]
+
+
+async def test_token_engine_accepts_future_shaped_rust_cancellation() -> None:
+    chunks = [
+        chunk
+        async for chunk in WorkflowTokenEngine(_application()).generate(
+            {"token_ids": [41]}, _FutureContext()
         )
     ]
 
@@ -104,6 +121,15 @@ async def test_frontend_application_supports_explicit_boundary_adapters() -> Non
 
     assert chunks[0]["token_ids"] == [9]
     assert chunks[0]["engine_data"] == {"source": "workflow"}
+
+
+def test_frontend_application_accepts_a_custom_chat_template_path() -> None:
+    application = _application(custom_template_path=Path("templates/vision.jinja"))
+
+    assert application.custom_template_path == Path("templates/vision.jinja")
+
+    with pytest.raises(TypeError, match="pathlib.Path"):
+        _application(custom_template_path="templates/vision.jinja")
 
 
 async def test_loader_invokes_trusted_async_provider_with_runtime_and_config(
