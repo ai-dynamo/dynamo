@@ -3647,3 +3647,107 @@ def test_steady_fpm_gate_only_fires_for_two_step_decode_points():
     stub._bench_current_point = BenchmarkPoint(point_type="decode")
     stub._last_update_time = 0.0  # previous update was an empty step
     assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-prompt randomization (salt-paired random token ids)
+# ---------------------------------------------------------------------------
+
+
+def _vocab_stub(vocab_size: int, dp_rank: int = 0):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = vocab_size
+    stub._fpm_dp_rank = dp_rank
+    return stub
+
+
+def test_synthetic_token_ids_are_salt_deterministic_and_in_vocab():
+    stub = _vocab_stub(151_000)
+
+    first = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt-a", 64)
+    second = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt-a", 64)
+    other = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt-b", 64)
+
+    assert first == second, "same salt must reproduce the same sequence"
+    assert first != other
+    assert all(1 <= token < 151_000 for token in first)
+    assert len(set(first)) > 1, "prompts must not be constant"
+
+
+def test_synthetic_token_ids_prefix_stability_pairs_seed_with_request():
+    """The fake prefix-cache pairing invariant: the seed request draws
+    ``prefix_tokens`` ids and the measuring request draws its full prompt
+    from the SAME salt, so the seed must be a strict prefix of the prompt --
+    otherwise the block hashes cannot match and every kv>0 point dies with
+    ``fake_prefix_cache_validation_failed``."""
+    stub = _vocab_stub(151_000)
+
+    seed = InstrumentedScheduler._bench_synthetic_token_ids(stub, "pair-salt", 48)
+    prompt = InstrumentedScheduler._bench_synthetic_token_ids(stub, "pair-salt", 320)
+
+    assert prompt[:48] == seed
+
+
+def test_synthetic_token_ids_decorrelate_across_dp_ranks():
+    """Lockstep keeps salts identical on every attention-DP rank; the rank
+    must be mixed into the seed so DEP expert routing is not fed the same
+    token stream N times over."""
+    rank0 = _vocab_stub(151_000, dp_rank=0)
+    rank1 = _vocab_stub(151_000, dp_rank=1)
+
+    tokens0 = InstrumentedScheduler._bench_synthetic_token_ids(rank0, "same", 64)
+    tokens1 = InstrumentedScheduler._bench_synthetic_token_ids(rank1, "same", 64)
+
+    assert tokens0 != tokens1
+
+
+def test_synthetic_token_ids_fall_back_to_zeros_without_vocab():
+    for vocab_size in (0, 1):
+        stub = _vocab_stub(vocab_size)
+        tokens = InstrumentedScheduler._bench_synthetic_token_ids(stub, "s", 8)
+        assert tokens == [0] * 8
+    # Stubs without the attribute (legacy construction paths) also fall back.
+    bare = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    assert InstrumentedScheduler._bench_synthetic_token_ids(bare, "s", 4) == [0] * 4
+
+
+def test_seed_and_measuring_request_share_block_hashes():
+    """End-to-end pairing through vLLM's real block hasher: the seeded
+    prefix request and the (longer) measuring request must produce identical
+    hashes for every full prefix block, with the same cache salt."""
+    block_size = 16
+    caching_hash_fn = instrumented_scheduler_module.get_hash_fn_by_name("sha256")
+    instrumented_scheduler_module.init_none_hash(caching_hash_fn)
+    hasher = instrumented_scheduler_module.get_request_block_hasher(
+        block_size, caching_hash_fn
+    )
+    stub = _vocab_stub(151_000)
+    salt = "block-hash-salt"
+    prefix_tokens = 64  # 4 full blocks
+    prompt_len = 128
+
+    seed_req = instrumented_scheduler_module.Request(
+        request_id="__bench_fake_prefix_0",
+        prompt_token_ids=InstrumentedScheduler._bench_synthetic_token_ids(
+            stub, salt, prefix_tokens
+        ),
+        sampling_params=instrumented_scheduler_module.SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+        cache_salt=salt,
+    )
+    measuring_req = instrumented_scheduler_module.Request(
+        request_id="__bench_0",
+        prompt_token_ids=InstrumentedScheduler._bench_synthetic_token_ids(
+            stub, salt, prompt_len
+        ),
+        sampling_params=instrumented_scheduler_module.SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+        cache_salt=salt,
+    )
+
+    seed_hashes = list(seed_req.block_hashes)
+    measuring_hashes = list(measuring_req.block_hashes)
+    assert len(seed_hashes) == prefix_tokens // block_size
+    assert measuring_hashes[: len(seed_hashes)] == seed_hashes
