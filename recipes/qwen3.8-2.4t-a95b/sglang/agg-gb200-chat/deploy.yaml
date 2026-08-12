@@ -120,7 +120,8 @@ spec:
               --weight-loader-prefetch-num-threads 4 \
               --watchdog-timeout 900 \
               --decode-log-interval 1 \
-              --enable-cache-report
+              --enable-cache-report \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571"}'
           env:
           - {name: NCCL_ALGO,                                value: Ring}
           - {name: NCCL_PROTO,                               value: LL128}

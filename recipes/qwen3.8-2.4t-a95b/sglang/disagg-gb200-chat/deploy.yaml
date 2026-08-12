@@ -121,7 +121,8 @@ spec:
               --host 0.0.0.0 \
               --disaggregation-mode prefill \
               --disaggregation-transfer-backend nixl \
-              --disaggregation-bootstrap-port 30001
+              --disaggregation-bootstrap-port 30001 \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571"}'
           env:
           - {name: NCCL_ALGO,                                value: Ring}
           - {name: NCCL_PROTO,                               value: LL128}
@@ -225,7 +226,8 @@ spec:
               --watchdog-timeout 7200 \
               --disaggregation-mode decode \
               --disaggregation-transfer-backend nixl \
-              --disaggregation-bootstrap-port 30001
+              --disaggregation-bootstrap-port 30001 \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571"}'
           env:
           - {name: NCCL_ALGO,                                value: Ring}
           - {name: NCCL_PROTO,                               value: LL128}
