@@ -17,28 +17,36 @@ The public replay entrypoints live one level up in `lib/mocker/src/replay/entryp
 
 Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
-`offline/mod.rs` chooses between three implementations:
+`offline/mod.rs` wires two production runtime families:
 
-- `lib/mocker/src/replay/offline/single.rs` for aggregated replay with `num_workers == 1` and `dp_size == 1`
-- `lib/mocker/src/replay/offline/agg.rs` for everything else, including aggregated multi-worker replay and `kv_router` replay
+- `lib/mocker/src/replay/offline/agg.rs` for every aggregated replay topology,
+  including one-worker, multi-worker, `round_robin`, `kv_router`, one-shot,
+  `ReplayWorkSource`, and interactive replay
 - `lib/mocker/src/replay/offline/disagg.rs` for offline disaggregated prefill/decode replay
+
+`lib/mocker/src/replay/offline/single.rs` is compiled only under `cfg(test)`. It is a
+legacy parity oracle for focused comparisons against `AggRuntime`, not a production
+fast path or a runtime selected by `offline/mod.rs`.
 
 ## File Map
 
 - `lib/mocker/src/replay/offline/mod.rs`
-  Chooses single-worker fast path vs multi-worker harness.
+  Declares the runtime modules and exports the offline replay API.
 - `lib/mocker/src/replay/offline/single.rs`
-  Minimal replay loop for one aggregated worker.
+  Test-only legacy one-worker loop used as a parity oracle for `AggRuntime`.
 - `lib/mocker/src/replay/offline/agg.rs`
-  General offline cluster simulator for multi-worker replay and KV-router replay.
+  Sole production aggregated simulator for every worker count and router mode.
 - `lib/mocker/src/replay/offline/disagg.rs`
   Offline two-stage replay harness with separate prefill and decode pools.
 - `lib/mocker/src/replay/offline/state.rs`
   Per-worker wrapper around `EngineCore`, including optional KV event capture.
 - `lib/mocker/src/replay/offline/events.rs`
-  `SimulationEvent`, `SimulationEventKind`, and worker-completion payload types used by the multi-worker harness.
-- `lib/mocker/src/replay/offline/core.rs`
-  Small `ReplayWorkerCore` wrapper used by the single-worker path.
+  `SimulationEvent`, `SimulationEventKind`, and worker-completion payload types
+  used by the production event loops.
+- `lib/mocker/src/replay/offline/core/`
+  Router-neutral admission and placement contracts.
+- `lib/mocker/src/replay/offline/components/worker_core.rs`
+  Small `ReplayWorkerCore` wrapper used by test parity and KV-event helpers.
 - `lib/mocker/src/replay/offline/runtime_utils.rs`
   Shared helpers used by `agg.rs` and `disagg.rs`: event scheduling,
   `ReadyWorkerCompletions`, and `next_timestamp`.
@@ -46,28 +54,29 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
   `ReplayProgress`, the indicatif-based progress bar used by the harnesses.
 - `lib/mocker/src/replay/offline/components/`
   Shared abstractions split out from the runtimes:
-  - `router.rs` — `OfflineReplayRouter` (synchronous in-process router, KV + round-robin modes) and `OfflineRouterSnapshot`.
   - `engine.rs` — `EngineComponent`, `EngineEffects`, `EnginePassMode` wrappers around `EngineCore`.
   - `admission.rs` — admission queue and trace/workload request gating.
   - `types.rs` — `WorkerAdmission`, `RouterEffects`, `ScheduledWorkerCompletions`, `TrafficAccumulator`, `TrafficStats`, `ReplayMode`.
+  - `worker_core.rs` — the small direct-engine wrapper used by test parity and KV-event helpers.
   - `mod.rs` — re-exports.
 
-## Single-Worker Fast Path
+## Test-Only Single-Worker Parity Oracle
 
-The single-worker path is intentionally simple and used when `num_workers == 1`
-and `dp_size == 1` for vLLM, SGLang, and TRT-LLM engine modes. Multi-rank
-attention-DP uses the general harness so each rank has an independent scheduler
-and KV pool while all ranks still share one deterministic event loop and a
-group-owned iteration clock.
+`SingleRuntime` is intentionally simple, but it is not used by production replay.
+The module is compiled only for tests and provides an independent one-worker
+reference for vLLM, SGLang, and TRT-LLM parity checks. Production replay uses
+`AggRuntime` even when `num_workers == 1` and `dp_size == 1`, so one-shot replay,
+`ReplayWorkSource`, and `OfflineReplaySession` share the same event ordering,
+topology accounting, admission, scheduling, KV behavior, and terminal accounting.
 
-That path avoids the cluster event queue and router machinery entirely, but it now supports both:
+The parity oracle avoids the cluster event queue and router machinery. It supports:
 
 - flat request replay
 - workload-driven replay through `WorkloadDriver` for multi-turn/session traces
 
 ```mermaid
 flowchart TD
-    A["single.rs::SingleRuntime"] --> B["pending requests"]
+    A["cfg(test): single.rs::SingleRuntime"] --> B["pending requests"]
     B --> C{"mode"}
     C -->|trace| D["enqueue arrivals whose arrival_timestamp_ms <= current_time_ms"]
     C -->|concurrency| E["enqueue until max_in_flight"]
@@ -86,11 +95,13 @@ Important details:
 - Concurrency mode ignores original arrival spacing and keeps the worker filled up to `max_in_flight`.
 - Workload trace mode honors first-turn timestamps and inter-turn delays.
 - Workload concurrency mode ignores first-turn timestamps but still enforces inter-turn delays after completion.
-- The worker itself is still the real mocker engine core; only the scheduling loop is simplified.
+- The worker itself is still the real mocker engine core; only the test-reference scheduling loop is simplified.
 
-## Multi-Worker Harness
+## Aggregated Production Kernel
 
-The general aggregated harness lives in `lib/mocker/src/replay/offline/agg.rs`. It models a cluster with:
+The production aggregated kernel lives in `lib/mocker/src/replay/offline/agg.rs`.
+It serves every static aggregated topology, from one worker to heterogeneous
+multi-pool configurations, and models a cluster with:
 
 - a logical clock `now_ms`
 - a pending request queue
@@ -251,7 +262,7 @@ TTFT includes prefill queueing and prefill compute.
 
 ## Trace vs Concurrency Modes
 
-Both single and multi harnesses support two admission modes:
+The production aggregated and disaggregated runtimes support two admission modes:
 
 - Trace mode
   - for flat requests, respects input arrival timestamps
@@ -267,14 +278,14 @@ Both single and multi harnesses support two admission modes:
     when an active one finishes).
   - stamps synthetic arrival times as requests are admitted
 
-This split is why `lib/mocker/src/replay/offline/mod.rs` exposes both:
+The replay entrypoints expose both:
 
 - `simulate_trace(...)`
 - `simulate_concurrency(...)`
 
 ## Metrics Collection
 
-Both harnesses emit request timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`:
+Both production runtime families emit request timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`:
 
 - arrival
 - admission
