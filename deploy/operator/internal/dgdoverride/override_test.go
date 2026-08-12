@@ -230,6 +230,7 @@ spec:
 func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Define invalid args append directives")
 	tests := []struct {
 		name          string
 		containerName string
@@ -241,6 +242,7 @@ func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
 		{name: "missing args", containerName: "main", modifier: "append", wantError: "args must be non-empty"},
 		{name: "non-string args", containerName: "main", modifier: "append", argsLine: "          args: [--flag, 7]\n", wantError: "list of strings"},
 		{name: "empty string arg", containerName: "main", modifier: "append", argsLine: "          args: [--flag, \"\"]\n", wantError: "args[1] must be non-empty"},
+		{name: "empty container name", containerName: `""`, modifier: "append", argsLine: "          args: [--flag]\n", wantError: "name must be a non-empty string"},
 		{name: "unknown sidecar", containerName: "missing", modifier: "append", argsLine: "          args: [--flag]\n", wantError: "is not present in the generated blueprint"},
 	}
 

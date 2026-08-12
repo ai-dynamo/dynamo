@@ -295,9 +295,11 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 }
 
 func TestValidateDynamoComponentDeploymentSharedSpecContainerArgsPatches(t *testing.T) {
+	t.Log("Prepare shared validation fixtures")
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 	componentPath := field.NewPath("spec", "components").Index(0)
 
+	t.Log("Define valid and invalid container argument patch cases")
 	tests := []struct {
 		name     string
 		template *corev1.PodTemplateSpec
@@ -327,6 +329,15 @@ func TestValidateDynamoComponentDeploymentSharedSpecContainerArgsPatches(t *test
 			}}},
 			target: "missing",
 			want:   []string{"spec.components[0].containerArgsPatches[0].name"},
+		},
+		{
+			name:     "rejects sidecar without pod template",
+			template: nil,
+			target:   "metrics",
+			want: []string{
+				"spec.components[0].containerArgsPatches[0].name",
+				"spec.components[0].podTemplate.spec.containers",
+			},
 		},
 		{
 			name: "rejects empty argument",

@@ -1736,6 +1736,8 @@ func applyContainerArgsPatches(podSpec *corev1.PodSpec, patches []v1beta1.Contai
 				break
 			}
 		}
+
+		// Reject stale or invalid targets before mutating the rendered pod.
 		if targetIndex == -1 {
 			return fmt.Errorf("containerArgsPatches references unknown container %q", patch.Name)
 		}

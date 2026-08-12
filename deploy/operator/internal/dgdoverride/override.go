@@ -607,6 +607,8 @@ func extractBetaContainerArgsPatches(
 	if _, exists := component["containerArgsPatches"]; exists {
 		return fmt.Errorf("beta override spec.components[%d] cannot combine containerArgsPatches with a $patch args directive", componentIndex)
 	}
+
+	// Persist the transformed containers and typed patches for structural merge and pod rendering.
 	if err := unstructured.SetNestedSlice(component, containers, "podTemplate", "spec", "containers"); err != nil {
 		return fmt.Errorf("prepare beta override component containers: %w", err)
 	}

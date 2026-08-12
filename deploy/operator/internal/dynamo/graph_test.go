@@ -6151,12 +6151,14 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 }
 
 func TestGenerateBasePodSpecAppendsContainerArgsAfterDefaultsAndOverrides(t *testing.T) {
+	t.Log("Prepare shared pod-generation fixtures")
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 	}
 
+	t.Log("Define generated-default and explicit-replacement cases")
 	tests := []struct {
 		name         string
 		overrideArgs []string
