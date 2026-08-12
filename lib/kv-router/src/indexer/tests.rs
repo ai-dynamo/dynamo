@@ -2492,14 +2492,16 @@ mod local_indexer_tests {
     }
 
     fn make_local_clear_event(event_id: u64) -> RouterEvent {
-        RouterEvent::new(
-            0,
-            KvCacheEvent {
+        RouterEvent {
+            worker_id: 0,
+            storage_tier: StorageTier::Device,
+            residency_domain: WireResidencyDomain::default(),
+            event: KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Cleared,
                 dp_rank: 0,
             },
-        )
+        }
     }
 
     #[tokio::test]
@@ -2606,6 +2608,7 @@ mod local_indexer_tests {
             WorkerKvQueryResponse::TreeDump {
                 events,
                 last_event_id,
+                ..
             } => {
                 assert_eq!(events.len(), 10);
                 assert_eq!(last_event_id, 14);
@@ -2618,6 +2621,7 @@ mod local_indexer_tests {
             WorkerKvQueryResponse::TreeDump {
                 events,
                 last_event_id,
+                ..
             } => {
                 assert_eq!(events.len(), 10);
                 assert_eq!(last_event_id, 14);
@@ -2643,6 +2647,7 @@ mod local_indexer_tests {
             WorkerKvQueryResponse::TreeDump {
                 last_event_id,
                 events,
+                ..
             } => {
                 assert_eq!(
                     last_event_id, 0,
@@ -2655,7 +2660,7 @@ mod local_indexer_tests {
     }
 
     #[tokio::test]
-    async fn test_local_indexer_buffer_response_starts_at_last_clear() {
+    async fn test_local_indexer_buffer_response_starts_at_last_all_domain_clear() {
         let indexer = LocalKvIndexer::new(
             CancellationToken::new(),
             4,
@@ -2987,6 +2992,7 @@ mod local_indexer_tests {
             WorkerKvQueryResponse::TreeDump {
                 events,
                 last_event_id,
+                ..
             } => {
                 assert_eq!(last_event_id, 2);
                 assert!(events.iter().any(|event| event.event.event_id == 2));

@@ -7,7 +7,7 @@
 ########## Planner / Profiler image ##########
 ##############################################
 # Standalone planner/profiler image:
-# - install deps in a slim builder stage that has git/git-lfs available
+# - install dependencies in a slim builder stage
 # - ship only the runtime artifacts in a distroless final stage
 
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
@@ -16,8 +16,7 @@ ARG PYTHON_VERSION
 ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
-# dependencies in the builder stage. git/git-lfs are only needed because
-# aiconfigurator is currently installed from a Git URL with LFS-backed assets.
+# dependencies in the builder stage.
 # On arm64, gcc + libc6-dev are added so aiperf's `crick` dep can compile
 # from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
 # the prebuilt wheel from PyPI is used and the toolchain is skipped
@@ -35,8 +34,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     if [ "$TARGETARCH" = "arm64" ]; then EXTRA_PKGS="gcc libc6-dev"; fi; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
-        git \
-        git-lfs \
         libgomp1 \
         $EXTRA_PKGS && \
     apt-get clean && \
@@ -73,7 +70,7 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
@@ -83,11 +80,17 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
 
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
-# runtime code comes from the wheel installed above; copy only its tests.
+# runtime code comes from the wheel installed above. The Router adapter and
+# replay bridge unit tests also run here because this image installs that wheel;
+# copy the AI Simulate examples exercised by those tests as test fixtures.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation.py /workspace/components/src/dynamo/replay/tests/test_simulation.py
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation_integration.py /workspace/components/src/dynamo/replay/tests/test_simulation_integration.py
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_sweep_config_provider.py /workspace/components/src/dynamo/router/tests/test_router_sweep_config_provider.py
+COPY --chmod=775 --chown=dynamo:0 aisimulate/examples/sweeper/tools/run_sweep.py /workspace/aisimulate/examples/sweeper/tools/run_sweep.py
 COPY --chmod=775 --chown=dynamo:0 aisimulate/tests /workspace/aisimulate/tests
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev

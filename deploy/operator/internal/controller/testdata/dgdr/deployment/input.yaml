@@ -8,7 +8,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
-  image: test.invalid/profiler:replaced-by-test
+  image: test.invalid/profiler:1.4.0-test
   searchStrategy: rapid
   autoApply: true
   hardware:

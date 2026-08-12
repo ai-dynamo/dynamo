@@ -11,7 +11,7 @@ use crate::protocols::{
     StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
-use super::types::{BlockHashValue, RawKvEvent};
+use super::types::{BlockHashValue, Locality, RawKvEvent};
 
 /// Convert a raw event coming from the ZMQ channel into a placement-aware worker event.
 pub fn convert_event(
@@ -22,13 +22,48 @@ pub fn convert_event(
     warning_count: &Arc<AtomicU32>,
     image_token_id: Option<u32>,
 ) -> Option<PlacementEvent> {
-    let storage_tier = match &raw {
-        RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
-            StorageTier::from_kv_medium_or_default(medium.as_deref())
+    // Read the wire tier/locality facts up front, before any indexing work.
+    let (medium, locality) = match &raw {
+        RawKvEvent::BlockStored {
+            medium, locality, ..
         }
-        RawKvEvent::AllBlocksCleared => StorageTier::Device,
+        | RawKvEvent::BlockRemoved {
+            medium, locality, ..
+        } => (medium.as_deref(), *locality),
+        RawKvEvent::AllBlocksCleared => (None, None),
         RawKvEvent::Ignored => return None,
     };
+
+    // No consumer exists for a shared/global index yet (dynamo #10457), so
+    // REMOTE and any unrecognized locality fail closed. Absent or LOCAL keeps
+    // the event worker-local, matching legacy CPU-offload events that never
+    // carried a locality field. The normalizer's preprocess step classifies
+    // these as filtered first; this guard is a defensive backstop for direct
+    // convert_event callers that bypass preprocess.
+    if matches!(locality, Some(Locality::Remote | Locality::Unknown)) {
+        tracing::trace!(event_id, "Dropping non-local KV event (locality != LOCAL)");
+        return None;
+    }
+
+    // Fail closed on unrecognized media instead of silently indexing them on
+    // the device (G1) primary tree. vLLM 0.26.0 ships `FS` / `OBJ` (pre-#48123
+    // wire); those and any future medium strings are dropped, not misfiled. The
+    // normalizer's preprocess step classifies these as filtered first (so no
+    // event id is burned); this guard is a defensive backstop for direct
+    // convert_event callers that bypass preprocess, mirroring the locality gate.
+    let storage_tier = match medium {
+        None => StorageTier::Device,
+        Some(medium) => match StorageTier::from_kv_medium(medium) {
+            Some(tier) => tier,
+            None => {
+                if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
+                    tracing::warn!(event_id, medium, "Dropping KV event with unknown medium");
+                }
+                return None;
+            }
+        },
+    };
+
     let dp_rank = worker.dp_rank;
     let event = match raw {
         RawKvEvent::BlockStored {
@@ -44,6 +79,7 @@ pub fn convert_event(
             group_idx: _,
             kv_cache_spec_kind: _,
             kv_cache_spec_sliding_window: _,
+            locality: _,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {

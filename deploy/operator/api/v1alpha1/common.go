@@ -196,8 +196,7 @@ type GPUMemoryServiceSpec struct {
 	// DGD/DCD services apply this to service pods. Auto-created checkpoints
 	// apply checkpoint job clients before creating the DynamoCheckpoint; manual
 	// DynamoCheckpoint users must provide an already-prepared pod template.
-	// In each rendered pod, only matching container names are wired; absent
-	// names are ignored.
+	// Every name must match a user-declared container in the enclosing pod spec.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
@@ -256,12 +255,16 @@ type FailoverSpec struct {
 }
 
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-// for replica management. When enabled, the DGDSA owns the replicas field and
-// external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+// (DGDSA) for replica management. When enabled, the DGDSA owns the replicas field so that
+// external autoscalers (HPA, KEDA, Planner) can drive scaling via the Scale subresource.
+//
+// Enable it with `scalingAdapter: {enabled: true}`. Because `enabled` defaults to false, a
+// bare `scalingAdapter: {}` is disabled.
 type ScalingAdapter struct {
-	// Enabled indicates whether the ScalingAdapter should be enabled for this service.
-	// When true, a DGDSA is created and owns the replicas field.
-	// When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+	// Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and
+	// owns the replicas field. When false (the default), no DGDSA is created and replicas are
+	// set directly on the DGD -- so a bare `scalingAdapter: {}` is disabled; set
+	// `enabled: true` to opt in.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`

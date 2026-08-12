@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Qwen3-235B-A22B-FP8 Recipes
 
 Production-ready deployments for **Qwen3-235B-A22B** (MoE model with 22B active parameters) using TensorRT-LLM.
@@ -13,7 +18,7 @@ Production-ready deployments for **Qwen3-235B-A22B** (MoE model with 22B active 
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx)
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **GPU cluster** with H100/H200 (Hopper) or B100/B200 (Blackwell) GPUs — see [Hardware Requirements](#hardware-requirements)
 3. **HuggingFace token** with access to Qwen models
 
@@ -37,7 +42,64 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 # OR: kubectl apply -f trtllm/agg/blackwell/deploy.yaml -n ${NAMESPACE}   # B100/B200
 # OR: kubectl apply -f trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}   # H100/H200
-# OR: kubectl apply -f trtllm/disagg/blackwell/deploy.yaml -n ${NAMESPACE} # B100/B200
+
+# For Blackwell disaggregated, choose the provider-specific manifest matching your cluster interconnect:
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-gcp-roce.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-nscale-ib.yaml -n ${NAMESPACE}
+```
+
+## Cloud Provider Overlays
+
+The Blackwell disaggregated recipe keeps the shared deployment in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`.
+Provider-specific deltas live in Kustomize Components and are selected by
+`trtllm/disagg/blackwell/.kustomize-matrix.yaml`.
+Shared Kustomize building blocks belong under `recipes/kustomize/components/`;
+the disaggregated provider Components use the
+backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
+Kustomize is both the authoring model and documentation for the variants: the
+base and Components explain provider settings, and each public overlay documents
+the selected composition. Cluster users can apply a checked-in `deploy-*.yaml`
+manifest directly or apply its public overlay with `kubectl apply -k`; neither
+path requires regeneration.
+For recipe contributors, the source of truth is the matrix, `kustomize/base/`,
+recipe-local Components, plus any referenced shared Components under
+`recipes/kustomize/components/`. Public overlay
+`kustomization.yaml` files and `deploy-*.yaml` files are generated artifacts:
+commit them for review, but do not edit them by hand.
+Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from source YAML before matching rendered fields.
+Comments inside literal block scalars already render in place.
+
+| Rendered manifest | Provider fabric | Patch source |
+|-------------------|-----------------|--------------|
+| `trtllm/disagg/blackwell/deploy-generic.yaml` | Provider-neutral baseline | `trtllm/disagg/blackwell/kustomize/overlays/generic/` |
+| `trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml` | AWS EFA on `p6-b200.48xlarge`, 8 EFA per worker | `recipes/kustomize/components/aws-efa-p8d8/` |
+| `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `recipes/kustomize/components/disagg-workers/gke-roce/` |
+| `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `recipes/kustomize/components/disagg-workers/nscale-ib/` |
+
+For example, apply the GKE RoCE composition from its checked-in Kustomization:
+
+```bash
+kubectl apply -k trtllm/disagg/blackwell/kustomize/overlays/gcp-roce -n ${NAMESPACE}
+```
+
+To make a local, uncommitted composition, create your own `kustomization.yaml` in
+the repository checkout or run `compose` from the repository root:
+
+```bash
+scripts/kustomize-matrix.py compose \
+  recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/kustomize/base \
+  recipes/kustomize/components/disagg-workers/gke-roce \
+  | kubectl apply -f - -n ${NAMESPACE}
+```
+
+Only recipe contributors update checked-in derived artifacts. After editing the
+matrix, base, or Components, regenerate the public overlays and apply-able
+manifests from the repository root:
+
+```bash
+scripts/kustomize-matrix.py unfold trtllm/disagg/blackwell/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render trtllm/disagg/blackwell/.kustomize-matrix.yaml
 ```
 
 ## Test the Deployment

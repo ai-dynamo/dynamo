@@ -14,7 +14,6 @@ import logging
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -53,6 +52,7 @@ from tests.router.helper import (
     parse_sse_json_chunks,
     poll_for_worker_instances,
     topology_env,
+    wait_for_frontend_ready,
 )
 from tests.router.mocker_process import (
     DisaggMockerProcess,
@@ -60,7 +60,7 @@ from tests.router.mocker_process import (
     launch_disagg_workers,
     wait_for_disagg_workers,
 )
-from tests.router.router_process import KVRouterProcess
+from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
@@ -210,14 +210,13 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 
 def _require_router_aic() -> dict[str, Any]:
     pytest.importorskip(
-        "aiconfigurator", reason="router AIC test requires aiconfigurator"
+        "aiconfigurator_core",
+        reason="router AIC test requires aiconfigurator-core",
     )
-    # Rust AIC callback imports aiconfigurator.sdk.engine.compile_engine
-    # (Phase 1.5 API from ai-dynamo/aiconfigurator#1200). PyPI releases
-    # predating it don't ship engine.py.
+    # Rust AIC callback imports aiconfigurator_core.sdk.engine.compile_engine.
     pytest.importorskip(
-        "aiconfigurator.sdk.engine",
-        reason="router AIC test requires aiconfigurator.sdk.engine (Phase 1.5)",
+        "aiconfigurator_core.sdk.engine",
+        reason="router AIC test requires aiconfigurator_core.sdk.engine",
     )
     return ROUTER_AIC_CONFIG.copy()
 
@@ -245,8 +244,21 @@ class CounterWorkerProcess:
     """
 
     def __init__(
-        self, request, store_backend: str = "etcd", request_plane: str = "nats"
+        self,
+        request,
+        store_backend: str = "etcd",
+        request_plane: str = "nats",
+        router_mode: str = "device-aware-weighted",
+        initial_taints: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
+        system_ports: tuple[int, int] | None = None,
     ):
+        if initial_taints is not None and len(initial_taints) != 2:
+            raise ValueError(
+                "initial_taints must contain exactly two worker taint sets"
+            )
+        if system_ports is not None and len(system_ports) != 2:
+            raise ValueError("system_ports must contain exactly two worker ports")
+
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "counter"
@@ -255,6 +267,9 @@ class CounterWorkerProcess:
         self._request = request
         self._store_backend = store_backend
         self._request_plane = request_plane
+        self._router_mode = router_mode
+        self._initial_taints = initial_taints or ((), ())
+        self._system_ports = system_ports
         self._cpu_count_file: Optional[str] = None
         self._gpu_count_file: Optional[str] = None
         self._cpu_proc: Optional[ManagedProcess] = None
@@ -270,55 +285,76 @@ class CounterWorkerProcess:
         assert self._gpu_count_file is not None
         return self._gpu_count_file
 
+    def _worker_command(
+        self,
+        count_file: str,
+        device_type: str,
+        initial_taints: tuple[str, ...],
+    ) -> list[str]:
+        command = [
+            sys.executable,
+            COUNTER_WORKER_SCRIPT,
+            count_file,
+            device_type,
+            self.endpoint_path,
+            "--discovery-backend",
+            self._store_backend,
+            "--request-plane",
+            self._request_plane,
+            "--router-mode",
+            self._router_mode,
+        ]
+        if self._router_mode == "kv":
+            command.append("--no-router-kv-events")
+        for taint in initial_taints:
+            command.extend(["--initial-taint", taint])
+        return command
+
+    def _worker_process_options(
+        self, worker_index: int
+    ) -> tuple[dict[str, str], list[int], list[str]]:
+        env = os.environ.copy()
+        if self._system_ports is None:
+            return env, [], []
+
+        system_port = self._system_ports[worker_index]
+        env["DYN_SYSTEM_PORT"] = str(system_port)
+        return env, [system_port], []
+
     def __enter__(self):
         cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
         os.close(cpu_fd)
         gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
         os.close(gpu_fd)
 
-        env = os.environ.copy()
+        cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
         self._cpu_proc = ManagedProcess(
-            command=[
-                sys.executable,
-                COUNTER_WORKER_SCRIPT,
+            command=self._worker_command(
                 self._cpu_count_file,
                 "cpu",
-                self.endpoint_path,
-                "--discovery-backend",
-                self._store_backend,
-                "--request-plane",
-                self._request_plane,
-                "--router-mode",
-                "device-aware-weighted",
-            ],
-            env=env,
+                self._initial_taints[0],
+            ),
+            env=cpu_env,
             timeout=60,
             display_output=True,
-            health_check_ports=[],
-            health_check_urls=[],
+            health_check_ports=cpu_health_ports,
+            health_check_urls=cpu_health_urls,
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="counter-worker-cpu",
         )
+        gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
         self._gpu_proc = ManagedProcess(
-            command=[
-                sys.executable,
-                COUNTER_WORKER_SCRIPT,
+            command=self._worker_command(
                 self._gpu_count_file,
                 "gpu",
-                self.endpoint_path,
-                "--discovery-backend",
-                self._store_backend,
-                "--request-plane",
-                self._request_plane,
-                "--router-mode",
-                "device-aware-weighted",
-            ],
-            env=env,
+                self._initial_taints[1],
+            ),
+            env=gpu_env,
             timeout=60,
             display_output=True,
-            health_check_ports=[],
-            health_check_urls=[],
+            health_check_ports=gpu_health_ports,
+            health_check_urls=gpu_health_urls,
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="counter-worker-gpu",
@@ -957,24 +993,43 @@ def test_router_decisions_router_aic(
     )
 
 
-def _wait_for_frontend_to_observe_single_pd_role(
-    frontend: KVRouterProcess,
+async def _wait_for_frontend_to_commit_single_pd_role(
+    frontend_port: int,
+    namespace: str,
     worker_type: str,
     timeout: float = 30,
 ) -> None:
-    patterns = {
-        "decode": "No prefill endpoint for namespace yet, storing sender for future activation",
-        "prefill": "Stored prefill endpoint for future decode WorkerSet registration",
-    }
-    pattern = patterns[worker_type]
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pattern in frontend.read_logs():
-            return
-        time.sleep(0.1)
+    readiness_url = f"http://localhost:{frontend_port}/v1/models/{MODEL_NAME}/ready"
+    deadline = asyncio.get_running_loop().time() + timeout
+    last_response: object = None
+    client_timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with session.get(readiness_url) as response:
+                    if response.status == 200:
+                        body = await response.json()
+                        last_response = body
+                        role = (
+                            body.get("namespaces", {})
+                            .get(namespace, {})
+                            .get("worker_types", {})
+                            .get(worker_type, {})
+                        )
+                        if role.get("workers", 0) == 1:
+                            return
+                    else:
+                        last_response = {
+                            "status": response.status,
+                            "body": await response.text(),
+                        }
+            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+                last_response = repr(error)
+            await asyncio.sleep(0.1)
 
     raise AssertionError(
-        f"Frontend did not observe the standalone {worker_type} WorkerSet within {timeout}s"
+        f"Frontend did not commit the standalone {worker_type} WorkerSet within {timeout}s; "
+        f"last response: {last_response}"
     )
 
 
@@ -1094,8 +1149,10 @@ def test_mocker_disagg_startup_lifecycle(
                 )[0]
 
             if frontend is not None and len(workers) == 1:
-                _wait_for_frontend_to_observe_single_pd_role(
-                    frontend, next(iter(workers))
+                asyncio.run(
+                    _wait_for_frontend_to_commit_single_pd_role(
+                        frontend_port, namespace, next(iter(workers))
+                    )
                 )
 
         assert frontend is not None
@@ -1519,3 +1576,141 @@ def test_router_per_worker_config(
             cpu_count_file=workers.cpu_count_file,
             gpu_count_file=workers.gpu_count_file,
         )
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_update_model_taints_replaces_worker_routing_constraints(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    request_plane,
+    event_plane,
+    num_system_ports,
+):
+    """Update one worker's taints through HTTP and observe KV routing propagation."""
+    assert event_plane == "zmq"
+    assert num_system_ports == 2
+    worker_a_system_port, worker_b_system_port = dynamo_dynamic_ports.system_ports
+    system_ports = (worker_a_system_port, worker_b_system_port)
+
+    def read_count(path: str) -> int:
+        try:
+            value = Path(path).read_text().strip()
+            return int(value) if value else 0
+        except (OSError, ValueError):
+            return 0
+
+    def constrained_payload(required_taint: str) -> dict[str, Any]:
+        return {
+            **COUNTER_TEST_PAYLOAD,
+            "stream": False,
+            "nvext": {
+                "routing_constraints": {
+                    "required_taints": [required_taint],
+                }
+            },
+        }
+
+    async def run_test(workers: CounterWorkerProcess) -> None:
+        frontend_url = f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        fast_payload = constrained_payload("capacity/fast")
+        slow_payload = constrained_payload("capacity/slow")
+        other_payload = constrained_payload("capacity/other")
+
+        await wait_for_frontend_ready(
+            frontend_url=frontend_url,
+            expected_num_workers=workers.num_workers,
+            timeout=60,
+            test_payload=fast_payload,
+            engine_workers=workers,
+            store_backend="etcd",
+            request_plane=request_plane,
+        )
+
+        async def post_chat(
+            session: aiohttp.ClientSession,
+            payload: dict[str, Any],
+        ) -> tuple[int, str]:
+            async with session.post(chat_url, json=payload) as response:
+                return response.status, await response.text()
+
+        client_timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            baseline_a = read_count(workers.cpu_count_file)
+            baseline_b = read_count(workers.gpu_count_file)
+            status, body = await post_chat(session, fast_payload)
+            assert status == 200, body
+            assert read_count(workers.cpu_count_file) == baseline_a + 1
+            assert read_count(workers.gpu_count_file) == baseline_b
+
+            update_url = (
+                f"http://127.0.0.1:{system_ports[0]}" "/engine/update/model_taints"
+            )
+            async with session.post(
+                update_url,
+                json={"taints": ["capacity/slow"]},
+            ) as response:
+                update_body = await response.json(content_type=None)
+                assert response.status == 200, update_body
+            assert update_body == {
+                "status": "ok",
+                "taints": ["capacity/slow"],
+            }
+
+            # The first successful constrained request is the propagation barrier.
+            deadline = asyncio.get_running_loop().time() + 30
+            last_status = None
+            last_body = ""
+            while asyncio.get_running_loop().time() < deadline:
+                last_status, last_body = await post_chat(session, slow_payload)
+                if last_status == 200:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError(
+                    "Timed out waiting for capacity/slow routing propagation: "
+                    f"status={last_status} body={last_body}"
+                )
+
+            assert read_count(workers.cpu_count_file) == baseline_a + 2
+            assert read_count(workers.gpu_count_file) == baseline_b
+
+            before_removed_a = read_count(workers.cpu_count_file)
+            before_removed_b = read_count(workers.gpu_count_file)
+            status, body = await post_chat(session, fast_payload)
+            assert status == 500, (
+                "capacity/fast should have been replaced, not retained; "
+                f"status={status} body={body}"
+            )
+            assert read_count(workers.cpu_count_file) == before_removed_a
+            assert read_count(workers.gpu_count_file) == before_removed_b
+
+            before_other_a = read_count(workers.cpu_count_file)
+            before_other_b = read_count(workers.gpu_count_file)
+            status, body = await post_chat(session, other_payload)
+            assert status == 200, body
+            assert read_count(workers.cpu_count_file) == before_other_a
+            assert read_count(workers.gpu_count_file) == before_other_b + 1
+
+    with CounterWorkerProcess(
+        request,
+        request_plane=request_plane,
+        router_mode="kv",
+        initial_taints=(("capacity/fast",), ("capacity/other",)),
+        system_ports=system_ports,
+    ) as workers:
+        with FrontendRouterProcess(
+            request=request,
+            block_size=BLOCK_SIZE,
+            frontend_port=dynamo_dynamic_ports.frontend_port,
+            namespace=workers.namespace,
+            store_backend="etcd",
+            request_plane=request_plane,
+            router_mode="kv",
+            min_initial_workers=workers.num_workers,
+        ):
+            asyncio.run(run_test(workers))

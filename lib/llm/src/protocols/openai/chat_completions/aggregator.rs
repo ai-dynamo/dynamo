@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, HashMap};
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
@@ -17,6 +17,7 @@ use crate::protocols::{
 
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_runtime::engine::DataStream;
+use dynamo_runtime::error::DynamoError;
 
 fn is_harmony_parser(parser: &str) -> bool {
     parser == "harmony"
@@ -42,8 +43,6 @@ pub struct DeltaAggregator {
     system_fingerprint: Option<String>,
     /// Map of incremental response choices, keyed by index.
     choices: HashMap<u32, DeltaChoice>,
-    /// Optional error message if an error occurs during aggregation.
-    error: Option<String>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
@@ -199,7 +198,6 @@ impl DeltaAggregator {
             usage: None,
             system_fingerprint: None,
             choices: HashMap::new(),
-            error: None,
             service_tier: None,
             nvext: None,
         }
@@ -213,25 +211,15 @@ impl DeltaAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation is successful.
-    /// * `Err(String)` if an error occurs during processing.
+    /// * `Err(DynamoError)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         let mut aggregator = stream
-            .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
-                // Attempt to unwrap the delta, capturing any errors.
-                let delta = match delta.ok() {
-                    Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
-                        return aggregator;
-                    }
-                };
-
-                if aggregator.error.is_none()
-                    && let Some(delta) = delta.data
-                {
+            .map(Annotated::into_data)
+            .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
+                if let Some(delta) = delta {
                     aggregator.id = delta.inner.id;
                     aggregator.model = delta.inner.model;
                     aggregator.created = delta.inner.created;
@@ -339,14 +327,9 @@ impl DeltaAggregator {
                         }
                     }
                 }
-                aggregator
+                Ok(aggregator)
             })
-            .await;
-
-        // Return early if an error was encountered.
-        if let Some(error) = aggregator.error {
-            return Err(error);
-        }
+            .await?;
 
         // #8640: finalize the per-index tool-call chunk accumulator into the
         // choice's `tool_calls` vector. Chunks missing id or name across the
@@ -388,6 +371,31 @@ impl DeltaAggregator {
                 // (tool_choice=required/named or structural-tag, gated by
                 // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
                 // keep the v1 finalize path.
+                // Extract the truncated tail BEFORE parsing so a second <tool_call>
+                // truncated after a complete first one is not silently dropped.
+                // Token strings come from the parser config so this stays in sync
+                // with any override, and matches the streaming path in preprocessor.rs.
+                let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+                let glm47_truncated_tail = if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) {
+                    choice
+                        .text
+                        .rfind(glm47_cfg.tool_call_start.as_str())
+                        .and_then(|start| {
+                            let tail = &choice.text[start..];
+                            if !tail.contains(glm47_cfg.tool_call_end.as_str()) {
+                                Some(tail.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+
                 let parse_result = if super::tool_parser_v2::enabled()
                     && super::tool_parser_v2::supports_family(parser)
                     && parsing_options.experimental_v2_batch_eligible
@@ -419,6 +427,34 @@ impl DeltaAggregator {
                     choice.text = content.unwrap_or_default();
                 } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
+                } else if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    )
+                    && choice.text.contains(glm47_cfg.tool_call_start.as_str())
+                {
+                    tracing::warn!(
+                        parser,
+                        "glm47: partial <tool_call> returned as content on length finish"
+                    );
+                }
+
+                // Recover any tail saved before parsing — the parser drops a truncated
+                // second block silently when an earlier complete block was already parsed.
+                if let Some(tail) = glm47_truncated_tail
+                    && !choice.text.contains(&tail)
+                {
+                    tracing::warn!(
+                        parser,
+                        tail_bytes = tail.len(),
+                        "glm47: truncated later <tool_call> appended as content"
+                    );
+                    if choice.text.is_empty() {
+                        choice.text = tail;
+                    } else {
+                        choice.text.push_str(&tail);
+                    }
                 }
             }
         }
@@ -470,7 +506,8 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        // If tool calls are present and non-empty, finish reason should be ToolCalls
+        // TODO: Revisit whether tool calls produced at the output-token limit should
+        // preserve Length and yield an incomplete Responses result.
         let finish_reason = if delta
             .tool_calls
             .as_ref()
@@ -522,11 +559,11 @@ pub trait ChatCompletionAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
-    /// * `Err(String)` if an error occurs.
+    /// * `Err(DynamoError)` if an error occurs.
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String>;
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError>;
 
     /// Converts an SSE stream into a [`NvCreateChatCompletionResponse`].
     ///
@@ -535,25 +572,25 @@ pub trait ChatCompletionAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
-    /// * `Err(String)` if an error occurs.
+    /// * `Err(DynamoError)` if an error occurs.
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String>;
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError>;
 }
 
 impl ChatCompletionAggregator for NvCreateChatCompletionResponse {
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         DeltaAggregator::apply(stream, parsing_options).await
     }
 
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(stream);
         NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
@@ -608,6 +645,7 @@ mod tests {
                 content: Some(vec![dynamo_protocols::types::ChatCompletionTokenLogprob {
                     token: token.clone(),
                     logprob: lp,
+                    token_id: None,
                     bytes: token_to_utf8_bytes(&token),
                     top_logprobs: vec![],
                 }]),
@@ -1824,5 +1862,157 @@ mod tests {
             "content key must be serialized as null when absent"
         );
         assert!(json.get("reasoning_content").is_some());
+    }
+
+    // --- glm47 truncation recovery tests ---
+    //
+    // Reproduces the drop confirmed on dynamo-parsers 5.1.3:
+    //   in:  <tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos   (finish_reason=length)
+    //   out: finish=length  tool_calls=None  content=""
+    // The parser sees an incomplete XML block and returns no tool call and no
+    // content, so the client gets an empty turn. The recovery path appends the
+    // raw partial markup as content so the caller can at least surface it.
+
+    #[tokio::test]
+    async fn test_glm47_single_truncated_call_recovered_as_content() {
+        let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos";
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![delta]));
+        let result =
+            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
+                .await
+                .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+        assert!(
+            choice.message.tool_calls.is_none(),
+            "incomplete call must not produce a structured tool_call"
+        );
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(text.to_string())),
+            "truncated markup must be returned as raw content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glm47_complete_call_then_truncated_second_recovered() {
+        // First call complete, second truncated mid-argument.
+        let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>US/E";
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![delta]));
+        let result =
+            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
+                .await
+                .unwrap();
+
+        let choice = &result.inner.choices[0];
+        // First complete call is parsed into tool_calls.
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "first complete call must be structured"
+        );
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        // Truncated second block is in content, not dropped.
+        let content = choice
+            .message
+            .content
+            .as_ref()
+            .expect("truncated second call must be in content");
+        let ChatCompletionMessageContent::Text(t) = content else {
+            panic!("content must be Text")
+        };
+        assert!(
+            t.contains("<tool_call>get_time"),
+            "truncated second call markup must be in content"
+        );
+        assert!(!t.contains("</tool_call>"), "must not contain closing tag");
+    }
+
+    #[tokio::test]
+    async fn test_glm47_complete_call_stop_no_recovery() {
+        // Complete call with finish_reason=Stop: no recovery needed.
+        let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call>";
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![delta]));
+        let result =
+            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
+                .await
+                .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        assert!(choice.message.tool_calls.is_some());
+        assert!(
+            choice.message.content.is_none(),
+            "no content for a clean complete call"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_typed_error_after_partial_output() {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        let partial = create_test_delta(
+            0,
+            "partial",
+            Some(dynamo_protocols::types::Role::Assistant),
+            None,
+            None,
+            None,
+        );
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid sampling parameter")
+            .build();
+        let stream = stream::iter(vec![
+            partial,
+            Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            },
+        ]);
+
+        let error = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "invalid sampling parameter");
     }
 }

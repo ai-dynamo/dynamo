@@ -116,9 +116,6 @@ impl<S> KvSourceStatus<S> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Descriptive membership change only.
-///
-/// NOTE: Reset requirements are intentionally absent here. The shared coordinator derives and
-/// publishes a cumulative lifecycle generation so coalescing watch receivers cannot miss a fence.
 pub struct KvSourceTransition<S = KvEventSource> {
     pub key: KvSourceKey,
     pub previous: KvSourceStatus<S>,
@@ -144,13 +141,6 @@ pub struct KvSourceMembershipView<S = KvEventSource> {
     /// `Some(true)` and `Some(false)` are explicit declarations. `None` is a legacy or otherwise
     /// unknown declaration.
     pub kv_event_publishing_enabled: HashMap<WorkerId, Option<bool>>,
-    /// Monotonic cold-reset fence for each logical source in `sources`.
-    ///
-    /// A consumer must cold-reset a logical rank before accepting a source when this value
-    /// differs from the last value it applied. Keeping the cumulative generation in every
-    /// snapshot makes reset-relevant transitions observable even when a Tokio watch receiver
-    /// coalesces intermediate snapshots.
-    pub lifecycle_generations: HashMap<WorkerWithDpRank, u64>,
     /// Whether the serving runtime config expects a worker-local recovery target.
     /// This is expectation/readiness metadata only and never admits a serving worker.
     pub recovery_expected: HashMap<WorkerWithDpRank, bool>,
@@ -159,10 +149,6 @@ pub struct KvSourceMembershipView<S = KvEventSource> {
 impl<S> KvSourceMembershipView<S> {
     pub fn status(&self, worker: &WorkerWithDpRank) -> Option<&KvSourceStatus<S>> {
         self.sources.get(worker)
-    }
-
-    pub fn lifecycle_generation(&self, worker: &WorkerWithDpRank) -> Option<u64> {
-        self.lifecycle_generations.get(worker).copied()
     }
 
     pub fn recovery_expected(&self, worker: &WorkerWithDpRank) -> Option<bool> {
@@ -234,10 +220,13 @@ pub enum KvSourceMembershipError {
 ///   never a routing identity.
 /// - Recovery targets are immutable within an incarnation. Replacing one replaces the entire
 ///   source incarnation.
+/// - The engine-side KV event publisher lifetime is coupled to the owning Dynamo
+///   `KvEventPublisher` and its `publisher_id`.
 /// - Supported multi-node restarts preserve the logical worker/rank key but create a new rank
-///   publisher and recovery target. A future backend that resurrects cache state beneath a
-///   surviving publisher must instead recreate that publisher or emit an ordered `Cleared`
-///   barrier.
+///   publisher and recovery target.
+/// - Independently replacing an engine publisher beneath a surviving Dynamo publisher is
+///   unsupported. A future backend that does so must emit an ordered rank-scoped `Cleared`
+///   barrier before later mutations or recreate the Dynamo publisher with a fresh ID.
 #[derive(Debug, Clone)]
 pub struct KvSourceMembership<S = KvEventSource> {
     advertisements: HashMap<KvSourceKey, HashMap<PublisherId, S>>,
@@ -408,7 +397,6 @@ where
         KvSourceMembershipView {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution,
-            lifecycle_generations: sources.keys().map(|worker| (*worker, 0)).collect(),
             recovery_expected: workers,
             kv_event_publishing_enabled,
             sources,
@@ -519,6 +507,7 @@ mod tests {
                 instance_id: publisher_id,
                 transport: TransportType::Tcp("tcp://127.0.0.1:1234".to_string()),
                 device_type: None,
+                request_plane_codec: None,
             }),
             ..source(endpoint, worker_id, rank, publisher_id)
         }

@@ -24,6 +24,7 @@ dependencies = [
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
     "typing_extensions>=4.10.0",
+    "tqdm>=4.0.0",
 ]
 
 classifiers = [
@@ -48,7 +49,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc22",
+    "tensorrt-llm==1.3.0rc23",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -58,7 +59,7 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl[cu13]==1.3.1",
+    "nixl[cu13]==1.3.2",
     "vllm[flashinfer,runai,otel]==0.26.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
@@ -72,7 +73,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.15",
+    "sglang[diffusion]==0.5.16",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",
@@ -81,16 +82,52 @@ sglang = [
 ]
 
 mocker = [
-    # No direct URL: it blocks the wheel release (PyPI/Warehouse rejects direct references).
-    # Cap below 0.10: the 0.10 SDK/CLI API and AIC Rust engine wire-format
-    # broke the profiler; lift the cap when the 0.10 migration lands.
-    "aiconfigurator>=0.9.0,<0.10.0",
+    "aiconfigurator-core==0.11.0.dev20260728",
 ]
+
+[tool.uv]
+# Some backend extras have incompatible transitive dependency requirements.
+# Each conflict below identifies the dependency that prevents co-installation.
+conflicts = [
+    # vLLM and SGLang have incompatible NIXL requirements.
+    [
+        { extra = "vllm" },
+        { extra = "sglang" },
+    ],
+    # TensorRT-LLM and the mocker have incompatible NumPy requirements.
+    [
+        { extra = "trtllm" },
+        { extra = "mocker" },
+    ],
+    # TensorRT-LLM and vLLM have incompatible flashinfer-python requirements.
+    [
+        { extra = "trtllm" },
+        { extra = "vllm" },
+    ],
+    # The mocker and vLLM have incompatible NumPy requirements on macOS with Python 3.14.
+    [
+        { extra = "mocker" },
+        { extra = "vllm" },
+    ],
+    # SGLang and TensorRT-LLM have incompatible XGrammar requirements.
+    [
+        { extra = "sglang" },
+        { extra = "trtllm" },
+    ],
+]
+
+
+[tool.uv.dependency-groups]
+docs = { requires-python = ">=3.11" }
 
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
+
+[project.entry-points."aisimulate.sweep_config_providers"]
+"dynamo.planner" = "dynamo.planner.simulation:create_provider"
+"dynamo.router" = "dynamo.router.simulation:create_provider"
 
 [dependency-groups]
 docs = [
@@ -112,6 +149,14 @@ docs = [
     "myst-parser>=4.0",
     "myst-nb>=1.2",
     "nbsphinx>=0.9",
+    # Static Python API discovery for docs/fern/scripts/gen_python_api.py.
+    # Griffe parses the source tree without importing Dynamo, so the Fern
+    # docs build does not require the runtime, backends, or CUDA to be
+    # installed. Pytest and PyYAML are used by the focused tests under
+    # docs/fern/scripts/tests/ that exercise the generator and navigation.
+    "griffe==2.1.0",
+    "pytest>=8.0",
+    "pyyaml>=6.0",
 ]
 
 [build-system]
@@ -125,9 +170,6 @@ path = "hatch_build.py"
 packages = [
     "components/src/dynamo",
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
@@ -164,7 +206,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator", "aiconfigurator_core"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -265,6 +307,7 @@ markers = [
     "nightly: marks tests to run nightly",
     "skip_in_nightly: excludes a test from the nightly pipeline only (still runs in pre_merge/post_merge). Used via `not skip_in_nightly` in nightly-ci.yml marker filters",
     "frontend_api_surface_compliance: marks tests that validate Dynamo's HTTP API surface (Responses/Anthropic wire shape, tool-call routing) against upstream compliance harnesses",
+    "token_budget_parity: compares native backend and Dynamo prompt/output overflow behavior",
     "weekly: marks tests to run weekly",
     "release: marks tests to run on release pipelines",
     "gpu_0: marks tests that don't require GPU",
@@ -285,6 +328,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "wheel_smoke: marks tests that validate wheels copied from runtime images",
+    "installs_extra_dependencies: marks tests that pip-install a package the runtime image intentionally omits (via DYN_TEST_ONLY_PIP_INSTALL). The feature under test may not work in an unmodified shipped image",
     "stress: marks tests as stress tests",
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
@@ -298,6 +342,7 @@ markers = [
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
+    "mocker: marks tests for the mocker component",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",
@@ -374,6 +419,13 @@ module = ["dynamo.planner.manual.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
+# AI Simulate is a separate, optional distribution. Load its types when it is
+# installed without reporting errors that originate inside that distribution.
+module = ["aisimulate", "aisimulate.*"]
+follow_imports = "silent"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Skip mypy analysis on backend framework internals.
 # ignore_missing_imports silences import-not-found only when the backend
 # is not installed (e.g. sglang/trtllm missing in the vllm container).
@@ -388,6 +440,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["tensorrt_llm", "tensorrt_llm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyNvVideoCodec: GPU-only NVDEC codec (common/multimodal/nvdec_decoder.py).
+# Absent from the CPU lint env and ships no type stubs, so mypy would raise
+# import-not-found on the guarded `import PyNvVideoCodec`.
+module = ["PyNvVideoCodec", "PyNvVideoCodec.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
@@ -467,6 +527,8 @@ module = [
     "pydantic_core",
     "aiconfigurator",
     "aiconfigurator.*",
+    "aiconfigurator_core",
+    "aiconfigurator_core.*",
     "soundfile",
     "soundfile.*",
     "librosa",

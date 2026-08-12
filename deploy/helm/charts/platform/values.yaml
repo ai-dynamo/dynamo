@@ -218,12 +218,6 @@ dynamo-operator:
 
   # Webhook configuration for admission control and validation
   webhook:
-    service:
-      # -- Publish the webhook Service endpoint before the Pod Ready condition is true.
-      # Keep false for production; short-lived vCluster CI may enable this to tolerate
-      # stale host Pod readiness while admission smoke tests verify the webhook itself.
-      publishNotReadyAddresses: false
-
     # Certificate configuration for webhook TLS
     certificateSecret:
       # -- Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate).
@@ -235,7 +229,7 @@ dynamo-operator:
     # -- CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically.
     caBundle: ""
 
-    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees.
+    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. Keep 'Fail' in every environment so requests cannot bypass Dynamo validation and defaulting. 'Ignore' is an emergency-only, short-lived bypass: pause Dynamo resource writes, restore 'Fail' immediately after recovery, and audit every resource changed during the bypass window.
     failurePolicy: Fail
 
     # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods.
@@ -297,9 +291,6 @@ grove:
       healthProbes:
         # -- Enable Grove's webhook-aware liveness and readiness probes.
         # The readiness endpoint stays false until certificates and the webhook server are ready.
-        # vCluster CI temporarily bypasses this signal only for Service routing:
-        # its setup gate still waits for this container probe, which will also
-        # resume gating Service endpoints after that workaround is removed.
         enable: true
 
 # Kai Scheduler component - advanced workload scheduling

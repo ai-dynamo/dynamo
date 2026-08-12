@@ -26,6 +26,7 @@ use crate::scheduler::{
 
 use super::core::{RequestStatus, VllmCore, VllmRequestState};
 use super::live::{MockerMetrics, Scheduler};
+use super::request::RequestKvState;
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 23;
 
@@ -134,11 +135,92 @@ fn flat_tokens_cover_every_native_g1_configuration() {
 }
 
 #[test]
+fn unset_g1_backend_constructs_native_request_state() {
+    let mut args = router_args();
+    args.g1_backend = None;
+    let mut core = VllmCore::new(args);
+    let uuid = Uuid::from_u128(80_100);
+    core.receive(DirectRequest {
+        tokens: (0..8).collect(),
+        max_output_tokens: 2,
+        uuid: Some(uuid),
+        ..Default::default()
+    });
+
+    assert!(core.request_uses_flat_tokens(uuid));
+}
+
+#[test]
+fn minimum_shared_scheduler_block_size_constructs_requests_for_both_backends() {
+    let mut next_uuid = 80_200_u128;
+    for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+        for backend in [G1Backend::Native, G1Backend::Kvbm] {
+            let args = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .g1_backend(backend)
+                .block_size(2)
+                .num_gpu_blocks(4)
+                .max_num_batched_tokens(Some(4))
+                .max_num_seqs(Some(1))
+                .enable_chunked_prefill(true)
+                .enable_prefix_caching(true)
+                .speedup_ratio(0.0)
+                .build()
+                .unwrap();
+            let mut core = VllmCore::new(args);
+            let uuid = Uuid::from_u128(next_uuid);
+            next_uuid += 1;
+            core.receive(DirectRequest {
+                tokens: vec![0],
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![1]),
+                uuid: Some(uuid),
+                ..Default::default()
+            });
+
+            assert_eq!(
+                core.request_uses_flat_tokens(uuid),
+                backend == G1Backend::Native,
+                "engine_type={engine_type:?}, backend={backend:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "native decode never rolls back a sampled token")]
+fn native_request_state_rejects_decode_rollback() {
+    let mut request = RequestKvState::native(
+        Uuid::from_u128(80_101),
+        vec![1, 2],
+        1,
+        1,
+        4,
+        true,
+        false,
+        false,
+        None,
+    );
+    request.pop();
+}
+
+#[test]
+fn kvbm_request_state_preserves_decode_rollback() {
+    let mut request =
+        RequestKvState::kvbm(ActiveSequence::new(vec![1, 2], 1, Some(4), true, false));
+    let original_len = request.len();
+    request.generate_token();
+    request.pop();
+
+    assert_eq!(request.len(), original_len);
+}
+
+#[test]
 fn flat_storage_capacity_is_bounded_by_realizable_output() {
     const BLOCK_SIZE: usize = 4;
     const MAX_OUTPUT_TOKENS: usize = 1_000_000;
 
-    for (prompt_len, expected_output_capacity) in [(10_usize, 2_usize), (17, 0)] {
+    for (prompt_len, expected_output_capacity) in [(8_usize, 4_usize), (10, 2), (17, 0)] {
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Vllm)
             .g1_backend(G1Backend::Native)
@@ -164,18 +246,16 @@ fn flat_storage_capacity_is_bounded_by_realizable_output() {
 
         let sequence = &core.state().requests[&uuid].sequence;
         assert_eq!(sequence.max_output_tokens(), MAX_OUTPUT_TOKENS);
-        let (token_capacity, unique_capacity, hash_capacity, lineage_capacity) = sequence
-            .flat_storage_capacities()
-            .expect("native G1 must use flat storage");
+        let (token_capacity, lease_capacity) = sequence
+            .native_storage_capacities()
+            .expect("native G1 must use request-sequence storage");
         let bounded_blocks = (prompt_len + expected_output_capacity).div_ceil(BLOCK_SIZE);
         let unbounded_blocks = (prompt_len + MAX_OUTPUT_TOKENS).div_ceil(BLOCK_SIZE);
 
         assert!(token_capacity >= prompt_len + expected_output_capacity);
         assert!(token_capacity < prompt_len + MAX_OUTPUT_TOKENS);
-        for capacity in [unique_capacity, hash_capacity, lineage_capacity] {
-            assert!(capacity >= bounded_blocks);
-            assert!(capacity < unbounded_blocks);
-        }
+        assert!(lease_capacity >= bounded_blocks);
+        assert!(lease_capacity < unbounded_blocks);
     }
 }
 
@@ -207,6 +287,7 @@ fn zero_output_request_completes_after_prefill(#[case] engine_type: EngineType) 
             token_id: None,
             completed: true,
             rejected: false,
+            cached_tokens: Some(0),
             ..
         }] if *signal_uuid == uuid
     ));
@@ -247,6 +328,7 @@ fn fully_cached_zero_output_request_is_not_decode_fpm_work() {
             token_id: None,
             completed: true,
             rejected: false,
+            cached_tokens: Some(4),
             ..
         }] if *signal_uuid == uuid
     ));
@@ -466,6 +548,12 @@ mod destination_lifecycle {
             .speedup_ratio(0.0)
             .build()
             .unwrap()
+    }
+
+    fn args_for_backend(worker_type: WorkerType, backend: G1Backend) -> MockEngineArgs {
+        let mut args = args(worker_type);
+        args.g1_backend = Some(backend);
+        args
     }
 
     fn request(uuid: Uuid, tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
@@ -702,14 +790,20 @@ mod destination_lifecycle {
         assert_eq!(footprint(128), 12);
     }
 
-    #[test]
-    fn handoff_prefill_to_reserved_decode_owns_kv_until_normal_admission() {
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
+    fn handoff_prefill_to_reserved_decode_owns_kv_until_normal_admission(
+        #[case] backend: G1Backend,
+    ) {
         let logical_uuid = Uuid::from_u128(10_001);
         let handoff_id = HandoffId::from(Uuid::from_u128(10_002));
         let logical_tokens = (0..8).collect::<Vec<_>>();
 
-        let mut source = VllmCore::new_with_kv_capture(args(WorkerType::Prefill), 31);
-        let mut destination = VllmCore::new_with_kv_capture(args(WorkerType::Decode), 32);
+        let mut source =
+            VllmCore::new_with_kv_capture(args_for_backend(WorkerType::Prefill, backend), 31);
+        let mut destination =
+            VllmCore::new_with_kv_capture(args_for_backend(WorkerType::Decode, backend), 32);
 
         destination.receive(request(Uuid::from_u128(10_003), (0..4).collect(), 1));
         execute(&mut destination, 0.0);
@@ -1033,18 +1127,27 @@ mod core_behavior {
         });
 
         let mut collector = crate::replay::TraceCollector::default();
-        let mut emitted = Vec::new();
+        let mut signals = Vec::new();
         for step in 0..planned.len() {
             let pass = core.execute_pass(&mut collector, step as f64);
-            emitted.extend(
+            signals.extend(
                 pass.output_signals
                     .into_iter()
-                    .filter(|signal| signal.uuid == uuid)
-                    .map(|signal| signal.token_id.expect("planned token should be present")),
+                    .filter(|signal| signal.uuid == uuid),
             );
         }
 
+        let emitted: Vec<_> = signals
+            .iter()
+            .map(|signal| signal.token_id.expect("planned token should be present"))
+            .collect();
         assert_eq!(emitted, planned);
+        assert_eq!(signals[0].cached_tokens, Some(0));
+        assert!(
+            signals[1..]
+                .iter()
+                .all(|signal| signal.cached_tokens.is_none())
+        );
         assert!(core.is_empty());
     }
 
@@ -1523,11 +1626,13 @@ mod core_behavior {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
-                sequence,
+                sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
                 num_preemptions: 1,
                 offload_dependency: None,
+                cached_prefix_tokens: None,
+                cached_tokens_signaled: false,
             },
         );
 
@@ -1729,9 +1834,13 @@ mod core_behavior {
 mod router_events {
     use super::*;
 
-    #[test]
-    fn test_vllm_pass_visibility_is_pass_start() {
-        let mut core = VllmCore::new_with_kv_capture(router_args(), ROUTER_TEST_WORKER_ID);
+    #[rstest]
+    #[case::vllm(EngineType::Vllm)]
+    #[case::trtllm(EngineType::Trtllm)]
+    fn test_shared_vllm_core_pass_visibility_is_pass_end(#[case] engine_type: EngineType) {
+        let mut args = router_args();
+        args.engine_type = engine_type;
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 2,
@@ -1745,10 +1854,7 @@ mod router_events {
         let mut collector = crate::replay::TraceCollector::default();
         let pass = core.execute_pass(&mut collector, 0.0);
 
-        assert_eq!(
-            pass.router_event_visibility,
-            RouterEventVisibility::PassStart
-        );
+        assert_eq!(pass.router_event_visibility, RouterEventVisibility::PassEnd);
         assert!(!pass.kv_events.is_empty());
         assert!(
             pass.kv_events
@@ -1901,10 +2007,14 @@ mod router_events {
         harness.shutdown();
     }
 
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
     #[tokio::test]
-    async fn test_preemption_recompute_events_apply_cleanly() {
+    async fn test_preemption_recompute_events_apply_cleanly(#[case] backend: G1Backend) {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let args = MockEngineArgs::builder()
+            .g1_backend(backend)
             .block_size(4)
             .num_gpu_blocks(6)
             .max_num_batched_tokens(Some(16))
@@ -1948,11 +2058,12 @@ mod router_events {
             }
         }
 
-        assert!(saw_preemption);
+        assert!(saw_preemption, "backend={backend:?}");
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
+        assert_eq!(request.sequence.num_allocated_tokens(), 0);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
 
         let mut readmitted = false;
@@ -1968,7 +2079,7 @@ mod router_events {
 
         assert!(
             readmitted,
-            "preempted request should be admitted for recompute"
+            "preempted request should be admitted for recompute: backend={backend:?}"
         );
         harness.assert_no_event_warnings();
         harness.shutdown();
@@ -2381,11 +2492,17 @@ mod live_scheduler {
         assert_scheduler_idle(&metrics);
     }
 
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
     #[tokio::test]
-    async fn test_live_scheduler_forwards_buffered_kv_token_ids() {
+    async fn raw_sink_emits_completed_unaligned_prompt_block_for_both_g1_backends(
+        #[case] backend: G1Backend,
+    ) {
         let sink = Arc::new(CapturingKvSink::default());
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
+            .g1_backend(backend)
             .block_size(4)
             .num_gpu_blocks(12)
             .max_num_batched_tokens(Some(8))
@@ -2393,7 +2510,6 @@ mod live_scheduler {
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
             .speedup_ratio(1000.0)
-            .zmq_kv_events_port(Some(12345))
             .build()
             .unwrap();
         let scheduler = Scheduler::new(
@@ -2406,24 +2522,28 @@ mod live_scheduler {
         );
 
         scheduler.receive(DirectRequest {
-            tokens: (0..8).collect(),
-            max_output_tokens: 1,
-            output_token_ids: None,
+            tokens: vec![0, 1, 2],
+            max_output_tokens: 2,
+            output_token_ids: Some(vec![3, 4]),
             uuid: Some(Uuid::from_u128(72)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
             ..Default::default()
         });
 
-        let output_batch = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
-            .await
-            .expect("scheduler should emit output")
-            .expect("output channel should stay open");
-        let signal = output_batch
-            .into_iter()
-            .next()
-            .expect("live scheduler should emit one output signal");
-        assert!(signal.completed);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let output_batch = output_rx
+                    .recv()
+                    .await
+                    .expect("output channel should stay open");
+                if output_batch.iter().any(|signal| signal.completed) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("scheduler should complete the request");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let events = sink.take();
@@ -2434,8 +2554,7 @@ mod live_scheduler {
                 _ => None,
             })
             .expect("live scheduler should forward stored KV event token ids");
-        assert!(!stored.is_empty());
-        assert!(stored.iter().all(|block| !block.is_empty()));
+        assert_eq!(stored, vec![vec![0, 1, 2, 3]]);
     }
 
     #[tokio::test]
@@ -2987,6 +3106,7 @@ mod offload {
     };
 
     use super::super::core::{RequestStatus, VllmCore, VllmRequestState};
+    use super::super::request::RequestKvState;
 
     /// Seed `g2` with each PLH by allocating a fresh slot, staging,
     /// registering, and dropping — so the block lands in the inactive
@@ -3035,11 +3155,13 @@ mod offload {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
-                sequence,
+                sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens,
                 num_preemptions: 0,
                 offload_dependency: None,
+                cached_prefix_tokens: None,
+                cached_tokens_signaled: false,
             },
         );
     }
@@ -3702,6 +3824,8 @@ mod offload {
             (
                 request
                     .sequence
+                    .legacy()
+                    .expect("KVBM test request must use legacy storage")
                     .prepare_allocation(block_size * 2)
                     .expect("prefix allocation signal"),
                 request.sequence.positional_lineage_hashes().to_vec(),
@@ -3780,6 +3904,8 @@ mod offload {
             (
                 request
                     .sequence
+                    .legacy()
+                    .expect("KVBM test request must use legacy storage")
                     .prepare_allocation(block_size * 2)
                     .expect("prefix allocation signal"),
                 request.sequence.positional_lineage_hashes().to_vec(),
@@ -4052,6 +4178,12 @@ mod offload {
         // request, schedules nothing.
         let mut collector = crate::replay::TraceCollector::default();
         let pass1 = core.execute_pass(&mut collector, 0.0);
+        let stall_deadline = core
+            .earliest_offload_deadline()
+            .expect("parked swap-in must expose a stall-advance deadline");
+        assert_eq!(pass1.token_completion_ms, 0.0);
+        assert_eq!(pass1.end_ms, stall_deadline);
+        assert!(pass1.end_ms > pass1.token_completion_ms);
         assert_eq!(
             core.requests_awaiting_swap_in.len(),
             1,
@@ -4353,4 +4485,175 @@ mod offload {
         assert!(core.destination_is_held(handoff_id));
         assert_eq!(core.destination_block_count(handoff_id), 2);
     }
+}
+
+#[test]
+fn test_first_signal_carries_admission_cache_truth() {
+    let args = MockEngineArgs::builder()
+        .engine_type(EngineType::Vllm)
+        .block_size(4)
+        .num_gpu_blocks(16)
+        .max_num_batched_tokens(Some(16))
+        .max_num_seqs(Some(3))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+    let mut core = VllmCore::new(args);
+    // 9 tokens = two full blocks (cacheable) + one partial.
+    let tokens: Vec<u32> = (0..9).collect();
+
+    fn drive_to_completion(core: &mut VllmCore, uuid: Uuid) -> Vec<OutputSignal> {
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut signals = Vec::new();
+        for step in 0..100 {
+            let pass = core.execute_pass(&mut collector, step as f64);
+            signals.extend(
+                pass.output_signals
+                    .iter()
+                    .filter(|signal| signal.uuid == uuid)
+                    .cloned(),
+            );
+            if signals.iter().any(|signal| signal.completed) {
+                return signals;
+            }
+        }
+        panic!("request {uuid} never completed");
+    }
+
+    let cold = Uuid::from_u128(90);
+    core.receive(DirectRequest {
+        tokens: tokens.clone(),
+        max_output_tokens: 3,
+        uuid: Some(cold),
+        ..Default::default()
+    });
+    let cold_signals = drive_to_completion(&mut core, cold);
+    assert_eq!(
+        cold_signals[0].cached_tokens,
+        Some(0),
+        "cold request must report zero admission cache hits"
+    );
+    assert!(
+        cold_signals[1..]
+            .iter()
+            .all(|signal| signal.cached_tokens.is_none()),
+        "cache truth must ride the first signal only"
+    );
+
+    let warm = Uuid::from_u128(91);
+    core.receive(DirectRequest {
+        tokens: tokens.clone(),
+        max_output_tokens: 3,
+        uuid: Some(warm),
+        ..Default::default()
+    });
+    let warm_signals = drive_to_completion(&mut core, warm);
+    assert_eq!(
+        warm_signals[0].cached_tokens,
+        Some(8),
+        "repeat of the same prompt must report its two full blocks as admission cache hits"
+    );
+    assert!(
+        warm_signals[1..]
+            .iter()
+            .all(|signal| signal.cached_tokens.is_none()),
+        "cache truth must ride the first signal only"
+    );
+}
+
+#[test]
+fn test_preempted_request_keeps_original_admission_cache_truth() {
+    let args = MockEngineArgs::builder()
+        .engine_type(EngineType::Vllm)
+        .block_size(4)
+        .num_gpu_blocks(6)
+        .max_num_batched_tokens(Some(16))
+        .max_num_seqs(Some(2))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .preemption_mode(PreemptionMode::Lifo)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+    let mut core = VllmCore::new(args);
+    let mut collector = crate::replay::TraceCollector::default();
+    let mut now_ms = 0.0;
+
+    // Warm one block so the victim's first admission sees a genuine hit.
+    let warm = Uuid::from_u128(70);
+    core.receive(DirectRequest {
+        tokens: (0..4).collect(),
+        max_output_tokens: 1,
+        uuid: Some(warm),
+        ..Default::default()
+    });
+    for _ in 0..8 {
+        let pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = pass.end_ms.max(now_ms + 1.0);
+        if core.state.requests.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        core.state.requests.is_empty(),
+        "warm request never completed"
+    );
+
+    // The filler is admitted first; the victim (warm prefix + unique tail) is
+    // newest, so Lifo preempts it under KV pressure before its first output.
+    let filler = Uuid::from_u128(71);
+    let victim = Uuid::from_u128(72);
+    core.receive(DirectRequest {
+        tokens: (100..108).collect(),
+        max_output_tokens: 8,
+        uuid: Some(filler),
+        ..Default::default()
+    });
+    core.receive(DirectRequest {
+        tokens: (0..4).chain(200..212).collect(),
+        max_output_tokens: 4,
+        uuid: Some(victim),
+        ..Default::default()
+    });
+
+    let mut victim_signals = Vec::new();
+    let mut preempted = false;
+    for _ in 0..64 {
+        let pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = pass.end_ms.max(now_ms + 1.0);
+        victim_signals.extend(
+            pass.output_signals
+                .iter()
+                .filter(|signal| signal.uuid == victim)
+                .cloned(),
+        );
+        if !preempted && pass.mocker_metrics.vllm_preemptions_total > 0 {
+            preempted = true;
+            assert!(
+                victim_signals.is_empty(),
+                "victim must be preempted before its first output"
+            );
+            assert_eq!(core.state.requests.get(&victim).unwrap().num_preemptions, 1);
+        }
+        if victim_signals.iter().any(|signal| signal.completed) {
+            break;
+        }
+    }
+    assert!(preempted, "victim was never preempted");
+    assert!(
+        victim_signals.iter().any(|signal| signal.completed),
+        "victim never completed after readmission"
+    );
+    assert_eq!(
+        victim_signals[0].cached_tokens,
+        Some(4),
+        "first signal must retain the original admission count, not a post-preemption re-probe"
+    );
+    assert!(
+        victim_signals[1..]
+            .iter()
+            .all(|signal| signal.cached_tokens.is_none())
+    );
 }

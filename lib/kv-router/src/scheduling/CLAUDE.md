@@ -49,8 +49,6 @@ sequenceDiagram
 
 ```text
 PolicyClassQueue("agents")
-├── admission_policy: Option<ScheduledAdmissionPolicy>
-├── deferred: FxHashMap<AdmissionId, PolicyQueueEntry>    # Held by admission policy
 ├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
 ├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
 │   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
@@ -68,17 +66,14 @@ PolicyClassQueue("agents")
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
 - A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
 
-## Policy-class admission lifecycle
-
-- **Decide:** A lifecycle-tracked request (`TrackedWithLifecycle`) and its cleanup handle (`RequestLifecycleLease`) enter `SchedulerQueueActor`, the single task that owns admission and queue state. The admission policy can opt out (`Bypass`), allow the request to proceed (`Ready`), or hold it (`Defer`).
-- **Wait or choose a worker:** A ready request runs now if capacity is available; otherwise it waits. A deferred request waits until the policy releases it with `MakeReady`. Choosing an exact worker may move the request to a different queue, but the original policy still receives its status updates. Queue limits apply when new requests arrive, not when an existing request moves.
-- **Give the router cleanup ownership:** After the actor records which version of the request it owns, it activates the cleanup handle. Selection returns the chosen worker, a context-token counter that only moves forward, and the handle. The LLM router puts both into `RequestGuard` before sending the request to the backend, so dispatch failure or cancellation still releases scheduler state.
-- **Run and stream:** After the backend accepts the request, `RequestGuard` first records that fact on the cleanup handle, then notifies the actor through the bounded command queue. Response items update the current context-token count. `Stop`, `EoS`, and `Length` mark the request complete before the item reaches the caller; a normal stream close also completes, while cancellation and errors abort.
-- **Release resources:** When `RequestGuard` finishes or is dropped, its cleanup handle is added to the shared cleanup queue. One bounded wake can cover a batch of dropped requests. The actor drains all pending cleanup, releases worker capacity, and tells the policy whether each request completed or aborted. Do not replace this with an unbounded channel or a new task for every dropped request.
-
 ## Guardrails
 
-- A request ID identifies at most one active scheduler request. Do not reuse it until the prior request has been cleaned up; cancellation and admission state are keyed by request ID.
+- A request ID identifies at most one active scheduler booking. Duplicate adds
+  conflict regardless of the target worker. A serialized migration retry may
+  reuse the ID only after the previous booking has been released.
+- Before an unpinned retry, exclude every worker already failed by that migration state machine. Preserve caller allowlists and routing constraints. An affinity-derived pin may be invalidated and rebound; an explicit request pin remains exact.
+- A failed stream releases its scheduler booking before the error reaches the retry manager. This ordering prevents a later attempt from overlapping stale cleanup.
+- Cleanup that can outlive a request attempt must be conditional on the worker that acquired the booking. `RequestGuard` uses `free_if_worker` (ownership mismatch = no-op). The admission lifecycle lease ends before handoff and remains request-ID-only.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, select a worker, skip the capacity reservation if the response receiver
   is closed, then reserve capacity before responding. Failed response delivery
@@ -113,3 +108,28 @@ PolicyClassQueue("agents")
   before/after routing or queue benchmarks.
 - Keep text and external IDs such as request IDs on standard hash collections.
   Use `FxHashMap` / `FxHashSet` for internal numeric hot-path keys only.
+
+## Public Worker-Selection API
+
+The `selector` module contains the public Rust contract for custom worker filters, scorers, and pickers. Treat each public item as a versioned external API.
+
+- Do not add a public field, accessor, input group, type, or re-export unless the task explicitly requires a new external policy capability.
+- An internal need in the default scorer, logging, tests, or SelectionService does not justify a public API addition.
+- Trace a proposed value to its source before you expose it. Record whether it is raw state, a derived estimate, or an intermediate in Dynamo's default formula.
+- Expose raw facts or complete user-facing abstractions. Do not expose partial credit, weighted overlap, legacy arithmetic, or another intermediate whose meaning depends on the default policy.
+- Keep struct fields private. Add the narrowest accessor that supports the approved use case.
+- When a protocol context is projected into a worker-selection type, destructure the source without `..` and handle every field explicitly. Map only approved policy fields. Bind each field that stays internal by name and explain why. A new source field must cause a compile error until its policy meaning, cost, documentation, and contract test are reviewed.
+- Return `Option` for absent data. Do not replace absence with a sentinel value.
+- Document the source, units, lifetime, staleness, missing-data behavior, weighting, and clamping for each public value.
+- Require callers to name each `WorkerInputs` group that they use. Do not add a public `ALL` shortcut.
+- Before you add a value to an existing input group, account for its calculation and retained-column cost for every policy that requests that group.
+- Do not pass the full `SchedulingRequest`, worker maps, router configuration internals, default-score weights, or host-owned eligibility and reservation state to custom policies.
+- Keep `DefaultWorkerScorer` and `DefaultWorkerPicker` internal. External policies own their filters and both scoring and picking stages.
+- Keep eligibility, picker-row validation, accounting, and reservation in the host path.
+
+Before each public API addition:
+
+1. Search all accessors, re-exports, documentation, examples, and external-looking call sites.
+2. Add one focused contract test that uses the new value through `WorkerFilter`, `WorkerScorer`, or `WorkerPicker`.
+3. Update `docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx` and one canonical example.
+4. If the signal adds work, storage, allocation, or another scan to the selection path, run the worker-selection benchmark.

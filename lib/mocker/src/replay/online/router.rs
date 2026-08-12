@@ -175,12 +175,12 @@ impl KvReplayRouter {
             prefill_load_estimator,
             None,
             None,
+            None,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
             scheduler_cancel.clone(),
             "replay",
             false,
-            Default::default(),
         )?);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();

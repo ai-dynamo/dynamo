@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashMap,
     ops::{Deref, DerefMut},
     sync::Arc,
     time::Duration,
 };
 
-use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
+use dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
 use dynamo_runtime::{
     discovery::{
         Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
@@ -22,8 +21,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    KvEventSource, KvSourceMembership, KvSourceMembershipView, KvSourceStatus,
-    KvStateEndpointResolution, RuntimeConfigWatch, resolve_kv_state_endpoint,
+    KvEventSource, KvSourceMembership, KvSourceMembershipView, KvStateEndpointResolution,
+    RuntimeConfigWatch, resolve_kv_state_endpoint,
 };
 
 struct BoundSourceStream {
@@ -117,75 +116,6 @@ impl Drop for KvSourceMembershipCoordinator {
     }
 }
 
-#[derive(Default)]
-struct LifecycleTracker {
-    entries: HashMap<WorkerWithDpRank, LogicalLifecycle>,
-    endpoint_resolution: Option<KvStateEndpointResolution>,
-}
-
-#[derive(Default)]
-struct LogicalLifecycle {
-    generation: u64,
-    ever_active: bool,
-    previous: Option<KvSourceStatus>,
-}
-
-impl LifecycleTracker {
-    fn apply(&mut self, mut view: KvSourceMembershipView) -> KvSourceMembershipView {
-        let endpoint_remapped = self
-            .endpoint_resolution
-            .as_ref()
-            .is_some_and(|previous| previous != &view.endpoint_resolution);
-        self.endpoint_resolution = Some(view.endpoint_resolution.clone());
-
-        let expected: Vec<_> = view.sources.keys().copied().collect();
-        for worker in &expected {
-            let status = view
-                .sources
-                .get(worker)
-                .expect("worker came from source membership view");
-            let lifecycle = self.entries.entry(*worker).or_default();
-            if endpoint_remapped || transition_requires_reset(lifecycle, status) {
-                lifecycle.generation = lifecycle.generation.saturating_add(1);
-            }
-            lifecycle.ever_active |= status.active_source().is_some();
-            lifecycle.previous = Some(status.clone());
-            view.lifecycle_generations
-                .insert(*worker, lifecycle.generation);
-        }
-
-        for (worker, lifecycle) in &mut self.entries {
-            if expected.contains(worker) {
-                continue;
-            }
-            if lifecycle.ever_active && lifecycle.previous.is_some() {
-                lifecycle.generation = lifecycle.generation.saturating_add(1);
-            }
-            lifecycle.previous = None;
-        }
-
-        view
-    }
-}
-
-fn transition_requires_reset(lifecycle: &LogicalLifecycle, current: &KvSourceStatus) -> bool {
-    let Some(previous) = lifecycle.previous.as_ref() else {
-        return lifecycle.ever_active;
-    };
-    if previous == current {
-        return false;
-    }
-
-    match (previous, current) {
-        (KvSourceStatus::Missing, KvSourceStatus::Missing) => false,
-        (
-            KvSourceStatus::Missing,
-            KvSourceStatus::ActiveLiveOnly(_) | KvSourceStatus::ActiveRecoverable(_),
-        ) => lifecycle.ever_active,
-        _ => true,
-    }
-}
-
 async fn run_membership_coordinator(
     serving_endpoint: EndpointId,
     mut runtime_configs: RuntimeConfigWatch,
@@ -196,14 +126,9 @@ async fn run_membership_coordinator(
     let mut configs = runtime_configs.borrow_and_update().clone();
     let mut resolution = resolve_kv_state_endpoint(&serving_endpoint, configs.values());
     let mut membership = KvSourceMembership::new();
-    let mut lifecycle = LifecycleTracker::default();
     let mut source_stream = bind_source_stream(&discovery, &resolution, &cancel).await;
     let mut retry_delay = Duration::from_millis(100);
-    publish_view(
-        &sender,
-        &mut lifecycle,
-        membership.view(&serving_endpoint, &configs),
-    );
+    publish_view(&sender, membership.view(&serving_endpoint, &configs));
 
     loop {
         enum CoordinatorInput {
@@ -237,42 +162,26 @@ async fn run_membership_coordinator(
                     resolution = next_resolution;
                     membership = KvSourceMembership::new();
                     drop(source_stream.take());
-                    publish_view(
-                        &sender,
-                        &mut lifecycle,
-                        membership.view(&serving_endpoint, &configs),
-                    );
+                    publish_view(&sender, membership.view(&serving_endpoint, &configs));
                     source_stream = bind_source_stream(&discovery, &resolution, &cancel).await;
                     if source_stream.is_some() {
                         retry_delay = Duration::from_millis(100);
                     }
                 } else {
-                    publish_view(
-                        &sender,
-                        &mut lifecycle,
-                        membership.view(&serving_endpoint, &configs),
-                    );
+                    publish_view(&sender, membership.view(&serving_endpoint, &configs));
                 }
             }
             CoordinatorInput::Source(Some(event)) => {
                 let stream_is_healthy =
                     reconcile_discovery_event(event, &resolution, &mut membership);
-                publish_view(
-                    &sender,
-                    &mut lifecycle,
-                    membership.view(&serving_endpoint, &configs),
-                );
+                publish_view(&sender, membership.view(&serving_endpoint, &configs));
                 if !stream_is_healthy {
                     drop(source_stream.take());
                 }
             }
             CoordinatorInput::Source(None) => {
                 membership = KvSourceMembership::new();
-                publish_view(
-                    &sender,
-                    &mut lifecycle,
-                    membership.view(&serving_endpoint, &configs),
-                );
+                publish_view(&sender, membership.view(&serving_endpoint, &configs));
                 source_stream = None;
             }
             CoordinatorInput::Retry => {
@@ -372,7 +281,9 @@ fn reconcile_discovery_event(
             }
             membership.remove_publisher(publisher_id);
         }
-        Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
+        Ok(DiscoveryEvent::Added(_))
+        | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+        | Ok(DiscoveryEvent::Removed(_)) => {}
         Err(error) => {
             tracing::error!(%error, "KV event-source discovery stream failed; rebinding");
             *membership = KvSourceMembership::new();
@@ -383,12 +294,7 @@ fn reconcile_discovery_event(
     true
 }
 
-fn publish_view(
-    sender: &watch::Sender<KvSourceMembershipView>,
-    lifecycle: &mut LifecycleTracker,
-    view: KvSourceMembershipView,
-) {
-    let view = lifecycle.apply(view);
+fn publish_view(sender: &watch::Sender<KvSourceMembershipView>, view: KvSourceMembershipView) {
     if *sender.borrow() != view {
         sender.send_replace(view);
     }
@@ -405,7 +311,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::discovery::{KvSourceAmbiguity, KvSourceId, KvSourceKey};
+    use crate::discovery::{KvSourceAmbiguity, KvSourceStatus};
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
     fn endpoint(name: &str) -> EndpointId {
@@ -447,6 +353,7 @@ mod tests {
                 instance_id: publisher_id,
                 transport: TransportType::Tcp("tcp://127.0.0.1:1234".to_string()),
                 device_type: None,
+                request_plane_codec: None,
             }),
             ..source(endpoint, worker_id, publisher_id)
         }
@@ -513,7 +420,6 @@ mod tests {
         })
         .await;
 
-        let generation_a = watch.borrow().lifecycle_generation(&worker).unwrap();
         let source_b = recoverable_source(&kv, 42, 205);
         register_source(discovery.as_ref(), &source_b).await;
         wait_for(&mut watch, |view| {
@@ -525,7 +431,6 @@ mod tests {
             )
         })
         .await;
-        assert!(watch.borrow().lifecycle_generation(&worker).unwrap() > generation_a);
     }
 
     #[tokio::test]
@@ -551,7 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remap_rebinds_exact_watch_and_preserves_cumulative_reset_generation() {
+    async fn remap_rebinds_exact_watch() {
         let serving = endpoint("generate");
         let kv_a = endpoint("kv-a");
         let kv_b = endpoint("kv-b");
@@ -571,11 +476,6 @@ mod tests {
             view.status(&worker) == Some(&KvSourceStatus::ActiveLiveOnly(source_a.clone()))
         })
         .await;
-        let generation_a = slow_consumer
-            .borrow()
-            .lifecycle_generation(&worker)
-            .unwrap();
-
         configs_tx
             .send(HashMap::from([(42, runtime_config(Some(kv_b.clone())))]))
             .unwrap();
@@ -588,56 +488,20 @@ mod tests {
         })
         .await;
 
-        assert!(
-            slow_consumer
-                .borrow()
-                .lifecycle_generation(&worker)
-                .unwrap()
-                > generation_a
-        );
         assert_eq!(slow_consumer.borrow().serving_endpoint, serving);
     }
 
     #[test]
-    fn coalesced_ambiguity_still_advances_the_published_reset_fence() {
+    fn immutable_recovery_target_violation_fails_closed() {
         let serving = endpoint("generate");
         let kv = endpoint("kv");
         let configs = HashMap::from([(42, runtime_config(Some(kv.clone())))]);
         let worker = WorkerWithDpRank::new(42, 4);
         let mut membership = KvSourceMembership::new();
-        let mut lifecycle = LifecycleTracker::default();
 
         membership.add(source(&kv, 42, 100)).unwrap();
-        let active_a = lifecycle.apply(membership.view(&serving, &configs));
-        membership.add(source(&kv, 42, 205)).unwrap();
-        let _unobserved_ambiguity = lifecycle.apply(membership.view(&serving, &configs));
-        membership
-            .remove(&KvSourceId {
-                key: KvSourceKey::new(kv.clone(), worker),
-                publisher_id: 100,
-            })
-            .unwrap();
-        let active_b = lifecycle.apply(membership.view(&serving, &configs));
-
-        assert!(
-            active_b.lifecycle_generation(&worker).unwrap()
-                > active_a.lifecycle_generation(&worker).unwrap()
-        );
-    }
-
-    #[test]
-    fn immutable_recovery_target_violation_fails_closed_and_advances_generation() {
-        let serving = endpoint("generate");
-        let kv = endpoint("kv");
-        let configs = HashMap::from([(42, runtime_config(Some(kv.clone())))]);
-        let worker = WorkerWithDpRank::new(42, 4);
-        let mut membership = KvSourceMembership::new();
-        let mut lifecycle = LifecycleTracker::default();
-
-        membership.add(source(&kv, 42, 100)).unwrap();
-        let active = lifecycle.apply(membership.view(&serving, &configs));
         assert!(membership.add(recoverable_source(&kv, 42, 100)).is_err());
-        let invalid = lifecycle.apply(membership.view(&serving, &configs));
+        let invalid = membership.view(&serving, &configs);
 
         assert!(matches!(
             invalid.status(&worker),
@@ -645,10 +509,6 @@ mod tests {
                 KvSourceAmbiguity::ConflictingDescriptor { publisher_id: 100 }
             ))
         ));
-        assert!(
-            invalid.lifecycle_generation(&worker).unwrap()
-                > active.lifecycle_generation(&worker).unwrap()
-        );
     }
 
     #[test]

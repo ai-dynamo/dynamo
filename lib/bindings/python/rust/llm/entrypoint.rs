@@ -22,13 +22,14 @@ use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
-use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
+use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
 use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
@@ -456,15 +457,12 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
-    non_cpu_to_cpu_ratio: Option<usize>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, non_cpu_to_cpu_ratio=None))]
-    // PyO3 keeps this constructor aligned with the Python keyword API.
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -473,7 +471,6 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
-        non_cpu_to_cpu_ratio: Option<usize>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -487,9 +484,6 @@ impl RouterConfig {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
-        }
-        if non_cpu_to_cpu_ratio.is_some_and(|ratio| ratio < 1) {
-            return Err(PyValueError::new_err("non_cpu_to_cpu_ratio must be >= 1"));
         }
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
@@ -505,22 +499,7 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
-            non_cpu_to_cpu_ratio,
         })
-    }
-
-    #[getter(non_cpu_to_cpu_ratio)]
-    fn non_cpu_to_cpu_ratio(&self) -> Option<usize> {
-        self.non_cpu_to_cpu_ratio
-    }
-
-    #[setter(non_cpu_to_cpu_ratio)]
-    fn set_non_cpu_to_cpu_ratio(&mut self, value: Option<usize>) -> PyResult<()> {
-        if value.is_some_and(|ratio| ratio < 1) {
-            return Err(PyValueError::new_err("non_cpu_to_cpu_ratio must be >= 1"));
-        }
-        self.non_cpu_to_cpu_ratio = value;
-        Ok(())
     }
 }
 
@@ -536,7 +515,6 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
-            non_cpu_to_cpu_ratio: rc.non_cpu_to_cpu_ratio,
         }
     }
 }
@@ -590,7 +568,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, tokenizer_backend=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -621,6 +599,7 @@ impl EntrypointArgs {
         strip_anthropic_preamble: Option<bool>,
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
+        reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
@@ -655,6 +634,12 @@ impl EntrypointArgs {
                     .map_err(PyValueError::new_err)
             })
             .transpose()?;
+        let reasoning_field = reasoning_field_name
+            .map(|name| {
+                name.parse::<ReasoningField>()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))
+            })
+            .transpose()?;
 
         let mut runtime_config = runtime_config.unwrap_or_default();
         if let Some(tokenizer_backend) = tokenizer_backend {
@@ -681,6 +666,7 @@ impl EntrypointArgs {
                 strip_anthropic_preamble,
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
+                reasoning_field,
             ),
             tls_cert_path,
             tls_key_path,
@@ -986,7 +972,43 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     let frontend_route_extensions =
         super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
+    let worker_selection_policy_factory = crate::worker_selection_policy_factory(
+        &engine_config
+            .inner
+            .local_model()
+            .router_config()
+            .kv_router_config,
+    )
+    .map_err(to_pyerr)?;
+    if worker_selection_policy_factory.is_some()
+        && !engine_config
+            .inner
+            .local_model()
+            .router_config()
+            .router_mode
+            .is_kv_routing()
+    {
+        return Err(PyValueError::new_err(
+            "linked worker-selection policies require --router-mode kv",
+        ));
+    }
+    if worker_selection_policy_factory.is_some() && !matches!(&input_enum, Input::Http) {
+        return Err(PyValueError::new_err(
+            "linked worker-selection policies require HTTP frontend input",
+        ));
+    }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        if let Some(factory) = worker_selection_policy_factory {
+            HttpFrontend::default()
+                .frontend_route_extensions(frontend_route_extensions)
+                .worker_selection_policy_factory(move |config, worker_type, partition| {
+                    factory(config, worker_type, partition)
+                })
+                .run(distributed_runtime.inner.clone(), engine_config.inner)
+                .await
+                .map_err(to_pyerr)?;
+            return Ok(());
+        }
         dynamo_llm::entrypoint::input::run_input_with_frontend_route_extensions(
             distributed_runtime.inner.clone(),
             input_enum,

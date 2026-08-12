@@ -17,7 +17,7 @@ spec:
                 nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
         spec:
             containers:
-                - image: registry.example/dynamo-worker:test
+                - image: registry.example/dynamo-worker:1.4.0-test
                   name: main
     replicas: 2
     type: decode
@@ -38,7 +38,7 @@ spec:
                 nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
         spec:
             containers:
-                - image: registry.example/dynamo-frontend:test
+                - image: registry.example/dynamo-frontend:1.4.0-test
                   name: main
     replicas: 1
     type: frontend
@@ -124,7 +124,7 @@ spec:
                         fieldRef:
                             apiVersion: v1
                             fieldPath: metadata.uid
-                  image: registry.example/dynamo-worker:test
+                  image: registry.example/dynamo-worker:1.4.0-test
                   imagePullPolicy: IfNotPresent
                   livenessProbe:
                     failureThreshold: 1
@@ -250,7 +250,7 @@ spec:
                         fieldRef:
                             apiVersion: v1
                             fieldPath: metadata.uid
-                  image: registry.example/dynamo-frontend:test
+                  image: registry.example/dynamo-frontend:1.4.0-test
                   imagePullPolicy: IfNotPresent
                   livenessProbe:
                     failureThreshold: 3

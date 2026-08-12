@@ -50,7 +50,7 @@ Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx).
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **DRA / ComputeDomain controller** for the cross-node NVLink channel:
    ```bash
    kubectl get crd | grep computedomain

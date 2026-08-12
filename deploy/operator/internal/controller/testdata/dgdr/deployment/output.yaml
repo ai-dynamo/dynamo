@@ -15,6 +15,7 @@ spec:
             - image: $ignore
               name: main
       replicas: 1
+      runtimeVersionOverride: 1.4.0
       type: frontend
     - name: decode
       podTemplate:
@@ -27,10 +28,25 @@ spec:
                 - Qwen/Qwen3-0.6B
                 - --speedup-ratio
                 - "1.0"
-                - --planner-profile-data
-                - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
                 - --disaggregation-mode
                 - decode
+                - --aic-perf-model
+                - --aic-backend
+                - vllm
+                - --aic-backend-version
+                - 0.14.0
+                - --aic-system
+                - h100_sxm
+                - --aic-tp-size
+                - "1"
+                - --aic-moe-tp-size
+                - "1"
+                - --aic-moe-ep-size
+                - "1"
+                - --aic-attention-dp-size
+                - "1"
+                - --engine-type
+                - vllm
               command:
                 - python3
                 - -m
@@ -42,6 +58,7 @@ spec:
               name: main
               workingDir: /workspace
       replicas: 1
+      runtimeVersionOverride: 1.4.0
       type: decode
     - name: prefill
       podTemplate:
@@ -54,10 +71,25 @@ spec:
                 - Qwen/Qwen3-0.6B
                 - --speedup-ratio
                 - "1.0"
-                - --planner-profile-data
-                - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
                 - --disaggregation-mode
                 - prefill
+                - --aic-perf-model
+                - --aic-backend
+                - vllm
+                - --aic-backend-version
+                - 0.14.0
+                - --aic-system
+                - h100_sxm
+                - --aic-tp-size
+                - "1"
+                - --aic-moe-tp-size
+                - "1"
+                - --aic-moe-ep-size
+                - "1"
+                - --aic-attention-dp-size
+                - "1"
+                - --engine-type
+                - vllm
               command:
                 - python3
                 - -m
@@ -69,6 +101,7 @@ spec:
               name: main
               workingDir: /workspace
       replicas: 1
+      runtimeVersionOverride: 1.4.0
       type: prefill
 status:
   $ignore: true
@@ -95,10 +128,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - decode
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m
@@ -110,6 +158,7 @@ spec:
           name: main
           workingDir: /workspace
   replicas: 1
+  runtimeVersionOverride: 1.4.0
   type: decode
 status:
   $ignore: true
@@ -153,10 +202,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - decode
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m
@@ -423,10 +487,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - prefill
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m
@@ -554,6 +633,7 @@ spec:
         - image: $ignore
           name: main
   replicas: 1
+  runtimeVersionOverride: 1.4.0
   type: frontend
 status:
   $ignore: true
@@ -580,10 +660,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - prefill
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m
@@ -595,6 +690,7 @@ spec:
           name: main
           workingDir: /workspace
   replicas: 1
+  runtimeVersionOverride: 1.4.0
   type: prefill
 status:
   $ignore: true

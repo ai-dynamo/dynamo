@@ -69,15 +69,6 @@ pub enum KvDcRelayError {
     #[cfg(feature = "ckf-diagnostics")]
     #[error("unknown or inactive serving endpoint {0}")]
     UnknownEndpoint(String),
-    #[error(
-        "stale source epoch for worker {worker_id} rank {dp_rank}: current {current}, received {received}"
-    )]
-    StaleSourceEpoch {
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        current: u64,
-        received: u64,
-    },
     #[error("invalid tree dump for worker {worker_id} rank {dp_rank}: {message}")]
     InvalidTreeDump {
         worker_id: WorkerId,
@@ -382,14 +373,8 @@ impl PendingActorFaults {
     fn push_source_fault(&mut self, fault: ActorFault) {
         let key = (fault.worker_id, fault.dp_rank);
         if let Some(current) = self.source_faults.get_mut(&key) {
-            let current_epoch = current.source_epoch.get();
-            let candidate_epoch = fault.source_epoch.get();
-            if candidate_epoch > current_epoch
-                || (candidate_epoch == current_epoch
-                    && is_stronger_source_fault(
-                        fault.disposition.action,
-                        current.disposition.action,
-                    ))
+            if fault.publisher_id != current.publisher_id
+                || is_stronger_source_fault(fault.disposition.action, current.disposition.action)
             {
                 *current = fault;
             }
@@ -866,7 +851,7 @@ fn report_producer_fence_trigger(endpoint: &EndpointId, trigger: &ProducerFenceT
             %endpoint,
             worker_id = fault.worker_id,
             dp_rank = fault.dp_rank,
-            source_epoch = fault.source_epoch.get(),
+            publisher_id = fault.publisher_id,
             event_id = ?fault.event_id,
             category = ?fault.category,
             action = ?fault.disposition.action,
@@ -1188,7 +1173,7 @@ async fn run_endpoint_slot(
                                         client.handle_target_fault(
                                             fault.worker_id,
                                             fault.dp_rank,
-                                            fault.source_epoch,
+                                            fault.publisher_id,
                                             false,
                                         ),
                                     )
@@ -1215,7 +1200,7 @@ async fn run_endpoint_slot(
                                             client.reject_source(
                                                 fault.worker_id,
                                                 fault.dp_rank,
-                                                fault.source_epoch,
+                                                fault.publisher_id,
                                             ),
                                         )
                                         .await
@@ -1665,7 +1650,6 @@ mod tests {
 
     use super::super::actor::ActorFaultCategory;
     use super::*;
-    use crate::kv_router::indexer::SourceEpoch;
 
     fn membership(endpoint: &str, domain: KvCacheDomainKey) -> EndpointMembership {
         let endpoint = EndpointId::from(endpoint);
@@ -1711,7 +1695,7 @@ mod tests {
     fn actor_fault(
         worker_id: WorkerId,
         dp_rank: DpRank,
-        source_epoch: u64,
+        publisher_id: u64,
         event_id: u64,
         disposition: CkfFailureDisposition,
     ) -> ActorFault {
@@ -1727,7 +1711,7 @@ mod tests {
         ActorFault {
             worker_id,
             dp_rank,
-            source_epoch: SourceEpoch::new(source_epoch),
+            publisher_id,
             event_id: Some(event_id),
             category,
             disposition,
@@ -2257,16 +2241,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_faults_coalesce_duplicate_and_stronger_source_actions() {
+    fn pending_faults_coalesce_duplicate_and_latest_publisher_actions() {
         let resource = CkfFailurePoint::PrecommitAllocationFailure.disposition();
         let reject = CkfFailurePoint::SourceProtocolFailure.disposition();
         let mut pending = PendingActorFaults::default();
 
         for event_id in 0..1_000 {
-            pending.push(actor_fault(1, 0, 1, event_id, resource));
+            pending.push(actor_fault(1, 0, 205, event_id, resource));
         }
-        pending.push(actor_fault(1, 0, 1, 1_000, reject));
-        pending.push(actor_fault(1, 0, 1, 1_001, resource));
+        pending.push(actor_fault(1, 0, 205, 1_000, reject));
+        pending.push(actor_fault(1, 0, 205, 1_001, resource));
 
         assert_eq!(pending.len(), 1);
         let Some(PendingActorAction::Fault(fault)) = pending.pop_front() else {
@@ -2275,12 +2259,12 @@ mod tests {
         assert_eq!(fault.disposition.action, CkfFailureAction::RejectSource);
         assert!(pending.pop_front().is_none());
 
-        pending.push(actor_fault(1, 0, 1, 1_002, reject));
-        pending.push(actor_fault(1, 0, 2, 1_003, resource));
+        pending.push(actor_fault(1, 0, 205, 1_002, reject));
+        pending.push(actor_fault(1, 0, 100, 1_003, resource));
         let Some(PendingActorAction::Fault(fault)) = pending.pop_front() else {
-            panic!("newer source epoch was not retained");
+            panic!("latest publisher fault was not retained");
         };
-        assert_eq!(fault.source_epoch, SourceEpoch::new(2));
+        assert_eq!(fault.publisher_id, 100);
         assert_eq!(
             fault.disposition.action,
             CkfFailureAction::ReportResourceFailure

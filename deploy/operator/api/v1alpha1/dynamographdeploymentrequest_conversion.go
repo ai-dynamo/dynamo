@@ -259,6 +259,7 @@ func restoreDGDRSpokeStatus(raw string) (DynamoGraphDeploymentRequestStatus, boo
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, restored *v1beta1.DynamoGraphDeploymentRequestSpec, save *DynamoGraphDeploymentRequestSpec) error {
 	dst.Model = src.Model
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	autoApply := src.AutoApply
 	dst.AutoApply = &autoApply
 
@@ -502,6 +503,7 @@ func projectProfilingConfigToProfilingJob(src *ProfilingConfigSpec, dst *v1beta1
 // v1beta1 to v1alpha1.
 func ConvertToDynamoGraphDeploymentRequestSpec(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, restored *DynamoGraphDeploymentRequestSpec, save *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	dst.Model = src.Model
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	if src.AutoApply != nil {
 		dst.AutoApply = *src.AutoApply
 	} else {

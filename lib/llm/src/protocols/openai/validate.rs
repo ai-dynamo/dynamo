@@ -90,8 +90,8 @@ pub const MAX_STOP_SEQUENCES: usize = 32;
 /// Maximum allowed number of tools.
 pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
-/// Maximum allowed length for function names
-pub const MAX_FUNCTION_NAME_LENGTH: usize = 96;
+/// Both `/v1/messages` and `/v1/responses` define a 128-character tool-name limit.
+pub const MAX_FUNCTION_NAME_LENGTH: usize = 128;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -552,6 +552,15 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
+        if let Some(parameters) = &tool.function.parameters
+            && !parameters.is_object()
+        {
+            anyhow::bail!(
+                "Function parameters at index {} for \"{}\" must be a JSON Schema object",
+                i,
+                tool.function.name,
+            );
+        }
     }
     Ok(())
 }
@@ -763,12 +772,23 @@ pub fn validate_suffix(suffix: Option<&str>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+const MAX_OUTPUT_TOKENS: u32 = 1_048_576;
+
 /// Validates max_tokens parameter
 pub fn validate_max_tokens(max_tokens: Option<u32>) -> Result<(), anyhow::Error> {
     if let Some(tokens) = max_tokens
         && tokens == 0
     {
         anyhow::bail!("Max tokens must be greater than 0, got {}", tokens);
+    }
+    if let Some(tokens) = max_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
+            tokens
+        );
     }
     Ok(())
 }
@@ -782,6 +802,15 @@ pub fn validate_max_completion_tokens(
     {
         anyhow::bail!(
             "Max completion tokens must be greater than 0, got {}",
+            tokens
+        );
+    }
+    if let Some(tokens) = max_completion_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max completion tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
             tokens
         );
     }
@@ -846,6 +875,21 @@ mod tests {
         let args = HashMap::from([("enable_thinking".to_string(), json!(false))]);
         validate_chat_template_args(Some(&args)).unwrap();
         validate_chat_template_args(None).unwrap();
+    }
+
+    #[test]
+    fn validate_response_format_rejects_null_json_schema() {
+        let response_format = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test_schema",
+                "schema": null
+            }
+        }))
+        .unwrap();
+
+        let err = validate_response_format(&Some(response_format)).unwrap_err();
+        assert!(err.to_string().contains("schema` is required"));
     }
 
     #[test]

@@ -259,7 +259,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         return video_bytes
 
     async def _frames_to_video(
-        self, frames: list, fps: int, codec: str = "h264_nvenc"
+        self, frames: list, fps: int, codec: str = "libvpx-vp9"
     ) -> bytes:
         """Convert list of frames to video bytes.
 
@@ -302,15 +302,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 output_buffer.seek(0)
                 return output_buffer.read()
 
-            try:
-                return encode_with_codec(codec)
-            except OSError:
-                if codec != "h264_nvenc":
-                    raise
-                logger.warning(
-                    "h264_nvenc failed; retrying video encoding with libx264"
-                )
-                return encode_with_codec("libx264")
+            # VP9 (libvpx-vp9) is a royalty-free CPU encoder in the in-tree LGPL
+            # ffmpeg; no HW/GPU fallback and no libx264 (GPL, H.264) fallback.
+            return encode_with_codec(codec)
 
         except ImportError as e:
             raise RuntimeError(

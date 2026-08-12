@@ -570,7 +570,6 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(serving_endpoint),
             sources: HashMap::from([(worker, status)]),
             kv_event_publishing_enabled: HashMap::from([(7, capability)]),
-            lifecycle_generations: HashMap::from([(worker, 0)]),
             recovery_expected: HashMap::from([(worker, false)]),
         }
     }

@@ -1,0 +1,291 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DynamoGraphDeployment (DGD) Reference
+subtitle: Field reference for the DynamoGraphDeployment custom resource — the canonical, live description of a Dynamo inference graph.
+---
+
+A `DynamoGraphDeployment` (DGD) is the canonical description of a running Dynamo inference graph. You list the components that make up the graph — frontend, workers, prefill and decode workers, planner, EPP — and the [operator](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md) reconciles them into [`DynamoComponentDeployment`](dynamo-component-deployment.mdx) resources, pods, and Services.
+
+A DGD is the resource that persists and serves traffic. Author one directly when you have a known-good configuration or a tuned [recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes); generate one from intent with a [`DynamoGraphDeploymentRequest`](dynamo-graph-deployment-request.mdx) (DGDR).
+
+This page documents the `nvidia.com/v1beta1` API — the served, current version.
+
+<Info>
+  Each entry in `spec.components` is a `DynamoComponentDeploymentSharedSpec` — the same fields documented on the [DCD Reference](dynamo-component-deployment.mdx#shared-component-spec). This page covers the **graph-level** fields; per-component fields live there.
+</Info>
+
+## Minimal example
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-graph
+spec:
+  backendFramework: vllm
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+    - name: worker
+      type: worker
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+```
+
+## Spec reference
+
+<ParamField path="components" type="[]DynamoComponentDeploymentSharedSpec">
+  Components deployed as part of this graph. Each entry carries its own stable logical `name` (unique within the list, case-insensitively). Component types are repeatable except `type: epp`, which may appear at most once. Maximum 25 components. For the full per-component field set, see [DCD Reference — Shared component spec](dynamo-component-deployment.mdx#shared-component-spec).
+</ParamField>
+
+<ParamField path="backendFramework" type="string">
+  Backend framework for the graph. Sets backend-specific defaults the operator injects into each component's `main` container.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
+</ParamField>
+
+<ParamField path="env" type="[]core/v1.EnvVar">
+  Environment variables prepended to every component's environment. A component-specific `env` entry with the same name takes precedence and may reference values from this list.
+
+  <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
+</ParamField>
+
+<ParamField path="annotations" type="map[string]string">
+  Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Component-level `podTemplate` values take precedence on conflict.
+</ParamField>
+
+<ParamField path="labels" type="map[string]string">
+  Labels propagated to all child resources. Same precedence rules as `annotations`.
+</ParamField>
+
+<ParamField path="priorityClassName" type="string">
+  Name of the `PriorityClass` to use for Grove `PodCliqueSet`s. Requires the Grove pathway. See [Grove](../../developer-guide/knowledge-base/kubernetes/multinode/grove.md).
+</ParamField>
+
+<ParamField path="restart" type="Restart">
+  Restart policy for the graph. Change `restart.id` to trigger a restart.
+</ParamField>
+
+<Indent>
+  <ParamField path="id" type="string" required={true}>
+    Arbitrary string; any change to it initiates a restart of the graph according to the configured strategy.
+  </ParamField>
+  <ParamField path="strategy" type="RestartStrategy">
+    How components are restarted.
+  </ParamField>
+  <Indent>
+    <ParamField path="type" type="RestartStrategyType" default="Sequential">
+      Whether components restart one at a time or all at once.
+
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Sequential</Badge> <Badge intent="note" minimal>Parallel</Badge></span>
+    </ParamField>
+    <ParamField path="order" type="[]string">
+      Complete ordered set of component names for a sequential restart. Omit to use the controller's default order. Must not be set for parallel restarts.
+    </ParamField>
+  </Indent>
+</Indent>
+
+<ParamField path="topologyConstraint" type="SpecTopologyConstraint">
+  Deployment-level topology constraint. Components without their own `topologyConstraint` inherit this value. See [Topology-Aware Scheduling](../../developer-guide/knowledge-base/kubernetes/multinode/topology-aware-scheduling.md).
+</ParamField>
+
+<Indent>
+  <ParamField path="clusterTopologyName" type="string" required={true}>
+    Name of the `ClusterTopology` resource defining the topology hierarchy for this deployment.
+  </ParamField>
+  <ParamField path="packDomain" type="string">
+    Default topology domain to pack pods within. Optional at this level; omit when only components carry constraints.
+  </ParamField>
+</Indent>
+
+<ParamField path="experimental" type="DynamoGraphDeploymentExperimentalSpec">
+  Graph-level opt-in preview features whose API shape may change in breaking ways between `v1beta1` releases. Component-level experimental features live under `spec.components[*].experimental` instead — see [DCD Reference — ExperimentalSpec](dynamo-component-deployment.mdx#experimentalspec).
+</ParamField>
+
+<Indent>
+  <ParamField path="kvTransferPolicy" type="KvTransferPolicy">
+    Topology-aware routing for KV-cache transfers between prefill and decode workers. Set exactly one of `labelKey` or `clusterTopologyName`. See [Topology-Aware KV Transfer](../../developer-guide/knowledge-base/kubernetes/multinode/topology-aware-kv-transfer.md).
+  </ParamField>
+  <Indent>
+    <ParamField path="clusterTopologyName" type="string">
+      References a Grove `ClusterTopology` CR. The operator reads the CR's topology levels and projects them through Dynamo-owned pod labels for worker topology metadata. Mutually exclusive with `labelKey`.
+    </ParamField>
+    <ParamField path="labelKey" type="string">
+      A Kubernetes node label key (for example `topology.kubernetes.io/zone`) whose value identifies the topology domain for each worker. The operator copies the node label onto worker pods so the runtime can publish it as worker metadata. Should correspond to the topology level named in `domain`. Mutually exclusive with `clusterTopologyName`.
+    </ParamField>
+    <ParamField path="domain" type="TopologyDomain">
+      Logical name for the topology level to enforce (for example `zone`, `rack`). The router uses this to match workers that share the same value for the label identified by `labelKey`. Free-form string matching `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`.
+    </ParamField>
+    <ParamField path="enforcement" type="KvTransferEnforcement" default="required">
+      How the selected prefill worker's topology is applied to decode routing. `required` allows only decode workers in the same topology domain as the selected prefill worker; `preferred` keeps all decode workers eligible but biases selection toward the same domain.
+
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>required</Badge> <Badge intent="note" minimal>preferred</Badge></span>
+    </ParamField>
+    <ParamField path="preferredWeight" type="float">
+      Required and used only when `enforcement` is `preferred`. Higher values create a stronger same-domain routing preference but do not guarantee same-domain selection; the value is not a probability. `0` disables the topology preference; `1` is the strongest supported preference. Minimum `0`, maximum `1`.
+    </ParamField>
+  </Indent>
+</Indent>
+
+## Status
+
+The operator maintains observed state under `status`.
+
+<ParamField path="status.state" type="string" default="initializing">
+  High-level textual status of the graph deployment lifecycle.
+</ParamField>
+
+<ParamField path="status.conditions" type="[]metav1.Condition">
+  Latest observed conditions, merged by type. Includes `Available` and `DynamoComponentReady`.
+
+  <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
+</ParamField>
+
+<ParamField path="status.components" type="map[string]ComponentReplicaStatus">
+  Per-component replica status, keyed by component name.
+
+  See: [ComponentReplicaStatus](#componentreplicastatus)
+</ParamField>
+
+<ParamField path="status.observedGeneration" type="integer">
+  Most recent `metadata.generation` observed by the controller.
+</ParamField>
+
+<ParamField path="status.restart" type="RestartStatus">
+  Status of a graph-level restart in progress.
+</ParamField>
+
+<Indent>
+  <ParamField path="observedID" type="string">
+    The restart ID currently being processed. Matches `spec.restart.id`.
+  </ParamField>
+  <ParamField path="phase" type="RestartPhase">
+    Phase of the restart.
+
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Pending</Badge> <Badge intent="note" minimal>Restarting</Badge> <Badge intent="note" minimal>Completed</Badge> <Badge intent="note" minimal>Failed</Badge> <Badge intent="note" minimal>Superseded</Badge></span>
+  </ParamField>
+  <ParamField path="inProgress" type="[]string">
+    Names of the components currently being restarted.
+  </ParamField>
+</Indent>
+
+<ParamField path="status.checkpoints" type="map[string]ComponentCheckpointStatus">
+  Per-component checkpoint status, keyed by component name. See [Snapshot and Restore](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md).
+
+  See: [ComponentCheckpointStatus](#componentcheckpointstatus)
+</ParamField>
+
+<ParamField path="status.rollingUpdate" type="RollingUpdateStatus">
+  Progress of operator-managed rolling updates. Currently supported only for single-node, non-Grove deployments. See [Rolling Update](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/rolling-update.md).
+</ParamField>
+
+<Indent>
+  <ParamField path="phase" type="RollingUpdatePhase">
+    Current phase of the rolling update.
+
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Pending</Badge> <Badge intent="note" minimal>InProgress</Badge> <Badge intent="note" minimal>Completed</Badge> <Badge intent="note" minimal>Failed</Badge></span>
+  </ParamField>
+  <ParamField path="startTime" type="metav1.Time">
+    When the rolling update began.
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Time" target="_blank">metav1.Time</a>
+  </ParamField>
+  <ParamField path="endTime" type="metav1.Time">
+    When the rolling update completed, successfully or failed.
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Time" target="_blank">metav1.Time</a>
+  </ParamField>
+  <ParamField path="updatedComponents" type="[]string">
+    Components that have completed the rolling update.
+  </ParamField>
+</Indent>
+
+## Additional Types
+
+Nested struct types referenced by the status fields above, broken out here to keep the field lists shallow. Types prefixed `core/v1.` or `metav1.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
+
+### ComponentReplicaStatus
+
+Replica information for a single component, keyed by component name in `status.components`.
+
+<ParamField path="componentKind" type="ComponentKind">
+  Underlying Kubernetes resource kind backing the component.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>PodClique</Badge> <Badge intent="note" minimal>PodCliqueScalingGroup</Badge> <Badge intent="note" minimal>Deployment</Badge> <Badge intent="note" minimal>LeaderWorkerSet</Badge></span>
+</ParamField>
+
+<ParamField path="componentNames" type="[]string">
+  Underlying Kubernetes resource names for this Dynamo component. During normal operation this contains a single name; during rolling updates it contains both the old and new resource names.
+</ParamField>
+
+<ParamField path="replicas" type="integer">
+  Total number of non-terminated replicas. Minimum `0`.
+</ParamField>
+
+<ParamField path="updatedReplicas" type="integer">
+  Number of replicas at the current/desired revision. Minimum `0`.
+</ParamField>
+
+<ParamField path="readyReplicas" type="integer">
+  Number of ready replicas. Populated for `PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for `PodCliqueScalingGroup`. Minimum `0`.
+</ParamField>
+
+<ParamField path="availableReplicas" type="integer">
+  Number of available replicas. Populated for `Deployment` and `PodCliqueScalingGroup`; not available for `PodClique` or `LeaderWorkerSet`. Minimum `0`.
+</ParamField>
+
+### ComponentCheckpointStatus
+
+Checkpoint information for a single component, keyed by component name in `status.checkpoints`.
+
+<ParamField path="checkpointName" type="string">
+  Name of the associated `DynamoCheckpoint` CR.
+</ParamField>
+
+<ParamField path="checkpointID" type="string">
+  Artifact ID used by the snapshot protocol.
+</ParamField>
+
+<ParamField path="identityHash" type="string" deprecated={true}>
+  Computed hash of the checkpoint identity. Deprecated: automatic checkpoints use `checkpointID`; this field is retained for older status consumers.
+</ParamField>
+
+<ParamField path="ready" type="boolean">
+  Whether the checkpoint artifact is ready for future pods to restore.
+</ParamField>
+
+## Inspect a DGD
+
+```bash
+# List graph deployments (short name: dgd)
+kubectl get dgd -n $NAMESPACE
+
+# Detailed status, conditions, and events
+kubectl describe dgd my-graph -n $NAMESPACE
+
+# Per-component readiness
+kubectl get dgd my-graph -n $NAMESPACE -o jsonpath='{.status.components}'
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="DCD Reference" icon="cube" href="dynamo-component-deployment.mdx">
+    Per-component fields embedded in `spec.components`.
+  </Card>
+  <Card title="DGDR Reference" icon="wand-magic-sparkles" href="dynamo-graph-deployment-request.mdx">
+    Generate a DGD by intent instead of authoring it by hand.
+  </Card>
+  <Card title="Deploy with DGD" icon="rocket" href="../../kubernetes/model-deployment/deploy-with-dgd.md">
+    Task-oriented walkthrough of authoring a graph deployment.
+  </Card>
+  <Card title="Dynamo Operator" icon="gears" href="../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md">
+    Operator-injected defaults, environment variables, and reconciliation.
+  </Card>
+</CardGroup>

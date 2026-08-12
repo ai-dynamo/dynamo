@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::local_model::{
+    LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
+};
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
+#[cfg(feature = "custom-policy")]
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
@@ -24,7 +28,6 @@ use tokio::sync::Mutex;
 use tracing::Instrument;
 
 use dynamo_runtime::config;
-use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
@@ -35,6 +38,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+#[cfg(feature = "custom-policy")]
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -97,6 +103,9 @@ type PythonBidirectionalIngress = Ingress<
 
 static INIT: OnceCell<()> = OnceCell::new();
 
+#[cfg(feature = "custom-policy")]
+static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
+
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
 
@@ -151,17 +160,9 @@ fn create_request_context(
     }
 }
 
-/// A Python module implemented in Rust. The name of this function must match
-/// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
-/// import the module.
-#[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-        eprintln!(
-            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
-        );
-    } else if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
+fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // OTLP export no longer requires a pre-existing runtime, so initialize at import.
+    if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
     }
 
@@ -172,6 +173,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
+    m.add_function(wrap_pyfunction!(update_model_taints, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
@@ -189,6 +191,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
 
     m.add_class::<DistributedRuntime>()?;
+    m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
@@ -209,16 +212,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::TrtllmArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
-    #[cfg(feature = "aic-forward-pass")]
-    {
-        m.add_class::<llm::engine_perf::AicEngineConfig>()?;
-        m.add_class::<llm::engine_perf::EngineCapacity>()?;
-        m.add_class::<llm::engine_perf::EngineCapacityRequest>()?;
-        m.add_class::<llm::engine_perf::EnginePerfLimits>()?;
-        m.add_class::<llm::engine_perf::OptimizationTarget>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
-    }
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -263,6 +256,57 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
 
     Ok(())
+}
+
+pub(crate) fn worker_selection_policy_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| registry.resolve(config))
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "custom-policy")]
+fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    dynamo_worker_selection_policy_catalog::register(&mut registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+
+    WORKER_SELECTION_POLICY_REGISTRY
+        .set(registry)
+        .map_err(|_| {
+            PyRuntimeError::new_err("worker-selection policy registry already installed")
+        })?;
+    register_core(m)
+}
+
+/// The extension-module entrypoint for a custom policy image.
+#[cfg(feature = "custom-policy")]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core_with_custom_worker_selection_policy(m)
+}
+
+/// The stock extension-module entrypoint.
+#[cfg(not(feature = "custom-policy"))]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core(m)
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr
@@ -318,6 +362,21 @@ fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 
 #[pyfunction(name = "run_select_service")]
 #[pyo3(signature = (argv=None))]
+#[cfg(feature = "select-service")]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || {
+        llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
+            argv,
+            worker_selection_policy_factory,
+        )
+    })
+    .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+#[cfg(not(feature = "select-service"))]
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_select_service_cli(argv))
@@ -550,6 +609,19 @@ fn register_model<'p>(
         if is_tensor_based || is_images || is_videos || is_realtime {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            // Preserve source_path for compatibility checks (LoRA vs base model).
+            // Only set if it differs from model_name to preserve legacy MDC checksums.
+            if source_path != model_name {
+                card.source_path = Some(source_path.clone());
+            }
+
+            // Populate lora_info if this is a LoRA registration.
+            if let Some(lora_name) = lora_identifier.clone() {
+                card.lora = Some(llm_rs::model_card::LoraInfo {
+                    name: lora_name,
+                    max_gpu_lora_count,
+                });
+            }
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.worker_type = worker_type_value;
@@ -565,20 +637,20 @@ fn register_model<'p>(
                 );
             }
 
-            card.runtime_config = runtime_config.inner;
+            // For base model (no lora_identifier), propagate LoRA slot capacity so
+            // frontend allocator can see idle-but-LoRA-capable workers before first adapter load.
+            let mut rc = runtime_config.inner;
+            if lora_identifier.is_none() {
+                rc.max_gpu_lora_count = max_gpu_lora_count;
+            }
+            card.runtime_config = rc;
             card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
-            let discovery = endpoint.inner.drt().discovery();
-            let spec = rs::discovery::DiscoverySpec::from_model(
-                endpoint.inner.component().namespace().name().to_string(),
-                endpoint.inner.component().name().to_string(),
-                endpoint.inner.name().to_string(),
-                &card,
-            )
-            .map_err(to_pyerr)?;
-            discovery.register(spec).await.map_err(to_pyerr)?;
+            register_model_card(&endpoint.inner, &card)
+                .await
+                .map_err(|e| PyException::new_err(format!("{}", e)))?;
 
             return Ok(());
         }
@@ -689,6 +761,21 @@ fn unregister_model<'p>(
             .await
             .map_err(to_pyerr)?;
         Ok(())
+    })
+}
+
+/// Replace the caller-managed taints on this worker's registered model.
+#[pyfunction]
+#[pyo3(signature = (endpoint, taints))]
+fn update_model_taints<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    taints: std::collections::HashSet<String>,
+) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        update_model_taints_rs(&endpoint.inner, taints)
+            .await
+            .map_err(to_pyerr)
     })
 }
 
@@ -897,9 +984,29 @@ impl ModelType {
     const Realtime: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Realtime,
     };
+    #[classattr]
+    const Classify: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Classify,
+    };
+    #[classattr]
+    const Pooling: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Pooling,
+    };
 
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()
+    }
+
+    fn supports_embedding(&self) -> bool {
+        self.inner.supports_embedding()
+    }
+
+    fn supports_classify(&self) -> bool {
+        self.inner.supports_classify()
+    }
+
+    fn supports_pooling(&self) -> bool {
+        self.inner.supports_pooling()
     }
 
     fn __or__(&self, other: &Self) -> Self {
@@ -1031,14 +1138,6 @@ impl DistributedRuntime {
                 Ok(worker.runtime().clone())
             })
             .map_err(to_pyerr)?;
-
-        // Initialize logging in context where tokio runtime is available
-        // otel exporter requires it
-        if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-            runtime.secondary().block_on(async {
-                rs::logging::init();
-            });
-        }
 
         let nats_enabled = request_plane.is_nats()
             || matches!(

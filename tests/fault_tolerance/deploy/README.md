@@ -655,7 +655,7 @@ graph LR
 
 ### Install Dynamo Platform
 
-Follow the [instructions](../../../docs/fern/kubernetes/installation-guide.md) to install `Dynamo` in your Kubernetes cluster.
+Follow the [instructions](../../../docs/fern/pages/kubernetes/installation/install-dynamo.md) to install `Dynamo` in your Kubernetes cluster.
 
 ### Mount Workspace and Kube Config
 

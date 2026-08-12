@@ -12,6 +12,7 @@
  *
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
+ * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -58,6 +59,19 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  // dev/local-dev templates build only the dev images -- they must NOT pull in
+  // `core` (all runtime builds + the GPU test matrix), and must not be silently
+  // uncovered the way they were when they sat in `ignore`.
+  {
+    file: 'container/templates/dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'dev.Dockerfile triggers dev image builds only'
+  },
+  {
+    file: 'container/templates/local_dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'local_dev.Dockerfile triggers dev image builds only'
+  },
   // Backend-specific files should only trigger their backend
   {
     file: 'examples/backends/vllm/launch/dsr1_dep.sh',
@@ -75,9 +89,56 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
+    expect: { core: false, examples: true },
+    desc: 'recipe matrix dotfile triggers recipe check without core'
+  },
+  {
+    file: 'scripts/kustomize-matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator triggers recipe check without core'
+  },
+  {
+    file: 'tests/test_kustomize_matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator test triggers recipe check without core'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
+  },
+
+  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
+  {
+    file: 'lib/sidecar/common/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'common sidecar source avoids unrelated build and E2E filters'
+  },
+  {
+    file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+  },
+  {
+    file: 'lib/sidecar/sglang/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sglang sidecar source avoids backend E2E'
+  },
+  {
+    file: 'lib/sidecar/trtllm/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
+  },
+  {
+    file: 'lib/sidecar/vllm/deploy/agg.yaml',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar deployment config avoids Rust and E2E checks'
+  },
+  {
+    file: 'lib/sidecar/README.md',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar README avoids Rust, Fern, and E2E checks'
   },
 
   // Doc files should be excluded from core (negation patterns)

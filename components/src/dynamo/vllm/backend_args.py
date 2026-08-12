@@ -177,6 +177,26 @@ class DynamoVllmArgGroup(ArgGroup):
             "and InstrumentedScheduler injection (none apply to pooling models).",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--realtime",
+            env_var="DYN_VLLM_REALTIME",
+            default=False,
+            help="Serve a ModelType.Realtime bidirectional endpoint through "
+            "the OpenAI /v1/realtime protocol. Standard vLLM currently "
+            "supports transcription sessions only. Aggregated workers only.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--classify-worker",
+            env_var="DYN_VLLM_CLASSIFY_WORKER",
+            default=False,
+            help="Run as a sequence-classification worker, exposing /v1/classify and "
+            "/v1/pooling endpoints. Engine must be started with vLLM's --runner pooling. "
+            "Skips KV events, KV router registration, and InstrumentedScheduler injection.",
+        )
+
         # Headless mode for multi-node TP/PP
         add_negatable_bool_argument(
             g,
@@ -431,6 +451,8 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    realtime: bool = False
+    classify_worker: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
@@ -477,6 +499,8 @@ class DynamoVllmConfig(ConfigBase):
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_worker_exclusivity()
+        self._validate_realtime_worker_exclusivity()
+        self._validate_classify_worker_exclusivity()
         self._validate_custom_encoder()
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
@@ -601,9 +625,9 @@ class DynamoVllmConfig(ConfigBase):
         """Validate the aggregated CustomEncoder configuration.
 
         The encoder runs in-process in a single aggregated worker on the
-        token-in/token-out path and produces image embeds for the mixed
-        EmbedsPrompt, so it is a multimodal, aggregated-only, token-mode
-        component. Enforce those here (fail fast) instead of silently bypassing
+        token-in/token-out path and produces decoder-adapted image artifacts, so
+        it is a multimodal, aggregated-only, token-mode component. Enforce those
+        here (fail fast) instead of silently bypassing
         the multimodal gate at request time, no-op'ing in a decode worker that
         never reaches the custom-encoder branch, or loading the encoder in
         --use-vllm-tokenizer text mode where it is never invoked.
@@ -661,4 +685,79 @@ class DynamoVllmConfig(ConfigBase):
                 "generation scheduler and not compatible with pooling engines. "
                 "Embedding workers do not run generation, so prefill/decode "
                 "benchmark sweeps are not meaningful."
+            )
+
+    def _validate_realtime_worker_exclusivity(self) -> None:
+        """Realtime serving uses a dedicated aggregated bidirectional worker."""
+        if not self.realtime:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
+            )
+        if self.embedding_worker:
+            raise ValueError("--realtime cannot be combined with --embedding-worker.")
+        if self.classify_worker:
+            raise ValueError("--realtime cannot be combined with --classify-worker.")
+        for enabled, option in (
+            (bool(self.custom_encoder_class), "--custom-encoder-class"),
+            (self.gms_shadow_mode, "--gms-shadow-mode"),
+            (self.enable_rl, "--enable-rl"),
+            (self.headless, "--headless"),
+        ):
+            if enabled:
+                raise ValueError(f"--realtime cannot be combined with {option}.")
+        if self.enable_multimodal:
+            raise ValueError(
+                "--realtime cannot be combined with multimodal worker flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError("--realtime cannot be combined with --benchmark-mode.")
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError("--realtime cannot be combined with --enable-lora.")
+
+    def _validate_classify_worker_exclusivity(self) -> None:
+        """Classify worker is aggregated-only and exclusive of multimodal /
+        embedding roles. Mirrors the embedding-worker constraints — both are
+        pooling roles with no prefill/decode phases."""
+        if not self.classify_worker:
+            return
+        if self.embedding_worker:
+            raise ValueError(
+                "--classify-worker and --embedding-worker are mutually exclusive; "
+                "a worker registers exactly one pooling model type."
+            )
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError(
+                "--classify-worker is only valid with --disaggregation-mode=agg "
+                f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
+                "Pooling models do not have prefill/decode phases."
+            )
+        if self.enable_multimodal:
+            raise ValueError(
+                "--classify-worker cannot be combined with multimodal flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--classify-worker cannot be combined with --benchmark-mode. "
+                "Benchmark mode injects InstrumentedScheduler, which is a "
+                "generation scheduler and not compatible with pooling engines."
+            )
+        if self.headless:
+            raise ValueError(
+                "--classify-worker cannot be combined with --headless. "
+                "Headless mode returns before WorkerFactory.create(), so the "
+                "classify/pooling endpoint would never be registered."
+            )
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError(
+                "--classify-worker cannot be combined with --enable-lora. "
+                "The pooling-family handler does not forward lora_request to "
+                "engine_client.encode(), so an adapter-targeted request would "
+                "silently run against the base model."
             )

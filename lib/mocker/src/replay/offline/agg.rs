@@ -11,13 +11,19 @@ use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
-use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::events::{SimulationEvent, SimulationWorkerStage, WorkerCompletionPayload};
+use super::evidence::{
+    KvIngestBoundary, WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool,
+    WorkerPoolState, attach_pressure_references, drain_origin, lifecycle_capture_active,
+    record_lifecycle_operation, startup_origin,
+};
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    next_timestamp as choose_next_timestamp, pop_ready_scaling_tick, pop_ready_worker_completion,
-    pop_ready_worker_ready, push_scaling_tick, push_worker_completion, push_worker_ready,
+    ReadyWorkerCompletions, next_timestamp as choose_next_timestamp, pop_ready_scaling_tick,
+    pop_ready_worker_completions, pop_ready_worker_ready, push_scaling_tick,
+    push_worker_completions, push_worker_ready,
 };
 #[cfg(test)]
 use super::scaling::ReplayScalingDecision;
@@ -29,8 +35,7 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
-        ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
-        TrafficAccumulator,
+        ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator, WorkerScaleDelta,
     },
     state::AggRequestState,
 };
@@ -38,13 +43,18 @@ use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArg
 use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
-use crate::replay::{ReplayTerminalStatus, TraceCollector};
+use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
 use anyhow::bail;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::{BinaryHeap, VecDeque};
 use uuid::Uuid;
+
+fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
+    let first = origins.next()?;
+    origins.all(|origin| origin == first).then_some(first)
+}
 
 #[cfg(test)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -114,6 +124,7 @@ where
     now_ms: f64,
     dp_size: u32,
     next_event_seq: u64,
+    next_scaling_tick_ordinal: u64,
     admission: AdmissionQueue<Metadata>,
     requests: FxHashMap<Uuid, AggRequestState>,
     engine: EngineComponent<Observation>,
@@ -210,6 +221,7 @@ where
             now_ms: 0.0,
             dp_size: args.dp_size.max(1),
             next_event_seq: 0,
+            next_scaling_tick_ordinal: 0,
             admission,
             requests: FxHashMap::default(),
             engine,
@@ -370,6 +382,24 @@ where
         for placement in placements {
             self.record_placement(placement);
             let uuid = placement.request_id;
+            let (logical_worker_id, dp_rank) = self
+                .engine
+                .rank_identity(placement.scheduler_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "offline replay placement references unknown scheduler {}",
+                        placement.scheduler_id
+                    )
+                })?;
+            self.collector.on_route_released(
+                uuid,
+                ReplayRequestPool::Agg,
+                self.now_ms,
+                logical_worker_id,
+                placement.scheduler_id,
+                dp_rank,
+                placement.reported_overlap_tokens,
+            );
             let request = self
                 .requests
                 .get_mut(&uuid)
@@ -392,7 +422,7 @@ where
     ) -> anyhow::Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         let input_length = request.input_length();
-        let output_length = request.metadata().max_output_tokens;
+        let output_length = request.metadata().effective_max_output_tokens();
         request.metadata_mut().uuid = Some(uuid);
         if matches!(self.admission.mode(), ReplayMode::Concurrency { .. }) {
             request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
@@ -400,6 +430,7 @@ where
 
         self.collector
             .on_arrival(uuid, arrival_time_ms, input_length, output_length);
+        self.traffic.on_arrival();
 
         let effects = self
             .placement
@@ -413,6 +444,23 @@ where
                     );
                 }
                 self.record_placement(placement);
+                let (logical_worker_id, dp_rank) = self
+                    .engine
+                    .rank_identity(placement.scheduler_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "offline replay placement references unknown scheduler {}",
+                            placement.scheduler_id
+                        )
+                    })?;
+                self.collector.on_route_immediate(
+                    uuid,
+                    ReplayRequestPool::Agg,
+                    logical_worker_id,
+                    placement.scheduler_id,
+                    dp_rank,
+                    placement.reported_overlap_tokens,
+                );
                 self.requests.insert(
                     uuid,
                     AggRequestState::new_running(input_length, output_length),
@@ -424,6 +472,8 @@ where
                 )?;
             }
             PlacementDecision::Queued => {
+                self.collector
+                    .on_route_queued(uuid, ReplayRequestPool::Agg, self.now_ms);
                 self.requests
                     .insert(uuid, AggRequestState::new_queued(request));
             }
@@ -485,7 +535,12 @@ where
     }
 
     /// Apply router-visible KV events at the phase chosen by the scheduler core.
-    fn apply_engine_observations(&mut self, events: Observation::Batch) -> anyhow::Result<()> {
+    fn apply_engine_observations(
+        &mut self,
+        events: Observation::Batch,
+        boundary: KvIngestBoundary,
+    ) -> anyhow::Result<()> {
+        Observation::record_ingestion(&events, WorkerPool::Agg, boundary, self.now_ms)?;
         let placements = self.placement.observe(events, self.now_ms)?;
         self.dispatch_placements(placements)
     }
@@ -503,7 +558,7 @@ where
                 lifecycle_events.len()
             );
         }
-        self.apply_engine_observations(engine_events)?;
+        self.apply_engine_observations(engine_events, KvIngestBoundary::OffloadTick)?;
         Ok(progress.made_progress)
     }
 
@@ -530,8 +585,9 @@ where
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
-            // Rejected requests never ran: keep them out of the planner-facing
-            // traffic deltas (they still free their slot and advance below).
+            // Rejected requests never ran: keep them out of completed-request
+            // shape and latency samples. Their offered demand was already
+            // recorded at arrival, matching requests_started_total.
             if !signal.rejected {
                 let latencies = self.collector.request_latencies(signal.uuid);
                 let actual_output_tokens = self
@@ -544,7 +600,7 @@ where
                         )
                     })?;
                 debug_assert!(actual_output_tokens <= removed_state.output_tokens);
-                self.traffic.on_request(
+                self.traffic.on_completion(
                     removed_state.input_tokens,
                     actual_output_tokens,
                     latencies,
@@ -614,7 +670,7 @@ where
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     ) -> anyhow::Result<()> {
-        self.apply_engine_observations(engine_events)?;
+        self.apply_engine_observations(engine_events, KvIngestBoundary::PassEnd)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
@@ -630,26 +686,42 @@ where
         // each pass may drain router-pending work before its sibling ranks are applied.
         // Preserve this lower-rank-first tie-break for now. Atomic settlement requires
         // splitting router state mutation from pending-admission draining.
-        while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
-            debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
-            let payload = self.engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.record_fpm(payload.worker_idx, fpm)?;
+        while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
+            match completions {
+                ReadyWorkerCompletions::Single(payload) => {
+                    self.apply_worker_completion(payload)?;
+                }
+                ReadyWorkerCompletions::Batch(payloads) => {
+                    for payload in payloads {
+                        self.apply_worker_completion(payload)?;
+                    }
+                }
             }
-            self.process_completed_pass(
-                payload.worker_idx,
-                payload.completed_requests,
-                payload.output_signals,
-                payload.engine_events,
-                payload.accept_length_output_tokens,
-                payload.accept_length_decode_forwards,
-            )?;
             changed = true;
         }
 
         Ok(changed)
+    }
+
+    fn apply_worker_completion(
+        &mut self,
+        payload: WorkerCompletionPayload<Observation::Batch>,
+    ) -> anyhow::Result<()> {
+        debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
+        let payload = self.engine.on_scheduled_completion(payload)?;
+        if self.collect_fpm
+            && let Some(fpm) = payload.fpm
+        {
+            self.record_fpm(payload.worker_idx, fpm)?;
+        }
+        self.process_completed_pass(
+            payload.worker_idx,
+            payload.completed_requests,
+            payload.output_signals,
+            payload.engine_events,
+            payload.accept_length_output_tokens,
+            payload.accept_length_decode_forwards,
+        )
     }
 
     /// Release every admission made ready by the shared admission queue.
@@ -682,9 +754,8 @@ where
     fn drive_ready_workers(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self
-                .engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+            let effects = self.engine.drive_ready(self.now_ms, &mut self.collector)?;
+            attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 return Ok(changed);
             }
@@ -695,27 +766,22 @@ where
 
     fn handle_engine_effects(
         &mut self,
-        effects: EngineEffects<Observation::Batch>,
+        mut effects: EngineEffects<Observation::Batch>,
     ) -> anyhow::Result<()> {
-        self.apply_engine_observations(effects.pass_start_events)?;
-        for payload in effects.immediate_completions {
-            let payload = self.engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.record_fpm(payload.worker_idx, fpm)?;
-            }
-            self.process_completed_pass(
-                payload.worker_idx,
-                payload.completed_requests,
-                payload.output_signals,
-                payload.engine_events,
-                payload.accept_length_output_tokens,
-                payload.accept_length_decode_forwards,
-            )?;
+        for admission in effects.admissions.drain(..) {
+            self.collector.on_pool_admission(
+                admission.uuid,
+                ReplayRequestPool::Agg,
+                self.now_ms,
+                admission.reused_input_tokens,
+            );
         }
-        for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
-            push_worker_completion(&mut self.events, &mut self.next_event_seq, at_ms, payload);
+        self.apply_engine_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
+        for payload in effects.immediate_completions {
+            self.apply_worker_completion(payload)?;
+        }
+        if let Some(scheduled) = effects.scheduled_completion {
+            push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
         }
         Ok(())
     }
@@ -734,9 +800,32 @@ where
                     anyhow::anyhow!("ready worker {worker_id} has no engine topology")
                 })?;
                 let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                let mut released = placements
+                    .iter()
+                    .map(|placement| placement.request_id)
+                    .collect::<Vec<_>>();
                 self.dispatch_placements(placements)?;
                 let placements = self.placement.topology_settled(self.now_ms)?;
+                released.extend(placements.iter().map(|placement| placement.request_id));
                 self.dispatch_placements(placements)?;
+                let origin = startup_origin(WorkerPool::Agg, worker_id);
+                record_lifecycle_operation(
+                    self.now_ms,
+                    WorkerPool::Agg,
+                    "worker_ready_event",
+                    None,
+                    origin,
+                    vec![WorkerLifecycleTransition {
+                        worker_id,
+                        transition: WorkerLifecycleTransitionKind::WorkerReady,
+                        prior_state: Some("starting"),
+                        state: "active",
+                        reason: None,
+                        origin_operation_ordinal: origin,
+                    }],
+                    self.lifecycle_state(),
+                    released,
+                );
                 changed = true;
             }
             // If mark_worker_ready returned false the worker was cancelled
@@ -767,6 +856,33 @@ where
                     },
                     self.now_ms,
                 )?;
+            }
+            if !removed.is_empty() {
+                let origin = common_origin(
+                    removed
+                        .iter()
+                        .filter_map(|worker_id| drain_origin(WorkerPool::Agg, *worker_id)),
+                );
+                record_lifecycle_operation(
+                    self.now_ms,
+                    WorkerPool::Agg,
+                    "drain_settlement",
+                    None,
+                    origin,
+                    removed
+                        .iter()
+                        .map(|worker_id| WorkerLifecycleTransition {
+                            worker_id: *worker_id,
+                            transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                            prior_state: Some("draining"),
+                            state: "removed",
+                            reason: None,
+                            origin_operation_ordinal: drain_origin(WorkerPool::Agg, *worker_id),
+                        })
+                        .collect(),
+                    self.lifecycle_state(),
+                    Vec::new(),
+                );
             }
             changed |= !removed.is_empty();
             // Scaling ticks fire last so the policy observes a settled timestamp.
@@ -813,7 +929,9 @@ where
             let active_decode_ids = self.engine.active_group_ids();
             self.fpm_buffer
                 .emit_idle_due(&active_decode_ids, self.dp_size, self.now_ms);
+            let tick_ordinal = self.next_scaling_tick_ordinal;
             let snapshot = ReplayScalingSnapshot {
+                tick_ordinal,
                 now_ms: self.now_ms,
                 prefill_fpm: Vec::new(),
                 decode_fpm: self.fpm_buffer.take(),
@@ -825,6 +943,10 @@ where
                 draining_prefill_ids: Vec::new(),
                 draining_decode_ids: self.engine.draining_group_ids(),
             };
+            self.next_scaling_tick_ordinal = self
+                .next_scaling_tick_ordinal
+                .checked_add(1)
+                .expect("replay scaling tick ordinal overflow");
             let mut policy = self
                 .scaling_policy
                 .take()
@@ -834,7 +956,7 @@ where
             let decision = decision?;
 
             if let Some(target) = decision.target_decode {
-                self.apply_scaling(target)?;
+                self.apply_scaling_with_tick(target, Some(tick_ordinal))?;
             }
 
             // Re-arm only into the strict, finite future and only while work
@@ -895,19 +1017,29 @@ where
     ///
     /// Scale-down: the worker is removed from the router immediately (so no
     /// new requests land on it) and drains in-flight work in the engine.
+    #[cfg(test)]
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
+        self.apply_scaling_with_tick(target_workers, None)
+    }
+
+    fn apply_scaling_with_tick(
+        &mut self,
+        target_workers: usize,
+        planner_tick_ordinal: Option<u64>,
+    ) -> anyhow::Result<()> {
         if target_workers != self.engine.non_draining_group_count() {
             self.collector.clear_static_worker_count();
         }
-        let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers);
+        let delta = self.engine.apply_target_count(target_workers);
         #[cfg(test)]
-        if !added.is_empty() {
+        if !delta.added.is_empty() {
             self.worker_active_requests
                 .resize(self.engine.rank_id_capacity(), Vec::new());
         }
         let startup_delay_ms = self.engine.startup_time_ms();
+        let mut lifecycle_releases = Vec::new();
 
-        for &id in &added {
+        for &id in &delta.added {
             match startup_delay_ms {
                 Some(delay) => {
                     push_worker_ready(
@@ -928,20 +1060,23 @@ where
                         .worker_topology(id)
                         .ok_or_else(|| anyhow::anyhow!("new worker {id} has no engine topology"))?;
                     let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                    lifecycle_releases
+                        .extend(placements.iter().map(|placement| placement.request_id));
                     self.dispatch_placements(placements)?;
                 }
             }
         }
 
-        for id in newly_marked {
+        for &id in &delta.newly_draining {
             let topology = self.engine.worker_topology(id).unwrap_or(WorkerTopology {
                 worker_id: id,
                 scheduler_ids: Vec::new(),
             });
             let placements = self.placement.worker_draining(topology, self.now_ms)?;
+            lifecycle_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_placements(placements)?;
         }
-        for id in removed {
+        for &id in &delta.removed {
             let placements = self.placement.worker_removed(
                 WorkerTopology {
                     worker_id: id,
@@ -949,13 +1084,116 @@ where
                 },
                 self.now_ms,
             )?;
+            lifecycle_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_placements(placements)?;
         }
         let placements = self.placement.topology_settled(self.now_ms)?;
+        lifecycle_releases.extend(placements.iter().map(|placement| placement.request_id));
         self.dispatch_placements(placements)?;
+        self.record_scale_lifecycle(
+            &delta,
+            startup_delay_ms.is_some(),
+            planner_tick_ordinal,
+            lifecycle_releases,
+        );
         self.record_router_pending();
         self.record_in_flight_peak();
         Ok(())
+    }
+
+    fn lifecycle_state(&self) -> WorkerPoolState {
+        WorkerPoolState {
+            active: self.engine.active_group_ids(),
+            starting: self.engine.starting_group_ids(),
+            draining: self.engine.draining_group_ids(),
+        }
+    }
+
+    fn record_scale_lifecycle(
+        &self,
+        delta: &WorkerScaleDelta,
+        delayed_startup: bool,
+        planner_tick_ordinal: Option<u64>,
+        released: Vec<Uuid>,
+    ) {
+        if !lifecycle_capture_active() {
+            return;
+        }
+        let mut transitions = Vec::new();
+        transitions.extend(
+            delta
+                .added
+                .iter()
+                .map(|worker_id| WorkerLifecycleTransition {
+                    worker_id: *worker_id,
+                    transition: if delayed_startup {
+                        WorkerLifecycleTransitionKind::WorkerStarting
+                    } else {
+                        WorkerLifecycleTransitionKind::WorkerReady
+                    },
+                    prior_state: None,
+                    state: if delayed_startup {
+                        "starting"
+                    } else {
+                        "active"
+                    },
+                    reason: None,
+                    origin_operation_ordinal: None,
+                }),
+        );
+        transitions.extend(delta.cancelled_startups.iter().map(|worker_id| {
+            WorkerLifecycleTransition {
+                worker_id: *worker_id,
+                transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                prior_state: Some("starting"),
+                state: "removed",
+                reason: Some("startup_cancelled"),
+                origin_operation_ordinal: startup_origin(WorkerPool::Agg, *worker_id),
+            }
+        }));
+        transitions.extend(delta.newly_draining.iter().map(|worker_id| {
+            WorkerLifecycleTransition {
+                worker_id: *worker_id,
+                transition: WorkerLifecycleTransitionKind::WorkerDraining,
+                prior_state: Some("active"),
+                state: "draining",
+                reason: None,
+                origin_operation_ordinal: None,
+            }
+        }));
+        transitions.extend(
+            delta
+                .removed
+                .iter()
+                .map(|worker_id| WorkerLifecycleTransition {
+                    worker_id: *worker_id,
+                    transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                    prior_state: Some("draining"),
+                    state: "removed",
+                    reason: None,
+                    origin_operation_ordinal: drain_origin(WorkerPool::Agg, *worker_id),
+                }),
+        );
+        let origin = common_origin(
+            delta
+                .cancelled_startups
+                .iter()
+                .filter_map(|worker_id| startup_origin(WorkerPool::Agg, *worker_id)),
+        );
+        record_lifecycle_operation(
+            self.now_ms,
+            WorkerPool::Agg,
+            if planner_tick_ordinal.is_some() {
+                "planner_scale"
+            } else {
+                "manual_scale"
+            },
+            planner_tick_ordinal,
+            origin,
+            transitions,
+            self.lifecycle_state(),
+            released,
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1523,6 +1761,39 @@ mod tests {
         let report = collector.finish();
         assert_eq!(report.request_counts.completed_requests, 2);
         assert_eq!(report.request_counts.total_output_tokens, 1);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    fn planned_output_length_controls_aggregate_accounting(#[case] engine_type: EngineType) {
+        let args = match engine_type {
+            EngineType::Vllm => MockEngineArgs::builder()
+                .block_size(4)
+                .num_gpu_blocks(32)
+                .max_num_batched_tokens(Some(16))
+                .max_num_seqs(Some(1))
+                .speedup_ratio(1000.0)
+                .build()
+                .unwrap(),
+            EngineType::Sglang => sglang_replay_args(),
+            EngineType::Trtllm => unreachable!(),
+        };
+        let requests = vec![DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![7, 8, 9]),
+            uuid: Some(Uuid::from_u128(9_002)),
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }];
+
+        let (collector, _) =
+            run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
+        let snapshot = collector.snapshot(Uuid::from_u128(9_002)).unwrap();
+        assert_eq!(snapshot.requested_output_length, 3);
+        assert_eq!(snapshot.output_length, 3);
+        assert_eq!(collector.finish().request_counts.total_output_tokens, 3);
     }
 
     #[test]
@@ -2214,10 +2485,10 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
+    fn test_multi_worker_trace_kv_router_delays_cached_visibility_until_pass_completion() {
         let policy = RouterQueuePolicy::Fcfs;
         let mut args = queueing_router_args(policy);
-        // Preserve this snapshot's historical KVBM event-visibility semantics.
+        // Exercise the shared scheduler's KVBM event capture path.
         args.g1_backend = Some(G1Backend::Kvbm);
         let mut runtime = AggRuntime::new(
             &args,
@@ -2277,7 +2548,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1]
         );
-        assert!(initial_router.indexer.total_cached_blocks > 0);
+        assert_eq!(initial_router.indexer.total_cached_blocks, 0);
 
         assert!(runtime.advance_one_timestamp().unwrap());
         let queued = runtime.debug_snapshot();
@@ -2288,15 +2559,13 @@ mod tests {
         assert_eq!(queued_router.pending.len(), 1);
         assert_eq!(queued_router.pending[0].uuid, Uuid::from_u128(33));
 
-        let cached_workers = queued_router.pending[0]
-            .overlap_blocks_by_worker
-            .iter()
-            .filter(|(_, overlap)| *overlap > 0)
-            .map(|(worker_idx, _)| *worker_idx)
-            .collect::<Vec<_>>();
-        assert_eq!(cached_workers.len(), 1);
-        let cached_worker = cached_workers[0];
-
+        assert!(
+            queued_router.pending[0]
+                .overlap_blocks_by_worker
+                .iter()
+                .all(|(_, overlap)| *overlap == 0),
+            "a mid-pass arrival must not observe KV blocks before pass completion"
+        );
         while !runtime
             .stats
             .assigned_worker_by_uuid
@@ -2307,9 +2576,15 @@ mod tests {
 
         let dispatched = runtime.debug_snapshot();
         assert!(dispatched.router_pending_request_ids.is_empty());
-        assert_eq!(
-            runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(33)],
-            cached_worker
+        assert!(
+            dispatched
+                .router
+                .as_ref()
+                .unwrap()
+                .indexer
+                .total_cached_blocks
+                > 0,
+            "completed passes must publish their KV blocks"
         );
     }
 
@@ -2350,23 +2625,36 @@ mod tests {
         )
         .unwrap();
 
-        assert!(runtime.advance_one_timestamp().unwrap());
-        assert_eq!(
-            runtime.debug_snapshot().router_pending_request_ids,
-            vec![Uuid::from_u128(2)]
-        );
+        let ((), evidence) = super::super::evidence::with_runtime_evidence(
+            crate::replay::ReplayCaptureOptions {
+                capture_planner_details: true,
+                ..Default::default()
+            },
+            || {
+                assert!(runtime.advance_one_timestamp().unwrap());
+                assert_eq!(
+                    runtime.debug_snapshot().router_pending_request_ids,
+                    vec![Uuid::from_u128(2)]
+                );
 
-        runtime.apply_scaling(2).unwrap();
+                runtime.apply_scaling(2).unwrap();
 
-        assert!(
-            runtime
-                .debug_snapshot()
-                .router_pending_request_ids
-                .is_empty()
+                assert!(
+                    runtime
+                        .debug_snapshot()
+                        .router_pending_request_ids
+                        .is_empty()
+                );
+                assert_eq!(
+                    runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(2)],
+                    1
+                );
+            },
         );
+        assert_eq!(evidence.lifecycle_operations.len(), 1);
         assert_eq!(
-            runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(2)],
-            1
+            evidence.lifecycle_operations[0].topology_released_request_uuids,
+            vec![Uuid::from_u128(2).to_string()]
         );
     }
 
@@ -3704,20 +3992,80 @@ mod tests {
         )
         .unwrap();
 
-        // Scale up to 4 (2 new workers starting).
-        rt.apply_scaling(4).unwrap();
-        assert_eq!(rt.active_worker_count(), 2);
-        assert_eq!(rt.total_worker_count(), 4);
+        let ((), evidence) = super::super::evidence::with_runtime_evidence(
+            crate::replay::ReplayCaptureOptions {
+                capture_planner_details: true,
+                ..Default::default()
+            },
+            || {
+                // Scale up to 4 (2 new workers starting).
+                rt.apply_scaling(4).unwrap();
+                assert_eq!(rt.active_worker_count(), 2);
+                assert_eq!(rt.total_worker_count(), 4);
 
-        // Immediately scale back to 2 — should cancel both startup workers.
-        rt.apply_scaling(2).unwrap();
-        assert_eq!(rt.active_worker_count(), 2);
-        assert_eq!(rt.total_worker_count(), 2);
+                // Immediately scale back to 2 — should cancel both startup workers.
+                rt.apply_scaling(2).unwrap();
+                assert_eq!(rt.active_worker_count(), 2);
+                assert_eq!(rt.total_worker_count(), 2);
 
-        // Advance past the original startup time. No crash, counts unchanged.
-        rt.advance_to(6000.0).unwrap();
-        assert_eq!(rt.active_worker_count(), 2);
-        assert_eq!(rt.total_worker_count(), 2);
+                // Advance past the original startup time. No crash, counts unchanged.
+                rt.advance_to(6000.0).unwrap();
+                assert_eq!(rt.active_worker_count(), 2);
+                assert_eq!(rt.total_worker_count(), 2);
+            },
+        );
+
+        assert_eq!(evidence.lifecycle_operations.len(), 2);
+        let startup = &evidence.lifecycle_operations[0];
+        assert_eq!(startup.cause, "manual_scale");
+        assert_eq!(startup.origin_operation_ordinal, None);
+        assert_eq!(startup.state_after_batch.active, vec![0, 1]);
+        assert_eq!(startup.state_after_batch.starting, vec![2, 3]);
+        assert!(startup.state_after_batch.draining.is_empty());
+        assert_eq!(
+            startup
+                .transitions
+                .iter()
+                .map(|transition| (
+                    transition.worker_id,
+                    transition.transition,
+                    transition.reason
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, WorkerLifecycleTransitionKind::WorkerStarting, None),
+                (3, WorkerLifecycleTransitionKind::WorkerStarting, None),
+            ]
+        );
+        let cancellation = &evidence.lifecycle_operations[1];
+        assert_eq!(cancellation.cause, "manual_scale");
+        assert_eq!(cancellation.origin_operation_ordinal, Some(0));
+        assert_eq!(cancellation.state_after_batch.active, vec![0, 1]);
+        assert!(cancellation.state_after_batch.starting.is_empty());
+        assert!(cancellation.state_after_batch.draining.is_empty());
+        assert_eq!(
+            cancellation
+                .transitions
+                .iter()
+                .map(|transition| (
+                    transition.worker_id,
+                    transition.transition,
+                    transition.reason
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    3,
+                    WorkerLifecycleTransitionKind::WorkerRemoved,
+                    Some("startup_cancelled")
+                ),
+                (
+                    2,
+                    WorkerLifecycleTransitionKind::WorkerRemoved,
+                    Some("startup_cancelled")
+                ),
+            ]
+        );
     }
 
     #[test]

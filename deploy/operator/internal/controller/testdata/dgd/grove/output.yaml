@@ -62,7 +62,7 @@ spec:
                               valueFrom:
                                 fieldRef:
                                     fieldPath: metadata.uid
-                          image: registry.example/dynamo-frontend:test
+                          image: registry.example/dynamo-frontend:1.4.0-test
                           livenessProbe:
                             failureThreshold: 3
                             httpGet:
@@ -164,7 +164,7 @@ spec:
                               valueFrom:
                                 fieldRef:
                                     fieldPath: status.podIP
-                          image: registry.example/dynamo-worker:test
+                          image: registry.example/dynamo-worker:1.4.0-test
                           livenessProbe:
                             failureThreshold: 1
                             httpGet:
@@ -274,7 +274,7 @@ spec:
                               valueFrom:
                                 fieldRef:
                                     fieldPath: status.podIP
-                          image: registry.example/dynamo-worker:test
+                          image: registry.example/dynamo-worker:1.4.0-test
                           name: main
                           ports:
                             - containerPort: 9090

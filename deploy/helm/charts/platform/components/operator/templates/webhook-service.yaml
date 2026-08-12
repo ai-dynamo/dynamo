@@ -25,7 +25,6 @@ metadata:
     app.kubernetes.io/part-of: dynamo-operator
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
-  publishNotReadyAddresses: {{ .Values.webhook.service.publishNotReadyAddresses }}
   ports:
   - port: 443
     protocol: TCP

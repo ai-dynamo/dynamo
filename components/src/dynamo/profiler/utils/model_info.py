@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from transformers import AutoConfig
 
 try:
-    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+    from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
 except ImportError:
     get_model_config_from_model_path = None
 logger = logging.getLogger(__name__)

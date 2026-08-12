@@ -34,6 +34,9 @@ pub mod logging {
     /// Enable JSONL logging format
     pub const DYN_LOGGING_JSONL: &str = "DYN_LOGGING_JSONL";
 
+    /// Console log format: "readable" or "jsonl"; blank uses the legacy fallback
+    pub const DYN_LOGGING_CONSOLE_FORMAT: &str = "DYN_LOGGING_CONSOLE_FORMAT";
+
     /// Disable ANSI terminal colors in logs
     pub const DYN_SDK_DISABLE_ANSI_LOGGING: &str = "DYN_SDK_DISABLE_ANSI_LOGGING";
 
@@ -302,10 +305,16 @@ pub mod llm {
 
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
-    /// to 503 for Service Unavailable retry semantics. Any valid HTTP status
-    /// code (100–999) is accepted; an unparseable or out-of-range value falls
-    /// back to 529.
+    /// to 503 for Service Unavailable retry semantics. Status codes from 200
+    /// through 999 are accepted; an informational value from 100 through 199,
+    /// an unparseable value, or an out-of-range value falls back to 529. The
+    /// value is read and cached on first use.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+
+    /// Emit an SSE comment at this interval while a streaming response has no
+    /// data. Unset, `0`, invalid, or unrepresentable values keep SSE comments
+    /// disabled.
+    pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
@@ -355,6 +364,10 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// OpenAI-compatible response field used for emitted reasoning content.
+    /// Accepted values: "reasoning_content" (default) or "reasoning".
+    pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
+
     /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
     /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
     /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
@@ -370,6 +383,20 @@ pub mod llm {
     ///
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
+
+    /// Pre-commit peek window in milliseconds for the streaming chat/responses
+    /// paths. Controls how long the frontend polls the engine stream for a
+    /// synchronous backend error before committing HTTP 200.
+    /// Trades a small first-token latency budget
+    /// for the ability to surface `Backend(InvalidArgument)` and other
+    /// request-validation errors as HTTP 4xx instead of an SSE error frame.
+    ///
+    /// Default: unset → peek disabled (matches pre-fix behavior; all errors
+    /// surface as SSE frames post-HTTP-200). Set to a value ≥ observed
+    /// request-parse / admission p99 latency to opt in — request-validation
+    /// errors within the window surface as HTTP 4xx; anything past the window
+    /// stays as an SSE error frame. Setting to `0` also disables the peek.
+    pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
@@ -476,7 +503,8 @@ pub mod llm {
         /// Master switch. Truthy enables request trace emission.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Request trace sink selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
+        /// Request trace sink selection. Comma-separated values: `file`,
+        /// `stderr`, `nats`, `otel`, `s3`.
         ///
         /// Legacy values map as follows: `jsonl` => `file` with `jsonl` format,
         /// `jsonl_gz` => `file` with `jsonl_gz` format, `stderr` => `stderr`,
@@ -553,6 +581,30 @@ pub mod llm {
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// S3 bucket for the S3 request-trace sink. Required when
+        /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
+        pub const DYN_REQUEST_TRACE_S3_BUCKET: &str = "DYN_REQUEST_TRACE_S3_BUCKET";
+
+        /// AWS region for the S3 request-trace sink. When unset the AWS SDK
+        /// default region resolution is used (env, profile, IMDS).
+        pub const DYN_REQUEST_TRACE_S3_REGION: &str = "DYN_REQUEST_TRACE_S3_REGION";
+
+        /// Optional object key prefix for the S3 request-trace sink. When unset
+        /// records land at the bucket root.
+        pub const DYN_REQUEST_TRACE_S3_PREFIX: &str = "DYN_REQUEST_TRACE_S3_PREFIX";
+
+        /// S3 batch roll threshold in uncompressed bytes. When the pending
+        /// batch reaches this size, it is finalized and uploaded. Default
+        /// `67108864` (64 MiB).
+        pub const DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES: &str =
+            "DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES";
+
+        /// S3 periodic flush interval in milliseconds. Any partial batch is
+        /// finalized and uploaded when this elapses, so low-volume traces
+        /// still land in S3. Default `10000` (10 s).
+        pub const DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS: &str =
+            "DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS";
     }
 }
 
@@ -602,9 +654,6 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
-    /// Legacy ratio of non-CPU encoder capacity to CPU encoder capacity used by device-aware weighted routing.
-    pub const DYN_ENCODER_CUDA_TO_CPU_RATIO: &str = "DYN_ENCODER_CUDA_TO_CPU_RATIO";
-
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
@@ -622,8 +671,9 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
-    /// Request plane payload codec selection: "json" or "msgpack".
-    /// JSON is the compatibility default.
+    /// Preferred payload codec advertised by every request-plane endpoint in this process.
+    /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
+    /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
@@ -636,6 +686,35 @@ pub mod tcp_response_stream {
     /// Host/interface for the TCP response stream server.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
+
+    /// TCP request-plane TLS configuration
+    pub mod tls {
+        /// Path to the PEM certificate used by the TCP server.
+        /// When set together with DYN_TCP_TLS_KEY_PATH, TLS is enabled on the
+        /// TCP server. To enable TLS on the client side, also set
+        /// DYN_TCP_TLS_CA_CERT_PATH (or DYN_TCP_TLS_INSECURE for dev).
+        pub const DYN_TCP_TLS_CERT_PATH: &str = "DYN_TCP_TLS_CERT_PATH";
+
+        /// Path to the PEM private key for the TCP server certificate.
+        pub const DYN_TCP_TLS_KEY_PATH: &str = "DYN_TCP_TLS_KEY_PATH";
+
+        /// Path to the PEM CA certificate used by TCP clients to verify the server.
+        /// Required on the client side when the server uses a self-signed or internal CA.
+        pub const DYN_TCP_TLS_CA_CERT_PATH: &str = "DYN_TCP_TLS_CA_CERT_PATH";
+
+        /// Disable TLS certificate verification on the TCP client. Set to "true" to skip.
+        /// WARNING: Only for local development. Never use in production.
+        pub const DYN_TCP_TLS_INSECURE: &str = "DYN_TCP_TLS_INSECURE";
+
+        /// Override the TLS server name (SNI) used by TCP clients when verifying the
+        /// server certificate. When unset, the hostname extracted from the connection
+        /// address is used. Useful when connecting by IP to a server whose certificate
+        /// uses a DNS SAN.
+        pub const DYN_TCP_TLS_SERVER_NAME: &str = "DYN_TCP_TLS_SERVER_NAME";
+
+        /// TLS handshake timeout in seconds (default: 3).
+        pub const DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS: &str = "DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS";
+    }
 }
 
 /// Event Plane transport environment variables
@@ -751,6 +830,7 @@ mod tests {
             logging::DYN_LOG,
             logging::DYN_LOGGING_CONFIG_PATH,
             logging::DYN_LOGGING_JSONL,
+            logging::DYN_LOGGING_CONSOLE_FORMAT,
             logging::DYN_SDK_DISABLE_ANSI_LOGGING,
             logging::DYN_LOG_USE_LOCAL_TZ,
             logging::DYN_LOGGING_SPAN_EVENTS,
@@ -813,6 +893,7 @@ mod tests {
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
+            llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
@@ -823,6 +904,7 @@ mod tests {
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
@@ -833,6 +915,7 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::DYN_LORA_MCF_CONFIG,
+            llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
@@ -876,7 +959,6 @@ mod tests {
             model::huggingface::HF_ENDPOINT,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
-            router::DYN_ENCODER_CUDA_TO_CPU_RATIO,
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
@@ -886,6 +968,12 @@ mod tests {
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+            tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_CA_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_INSECURE,
+            tcp_response_stream::tls::DYN_TCP_TLS_SERVER_NAME,
+            tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,

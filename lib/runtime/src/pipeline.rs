@@ -14,10 +14,12 @@ pub use nodes::{
 pub mod context;
 pub mod error;
 pub mod network;
-pub use network::egress::addressed_router::{AddressedPushRouter, AddressedRequest};
+pub use crate::routing_policy::RouteTarget;
+pub use network::egress::addressed_router::{
+    AddressedPushRouter, AddressedRequest, StreamingDispatch,
+};
 pub use network::egress::push_router::{
     MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, RouterMode, WorkerLoadMonitor,
-    non_cpu_to_cpu_ratio_from_env, resolve_non_cpu_to_cpu_ratio,
 };
 pub mod registry;
 

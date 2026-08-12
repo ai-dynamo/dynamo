@@ -22,11 +22,11 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
-use dynamo_runtime::pipeline::{RouterMode, non_cpu_to_cpu_ratio_from_env};
+use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::envoy_helpers::find_header;
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -97,6 +97,7 @@ pub struct Router {
     runtime: Runtime,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
+    served_model: String,
 }
 
 impl Router {
@@ -176,16 +177,13 @@ impl Router {
             Some(prefill_config),
             None,
             None,
+            None,
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,
             // ext-proc constructs no KvWorkerMonitor; overload publishing is
             // unused on this path (matches the prior namespace-lookup miss).
             None,
-            // ext-proc carries no RouterConfig, so the ratio resolves from the
-            // legacy environment variable exactly as it did before the ratio
-            // became an explicit parameter.
-            non_cpu_to_cpu_ratio_from_env(),
         );
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
@@ -210,7 +208,16 @@ impl Router {
             runtime,
             pod_store,
             pod_store_ready,
+            served_model: model_name,
         })
+    }
+
+    /// The model this pool serves, from the discovered model card.
+    ///
+    /// Authoritative, unlike the `model` field of a request body, which the
+    /// router accepts without checking.
+    pub fn served_model(&self) -> &str {
+        &self.served_model
     }
 
     /// Tokenize a JSON request body and extract router queue priorities.
@@ -229,12 +236,10 @@ impl Router {
         let strict_priority = extract_strict_priority(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let formatted_prompt = self
-            .preprocessor
-            .apply_template(&request)?
-            .unwrap_or_default();
-
-        let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
+        let encoding = match self.preprocessor.apply_template(&request)? {
+            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
+            None => self.preprocessor.tokenize("")?,
+        };
         Ok((
             encoding.token_ids().to_vec(),
             cache_namespace,
@@ -1101,9 +1106,19 @@ impl EndpointPicker for Router {
         }
     }
 
-    async fn on_request_complete(&self, request_id: &str) {
+    async fn on_request_complete_with_usage(&self, request_id: &str, usage: Option<ResponseUsage>) {
         if request_id.is_empty() {
             return;
+        }
+        if let Some(usage) = usage {
+            tracing::debug!(
+                request_id,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                total_tokens = ?usage.total_tokens,
+                cached_tokens = ?usage.cached_tokens,
+                "Request complete with usage"
+            );
         }
         if let Err(e) = self.free_request(request_id).await {
             tracing::debug!(

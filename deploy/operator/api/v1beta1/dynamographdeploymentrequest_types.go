@@ -229,12 +229,14 @@ type WorkloadSpec struct {
 	OSL *int32 `json:"osl,omitempty"`
 
 	// Concurrency is the target concurrency level.
-	// Required (or RequestRate) when the planner is disabled.
+	// Mutually exclusive with the requestRate field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	Concurrency *float64 `json:"concurrency,omitempty"`
 
 	// RequestRate is the target request rate (req/s).
-	// Required (or Concurrency) when the planner is disabled.
+	// Mutually exclusive with the concurrency field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	RequestRate *float64 `json:"requestRate,omitempty"`
 }
@@ -279,7 +281,10 @@ type ModelCacheSpec struct {
 	PVCName string `json:"pvcName,omitempty"`
 
 	// PVCModelPath is the path to the model checkpoint directory within the PVC
-	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a
+	// container-visible absolute path already under PVCMountPath. Such an absolute
+	// path is interpreted as container-visible; use the relative form without a
+	// leading slash to address the same path prefix within the PVC.
 	// +optional
 	PVCModelPath string `json:"pvcModelPath,omitempty"`
 
@@ -459,6 +464,15 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// RuntimeVersionOverride supplies the default Dynamo runtime version for
+	// generated DynamoGraphDeployment components that do not set their own
+	// override. Set this when Image uses a non-semantic-version tag or digest, or
+	// when its tag does not identify the Dynamo runtime version. An explicit
+	// component value in overrides.dgd takes precedence.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
+
 	// ModelCache provides optional PVC configuration for pre-downloaded model weights.
 	// When provided, weights are loaded from the PVC instead of downloading from HuggingFace.
 	// +optional
@@ -621,10 +635,6 @@ type DynamoGraphDeploymentRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeploymentRequest `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentRequest{}, &DynamoGraphDeploymentRequestList{})
 }
 
 // SetPhase updates the Phase field in the DGDR status.

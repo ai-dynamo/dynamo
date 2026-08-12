@@ -299,6 +299,31 @@ impl DirectRequest {
     pub fn router_priorities(&self) -> (f64, u32) {
         (f64::from(self.priority.max(0)), self.strict_priority)
     }
+
+    #[inline]
+    pub(crate) fn effective_max_output_tokens(&self) -> usize {
+        self.output_token_ids
+            .as_ref()
+            .map_or(self.max_output_tokens, Vec::len)
+    }
+
+    pub(crate) fn clone_with_output_limit(&self, limit: usize) -> Self {
+        let max_output_tokens = self.effective_max_output_tokens().min(limit);
+        Self {
+            tokens: self.tokens.clone(),
+            max_output_tokens,
+            output_token_ids: self
+                .output_token_ids
+                .as_ref()
+                .map(|ids| ids[..max_output_tokens].to_vec()),
+            uuid: self.uuid,
+            dp_rank: self.dp_rank,
+            arrival_timestamp_ms: self.arrival_timestamp_ms,
+            priority: self.priority,
+            strict_priority: self.strict_priority,
+            policy_class: self.policy_class.clone(),
+        }
+    }
 }
 
 fn is_zero_i32(value: &i32) -> bool {
@@ -327,7 +352,7 @@ impl PrefillCost {
         &self,
         new_tokens: Option<usize>,
         perf_model: &PerfModel,
-    ) -> f64 {
+    ) -> anyhow::Result<f64> {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
         let isl = self.cached_tokens + tokens;
         perf_model.predict_prefill_time(1, isl, self.cached_tokens)
@@ -350,6 +375,10 @@ pub struct OutputSignal {
     pub rejected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_delay_ms: Option<f64>,
+    /// Prompt tokens served from KV cache at admission (scheduler truth,
+    /// post-eviction). Set once, on the request's first output signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<usize>,
 }
 
 /// Preemption policy for evicting decode requests under memory pressure
@@ -1007,6 +1036,16 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
+    if matches!(args.engine_type, EngineType::Vllm | EngineType::Trtllm) && args.block_size < 2 {
+        return Err(mock_engine_args_validation_error(
+            "shared_scheduler_block_size_too_small",
+            format!(
+                "the vLLM/TRT-LLM scheduler requires block_size to be at least 2 for engine_type={:?}, got block_size={}",
+                args.engine_type, args.block_size,
+            ),
+        ));
+    }
+
     if args.g1_backend == Some(G1Backend::Native) && args.requires_kvbm_g1() {
         return Err(mock_engine_args_validation_error(
             "native_g1_legacy_offload_conflict",
@@ -1557,6 +1596,39 @@ mod tests {
 
         assert_eq!(error.to_string(), "injected raw sink failure");
         assert_eq!(*sink.attempts.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn direct_request_output_plan_is_authoritative_when_limited() {
+        let request = DirectRequest {
+            tokens: vec![1, 2],
+            max_output_tokens: 0,
+            output_token_ids: Some(vec![7, 8]),
+            ..Default::default()
+        };
+
+        assert_eq!(request.effective_max_output_tokens(), 2);
+        let limited = request.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 1);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[7][..]));
+        assert_eq!(limited.output_token_ids.unwrap().capacity(), 1);
+        assert_eq!(request.output_token_ids.as_deref(), Some(&[7, 8][..]));
+
+        let empty_plan = DirectRequest {
+            max_output_tokens: 4,
+            output_token_ids: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(empty_plan.effective_max_output_tokens(), 0);
+        let limited = empty_plan.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[][..]));
+
+        let unplanned = DirectRequest::default();
+        assert_eq!(unplanned.effective_max_output_tokens(), 0);
+        let limited = unplanned.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert!(limited.output_token_ids.is_none());
     }
 
     #[test]
@@ -2157,6 +2229,50 @@ mod tests {
     fn test_normalized_sglang_defaults_block_size_to_one() {
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Sglang)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.block_size, 1);
+    }
+
+    #[test]
+    fn test_normalized_shared_scheduler_rejects_block_size_one_for_every_backend() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let args_for = |g1_backend| {
+                MockEngineArgs::builder()
+                    .engine_type(engine_type)
+                    .g1_backend(g1_backend)
+                    .block_size(1)
+                    .build()
+                    .unwrap()
+            };
+            let explicit_native = args_for(G1Backend::Native);
+            let explicit_kvbm = args_for(G1Backend::Kvbm);
+            let mut unset = explicit_native.clone();
+            unset.g1_backend = None;
+            let mut automatic_kvbm = unset.clone();
+            automatic_kvbm.num_g2_blocks = Some(1);
+
+            for args in [explicit_native, explicit_kvbm, unset, automatic_kvbm] {
+                let error = args.normalized().unwrap_err();
+                let message = error.to_string();
+                assert!(
+                    message.contains(
+                        "the vLLM/TRT-LLM scheduler requires block_size to be at least 2"
+                    ),
+                    "engine_type={engine_type:?}, error={error:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalized_sglang_accepts_block_size_one() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(1)
             .build()
             .unwrap()
             .normalized()
