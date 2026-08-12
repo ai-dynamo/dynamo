@@ -601,6 +601,12 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     self.identity.cache_owner_id,
                 ),
             };
+            // NOTE: Stored/Removed intentionally use the legacy local queue-admission
+            // contract; they do not wait for actor completion. Cleared is stronger and
+            // completes every affected tier before returning. `publish_exact` below
+            // confirms transport acceptance, not subscriber acknowledgement. Do not add
+            // per-event completion or listener stop-and-wait without changing this
+            // invariant and revalidating ingestion throughput.
             self.local_indexer
                 .apply_event_with_buffer(router_event.clone())
                 .await

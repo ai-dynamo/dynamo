@@ -355,7 +355,9 @@ impl LocalKvIndexer {
 
     /// Apply event with buffering.
     ///
-    /// This forwards the event to the underlying indexer and records it on success.
+    /// Stored and Removed events are recorded after successful queue admission; this does not
+    /// wait for the physical mutation to complete. Cleared is intentionally a stronger ordering
+    /// barrier and waits for every affected physical indexer before it is recorded.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         let result = self.apply_event_by_tier(&event).await;
         self.record_applied_event(event, result).await
