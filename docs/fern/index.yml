@@ -211,6 +211,8 @@ navigation:
           - page: Auto Deploy with DGDR
             slug: dgdr-walkthrough
             path: pages/kubernetes/auto-deployment/auto-deploy-with-dgdr.md
+          - page: DGDR v1beta2
+            path: pages/kubernetes/auto-deployment/dgdr-v1beta2.md
           - page: Dynamo Profiler
             path: pages/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
@@ -840,8 +842,6 @@ navigation:
                 contents:
                   - page: Dynamo Operator
                     path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md
-                  - page: DGDR v2 Use Cases (Draft)
-                    path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dgdr-v2-use-cases.md
                   - page: Service Discovery
                     path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md
                   - page: Webhooks
