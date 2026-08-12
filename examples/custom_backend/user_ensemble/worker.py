@@ -33,9 +33,17 @@ from dynamo.vllm.multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
     URL_VARIANT_KEY,
 )
-from dynamo.workflow import ExecutionPlan, StageRunner, compile_workflow
+from dynamo.workflow import (
+    DeploymentSpec,
+    StageRunner,
+    WorkflowExecutor,
+    compile_workflow,
+)
 from examples.custom_backend.user_ensemble.stages import DummyClassifier, EncoderStage
-from examples.custom_backend.user_ensemble.workflow import define_workflow
+from examples.custom_backend.user_ensemble.workflow import (
+    adapt_workflow_result,
+    define_workflow,
+)
 
 
 def _load_encoder_backend(class_path: str) -> type[VisionEncoderBackend[Any, Any, Any]]:
@@ -73,6 +81,23 @@ def _cleanup_resources(
                 decoder_runtime.shutdown()
 
 
+def prepare_user_ensemble_config(
+    argv: list[str] | None = None,
+) -> tuple[Config, type[VisionEncoderBackend[Any, Any, Any]]]:
+    """Parse the shared decoder/encoder configuration for this example."""
+
+    config = parse_args(argv)
+    if not config.custom_encoder_class:
+        raise ValueError(
+            "--custom-encoder-class is required by the user ensemble example"
+        )
+    if not config.served_model_name:
+        config.served_model_name = config.engine_args.served_model_name = config.model
+    configure_rl_logprobs_mode(config)
+    config.engine_args.enable_prompt_embeds = True
+    return config, _load_encoder_backend(config.custom_encoder_class)
+
+
 class UserEnsembleEngine(LLMEngine):
     """Expose the authored local workflow through one Dynamo endpoint."""
 
@@ -94,24 +119,13 @@ class UserEnsembleEngine(LLMEngine):
         self._decoder_stage: VllmDecoderStage | None = None
         self._encoder: AsyncVisionEncoder[Any, Any, Any] | None = None
         self._prometheus_temp_dir: Any | None = None
-        self._plan: ExecutionPlan | None = None
+        self._executor: WorkflowExecutor | None = None
 
     @classmethod
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[UserEnsembleEngine, WorkerConfig]:
-        config = parse_args(argv)
-        if not config.custom_encoder_class:
-            raise ValueError(
-                "--custom-encoder-class is required by the user ensemble example"
-            )
-        if not config.served_model_name:
-            config.served_model_name = (
-                config.engine_args.served_model_name
-            ) = config.model
-        configure_rl_logprobs_mode(config)
-        config.engine_args.enable_prompt_embeds = True
-        backend_type = _load_encoder_backend(config.custom_encoder_class)
+        config, backend_type = prepare_user_ensemble_config(argv)
 
         engine = cls(
             config=config,
@@ -153,12 +167,20 @@ class UserEnsembleEngine(LLMEngine):
                 name="workflow-vision-encoder",
             )
             encoder.load(self.model_name)
+            runners = {
+                "encoder": EncoderStage(encoder, adapter),
+                "classifier": self._classifier,
+                "generator": decoder_stage,
+            }
             plan = compile_workflow(
                 define_workflow(),
-                encoder=EncoderStage(encoder, adapter),
-                classifier=self._classifier,
-                generator=decoder_stage,
+                DeploymentSpec.local(
+                    encoder="encoder",
+                    classifier="classifier",
+                    generator="generator",
+                ),
             )
+            executor = WorkflowExecutor(plan, runners)
         except BaseException:
             _cleanup_resources(encoder, decoder_runtime, prometheus_temp_dir)
             raise
@@ -167,7 +189,7 @@ class UserEnsembleEngine(LLMEngine):
         self._decoder_stage = decoder_stage
         self._encoder = encoder
         self._prometheus_temp_dir = prometheus_temp_dir
-        self._plan = plan
+        self._executor = executor
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
@@ -179,18 +201,16 @@ class UserEnsembleEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        plan = self._plan
-        if plan is None:
+        executor = self._executor
+        if executor is None:
             raise RuntimeError("UserEnsembleEngine.generate() called before start()")
         request_id = context.id()
-        result = await plan.run(
+        result = await executor.run(
             {"image_url": self._single_image_url(request), "request": request},
             attempt_id=request_id,
         )
 
-        decoded = cast(GenerateChunk, result["chunk"])
-        decoded["engine_data"] = {"ensemble": {"classifier_scores": result["scores"]}}
-        yield decoded
+        yield cast(GenerateChunk, adapt_workflow_result(result))
 
     async def abort(self, context: Context) -> None:
         decoder_stage = self._decoder_stage
@@ -201,7 +221,7 @@ class UserEnsembleEngine(LLMEngine):
         encoder = self._encoder
         decoder_runtime = self._decoder_runtime
         prometheus_temp_dir = self._prometheus_temp_dir
-        self._plan = None
+        self._executor = None
         self._encoder = None
         self._decoder_stage = None
         self._decoder_runtime = None

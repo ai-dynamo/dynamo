@@ -21,7 +21,13 @@ pytest.importorskip(
 from dynamo.common.backend import GenerateChunk, GenerateRequest  # noqa: E402
 from dynamo.llm.exceptions import InvalidArgument  # noqa: E402
 from dynamo.vllm.decoder_stage import VllmDecoderStage  # noqa: E402
-from dynamo.workflow import StageContext, compile_workflow  # noqa: E402
+from dynamo.workflow import (  # noqa: E402
+    DeploymentSpec,
+    StageContext,
+    ValueRef,
+    WorkflowExecutor,
+    compile_workflow,
+)
 from examples.custom_backend.user_ensemble.stages import (  # noqa: E402
     DummyClassifier,
     EncoderStage,
@@ -29,7 +35,10 @@ from examples.custom_backend.user_ensemble.stages import (  # noqa: E402
 from examples.custom_backend.user_ensemble.worker import (  # noqa: E402
     UserEnsembleEngine,
 )
-from examples.custom_backend.user_ensemble.workflow import define_workflow  # noqa: E402
+from examples.custom_backend.user_ensemble.workflow import (  # noqa: E402
+    adapt_workflow_result,
+    define_workflow,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -127,7 +136,7 @@ def _engine(classifier=None):
     engine._decoder_runtime = None
     engine._decoder_stage = None
     engine._prometheus_temp_dir = None
-    engine._plan = None
+    engine._executor = None
     return engine
 
 
@@ -158,12 +167,20 @@ def _request(image_count: int = 1) -> GenerateRequest:
 def _bind(engine, encoder, adapter, decoder) -> None:
     engine._encoder = encoder
     engine._decoder_stage = decoder
-    engine._plan = compile_workflow(
+    runners = {
+        "encoder": EncoderStage(encoder, adapter),
+        "classifier": engine._classifier,
+        "generator": decoder,
+    }
+    plan = compile_workflow(
         define_workflow(),
-        encoder=EncoderStage(encoder, adapter),
-        classifier=engine._classifier,
-        generator=decoder,
+        DeploymentSpec.local(
+            encoder="encoder",
+            classifier="classifier",
+            generator="generator",
+        ),
     )
+    engine._executor = WorkflowExecutor(plan, runners)
 
 
 async def _collect(
@@ -180,14 +197,10 @@ def test_workflow_is_the_readable_pipeline_and_uses_declared_ports():
         "classifier",
         "generator",
     ]
-    assert workflow.outputs["scores"].to_dict() == {
-        "stage": "classifier",
-        "output": "scores",
-    }
-    assert workflow.outputs["chunk"].to_dict() == {
-        "stage": "generator",
-        "output": "chunk",
-    }
+    assert workflow.outputs["scores"] == ValueRef.for_stage_output(
+        "classifier", "scores"
+    )
+    assert workflow.outputs["chunk"] == ValueRef.for_stage_output("generator", "chunk")
 
 
 async def test_start_builds_prompt_adapter_outside_decoder() -> None:
@@ -204,6 +217,7 @@ async def test_start_builds_prompt_adapter_outside_decoder() -> None:
     encoder = MagicMock()
     adapter = MagicMock()
     plan = MagicMock()
+    executor = MagicMock()
     runtime_config = MagicMock()
     runtime_config.model = "test-model"
     runtime_config.served_model_name = "served-model"
@@ -236,6 +250,10 @@ async def test_start_builds_prompt_adapter_outside_decoder() -> None:
             "examples.custom_backend.user_ensemble.worker.compile_workflow",
             return_value=plan,
         ),
+        patch(
+            "examples.custom_backend.user_ensemble.worker.WorkflowExecutor",
+            return_value=executor,
+        ),
     ):
         config = await engine.start(worker_id=1)
 
@@ -246,7 +264,7 @@ async def test_start_builds_prompt_adapter_outside_decoder() -> None:
     assert isinstance(engine._decoder_stage, VllmDecoderStage)
     assert engine._encoder is encoder
     assert engine._prometheus_temp_dir is prometheus_temp_dir
-    assert engine._plan is plan
+    assert engine._executor is executor
     assert config.llm is not None
     assert config.llm.context_length == 4096
     assert config.llm.kv_cache_block_size is None
@@ -269,6 +287,24 @@ async def test_encoder_artifacts_fan_out_once_and_join_in_terminal_response():
     assert decoder.prompt == {"prompt_token_ids": [1, 2, 3, 99]}
     assert chunks[0]["engine_data"] == {
         "ensemble": {"classifier_scores": {"category-a": 0.9, "category-b": 0.1}}
+    }
+
+
+def test_shared_result_adapter_does_not_mutate_decoder_chunk() -> None:
+    chunk = {
+        "token_ids": [4, 2],
+        "engine_data": {"ensemble": {"decoder": "vllm"}},
+    }
+
+    adapted = adapt_workflow_result({"chunk": chunk, "scores": {"category-a": 0.9}})
+
+    assert chunk == {
+        "token_ids": [4, 2],
+        "engine_data": {"ensemble": {"decoder": "vllm"}},
+    }
+    assert adapted["engine_data"]["ensemble"] == {
+        "decoder": "vllm",
+        "classifier_scores": {"category-a": 0.9},
     }
 
 
