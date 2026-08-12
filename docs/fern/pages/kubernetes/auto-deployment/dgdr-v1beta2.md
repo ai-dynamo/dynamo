@@ -411,19 +411,23 @@ the Sweeper version that produced the candidate.
 
 Copy a candidate's `spec` into a DGD after the owning DGDR reports `Completed=True`:
 
-The Search UI shows the selected DGDC as syntax-highlighted YAML before deployment. Choose
-`Rolling Update` to update an existing DGD while keeping ready capacity available, or choose
-`Replace` to replace the target in one deployment operation. Review the materialized DGD spec, then
-select **Deploy**.
+The Search UI shows the selected DGDC as syntax-highlighted YAML before deployment. Create a new DGD
+without modifying an existing deployment, update an existing DGD only when the candidate can be
+applied safely in place, or delete and recreate an existing DGD with **Replace**. Replace can cause
+downtime. Review the materialized DGD spec, then select **Deploy**.
 
-![Mock candidate deployment dialog showing syntax-highlighted DGDC YAML, Rolling Update and Replace strategies, and a Deploy button](../../../assets/img/dgdr-candidate-promotion-ui-mock.svg)
+The deployment action does not modify an Ingress, LoadBalancer, or HTTPRoute and does not shift
+traffic between two DGDs. After creating a new DGD, wait until it is ready and update external
+routing separately.
+
+![Mock candidate deployment dialog showing syntax-highlighted DGDC YAML, New DGD selected, an unavailable in-place update, a disruptive Replace option, unchanged traffic routing, and a Deploy button](../../../assets/img/dgdr-candidate-promotion-ui-mock.svg)
 
 ```bash
 kubectl get dgdc minimax-planner-search-g4-0 -n inference -o json \
   | jq '{
       apiVersion: "nvidia.com/v1beta1",
       kind: "DynamoGraphDeployment",
-      metadata: {name: "minimax-production", namespace: "inference"},
+      metadata: {name: "minimax-production-g4", namespace: "inference"},
       spec: .spec
     }' \
   | kubectl apply -f -
@@ -536,7 +540,7 @@ kubectl delete dgdr minimax-planner-search -n inference
 Promoted DGDs have an independent lifecycle and remain after the DGDR is deleted:
 
 ```bash
-kubectl delete dgd minimax-production -n inference
+kubectl delete dgd minimax-production-g4 -n inference
 ```
 
 ## Related Documentation
