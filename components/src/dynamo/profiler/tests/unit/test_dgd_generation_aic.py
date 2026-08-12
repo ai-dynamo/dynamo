@@ -642,7 +642,7 @@ class TestEnableVllmBenchmarkMode:
             for component in cfg["spec"]["components"]
             if component["type"] == "worker"
         )
-        assert worker["name"] == "decode"
+        assert worker["name"] == "worker"
         assert _benchmark_mode(worker) == "agg"
 
     def test_real_agg_template_sets_single_worker(self):

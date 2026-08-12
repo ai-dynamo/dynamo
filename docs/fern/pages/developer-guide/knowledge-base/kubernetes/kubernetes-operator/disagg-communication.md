@@ -68,7 +68,7 @@ NVLink works **within a pod** for parallelism strategies (TP, EP) where all GPUs
 
 ```yaml
 # Decode worker with TP=4 uses NVLink between its 4 GPUs
-VLLMDecodeWorker:
+decode:
   resources:
     limits:
       gpu: "4"   # All 4 GPUs visible to single process
@@ -418,7 +418,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 spec:
   services:
-    VLLMPrefillWorker:
+    prefill:
       resources:
         limits:
           gpu: "2"

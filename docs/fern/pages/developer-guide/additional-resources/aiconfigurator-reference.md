@@ -311,7 +311,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           imagePullPolicy: IfNotPresent
 
-    VLLMWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 4

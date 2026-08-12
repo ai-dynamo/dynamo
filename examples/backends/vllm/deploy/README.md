@@ -16,22 +16,22 @@ Basic deployment pattern with frontend and a single decode worker.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
 Enhanced aggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode enabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 3. **Disaggregated Deployment** (`disagg.yaml`)
 High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -39,8 +39,8 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
 ### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
 Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.

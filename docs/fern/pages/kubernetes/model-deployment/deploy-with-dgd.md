@@ -45,6 +45,12 @@ spec:
 - `type: worker` runs the inference engine (vLLM, SGLang, or TensorRT-LLM).
 - Per-component fields you will use most: `replicas`, `multinode`, `sharedMemorySize`, and `podTemplate` — a standard Kubernetes [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core). The operator injects its defaults into the container named `main` inside `podTemplate.spec.containers`, where you set the `image`, the `command`/`args` that launch the engine, `resources` (CPU/memory/GPU), `envFrom`, `env`, and `volumeMounts`.
 
+For vLLM deployments, use `worker` for an aggregated component and `prefill` and `decode` for
+disaggregated components. The component name becomes part of generated Kubernetes resource names and
+the `nvidia.com/dynamo-component` label. For example, a `worker` component in a DGD named
+`vllm-agg` produces resources named `vllm-agg-worker`; changing the component name also changes
+commands, selectors, and overrides that target those resources.
+
 The steps below fill in these fields, building one spec from a model to a running deployment.
 
 <Steps toc={true} tocDepth={2}>
