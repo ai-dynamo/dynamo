@@ -34,7 +34,7 @@ pub static TCP_BYTES_RECEIVED_TOTAL: Lazy<Counter> = Lazy::new(|| {
 pub static TCP_ERRORS_TOTAL: Lazy<Counter> = Lazy::new(|| {
     Counter::new(
         transport_metric_name(transport::tcp::ERRORS_TOTAL),
-        "Total TCP request errors (send failure or timeout)",
+        "Total TCP request errors (connection, send, or timeout failure)",
     )
     .expect("tcp_errors_total counter")
 });
