@@ -8,6 +8,7 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
+use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
@@ -45,6 +46,12 @@ impl RequestEndTraceState {
     pub(super) fn request_tracker(&self) -> Arc<RequestTracker> {
         self.request.request_tracker.clone()
     }
+
+    pub(super) fn finish_reason_metadata(&self) -> Option<SharedFinishReasonMetadata> {
+        self.agent
+            .as_ref()
+            .map(|state| state.finish_reason_metadata.clone())
+    }
 }
 
 fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'static str> {
@@ -61,6 +68,30 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
         return Some("best_of greater than one is not supported");
     }
     None
+}
+
+fn validate_request_end_trace(
+    common_request: &PreprocessedRequest,
+    context: &Context<()>,
+    trace_block_size: usize,
+) -> bool {
+    let request_id = context.id();
+    if let Some(reason) = request_trace_rejection(common_request) {
+        tracing::warn!(
+            %request_id,
+            reason,
+            "request trace skipped because the request cannot be represented as one replay request"
+        );
+        return false;
+    }
+    if trace_block_size == 0 {
+        tracing::warn!(
+            %request_id,
+            "request trace skipped because the KV cache block size is unavailable"
+        );
+        return false;
+    }
+    true
 }
 
 fn shared_replay_metrics(
@@ -88,6 +119,35 @@ pub(crate) fn build_request_end_trace_state(
     )
 }
 
+/// Build request-end state with a new tracker for native endpoints that do not
+/// already have one. Validation runs before the tracker allocation.
+pub(crate) fn build_new_request_end_trace_state(
+    common_request: &PreprocessedRequest,
+    context: &Context<()>,
+    trace_block_size: usize,
+    agent_context: Option<&AgentContext>,
+) -> Option<(RequestEndTraceState, Arc<RequestTracker>)> {
+    if !validate_request_end_trace(common_request, context, trace_block_size) {
+        return None;
+    }
+
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(common_request.token_ids.len(), None);
+    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)
+        .expect("positive trace block size was validated");
+    let tracker_option = Some(tracker.clone());
+    let agent = agent_context.map(|agent_context| {
+        super::build_agent_context_trace_state_from_agent(
+            common_request,
+            &tracker_option,
+            context,
+            agent_context,
+        )
+    });
+    let state = RequestEndTraceState::new(agent, tracker.clone(), replay_metrics);
+    Some((state, tracker))
+}
+
 fn build_request_end_trace_state_for_policy(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
@@ -102,12 +162,7 @@ fn build_request_end_trace_state_for_policy(
     }
 
     let request_id = context.id();
-    if let Some(reason) = request_trace_rejection(common_request) {
-        tracing::warn!(
-            %request_id,
-            reason,
-            "request trace skipped because the request cannot be represented as one replay request"
-        );
+    if !validate_request_end_trace(common_request, context, trace_block_size) {
         return None;
     }
 
@@ -122,21 +177,11 @@ fn build_request_end_trace_state_for_policy(
         }
     };
 
-    let replay_metrics = match shared_replay_metrics(&common_request.token_ids, trace_block_size) {
-        Some(metrics) => metrics,
-        None => {
-            tracing::warn!(
-                %request_id,
-                "request trace skipped because the KV cache block size is unavailable"
-            );
-            return None;
-        }
-    };
-
+    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)
+        .expect("positive trace block size was validated");
     let agent = has_agent_context
         .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
         .flatten();
-
     Some(RequestEndTraceState::new(
         agent,
         request_tracker,
@@ -149,8 +194,7 @@ pub(crate) fn finish_reason_metadata_handle(
 ) -> Option<SharedFinishReasonMetadata> {
     trace_state
         .as_ref()
-        .and_then(|state| state.agent.as_ref())
-        .map(|state| state.finish_reason_metadata.clone())
+        .and_then(RequestEndTraceState::finish_reason_metadata)
 }
 
 pub(crate) fn wrap_request_end_stream<Resp>(
@@ -168,23 +212,27 @@ where
     let (stream, done) = crate::telemetry::stream::notify_on_completion(stream);
     tokio::spawn(async move {
         done.await;
-        let request_state = trace_state.request;
-        if let Some(agent_state) = trace_state.agent {
-            let (agent_context, mut metrics) =
-                super::request_metrics_from_agent_state(agent_state, request_id.clone());
-            metrics.replay = Some(super::into_owned_replay_metrics(
-                request_state.replay_metrics,
-            ));
-            super::record::emit_agent_request_end(agent_context, metrics);
-        } else {
-            super::record::emit_request_end(
-                request_id.clone(),
-                &request_state.request_tracker,
-                super::into_owned_replay_metrics(request_state.replay_metrics),
-            );
-        }
+        emit_request_end_trace_state(trace_state, request_id);
     });
     stream
+}
+
+pub(super) fn emit_request_end_trace_state(trace_state: RequestEndTraceState, request_id: String) {
+    let request_state = trace_state.request;
+    if let Some(agent_state) = trace_state.agent {
+        let (agent_context, mut metrics) =
+            super::request_metrics_from_agent_state(agent_state, request_id);
+        metrics.replay = Some(super::into_owned_replay_metrics(
+            request_state.replay_metrics,
+        ));
+        super::record::emit_agent_request_end(agent_context, metrics);
+    } else {
+        super::record::emit_request_end(
+            request_id,
+            &request_state.request_tracker,
+            super::into_owned_replay_metrics(request_state.replay_metrics),
+        );
+    }
 }
 
 pub(crate) fn wrap_chat_request_end_stream(
