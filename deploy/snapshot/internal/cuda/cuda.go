@@ -21,6 +21,12 @@ import (
 const (
 	nvidiaGPUResource  = "nvidia.com/gpu"
 	nvidiaGPUDRADriver = "gpu.nvidia.com"
+
+	// HelperBinaryName is the cuda-checkpoint-helper executable name.
+	HelperBinaryName = "cuda-checkpoint-helper"
+	// DefaultHelperBinaryPath is the agent-side cuda-checkpoint-helper absolute path.
+	// In the placeholder namespace pass filepath.Join(bundleDir, HelperBinaryName) instead.
+	DefaultHelperBinaryPath = "/usr/local/bin/" + HelperBinaryName
 )
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
@@ -334,7 +340,7 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := checkpoint(ctx, pid, jobFile, log); err != nil {
+		if err := checkpointWithJobFile(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
@@ -349,18 +355,23 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, jobFile string, log logr.Logger) (RestorePhaseTimings, error) {
+// helperBinaryPath must be the absolute path to cuda-checkpoint-helper: DefaultHelperBinaryPath
+// on the agent, or filepath.Join(bundleDir, HelperBinaryName) inside the placeholder namespace.
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, jobFile, log); err != nil {
+		if err := restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
-		if err := unlock(ctx, pid, jobFile, log); err != nil {
+	}
+
+	for _, pid := range cudaPIDs {
+		if err := unlock(ctx, pid, helperBinaryPath, log); err != nil {
 			timings.TotalDuration = time.Since(start)
-			state, stateErr := getState(ctx, pid, jobFile)
+			state, stateErr := getState(ctx, pid, helperBinaryPath)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue

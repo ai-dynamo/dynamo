@@ -15,7 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const cudaCheckpointJobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
+// JobFileEnv is the CUDA launch-job environment variable consumed by the driver.
+const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
 
 // StageJobFile copies a launch-job file into the checkpoint artifact and
 // returns the host-visible path to the source pod's live job file. Capture
@@ -32,7 +33,7 @@ func StageJobFile(hostProcPath string, cudaPIDs []int, checkpointDir string, sou
 	jobFilePID := 0
 	missingPIDs := make([]int, 0, len(cudaPIDs))
 	for _, pid := range cudaPIDs {
-		value, err := processEnvironmentValue(hostProcPath, pid, cudaCheckpointJobFileEnv)
+		value, err := processEnvironmentValue(hostProcPath, pid, JobFileEnv)
 		if err != nil {
 			return "", err
 		}
@@ -46,26 +47,26 @@ func StageJobFile(hostProcPath string, cudaPIDs []int, checkpointDir string, sou
 			continue
 		}
 		if value != jobFile {
-			return "", fmt.Errorf("CUDA processes do not share one %s: %q != %q", cudaCheckpointJobFileEnv, jobFile, value)
+			return "", fmt.Errorf("CUDA processes do not share one %s: %q != %q", JobFileEnv, jobFile, value)
 		}
 	}
 	if jobFile == "" {
 		if sourceGPUCount > 1 {
-			return "", fmt.Errorf("multi-GPU CUDA processes are missing %s", cudaCheckpointJobFileEnv)
+			return "", fmt.Errorf("multi-GPU CUDA processes are missing %s", JobFileEnv)
 		}
 		return "", nil
 	}
 	if len(missingPIDs) > 0 {
-		return "", fmt.Errorf("CUDA processes %v are missing %s while other CUDA processes use it", missingPIDs, cudaCheckpointJobFileEnv)
+		return "", fmt.Errorf("CUDA processes %v are missing %s while other CUDA processes use it", missingPIDs, JobFileEnv)
 	}
 	if !filepath.IsAbs(jobFile) || filepath.Clean(jobFile) != jobFile {
-		return "", fmt.Errorf("%s must be an absolute, clean path, got %q", cudaCheckpointJobFileEnv, jobFile)
+		return "", fmt.Errorf("%s must be an absolute, clean path, got %q", JobFileEnv, jobFile)
 	}
 	if jobFile == "/proc" || strings.HasPrefix(jobFile, "/proc/") {
-		return "", fmt.Errorf("%s must be persisted outside procfs before checkpoint, got %q", cudaCheckpointJobFileEnv, jobFile)
+		return "", fmt.Errorf("%s must be persisted outside procfs before checkpoint, got %q", JobFileEnv, jobFile)
 	}
 	if jobFile != snapshotprotocol.CUDAJobFilePath {
-		return "", fmt.Errorf("%s is %q, want checkpoint job file %q", cudaCheckpointJobFileEnv, jobFile, snapshotprotocol.CUDAJobFilePath)
+		return "", fmt.Errorf("%s is %q, want checkpoint job file %q", JobFileEnv, jobFile, snapshotprotocol.CUDAJobFilePath)
 	}
 
 	sourcePath := filepath.Join(hostProcPath, strconv.Itoa(jobFilePID), "root", strings.TrimPrefix(jobFile, string(os.PathSeparator)))

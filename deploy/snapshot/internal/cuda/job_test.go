@@ -26,7 +26,7 @@ func TestStageJobFile(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(processRoot, filepath.Dir(jobFile)), 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(procRoot, pid, "environ"), []byte("OTHER=value\x00"+cudaCheckpointJobFileEnv+"="+jobFile+"\x00"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(procRoot, pid, "environ"), []byte("OTHER=value\x00"+JobFileEnv+"="+jobFile+"\x00"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -57,7 +57,7 @@ func TestStageJobFileRejectsTransientProcPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(procRoot, "101"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(cudaCheckpointJobFileEnv+"=/proc/1/fd/3\x00"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(JobFileEnv+"=/proc/1/fd/3\x00"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,7 +72,7 @@ func TestStageJobFileRejectsUnexpectedContainerPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(procRoot, "101"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(cudaCheckpointJobFileEnv+"=/etc/shadow\x00"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(JobFileEnv+"=/etc/shadow\x00"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,7 +90,7 @@ func TestStageJobFileRejectsSymlink(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(processRoot, filepath.Dir(jobFile)), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(cudaCheckpointJobFileEnv+"="+jobFile+"\x00"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(JobFileEnv+"="+jobFile+"\x00"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	secret := filepath.Join(processRoot, "secret")

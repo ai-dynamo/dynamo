@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	defaultCUDAHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
-	helperWaitDelay         = 2 * time.Second
+	helperWaitDelay = 2 * time.Second
 
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
@@ -26,37 +25,26 @@ const (
 	actionUnlock     = "unlock"
 )
 
-var cudaCheckpointHelperBinary = defaultCUDAHelperBinary
+var cudaCheckpointHelperBinary = DefaultHelperBinaryPath
 
 func lock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionLock, "", log)
+	return runAction(ctx, pid, actionLock, "", DefaultHelperBinaryPath, log)
 }
 
-func lockWithJobFile(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
-	if jobFile == "" {
-		return lock(ctx, pid, log)
-	}
-	return runActionWithJobFile(ctx, pid, actionLock, "", jobFile, log)
+func checkpoint(ctx context.Context, pid int, log logr.Logger) error {
+	return runAction(ctx, pid, actionCheckpoint, "", DefaultHelperBinaryPath, log)
 }
 
-func checkpoint(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
-	return runActionWithJobFile(ctx, pid, actionCheckpoint, "", jobFile, log)
+func restoreProcess(ctx context.Context, pid int, deviceMap, helperBinaryPath string, log logr.Logger) error {
+	return runAction(ctx, pid, actionRestore, deviceMap, helperBinaryPath, log)
 }
 
-func restoreProcess(ctx context.Context, pid int, deviceMap, jobFile string, log logr.Logger) error {
-	return runActionWithJobFile(ctx, pid, actionRestore, deviceMap, jobFile, log)
+func unlock(ctx context.Context, pid int, helperBinaryPath string, log logr.Logger) error {
+	return runAction(ctx, pid, actionUnlock, "", helperBinaryPath, log)
 }
 
-func unlock(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
-	return runActionWithJobFile(ctx, pid, actionUnlock, "", jobFile, log)
-}
-
-func getState(ctx context.Context, pid int, jobFile string) (string, error) {
-	args := []string{"--get-state", "--pid", strconv.Itoa(pid)}
-	if jobFile != "" {
-		args = append(args, "--job-file", jobFile)
-	}
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
+func getState(ctx context.Context, pid int, helperBinaryPath string) (string, error) {
+	cmd := exec.CommandContext(ctx, helperBinaryPath, "--get-state", "--pid", strconv.Itoa(pid))
 	output, err := cmd.CombinedOutput()
 	state := strings.TrimSpace(string(output))
 	if err != nil {
@@ -68,19 +56,12 @@ func getState(ctx context.Context, pid int, jobFile string) (string, error) {
 	return state, nil
 }
 
-func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.Logger) error {
-	return runActionWithJobFile(ctx, pid, action, deviceMap, "", log)
-}
-
-func runActionWithJobFile(ctx context.Context, pid int, action, deviceMap, jobFile string, log logr.Logger) error {
+func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath string, log logr.Logger) error {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
-	if jobFile != "" {
-		args = append(args, "--job-file", jobFile)
-	}
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
+	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
