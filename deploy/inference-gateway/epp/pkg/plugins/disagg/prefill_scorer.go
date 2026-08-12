@@ -35,8 +35,8 @@ const (
 	// DynPrefillScorerType is the plugin type registered in the plugin registry.
 	DynPrefillScorerType = "dyn-prefill-scorer"
 
-	defaultPrefillReservationAdmissionTimeout = 5 * time.Second
-	defaultMaxPrefillReservations             = 32
+	defaultPrefillReservationAdmissionTimeout = 60 * time.Second
+	defaultMaxPrefillReservations             = 64
 )
 
 // compile-time type assertion
