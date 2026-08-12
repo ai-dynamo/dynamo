@@ -57,7 +57,8 @@ func bookingCleanupRetention() time.Duration {
 func bookingCleanupRetentionFromLookup(getEnv func(string) string) time.Duration {
 	raw := getEnv(routerActiveRequestExpirySeconds)
 	seconds, err := strconv.ParseUint(raw, 10, 64)
-	maxSeconds := uint64((time.Duration(1<<63-1) - bookingCleanupRetentionGrace) / time.Second)
+	const maxDurationSeconds = uint64((1<<63 - 1) / int64(time.Second))
+	maxSeconds := maxDurationSeconds - uint64(bookingCleanupRetentionGrace/time.Second)
 	if err != nil || seconds == 0 || seconds > maxSeconds {
 		return minimumBookingCleanupRetention
 	}
