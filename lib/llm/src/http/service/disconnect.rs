@@ -185,17 +185,63 @@ async fn connection_monitor(
 
 type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
 
-fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
-    let error = SanitizedError::Internal;
-    let body = serde_json::json!({
+fn stream_error_frame(message: &str, type_slug: &str, code: u16) -> String {
+    serde_json::json!({
         "error": {
-            "message": error.to_string(),
-            "type": error.openai_type_slug(),
-            "code": error.status().as_u16(),
+            "message": message,
+            "type": type_slug,
+            "code": code,
         }
     })
-    .to_string();
-    (ErrorType::Internal, body)
+    .to_string()
+}
+
+/// Build the inline SSE error frame for a stream that already committed its
+/// HTTP status.
+///
+/// Classification mirrors the pre-commit path in `backend_error_response`: a
+/// request the backend rejected as invalid forwards its message verbatim, and
+/// everything else stays sanitized so internals never reach the caller. The
+/// `code` field is advisory here — the real status went out with the 200 — but
+/// `message` and `type` are what a streaming client actually reads, and
+/// reporting `Internal server error` for every failure made a caller's own bad
+/// request indistinguishable from an engine fault.
+fn openai_stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
+    use crate::http::service::metrics::{
+        request_was_cancelled, request_was_rejected, request_was_unavailable,
+    };
+    use crate::http::service::openai::find_invalid_argument_in_chain;
+
+    if let Some(invalid_argument) = find_invalid_argument_in_chain(error) {
+        return (
+            ErrorType::Validation,
+            stream_error_frame(
+                invalid_argument.message(),
+                "invalid_request_error",
+                axum::http::StatusCode::BAD_REQUEST.as_u16(),
+            ),
+        );
+    }
+
+    // Same precedence as `ErrorMessage::from_anyhow`.
+    let (sanitized, error_type) = if request_was_rejected(error) {
+        (SanitizedError::Overloaded, ErrorType::Overload)
+    } else if request_was_unavailable(error) {
+        (SanitizedError::Unavailable, ErrorType::Unavailable)
+    } else if request_was_cancelled(error) {
+        (SanitizedError::Cancelled, ErrorType::Cancelled)
+    } else {
+        (SanitizedError::Internal, ErrorType::Internal)
+    };
+
+    (
+        error_type,
+        stream_error_frame(
+            &sanitized.to_string(),
+            sanitized.openai_type_slug(),
+            sanitized.status().as_u16(),
+        ),
+    )
 }
 
 /// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
@@ -820,5 +866,85 @@ mod tests {
         assert!(!body.contains("site-packages"), "leaked a filesystem path");
         assert!(!body.contains("panicked at"), "leaked panic text");
         assert!(!body.contains("ValueError"), "leaked exception type");
+    }
+
+    /// Pull the structured `{"error": {...}}` frame out of an SSE body.
+    fn error_frame(text: &str) -> serde_json::Value {
+        text.lines()
+            .find_map(|line| {
+                let payload = line.strip_prefix("data: ")?;
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()?
+                    .get("error")
+                    .cloned()
+            })
+            .unwrap_or_else(|| panic!("body missing structured error frame. Body:\n{text}"))
+    }
+
+    fn typed_error_stream(
+        error: dynamo_runtime::error::DynamoError,
+    ) -> impl futures::Stream<Item = Result<Event, axum::Error>> {
+        async_stream::try_stream! {
+            yield Event::default().data("chunk-0");
+            Err(axum::Error::new(error))?;
+        }
+    }
+
+    /// A rejection names something the caller can fix, so — unlike an internal
+    /// fault — its message must reach a streaming client, matching what the
+    /// pre-commit path returns for the same error.
+    #[tokio::test]
+    async fn test_mid_stream_invalid_argument_forwards_backend_message() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as RuntimeErrorType};
+
+        let (_metrics, guard, ctx, handle) = setup_test("invalid-arg-model", "req-invalid");
+        let message = "CustomEncoder failed: placeholder tokens (0) != image tensors (1)";
+        let stream = typed_error_stream(
+            DynamoError::builder()
+                .error_type(RuntimeErrorType::Backend(BackendError::InvalidArgument))
+                .message(message)
+                .build(),
+        );
+
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let body = collect_sse_body(monitored).await;
+        let frame = error_frame(&body);
+
+        assert_eq!(frame["message"], message);
+        assert_eq!(frame["type"], "invalid_request_error");
+        assert_eq!(frame["code"], 400);
+        assert!(
+            body.contains("data: [DONE]"),
+            "stream must still terminate. Body:\n{body}"
+        );
+    }
+
+    /// The complement: an untyped backend fault stays sanitized. Forwarding
+    /// messages is gated on the rejection classification, not on the error
+    /// merely being typed.
+    #[tokio::test]
+    async fn test_mid_stream_unknown_backend_error_stays_sanitized() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as RuntimeErrorType};
+
+        let (_metrics, guard, ctx, handle) = setup_test("unknown-model", "req-unknown");
+        let secret = "assertion failed at engine/worker.py:512";
+        let stream = typed_error_stream(
+            DynamoError::builder()
+                .error_type(RuntimeErrorType::Backend(BackendError::Unknown))
+                .message(secret)
+                .build(),
+        );
+
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let body = collect_sse_body(monitored).await;
+        let frame = error_frame(&body);
+
+        assert_eq!(frame["message"], "Internal server error");
+        assert_eq!(frame["type"], "internal_server_error");
+        assert_eq!(frame["code"], 500);
+        assert!(
+            !body.contains(secret),
+            "leaked internal detail. Body:\n{body}"
+        );
     }
 }

@@ -2056,11 +2056,16 @@ fn annotated_to_sse_event<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let error_message = if let Some(ref dynamo_err) = annotated.error
-                && !dynamo_err.message().is_empty()
-            {
-                dynamo_err.message().to_string()
-            } else if let Some(ref comments) = annotated.comment {
+            // Hand the typed error onward when the producer supplied one. The
+            // SSE error formatter classifies on it to pick the status and
+            // decide whether the message may be forwarded; collapsing to a
+            // `String` here erases `error_type` and left every streamed backend
+            // failure — invalid argument, overload, engine fault — looking
+            // identical to the caller.
+            if let Some(dynamo_err) = annotated.error.filter(|err| !err.message().is_empty()) {
+                return Err(axum::Error::new(dynamo_err));
+            }
+            let error_message = if let Some(ref comments) = annotated.comment {
                 let joined = comments.join(" -- ");
                 if joined.trim().is_empty() {
                     "unspecified error".to_string()
@@ -2239,6 +2244,48 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The SSE error formatter classifies on `error_type`, so the typed error
+    /// has to survive this conversion. Flattening it to its message here is
+    /// what made every streamed backend failure look internal downstream.
+    #[test]
+    fn test_annotated_error_event_preserves_typed_error() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as RuntimeErrorType};
+
+        let annotated = crate::types::Annotated::<serde_json::Value> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(RuntimeErrorType::Backend(BackendError::InvalidArgument))
+                    .message("bad image payload")
+                    .build(),
+            ),
+        };
+
+        let err = annotated_to_sse_event(annotated).expect_err("error event must become Err");
+        let found = crate::http::service::openai::find_invalid_argument_in_chain(&err)
+            .expect("typed InvalidArgument must survive into the axum error chain");
+        assert_eq!(found.message(), "bad image payload");
+    }
+
+    /// Without a typed error the comment fallback still applies, untyped.
+    #[test]
+    fn test_annotated_error_event_falls_back_to_comment() {
+        let annotated = crate::types::Annotated::<serde_json::Value> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec!["worker exploded".to_string()]),
+            error: None,
+        };
+
+        let err = annotated_to_sse_event(annotated).expect_err("error event must become Err");
+        assert!(err.to_string().contains("worker exploded"));
+        assert!(crate::http::service::openai::find_invalid_argument_in_chain(&err).is_none());
+    }
 
     #[test]
     fn test_round_to_sig_figs() {
