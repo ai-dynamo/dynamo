@@ -34,7 +34,13 @@ enum SglangRequestTraceState {
 
 struct ActiveSglangRequestTrace {
     request_end: RequestEndTraceState,
-    tool_call_parser: Option<String>,
+    tool_trace: Option<ToolTrace>,
+}
+
+struct ToolTrace {
+    parser: String,
+    tokenizer: crate::tokenizers::Tokenizer,
+    output_ids: Vec<u32>,
 }
 
 impl SglangRequestTrace {
@@ -76,14 +82,21 @@ impl SglangRequestTrace {
                 context.map(|_| request),
             );
         };
-        let tool_call_parser = request_end
-            .finish_reason_metadata()
-            .and(trace_config.tool_call_parser);
+        let tool_trace = request_end.finish_reason_metadata().and_then(|_| {
+            trace_config
+                .tool_call_parser
+                .zip(trace_config.tokenizer)
+                .map(|(parser, tokenizer)| ToolTrace {
+                    parser,
+                    tokenizer,
+                    output_ids: Vec::new(),
+                })
+        });
         (
             Self(SglangRequestTraceState::Active(Box::new(
                 ActiveSglangRequestTrace {
                     request_end,
-                    tool_call_parser,
+                    tool_trace,
                 },
             ))),
             context.map(|_| request),
@@ -104,7 +117,7 @@ impl SglangRequestTrace {
             stream,
             engine_context,
             active.request_end,
-            active.tool_call_parser,
+            active.tool_trace,
             request_id,
         ))
     }
@@ -117,8 +130,7 @@ struct SglangTraceStream {
     request_id: Option<String>,
     tracker: Arc<RequestTracker>,
     finish_reason_metadata: Option<SharedFinishReasonMetadata>,
-    tool_call_parser: Option<String>,
-    output_text: Option<String>,
+    tool_trace: Option<ToolTrace>,
     first_token_recorded: bool,
     observed_osl: usize,
     terminal_recorded: bool,
@@ -139,7 +151,7 @@ impl SglangTraceStream {
         stream: EngineStream<Annotated<LLMEngineOutput>>,
         engine_context: Arc<dyn AsyncEngineContext>,
         request_end: RequestEndTraceState,
-        tool_call_parser: Option<String>,
+        tool_trace: Option<ToolTrace>,
         request_id: String,
     ) -> Self {
         let tracker = request_end.request_tracker();
@@ -151,8 +163,7 @@ impl SglangTraceStream {
             request_id: Some(request_id),
             tracker,
             finish_reason_metadata,
-            output_text: tool_call_parser.as_ref().map(|_| String::new()),
-            tool_call_parser,
+            tool_trace,
             first_token_recorded: false,
             observed_osl: 0,
             terminal_recorded: false,
@@ -169,11 +180,14 @@ impl SglangTraceStream {
                 self.tracker.record_first_token();
                 self.first_token_recorded = true;
             }
-        }
-        if let Some(output_text) = self.output_text.as_mut()
-            && let Some(text) = native_response.get("text").and_then(Value::as_str)
-        {
-            output_text.push_str(text);
+            if let Some(tool_trace) = self.tool_trace.as_mut() {
+                tool_trace.output_ids.extend(
+                    output_ids
+                        .iter()
+                        .filter_map(Value::as_u64)
+                        .filter_map(|id| u32::try_from(id).ok()),
+                );
+            }
         }
 
         let Some(meta_info) = native_response.get("meta_info") else {
@@ -199,17 +213,15 @@ impl SglangTraceStream {
         }
     }
 
-    fn take_tool_parse(&mut self) -> Option<(String, String, SharedFinishReasonMetadata)> {
+    fn take_tool_parse(&mut self) -> Option<(ToolTrace, SharedFinishReasonMetadata)> {
         if !self.terminal_recorded {
             return None;
         }
-        Some((
-            self.output_text
-                .take()
-                .filter(|output| !output.is_empty())?,
-            self.tool_call_parser.take()?,
-            self.finish_reason_metadata.take()?,
-        ))
+        let tool_trace = self.tool_trace.take()?;
+        if tool_trace.output_ids.is_empty() {
+            return None;
+        }
+        Some((tool_trace, self.finish_reason_metadata.take()?))
     }
 
     fn finish(&mut self) {
@@ -227,10 +239,15 @@ impl SglangTraceStream {
         else {
             return;
         };
-        let Some((output_text, tool_call_parser, metadata)) = self.take_tool_parse() else {
+        let Some((tool_trace, metadata)) = self.take_tool_parse() else {
             emit_request_end_trace_state(request_end, request_id);
             return;
         };
+        let ToolTrace {
+            parser: tool_call_parser,
+            tokenizer,
+            output_ids,
+        } = tool_trace;
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::warn!(
                 "native SGLang tool metadata skipped because no Tokio runtime is available"
@@ -239,7 +256,21 @@ impl SglangTraceStream {
             return;
         };
         runtime.spawn(async move {
-            record_tool_calls(&metadata, &output_text, &tool_call_parser).await;
+            let output_text =
+                tokio::task::spawn_blocking(move || tokenizer.decode(&output_ids, false)).await;
+            match output_text {
+                Ok(Ok(output_text)) => {
+                    record_tool_calls(&metadata, output_text.as_str(), &tool_call_parser).await;
+                }
+                Ok(Err(error)) => tracing::debug!(
+                    %error,
+                    "failed to decode native SGLang output for request-trace tool metadata"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "native SGLang request-trace tool decode task failed"
+                ),
+            }
             emit_request_end_trace_state(request_end, request_id);
         });
     }
@@ -504,6 +535,17 @@ mod tests {
     async fn stream_emits_agent_finish_and_usage_metadata() {
         BUS.init(16);
         let mut receiver = BUS.subscribe();
+        let tokenizer = crate::tokenizers::Tokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+        ))
+        .unwrap();
+        let output_ids = tokenizer
+            .encode(r#"<tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>"#)
+            .unwrap()
+            .token_ids()
+            .to_vec();
+        let split = output_ids.len() / 2;
         let tracker = Arc::new(RequestTracker::new());
         let metadata = SharedFinishReasonMetadata::default();
         let state = RequestEndTraceState::new(
@@ -519,12 +561,11 @@ mod tests {
             Annotated::from_data(LLMEngineOutput {
                 engine_data: Some(serde_json::json!({
                     "sglang_response": {
-                        "text": "<think>Inspect the weather.</think><tool_call>{\"name\":\"get_",
-                        "output_ids": [101],
+                        "output_ids": &output_ids[..split],
                         "meta_info": {
                             "finish_reason": null,
                             "prompt_tokens": 3,
-                            "completion_tokens": 1,
+                            "completion_tokens": split,
                             "cached_tokens": 1
                         }
                     }
@@ -534,12 +575,11 @@ mod tests {
             Annotated::from_data(LLMEngineOutput {
                 engine_data: Some(serde_json::json!({
                     "sglang_response": {
-                        "text": "weather\",\"arguments\":{\"city\":\"SF\"}}</tool_call>",
-                        "output_ids": [102],
+                        "output_ids": &output_ids[split..],
                         "meta_info": {
                             "finish_reason": {"type": "stop", "matched": "END"},
                             "prompt_tokens": 3,
-                            "completion_tokens": 2,
+                            "completion_tokens": output_ids.len(),
                             "cached_tokens": 1
                         }
                     }
@@ -551,7 +591,11 @@ mod tests {
         let responses = SglangRequestTrace(SglangRequestTraceState::Active(Box::new(
             ActiveSglangRequestTrace {
                 request_end: state,
-                tool_call_parser: Some("qwen25".to_string()),
+                tool_trace: Some(ToolTrace {
+                    parser: "qwen25".to_string(),
+                    tokenizer,
+                    output_ids: Vec::new(),
+                }),
             },
         )))
         .wrap(stream, "req-sglang".to_string())
@@ -576,7 +620,10 @@ mod tests {
         let request = record.request.expect("request metrics");
         assert_eq!(request.x_request_id.as_deref(), Some("rollout-call-1"));
         assert_eq!(request.input_tokens, Some(3));
-        assert_eq!(request.output_tokens, Some(2));
+        assert_eq!(
+            request.output_tokens,
+            Some(u64::try_from(output_ids.len()).unwrap())
+        );
         assert_eq!(request.cached_tokens, Some(1));
         assert!(request.ttft_ms.is_some());
         assert!(request.total_time_ms.is_some());
@@ -632,7 +679,7 @@ mod tests {
         let mut wrapped = SglangRequestTrace(SglangRequestTraceState::Active(Box::new(
             ActiveSglangRequestTrace {
                 request_end: state,
-                tool_call_parser: None,
+                tool_trace: None,
             },
         )))
         .wrap(stream, "req-drop-order".to_string());
