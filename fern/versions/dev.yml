@@ -474,6 +474,9 @@ navigation:
           - page: Qwen3-32B
             path: ../pages-dev/recipes/model-recipes/qwen3-32b.mdx
             slug: qwen3-32b
+          - page: Qwen3.5-122B-A10B
+            path: ../pages-dev/recipes/model-recipes/qwen3-5-122b.mdx
+            slug: qwen3-5-122b
           - page: Qwen3-235B-A22B FP8
             path: ../pages-dev/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
             slug: qwen3-235b-a22b-fp8

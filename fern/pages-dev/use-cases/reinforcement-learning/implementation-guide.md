@@ -5,7 +5,7 @@ title: RL Implementation Guide
 subtitle: Connect RL orchestrators to Dynamo inference and engine administration interfaces
 ---
 
-**Experimental.** This guide is for engineers using Dynamo to serve RL rollouts during a training loop. It covers how to return token IDs and log probabilities, expose routing or engine metadata, discover live workers, and push weight updates without restarting the serving stack. Use the frontend for rollout inference, discover vLLM workers through the read-only RL discovery API, and send lifecycle or weight updates directly to the selected worker system URL.
+**Experimental.** This guide is for engineers using Dynamo to serve RL rollouts during a training loop. It covers how to return token IDs and log probabilities, expose routing or engine metadata, discover live workers, and push weight updates without restarting the serving stack. For SGLang rollouts, use the SGLang-compatible `/generate` API as the primary inference path. Discover vLLM workers through the read-only RL discovery API. Send lifecycle or weight updates directly to the selected worker system URL.
 
 Dynamo can add value to RL rollout serving when the rollout plane needs more than a static inference endpoint. Advanced routing can steer rollout traffic across heterogeneous workers, weight synchronization with Model Express can help move updated checkpoints into serving quickly, fault tolerance can keep rollout generation available across worker failures, and autoscaling can match serving capacity to changing rollout demand during training.
 
@@ -13,6 +13,7 @@ Dynamo can add value to RL rollout serving when the rollout plane needs more tha
 
 | User need | Dynamo surface | Status |
 |---|---|---|
+| Serve SGLang token-in/token-out rollouts with native request and response shapes | Frontend `POST /generate` or `PUT /generate` | Experimental |
 | Serve rollout generation through an OpenAI-compatible endpoint | Frontend `/v1/completions` and `/v1/chat/completions` | Available |
 | Return token IDs, prompt log probabilities, and selected backend metadata | `nvext.token_data` and `nvext.extra_fields` | Available |
 | Discover live rollout workers and their direct administration URLs | `/v1/rl/workers` on the frontend RL listener | vLLM only |
@@ -23,6 +24,7 @@ Dynamo can add value to RL rollout serving when the rollout plane needs more tha
 
 | Capability | vLLM | SGLang | TensorRT-LLM |
 |---|---|---|---|
+| Engine-native token-in/token-out API | `/inference/v1/generate` | `/generate` | Not supported |
 | Token input through `prompt` token arrays | Supported | Supported | Supported |
 | `nvext.token_data` tokenizer bypass | Supported | Supported | Supported |
 | `completion_token_ids` response field | Supported | Supported | Supported |
@@ -32,13 +34,14 @@ Dynamo can add value to RL rollout serving when the rollout plane needs more tha
 | Direct RL admin routes from discovery | Supported with `--enable-rl` | Not supported | Not supported |
 | SGLang `meta_info` upload | Not applicable | Supported with `--enable-rl` | Not applicable |
 
-Experimental means the RL integration surfaces are still converging around real framework usage. Treat `nvext.token_data`, the documented `nvext.extra_fields` values, and `/v1/rl/workers` for RL-enabled vLLM workers as the API-shaped surfaces to build against first. Treat `engine_data`, SGLang uploaded `meta_info`, direct `/engine/` route bodies, custom route names, and backend-native response shapes as backend-specific escape hatches that can change independently.
+Experimental means the RL integration surfaces are still converging around real framework usage. For SGLang, build new token-in/token-out integrations on `/generate` first. This API preserves the request fields and streaming response objects from the installed SGLang version. Use the OpenAI-compatible routes when an integration needs a cross-backend schema or `nvext.metadata_upload`. Treat `engine_data`, uploaded `meta_info`, direct `/engine/` route bodies, and custom route names as backend-specific interfaces. Their contracts can change independently.
 
 ## Choose an Interface
 
 | Task | Interface | Default Port | Behavior |
 |---|---|---:|---|
-| Run rollouts | `POST /v1/completions` or `POST /v1/chat/completions` | `8000` | Routes inference through the Dynamo frontend. |
+| Run SGLang token-in/token-out rollouts | `POST /generate` or `PUT /generate` | `8000` | Routes native SGLang requests through Dynamo and returns native streaming response objects. |
+| Run rollouts through an OpenAI-compatible API | `POST /v1/completions` or `POST /v1/chat/completions` | `8000` | Provides a cross-backend request and response schema. |
 | Discover RL workers | `GET /v1/rl/workers` | `8001` | Returns live vLLM workers, their advertised routes, and direct system URLs. |
 | Administer one engine | `POST <system_url>/engine/<route>` | Worker-specific | Calls one worker without frontend routing or fan-out. |
 
@@ -47,6 +50,69 @@ The discovery API runs on a dedicated frontend listener. It is not mounted on th
 <Warning>
 The worker system server does not add an authentication layer to `/engine/` routes. Restrict the system port and RL discovery listener to the orchestrator network, and do not expose them through a public inference gateway.
 </Warning>
+
+## SGLang Happy Path
+
+Use `/generate` for SGLang reinforcement learning clients that send token IDs and consume SGLang streaming responses. Aggregated and prefill/decode deployments accept the same request.
+
+<Steps>
+<Step title="Enable the SGLang-compatible API">
+
+Set `DYN_SGLANG_ENABLE_GENERATE=1` on the Dynamo frontend:
+
+```bash
+DYN_SGLANG_ENABLE_GENERATE=1 python -m dynamo.frontend
+```
+
+The API uses `/generate` by default. To use a different path, set `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` on the frontend.
+
+</Step>
+<Step title="Start a SGLang worker">
+
+```bash
+python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B
+```
+
+When the worker accepts token input and serves a supported SGLang role, it advertises this capability. Aggregated and decode workers support chat or completions output. Prefill workers support prefill output.
+
+Do not use `--use-sglang-tokenizer`. This flag selects text input. As a result, the worker does not advertise `/generate`. The `/generate` API does not require `--enable-rl`.
+
+</Step>
+<Step title="Send a token-input rollout">
+
+```bash
+curl -N http://localhost:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input_ids": [151644, 8948, 198],
+    "sampling_params": {
+      "max_new_tokens": 32,
+      "temperature": 0,
+      "n": 1
+    },
+    "stream": true,
+    "return_logprob": true,
+    "top_logprobs_num": 0
+  }'
+```
+
+Dynamo forwards each SGLang streaming response object as a server-sent event. The stream ends with `[DONE]`.
+
+`top_logprobs_num: 0` returns the selected-token log probability. To request top-k alternatives, set `DYN_SGL_ALLOW_TOP_LOGPROBS=1` on the worker. Then use a positive `top_logprobs_num` value.
+
+</Step>
+</Steps>
+
+The current API has these limits:
+
+- Provide one non-empty `input_ids` sequence.
+- Set `stream` to `true`.
+- Set `sampling_params.n` to `1`.
+- Use token input. The API does not support text, batched, multimodal, or non-streaming requests.
+- Use an aggregated deployment for prompt log probabilities. They are not parity-complete in prefill/decode deployments.
+
+Dynamo preserves other public SGLang request fields. The worker validates them against the installed SGLang version. The frontend rejects Dynamo-owned bootstrap and routing fields. Dynamo injects those fields after it selects a worker.
 
 ## vLLM Happy Path
 
@@ -123,7 +189,7 @@ The full vLLM example below adds result checks and an exit trap so a failed upda
 
 ## Frontend Feature Support
 
-The OpenAI-compatible completion routes provide the current token-in/token-out interface.
+The OpenAI-compatible completion routes provide a cross-backend token-in/token-out interface. For SGLang clients that use native request and response shapes, prefer `/generate`.
 
 | Feature | Request | Response | Notes |
 |---|---|---|---|
@@ -213,7 +279,7 @@ Use `nvext.engine_data` only when the orchestrator must consume other backend-sp
 
 ## Upload SGLang Metadata
 
-SGLang can upload the final cumulative `meta_info` for each choice to any filesystem supported by the installed fsspec backend. This path keeps large log probability tensors, routed-expert data, and custom metadata out of the HTTP response.
+The SGLang metadata upload feature uses the OpenAI-compatible route and `nvext`. When the rollout pipeline must store large metadata objects outside the HTTP response, use this feature. SGLang can upload the final cumulative `meta_info` for each choice to any filesystem supported by the installed fsspec backend.
 
 <Warning>
 Treat `metadata_upload.url` as trusted RL control-plane input. The worker trims the value, checks that it is a non-empty string, and passes it to fsspec without restricting the storage scheme or destination. Do not allow untrusted inference callers to set this URL; fsspec can access local or remote storage with the worker's permissions and credentials.
