@@ -457,12 +457,13 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
+    encoder_cuda_to_cpu_ratio: Option<usize>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, encoder_cuda_to_cpu_ratio=None))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -471,6 +472,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        encoder_cuda_to_cpu_ratio: Option<usize>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -483,6 +485,11 @@ impl RouterConfig {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
+            ));
+        }
+        if encoder_cuda_to_cpu_ratio.is_some_and(|ratio| ratio == 0) {
+            return Err(PyValueError::new_err(
+                "encoder_cuda_to_cpu_ratio must be 1 or more",
             ));
         }
         RsLoadThresholdConfig {
@@ -499,6 +506,7 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
+            encoder_cuda_to_cpu_ratio,
         })
     }
 }
@@ -515,6 +523,7 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
+            encoder_cuda_to_cpu_ratio: rc.encoder_cuda_to_cpu_ratio,
         }
     }
 }

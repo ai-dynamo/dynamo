@@ -1704,6 +1704,7 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
+        encoder_cuda_to_cpu_ratio: Optional[int] = None,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1716,6 +1717,9 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
+            encoder_cuda_to_cpu_ratio: Throughput of one non-CPU encode worker relative to one CPU
+                encode worker, used by DeviceAwareWeighted routing. Must be 1 or more. Falls back to
+                DYN_ENCODER_CUDA_TO_CPU_RATIO, then to 8.
         """
         ...
 

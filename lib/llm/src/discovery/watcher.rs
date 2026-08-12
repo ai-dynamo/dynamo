@@ -673,6 +673,7 @@ where
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
+                        router_config.encoder_cuda_to_cpu_ratio,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

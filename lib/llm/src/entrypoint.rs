@@ -52,6 +52,12 @@ pub struct RouterConfig {
     pub enforce_disagg: bool,
     #[serde(default)]
     pub session_affinity_ttl_secs: Option<u64>,
+    /// Throughput of one non-CPU worker relative to one CPU worker, which
+    /// `RouterMode::DeviceAwareWeighted` uses to split encode traffic between the two groups.
+    /// A value of 1 or more set here wins. Otherwise `DYN_ENCODER_CUDA_TO_CPU_RATIO` applies,
+    /// and otherwise the default of 8.
+    #[serde(default)]
+    pub encoder_cuda_to_cpu_ratio: Option<usize>,
 }
 
 impl RouterConfig {
@@ -62,6 +68,7 @@ impl RouterConfig {
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
+            encoder_cuda_to_cpu_ratio: None,
         }
     }
 
@@ -81,6 +88,49 @@ impl RouterConfig {
     pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
         self.session_affinity_ttl_secs = Some(ttl_secs);
         self
+    }
+
+    pub fn with_encoder_cuda_to_cpu_ratio(mut self, ratio: usize) -> Self {
+        self.encoder_cuda_to_cpu_ratio = Some(ratio);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_leaves_encoder_ratio_unset() {
+        let config = RouterConfig::new(RouterMode::Random, KvRouterConfig::default());
+        assert_eq!(config.encoder_cuda_to_cpu_ratio, None);
+    }
+
+    #[test]
+    fn builder_sets_encoder_ratio() {
+        let config = RouterConfig::new(RouterMode::Random, KvRouterConfig::default())
+            .with_encoder_cuda_to_cpu_ratio(4);
+        assert_eq!(config.encoder_cuda_to_cpu_ratio, Some(4));
+    }
+
+    #[test]
+    fn encoder_ratio_defaults_to_none_when_absent_from_json() {
+        let mut value = serde_json::to_value(RouterConfig::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("encoder_cuda_to_cpu_ratio")
+            .unwrap();
+        let config: RouterConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.encoder_cuda_to_cpu_ratio, None);
+    }
+
+    #[test]
+    fn encoder_ratio_round_trips_through_json() {
+        let config = RouterConfig::default().with_encoder_cuda_to_cpu_ratio(3);
+        let text = serde_json::to_string(&config).unwrap();
+        let parsed: RouterConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.encoder_cuda_to_cpu_ratio, Some(3));
     }
 }
 
