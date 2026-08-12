@@ -118,7 +118,9 @@ spec:
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
 | `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
-| `min_endpoint` | int | `1` | Minimum number of engine endpoints to maintain. |
+| `min_endpoint` | int | `1` | Minimum endpoints for `agg` mode. In `disagg` mode, applies the same minimum to prefill and decode. In `prefill` or `decode` mode, supplies the active role when its role-specific field is `null`. May be `0` for scale-to-zero compatibility. |
+| `prefill_min_endpoint` | int or `null` | `null` | Minimum prefill endpoints for `disagg` and `prefill` modes. When set, replaces the prefill value from `min_endpoint`. Must be at least `1`. |
+| `decode_min_endpoint` | int or `null` | `null` | Minimum decode endpoints for `disagg` and `decode` modes. When set, replaces the decode value from `min_endpoint`. Must be at least `1`. |
 | `max_gpu_budget` | int | `8` | Maximum total GPUs the planner may allocate. |
 | `ttft_ms` | float | `500.0` | TTFT SLA target (ms) for scaling decisions. |
 | `itl_ms` | float | `50.0` | ITL SLA target (ms) for scaling decisions. |
@@ -170,6 +172,23 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 | `report_interval_hours` | float or `null` | `24.0` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
 | `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
+| `control_api_port` | int | `9086` | Port for the loopback-only runtime minimum-endpoint API. Set to `0` to disable. |
+
+### Runtime Minimum Endpoint API
+
+The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
+
+In Kubernetes, port-forward to the Planner pod and patch the active mode's field:
+
+```bash
+kubectl port-forward pod/<planner-pod> 9086:9086
+curl http://127.0.0.1:9086/v1/min-endpoints
+curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
+  --header 'Content-Type: application/json' \
+  --data '{"decode_min_endpoint": 3}'
+```
+
+The update is atomic. The Planner rejects malformed values, fields that are inactive for the current mode, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same footprint checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
 
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
@@ -193,7 +212,7 @@ Existing planner fields still drive the builtin plugins:
 - `load_adjustment_interval_seconds` schedules `builtin_load_propose`, which reads FPM and worker-count observations and applies the current load-based algorithm.
 - `throughput_adjustment_interval_seconds` schedules `builtin_load_predict` and `builtin_throughput_propose`. The throughput proposer requires the prediction from the same tick, so it only fires when the predict plugin fires.
 - When both builtins propose targets in the same tick, load-based scaling runs after throughput-based scaling and preserves the existing behavior: throughput updates the lower-bound replicas, then load-based scaling can adjust above that floor and apply the global GPU budget clamp.
-- After the plugin pipeline finishes, the planner applies the same final `min_endpoint` and GPU-budget safety checks to builtin and external-plugin targets before scaling the deployment.
+- After the plugin pipeline finishes, the planner applies the same final effective component minimums and GPU-budget safety checks to built-in and external-plugin targets before scaling the deployment.
 
 #### DGDR example
 
