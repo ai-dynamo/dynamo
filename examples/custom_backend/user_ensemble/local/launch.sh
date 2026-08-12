@@ -6,7 +6,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../..")"
+REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../..")"
 source "$REPO_ROOT/examples/common/gpu_utils.sh"
 source "$REPO_ROOT/examples/common/launch_utils.sh"
 
@@ -32,7 +32,7 @@ python -m dynamo.frontend &
 
 CUDA_VISIBLE_DEVICES=$WORKER_GPU \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-python -m examples.custom_backend.user_ensemble.worker \
+python -m examples.custom_backend.user_ensemble.local.worker \
     --model "$MODEL" \
     --custom-encoder-class "$ENCODER_CLASS" \
     --enable-multimodal \

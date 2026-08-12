@@ -22,23 +22,21 @@ from dynamo.common.backend import GenerateChunk, GenerateRequest  # noqa: E402
 from dynamo.llm.exceptions import InvalidArgument  # noqa: E402
 from dynamo.vllm.decoder_stage import VllmDecoderStage  # noqa: E402
 from dynamo.workflow import (  # noqa: E402
-    DeploymentSpec,
     StageContext,
-    ValueRef,
     WorkflowExecutor,
     compile_workflow,
+)
+from examples.custom_backend.user_ensemble.config import (  # noqa: E402
+    prepare_user_ensemble_config,
+)
+from examples.custom_backend.user_ensemble.local.worker import (  # noqa: E402
+    UserEnsembleEngine,
 )
 from examples.custom_backend.user_ensemble.stages import (  # noqa: E402
     DummyClassifier,
     EncoderStage,
 )
-from examples.custom_backend.user_ensemble.worker import (  # noqa: E402
-    UserEnsembleEngine,
-)
-from examples.custom_backend.user_ensemble.workflow import (  # noqa: E402
-    adapt_workflow_result,
-    define_workflow,
-)
+from examples.custom_backend.user_ensemble.workflow import define_workflow  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -130,7 +128,6 @@ def _engine(classifier=None):
     engine._config = MagicMock()
     engine.model_name = "test-model"
     engine.served_model_name = "test-model"
-    engine._engine_args = MagicMock()
     engine._classifier = classifier or _RecordingClassifier()
     engine._encoder = None
     engine._decoder_runtime = None
@@ -172,14 +169,7 @@ def _bind(engine, encoder, adapter, decoder) -> None:
         "classifier": engine._classifier,
         "generator": decoder,
     }
-    plan = compile_workflow(
-        define_workflow(),
-        DeploymentSpec.local(
-            encoder="encoder",
-            classifier="classifier",
-            generator="generator",
-        ),
-    )
+    plan = compile_workflow(define_workflow())
     engine._executor = WorkflowExecutor(plan, runners)
 
 
@@ -189,39 +179,21 @@ async def _collect(
     return [chunk async for chunk in engine.generate(request, _context())]
 
 
-def test_workflow_is_the_readable_pipeline_and_uses_declared_ports():
-    workflow = define_workflow().build()
-
-    assert [stage.id for stage in workflow.stages] == [
-        "encoder",
-        "classifier",
-        "generator",
-    ]
-    assert workflow.outputs["scores"] == ValueRef.for_stage_output(
-        "classifier", "scores"
-    )
-    assert workflow.outputs["chunk"] == ValueRef.for_stage_output("generator", "chunk")
-
-
 async def test_start_builds_prompt_adapter_outside_decoder() -> None:
-    engine_args = MagicMock()
-    backend = MagicMock()
-    backend_type = MagicMock(return_value=backend)
-    engine_client = MagicMock()
+    backend_type = MagicMock()
     model_config = MagicMock()
     model_config.max_model_len = 4096
-    vllm_config = MagicMock()
-    vllm_config.model_config = model_config
-    vllm_config.shutdown_timeout = 10
+    decoder_runtime = MagicMock()
+    decoder_runtime.model_config = model_config
+    decoder_stage = MagicMock()
     prometheus_temp_dir = MagicMock()
     encoder = MagicMock()
-    adapter = MagicMock()
+    encoder_stage = MagicMock()
     plan = MagicMock()
     executor = MagicMock()
     runtime_config = MagicMock()
     runtime_config.model = "test-model"
     runtime_config.served_model_name = "served-model"
-    runtime_config.engine_args = engine_args
     engine = UserEnsembleEngine(
         config=runtime_config,
         encoder_backend_type=backend_type,
@@ -229,39 +201,36 @@ async def test_start_builds_prompt_adapter_outside_decoder() -> None:
 
     with (
         patch(
-            "examples.custom_backend.user_ensemble.worker.setup_vllm_engine",
-            return_value=(
-                engine_client,
-                vllm_config,
-                {"temperature": 0.0},
-                prometheus_temp_dir,
-                MagicMock(),
-            ),
-        ),
+            "examples.custom_backend.user_ensemble.local.worker.build_decoder_stage",
+            return_value=(decoder_stage, decoder_runtime, prometheus_temp_dir),
+        ) as build_decoder,
         patch(
-            "examples.custom_backend.user_ensemble.worker.create_custom_encoder_adapter",
-            return_value=adapter,
-        ) as create_adapter,
+            "examples.custom_backend.user_ensemble.local.worker.build_encoder_stage",
+            return_value=(encoder_stage, encoder),
+        ) as build_encoder,
         patch(
-            "examples.custom_backend.user_ensemble.worker.AsyncVisionEncoder",
-            return_value=encoder,
-        ),
-        patch(
-            "examples.custom_backend.user_ensemble.worker.compile_workflow",
+            "examples.custom_backend.user_ensemble.local.worker.compile_workflow",
             return_value=plan,
-        ),
+        ) as compile_local,
         patch(
-            "examples.custom_backend.user_ensemble.worker.WorkflowExecutor",
+            "examples.custom_backend.user_ensemble.local.worker.WorkflowExecutor",
             return_value=executor,
         ),
     ):
         config = await engine.start(worker_id=1)
 
-    create_adapter.assert_called_once_with(backend, model_config, engine_args)
-    encoder.load.assert_called_once_with("test-model")
-    assert engine._decoder_runtime is not None
-    assert engine._decoder_runtime.engine is engine_client
-    assert isinstance(engine._decoder_stage, VllmDecoderStage)
+    build_decoder.assert_called_once_with(runtime_config)
+    build_encoder.assert_called_once_with(
+        runtime_config,
+        backend_type,
+        name="workflow-vision-encoder",
+        model_config=model_config,
+    )
+    authored_workflow = compile_local.call_args.args[0]
+    assert len(compile_local.call_args.args) == 1
+    assert authored_workflow.build() == define_workflow().build()
+    assert engine._decoder_runtime is decoder_runtime
+    assert engine._decoder_stage is decoder_stage
     assert engine._encoder is encoder
     assert engine._prometheus_temp_dir is prometheus_temp_dir
     assert engine._executor is executor
@@ -287,24 +256,6 @@ async def test_encoder_artifacts_fan_out_once_and_join_in_terminal_response():
     assert decoder.prompt == {"prompt_token_ids": [1, 2, 3, 99]}
     assert chunks[0]["engine_data"] == {
         "ensemble": {"classifier_scores": {"category-a": 0.9, "category-b": 0.1}}
-    }
-
-
-def test_shared_result_adapter_does_not_mutate_decoder_chunk() -> None:
-    chunk = {
-        "token_ids": [4, 2],
-        "engine_data": {"ensemble": {"decoder": "vllm"}},
-    }
-
-    adapted = adapt_workflow_result({"chunk": chunk, "scores": {"category-a": 0.9}})
-
-    assert chunk == {
-        "token_ids": [4, 2],
-        "engine_data": {"ensemble": {"decoder": "vllm"}},
-    }
-    assert adapted["engine_data"]["ensemble"] == {
-        "decoder": "vllm",
-        "classifier_scores": {"category-a": 0.9},
     }
 
 
@@ -385,7 +336,7 @@ async def test_abort_and_cleanup_delegate_and_cleanup_is_idempotent():
     assert encoder.shutdown_calls == 1
 
 
-async def test_from_args_reuses_shared_vllm_config() -> None:
+def test_prepare_user_ensemble_config_reuses_vllm_arguments() -> None:
     runtime_config = MagicMock()
     runtime_config.model = "public/model-id"
     runtime_config.served_model_name = None
@@ -393,36 +344,56 @@ async def test_from_args_reuses_shared_vllm_config() -> None:
     runtime_config.engine_args = MagicMock()
     runtime_config.engine_args.served_model_name = None
     backend_type = MagicMock()
-    worker_config = MagicMock()
 
     with (
         patch(
-            "examples.custom_backend.user_ensemble.worker.parse_args",
+            "examples.custom_backend.user_ensemble.config.parse_args",
             return_value=runtime_config,
         ) as shared_parse_args,
         patch(
-            "examples.custom_backend.user_ensemble.worker.configure_rl_logprobs_mode"
+            "examples.custom_backend.user_ensemble.config.configure_rl_logprobs_mode"
         ) as configure_rl,
         patch(
-            "examples.custom_backend.user_ensemble.worker._load_encoder_backend",
+            "examples.custom_backend.user_ensemble.config.load_encoder_backend",
             return_value=backend_type,
-        ),
-        patch(
-            "examples.custom_backend.user_ensemble.worker.WorkerConfig.from_runtime_config",
-            return_value=worker_config,
-        ) as build_worker_config,
+        ) as load_encoder,
     ):
-        engine, returned_worker_config = await UserEnsembleEngine.from_args(["--model"])
+        config, returned_backend_type = prepare_user_ensemble_config(["--model"])
 
     shared_parse_args.assert_called_once_with(["--model"])
     configure_rl.assert_called_once_with(runtime_config)
     assert runtime_config.served_model_name == "public/model-id"
     assert runtime_config.engine_args.served_model_name == "public/model-id"
     assert runtime_config.engine_args.enable_prompt_embeds is True
+    load_encoder.assert_called_once_with("encoder.Backend")
+    assert config is runtime_config
+    assert returned_backend_type is backend_type
+
+
+async def test_from_args_uses_shared_configuration() -> None:
+    runtime_config = MagicMock()
+    runtime_config.model = "public/model-id"
+    runtime_config.served_model_name = "served-model"
+    backend_type = MagicMock()
+    worker_config = MagicMock()
+
+    with (
+        patch(
+            "examples.custom_backend.user_ensemble.local.worker.prepare_user_ensemble_config",
+            return_value=(runtime_config, backend_type),
+        ) as prepare_config,
+        patch(
+            "examples.custom_backend.user_ensemble.local.worker.WorkerConfig.from_runtime_config",
+            return_value=worker_config,
+        ) as build_worker_config,
+    ):
+        engine, returned_worker_config = await UserEnsembleEngine.from_args(["--model"])
+
+    prepare_config.assert_called_once_with(["--model"])
     build_worker_config.assert_called_once_with(
         runtime_config,
         model_name="public/model-id",
-        served_model_name="public/model-id",
+        served_model_name="served-model",
         enable_kv_routing=False,
     )
     assert engine._config is runtime_config

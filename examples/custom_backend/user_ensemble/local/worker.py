@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Aggregated encoder -> classifier + decoder workflow."""
+"""Aggregated encoder, classifier, and decoder workflow."""
 
 from __future__ import annotations
 
-import importlib
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
@@ -20,82 +19,29 @@ from dynamo.common.backend import (
 )
 from dynamo.common.backend.run import run
 from dynamo.llm.exceptions import InvalidArgument
-from dynamo.vllm.args import Config, configure_rl_logprobs_mode, parse_args
+from dynamo.vllm.args import Config
 from dynamo.vllm.decoder_runtime import VllmDecoderRuntime
 from dynamo.vllm.decoder_stage import VllmDecoderStage
-from dynamo.vllm.main import setup_vllm_engine
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
-    create_custom_encoder_adapter,
 )
 from dynamo.vllm.multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
     URL_VARIANT_KEY,
 )
-from dynamo.workflow import (
-    DeploymentSpec,
-    StageRunner,
-    WorkflowExecutor,
-    compile_workflow,
+from dynamo.workflow import StageRunner, WorkflowExecutor, compile_workflow
+from examples.custom_backend.user_ensemble.config import prepare_user_ensemble_config
+from examples.custom_backend.user_ensemble.resources import (
+    build_decoder_stage,
+    build_encoder_stage,
+    cleanup_resources,
 )
-from examples.custom_backend.user_ensemble.stages import DummyClassifier, EncoderStage
+from examples.custom_backend.user_ensemble.stages import DummyClassifier
 from examples.custom_backend.user_ensemble.workflow import (
     adapt_workflow_result,
     define_workflow,
 )
-
-
-def _load_encoder_backend(class_path: str) -> type[VisionEncoderBackend[Any, Any, Any]]:
-    module_name, separator, class_name = class_path.rpartition(".")
-    if not separator:
-        raise ValueError(
-            "--custom-encoder-class must be a dotted module.ClassName path; "
-            f"got {class_path!r}"
-        )
-    module = importlib.import_module(module_name)
-    backend_type = getattr(module, class_name)
-    if not isinstance(backend_type, type) or not issubclass(
-        backend_type, VisionEncoderBackend
-    ):
-        raise TypeError(f"{class_path} must name a VisionEncoderBackend subclass")
-    return cast(type[VisionEncoderBackend[Any, Any, Any]], backend_type)
-
-
-def _cleanup_resources(
-    encoder: AsyncVisionEncoder[Any, Any, Any] | None,
-    decoder_runtime: VllmDecoderRuntime | None,
-    prometheus_temp_dir: Any | None,
-) -> None:
-    """Release independently owned resources even if one cleanup fails."""
-
-    try:
-        if encoder is not None:
-            encoder.shutdown()
-    finally:
-        try:
-            if prometheus_temp_dir is not None:
-                prometheus_temp_dir.cleanup()
-        finally:
-            if decoder_runtime is not None:
-                decoder_runtime.shutdown()
-
-
-def prepare_user_ensemble_config(
-    argv: list[str] | None = None,
-) -> tuple[Config, type[VisionEncoderBackend[Any, Any, Any]]]:
-    """Parse the shared decoder/encoder configuration for this example."""
-
-    config = parse_args(argv)
-    if not config.custom_encoder_class:
-        raise ValueError(
-            "--custom-encoder-class is required by the user ensemble example"
-        )
-    if not config.served_model_name:
-        config.served_model_name = config.engine_args.served_model_name = config.model
-    configure_rl_logprobs_mode(config)
-    config.engine_args.enable_prompt_embeds = True
-    return config, _load_encoder_backend(config.custom_encoder_class)
 
 
 class UserEnsembleEngine(LLMEngine):
@@ -111,7 +57,6 @@ class UserEnsembleEngine(LLMEngine):
         self._config = config
         self.model_name = config.model
         self.served_model_name = config.served_model_name or config.model
-        self._engine_args = config.engine_args
         self._encoder_backend_type = encoder_backend_type
         self._classifier = classifier or DummyClassifier()
 
@@ -141,48 +86,26 @@ class UserEnsembleEngine(LLMEngine):
 
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id
-        (
-            engine_client,
-            vllm_config,
-            default_sampling_params,
-            prometheus_temp_dir,
-            _component_gauges,
-        ) = setup_vllm_engine(self._config)
-        decoder_runtime = VllmDecoderRuntime(
-            engine=engine_client,
-            vllm_config=vllm_config,
-            default_sampling_params=default_sampling_params,
+        decoder_stage, decoder_runtime, prometheus_temp_dir = build_decoder_stage(
+            self._config
         )
-        decoder_stage = VllmDecoderStage(decoder_runtime)
         encoder: AsyncVisionEncoder[Any, Any, Any] | None = None
         try:
-            backend = self._encoder_backend_type()
-            adapter = create_custom_encoder_adapter(
-                backend,
-                decoder_runtime.model_config,
-                self._engine_args,
-            )
-            encoder = AsyncVisionEncoder(
-                backend,
+            encoder_stage, encoder = build_encoder_stage(
+                self._config,
+                self._encoder_backend_type,
                 name="workflow-vision-encoder",
+                model_config=decoder_runtime.model_config,
             )
-            encoder.load(self.model_name)
             runners = {
-                "encoder": EncoderStage(encoder, adapter),
+                "encoder": encoder_stage,
                 "classifier": self._classifier,
                 "generator": decoder_stage,
             }
-            plan = compile_workflow(
-                define_workflow(),
-                DeploymentSpec.local(
-                    encoder="encoder",
-                    classifier="classifier",
-                    generator="generator",
-                ),
-            )
+            plan = compile_workflow(define_workflow())
             executor = WorkflowExecutor(plan, runners)
         except BaseException:
-            _cleanup_resources(encoder, decoder_runtime, prometheus_temp_dir)
+            cleanup_resources(encoder, decoder_runtime, prometheus_temp_dir)
             raise
 
         self._decoder_runtime = decoder_runtime
@@ -227,7 +150,7 @@ class UserEnsembleEngine(LLMEngine):
         self._decoder_runtime = None
         self._prometheus_temp_dir = None
 
-        _cleanup_resources(encoder, decoder_runtime, prometheus_temp_dir)
+        cleanup_resources(encoder, decoder_runtime, prometheus_temp_dir)
 
     @staticmethod
     def _single_image_url(request: GenerateRequest) -> str:
