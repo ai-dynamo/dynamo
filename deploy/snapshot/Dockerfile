@@ -441,12 +441,12 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
 #     restore with "version 'GLIBC_2.38' not found".
 #   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
-#   - The placeholder pod must NOT set readOnlyRootFilesystem: true. The agent
-#     bind-mounts the binary bundle into the placeholder's /tmp at restore time;
-#     a read-only root filesystem makes /tmp unwritable and the mount fails.
-#     (An emptyDir volume at /tmp does not help — the agent creates the mount
-#     point from outside via ns-bind-mount, which requires the target path to
-#     be on a writable filesystem inside the namespace.)
+#   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
+#     writable volume is mounted at /tmp. The agent bind-mounts the binary
+#     bundle into the placeholder's /tmp at restore time; with a read-only
+#     root and nothing mounted at /tmp, creating the mount point fails with
+#     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
+#     volume mounts stay writable independently of the root filesystem.
 #
 # cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
 # When used, the source workload image must have cuda-checkpoint at the same
