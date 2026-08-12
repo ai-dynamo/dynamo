@@ -215,17 +215,13 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 var enforceDisaggDeprecationOnce sync.Once
 
 const (
-	prefillMarkMaxAttempts       = 3
-	prefillMarkRetryBackoff      = 100 * time.Millisecond
-	cleanupMaxAttempts           = 3
-	cleanupRetryBackoff          = 100 * time.Millisecond
-	maxConcurrentBookingCleanups = 32
+	prefillMarkMaxAttempts  = 3
+	prefillMarkRetryBackoff = 100 * time.Millisecond
+	cleanupMaxAttempts      = 3
+	cleanupRetryBackoff     = 100 * time.Millisecond
 )
 
-var (
-	bookingLifecycles   sync.Map
-	bookingCleanupSlots = make(chan struct{}, maxConcurrentBookingCleanups)
-)
+var bookingLifecycles sync.Map
 
 // bookingLifecycle owns cleanup for one EPP booking across the prefill scorer,
 // decode scorer, and response callbacks. A booking has exactly one cleanup owner
@@ -233,11 +229,20 @@ var (
 type bookingLifecycle struct {
 	bookingID   string
 	freeBooking func(string) error
+	executor    *bookingExecutor
 
 	mu                     sync.Mutex
 	cleanupStarted         bool
 	cleanupSucceeded       bool
 	cleanupExhausted       bool
+	cleanupExpired         bool
+	cleanupQueued          bool
+	cleanupRunning         bool
+	cleanupDoneClosed      bool
+	cleanupStartedAt       time.Time
+	cleanupRetryAt         time.Time
+	cleanupReason          string
+	cleanupLogger          logr.Logger
 	decodeRegistrationDone chan struct{}
 	decodeRegistrationOpen bool
 
@@ -248,9 +253,14 @@ type bookingLifecycle struct {
 }
 
 func registerBookingLifecycle(bookingID string, freeBooking func(string) error) *bookingLifecycle {
+	return registerBookingLifecycleWithExecutor(bookingID, freeBooking, defaultBookingExecutor)
+}
+
+func registerBookingLifecycleWithExecutor(bookingID string, freeBooking func(string) error, executor *bookingExecutor) *bookingLifecycle {
 	lifecycle := &bookingLifecycle{
 		bookingID:   bookingID,
 		freeBooking: freeBooking,
+		executor:    executor,
 	}
 	actual, loaded := bookingLifecycles.LoadOrStore(bookingID, lifecycle)
 	if loaded {
@@ -304,8 +314,9 @@ func (l *bookingLifecycle) armCancellation(ctx context.Context) {
 	})
 }
 
-// startPrefillMarker makes first-token bookkeeping bounded and independent of
-// the response callback. EOS or request cancellation stops any pending retry.
+// startPrefillMarker submits first-token bookkeeping to a bounded executor and
+// returns without blocking the response callback. If the marker queue is full,
+// terminal cleanup still releases both the prefill and decode bookings.
 func (l *bookingLifecycle) startPrefillMarker(markPrefillComplete func(string) error, logger logr.Logger, requestID string) {
 	l.mu.Lock()
 	if l.cleanupStarted || l.markerDone != nil {
@@ -318,43 +329,24 @@ func (l *bookingLifecycle) startPrefillMarker(markPrefillComplete func(string) e
 	l.markerDone = markerDone
 	l.mu.Unlock()
 
-	go func() {
-		defer close(markerDone)
-		for attempt := 1; attempt <= prefillMarkMaxAttempts; attempt++ {
-			if markerCtx.Err() != nil {
-				return
-			}
-			if err := markPrefillComplete(l.bookingID); err == nil {
-				logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
-					"bookingID", l.bookingID, "requestID", requestID, "attempt", attempt)
-				return
-			} else {
-				logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
-					"bookingID", l.bookingID, "requestID", requestID, "attempt", attempt)
-			}
-			if attempt == prefillMarkMaxAttempts {
-				return
-			}
-
-			timer := time.NewTimer(prefillMarkRetryBackoff * time.Duration(attempt))
-			select {
-			case <-markerCtx.Done():
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				return
-			case <-timer.C:
-			}
-		}
-	}()
+	if !l.executor.enqueueMarker(prefillMarkerWork{
+		lifecycle:           l,
+		ctx:                 markerCtx,
+		done:                markerDone,
+		markPrefillComplete: markPrefillComplete,
+		logger:              logger,
+		requestID:           requestID,
+	}) {
+		stopMarker()
+		close(markerDone)
+		logger.V(logutil.DEFAULT).Info("DynDecodeScorer ResponseBody: prefill marker queue full; deferring release to terminal cleanup",
+			"bookingID", l.bookingID, "requestID", requestID)
+	}
 }
 
-// cleanup stops cancellation and marker ownership, waits for in-flight work,
-// and retries free_request on a bounded executor. A terminal failure remains in
-// bookingLifecycles as a tombstone so a duplicate cleanup cannot hide it.
+// cleanup transfers ownership to the bounded cleanup executor. Queue overflow
+// retains the lifecycle for reconciler submission, and exhausted work remains
+// retryable only for a finite retention window.
 func (l *bookingLifecycle) cleanup(ctx context.Context, reason string) bool {
 	l.mu.Lock()
 	if l.cleanupStarted {
@@ -362,10 +354,11 @@ func (l *bookingLifecycle) cleanup(ctx context.Context, reason string) bool {
 		return false
 	}
 	l.cleanupStarted = true
+	l.cleanupStartedAt = time.Now()
+	l.cleanupReason = reason
+	l.cleanupLogger = log.FromContext(ctx)
 	stopCancellation := l.stopCancellation
 	stopMarker := l.stopMarker
-	markerDone := l.markerDone
-	decodeRegistrationDone := l.decodeRegistrationDone
 	cleanupDone := make(chan struct{})
 	l.cleanupDone = cleanupDone
 	l.mu.Unlock()
@@ -377,45 +370,19 @@ func (l *bookingLifecycle) cleanup(ctx context.Context, reason string) bool {
 		stopMarker()
 	}
 
-	go func() {
-		if markerDone != nil {
-			<-markerDone
-		}
-		if decodeRegistrationDone != nil {
-			<-decodeRegistrationDone
-		}
-
-		logger := log.FromContext(ctx)
-		for attempt := 1; attempt <= cleanupMaxAttempts; attempt++ {
-			bookingCleanupSlots <- struct{}{}
-			err := l.freeBooking(l.bookingID)
-			<-bookingCleanupSlots
-			if err == nil {
-				l.mu.Lock()
-				l.cleanupSucceeded = true
-				l.mu.Unlock()
-				logger.V(logutil.VERBOSE).Info("Dynamo EPP booking cleaned up",
-					"bookingID", l.bookingID, "reason", reason, "attempt", attempt)
-				bookingLifecycles.Delete(l.bookingID)
-				close(cleanupDone)
-				return
-			}
-
-			logger.V(logutil.DEFAULT).Error(err, "Dynamo EPP booking cleanup failed",
-				"bookingID", l.bookingID, "reason", reason, "attempt", attempt)
-			if attempt == cleanupMaxAttempts {
-				l.mu.Lock()
-				l.cleanupExhausted = true
-				l.mu.Unlock()
-				logger.V(logutil.DEFAULT).Error(err, "Dynamo EPP booking cleanup exhausted retries; retaining tombstone",
-					"bookingID", l.bookingID, "reason", reason, "attempts", cleanupMaxAttempts)
-				close(cleanupDone)
-				return
-			}
-			time.Sleep(cleanupRetryBackoff * time.Duration(attempt))
-		}
-	}()
+	if !l.executor.enqueueCleanup(l) {
+		l.cleanupLogger.V(logutil.DEFAULT).Info("Dynamo EPP booking cleanup queue full; retained for reconciler submission",
+			"bookingID", l.bookingID, "reason", reason)
+	}
 	return true
+}
+
+func (l *bookingLifecycle) closeCleanupDoneLocked() chan struct{} {
+	if l.cleanupDone == nil || l.cleanupDoneClosed {
+		return nil
+	}
+	l.cleanupDoneClosed = true
+	return l.cleanupDone
 }
 
 func (l *bookingLifecycle) markerComplete() <-chan struct{} {
