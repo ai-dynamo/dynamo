@@ -94,6 +94,9 @@ class DynamoWorkerProcess(ManagedProcess):
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
+        # Keep HA tests on baseline vLLM path regardless of inherited shell env.
+        env.pop("DYN_FORWARDPASS_METRIC_PORT", None)
+        env.pop("DYN_FPM_TRACE", None)
 
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:

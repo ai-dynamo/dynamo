@@ -141,6 +141,10 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
+        # Keep cancellation tests on the non-FPM execution path even when
+        # developers/CI export FPM-related env vars globally.
+        env.pop("DYN_FORWARDPASS_METRIC_PORT", None)
+        env.pop("DYN_FPM_TRACE", None)
 
         # Set KV events config and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker
