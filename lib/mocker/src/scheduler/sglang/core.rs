@@ -379,10 +379,7 @@ impl SglangCore {
     }
 
     fn build_request(&self, request: DirectRequest) -> SglangRequest {
-        let max_output_tokens = request
-            .output_token_ids
-            .as_ref()
-            .map_or(request.max_output_tokens, Vec::len);
+        let max_output_tokens = request.effective_max_output_tokens();
         let output_storage_hint = self.config.output_storage_hint(
             request.tokens.len(),
             max_output_tokens,

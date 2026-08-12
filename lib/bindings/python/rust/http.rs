@@ -136,8 +136,9 @@ impl HttpService {
                 ))
             })?;
 
-        self.inner.enable_model_endpoint(endpoint_type, enabled);
-        Ok(())
+        self.inner
+            .enable_model_endpoint(endpoint_type, enabled)
+            .map_err(to_pyerr)
     }
 }
 
