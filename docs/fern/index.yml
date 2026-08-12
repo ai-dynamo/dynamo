@@ -840,6 +840,8 @@ navigation:
                 contents:
                   - page: Dynamo Operator
                     path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md
+                  - page: DGDR v2 Use Cases (Draft)
+                    path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dgdr-v2-use-cases.md
                   - page: Service Discovery
                     path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md
                   - page: Webhooks
