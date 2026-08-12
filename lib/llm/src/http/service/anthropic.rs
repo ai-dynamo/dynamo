@@ -601,6 +601,7 @@ async fn anthropic_messages(
         // to `monitor_for_disconnects` below.
         let cancel_ctx = ctx.clone();
 
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
@@ -625,6 +626,7 @@ async fn anthropic_messages(
                         let Some(annotated_chunk) = maybe_chunk else {
                             break; // backend stream ended normally
                         };
+                        let _ = activity_tx.send(());
                         process_response_and_observe_metrics(
                             &annotated_chunk,
                             &mut response_collector,
@@ -679,6 +681,7 @@ async fn anthropic_messages(
             inflight_guard,
             stream_handle,
             keep_alive,
+            activity_rx,
         );
 
         Ok(Sse::new(stream).into_response())

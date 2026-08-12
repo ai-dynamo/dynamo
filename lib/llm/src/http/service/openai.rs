@@ -2713,6 +2713,7 @@ async fn chat_completions(
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
@@ -2741,6 +2742,7 @@ async fn chat_completions(
 
                 // Drop empty chunks from multi-byte token assembly.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
+                    let _ = activity_tx.send(());
                     // Not forwarded, but the engine still generated these tokens,
                     // so account for them before discarding. Otherwise the
                     // real-time output-token counter undercounts and TTFT is
@@ -2799,6 +2801,7 @@ async fn chat_completions(
             inflight_guard,
             stream_handle,
             keep_alive,
+            activity_rx,
         );
 
         Ok(Sse::new(stream).into_response())

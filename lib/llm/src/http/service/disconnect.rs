@@ -33,6 +33,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
@@ -249,6 +250,7 @@ pub fn monitor_for_disconnects_with_keep_alive(
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
     keep_alive: Option<Duration>,
+    activity_rx: mpsc::UnboundedReceiver<()>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -257,7 +259,7 @@ pub fn monitor_for_disconnects_with_keep_alive(
         stream_handle,
         backend_stream_timeout(),
         openai_stream_error,
-        keep_alive,
+        keep_alive.map(|interval| (interval, activity_rx)),
     )
 }
 
@@ -287,7 +289,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
     error_formatter: StreamErrorFormatter,
-    keep_alive: Option<Duration>,
+    keep_alive: Option<(Duration, mpsc::UnboundedReceiver<()>)>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -298,10 +300,16 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 
     async_stream::try_stream! {
         tokio::pin!(stream);
+        let (keep_alive, mut activity_rx) = match keep_alive {
+            Some((interval, rx)) => (Some(interval), Some(rx)),
+            None => (None, None),
+        };
         // Keep the context's watch-backed cancellation future alive across body frames.
         // Recreating it for every token repeatedly clones a receiver and churns Notify state.
         let stopped = context.stopped();
         tokio::pin!(stopped);
+        let mut inactivity_deadline =
+            inactivity_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
             tokio::select! {
                 // Drain any ready SSE event before honoring a cancel or the
@@ -313,6 +321,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
+                            inactivity_deadline = inactivity_timeout
+                                .map(|timeout| tokio::time::Instant::now() + timeout);
                             yield event;
                         }
                         Some(Err(err)) => {
@@ -365,15 +375,27 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                 } => {
                     yield Event::default().comment("");
                 }
+                activity = async {
+                    match activity_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<()>>().await,
+                    }
+                } => {
+                    if activity.is_some() {
+                        inactivity_deadline = inactivity_timeout
+                            .map(|timeout| tokio::time::Instant::now() + timeout);
+                    } else {
+                        activity_rx = None;
+                    }
+                }
                 // Circuit breaker for zombie backend workers: if the backend holds a live TCP
                 // connection but produces no output for `inactivity_timeout`, kill the engine
                 // context so that InflightGuard::drop() fires and dec() corrects the gauge.
-                // The sleep is re-created each iteration so it acts as an *inactivity* timeout
-                // (resets whenever a token is received), not a hard total-request deadline.
-                // When inactivity_timeout is None the pending() future never resolves.
+                // Only real stream activity resets this deadline. Client heartbeats must not
+                // keep a dead backend alive indefinitely.
                 _ = async {
-                    match inactivity_timeout {
-                        Some(d) => tokio::time::sleep(d).await,
+                    match inactivity_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending::<()>().await,
                     }
                 } => {
@@ -707,11 +729,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keep_alive_resets_inactivity_timeout() {
+    async fn test_keep_alive_does_not_reset_inactivity_timeout() {
         let model = "keep-alive-model";
         let (metrics, guard, _context, handle) = setup_test(model, "req-keep-alive");
         let tracked_context = Arc::new(MockContext::with_kill_tracking());
         let engine_context: Arc<dyn AsyncEngineContext> = tracked_context.clone();
+        let (_activity_tx, activity_rx) = mpsc::unbounded_channel();
 
         let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
             hanging_stream(),
@@ -720,21 +743,16 @@ mod tests {
             handle,
             Some(Duration::from_secs(10)),
             openai_stream_error,
-            Some(Duration::from_secs(5)),
+            Some((Duration::from_secs(5), activity_rx)),
         );
         tokio::pin!(monitored);
 
-        for _ in 0..3 {
-            tokio::time::advance(Duration::from_secs(6)).await;
-            let _ = monitored
-                .next()
-                .await
-                .expect("heartbeat stream must stay open")
-                .expect("heartbeat must be valid");
-        }
-
-        assert!(!tracked_context.is_killed());
-        assert_eq!(metrics.get_inflight_count(model), 1);
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(monitored.next().await.unwrap().is_ok());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(monitored.next().await.is_none());
+        assert!(tracked_context.is_killed());
+        assert_eq!(metrics.get_inflight_count(model), 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
