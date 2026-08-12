@@ -136,6 +136,14 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
+    // If the name is an absolute filesystem path that exists, return it directly
+    // without attempting any HuggingFace download. This supports models loaded
+    // from local storage (e.g., FSx Lustre, NFS, or other shared filesystems).
+    if name.is_absolute() && name.exists() {
+        tracing::info!("Using local model path: {model_name}");
+        return Ok(name.to_path_buf());
+    }
+
     // Cache-first in all modes: if the snapshot is already on disk with the files we
     // need, return it without touching the network.
     if let Some(cached_path) = get_cached_model_path(&model_name, ignore_weights) {
