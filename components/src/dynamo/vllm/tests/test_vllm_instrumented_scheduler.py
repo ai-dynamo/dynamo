@@ -3647,3 +3647,90 @@ def test_steady_fpm_gate_only_fires_for_two_step_decode_points():
     stub._bench_current_point = BenchmarkPoint(point_type="decode")
     stub._last_update_time = 0.0  # previous update was an empty step
     assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+
+
+# ---------------------------------------------------------------------------
+# Decode KV seeding guard (fail closed on silent under-allocation)
+# ---------------------------------------------------------------------------
+
+
+def _decode_injection_stub(allocated_blocks_per_group, expected_blocks):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 0
+    stub._bench_active_req_ids = set()
+    stub.requests = {}
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub._bench_block_hasher = None
+    stub._bench_blocks_per_req = MagicMock(return_value=expected_blocks)
+    new_blocks = MagicMock()
+    new_blocks.get_block_ids.return_value = allocated_blocks_per_group
+    kv = MagicMock()
+    kv.allocate_slots.return_value = new_blocks
+    kv.num_kv_cache_groups = len(allocated_blocks_per_group)
+    kv.take_new_block_ids = MagicMock(return_value=None)
+    stub.kv_cache_manager = kv
+    stub.needs_kv_cache_zeroing = False
+    stub.connector = None
+    stub.ec_connector = None
+    return stub
+
+
+def test_decode_injection_fails_closed_on_kv_allocation_shortfall():
+    """An allocation that covers fewer blocks than the context needs must
+    truncate the batch (so the caller skips the point) instead of measuring
+    a step that attends over near-empty KV and records an impossible row."""
+    stub = _decode_injection_stub(
+        allocated_blocks_per_group=[[1, 2, 3]], expected_blocks=400
+    )
+
+    output = InstrumentedScheduler._bench_inject_fake_decode(
+        stub, context_lengths=[25_600]
+    )
+
+    assert output.total_num_scheduled_tokens == 0
+    assert stub.requests == {}
+    assert stub._bench_active_req_ids == set()
+    stub._bench_blocks_per_req.assert_called_once_with(
+        25_601, apply_admission_cap=False
+    )
+    stub.kv_cache_manager.free.assert_called_once()
+
+
+def test_decode_injection_accepts_full_kv_allocation():
+    stub = _decode_injection_stub(
+        allocated_blocks_per_group=[[1, 2], [3, 4]], expected_blocks=4
+    )
+
+    output = InstrumentedScheduler._bench_inject_fake_decode(stub, context_lengths=[63])
+
+    assert output.total_num_scheduled_tokens == 1
+    assert len(stub.requests) == 1
+    stub.kv_cache_manager.free.assert_not_called()
+
+
+def test_decode_injection_mid_batch_shortfall_keeps_earlier_registrations():
+    """A shortfall on request k>0 frees only the failing request inline and
+    truncates the batch; earlier requests stay registered so the caller's
+    existing decode_injection_failed path can clean them all up."""
+    stub = _decode_injection_stub(
+        allocated_blocks_per_group=[[1, 2, 3, 4]], expected_blocks=4
+    )
+    healthy = MagicMock()
+    healthy.get_block_ids.return_value = [[1, 2, 3, 4]]
+    short = MagicMock()
+    short.get_block_ids.return_value = [[1]]
+    stub.kv_cache_manager.allocate_slots = MagicMock(side_effect=[healthy, short])
+
+    output = InstrumentedScheduler._bench_inject_fake_decode(
+        stub, context_lengths=[63, 63]
+    )
+
+    assert output.total_num_scheduled_tokens == 1
+    assert list(stub.requests) == ["__bench_0"]
+    assert stub._bench_active_req_ids == {"__bench_0"}
+    # Only the failing request is freed inline; __bench_0 stays allocated
+    # for _bench_cleanup_requests to release on the skip path.
+    stub.kv_cache_manager.free.assert_called_once()
+    freed_req = stub.kv_cache_manager.free.call_args.args[0]
+    assert freed_req.request_id == "__bench_1"

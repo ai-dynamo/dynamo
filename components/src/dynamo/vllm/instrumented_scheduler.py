@@ -3182,6 +3182,36 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
                 break
 
+            # Fail closed on silent under-allocation. At multi-million-token
+            # contexts the allocator can hand back fewer blocks than the
+            # context needs instead of returning None; the measured step then
+            # attends over a fraction of the nominal KV and a physically
+            # impossible latency lands in the results as a valid row
+            # (observed: (256, 6.56M) recorded 11.2ms against a 57.5ms ground
+            # truth). Verify actual coverage before the request becomes
+            # measurable; a shortfall truncates the batch so the caller skips
+            # the point instead of measuring it against missing KV.
+            block_ids = new_blocks.get_block_ids()
+            allocated_blocks = sum(len(group) for group in block_ids)
+            # apply_admission_cap must stay False: vLLM's per-step allocation
+            # never applies the admission cap (a healthy fresh allocation is
+            # dense ceil(tokens / block_size) for every group), so a capped
+            # expectation would under-demand on sliding-window layouts and
+            # let real shortfalls through.
+            expected_blocks = self._bench_blocks_per_req(
+                padded_len, apply_admission_cap=False
+            )
+            if allocated_blocks < expected_blocks:
+                logger.warning(
+                    "KV seeding shortfall at ctx_len=%d: allocated %d block(s), "
+                    "point requires %d; truncating batch",
+                    ctx_len,
+                    allocated_blocks,
+                    expected_blocks,
+                )
+                self.kv_cache_manager.free(req)
+                break
+
             req.num_computed_tokens = ctx_len
             req.status = RequestStatus.RUNNING
 
@@ -3189,8 +3219,6 @@ class InstrumentedScheduler(AsyncScheduler):
             self.running.append(req)  # type: ignore[has-type]
             self._bench_active_req_ids.add(req_id)
             self._bench_seq += 1
-
-            block_ids = new_blocks.get_block_ids()
             new_reqs_data.append(
                 NewRequestData(
                     req_id=req_id,
