@@ -97,6 +97,7 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 }
 
 func TestDCD_RoundTrip_ContainerArgsPatches(t *testing.T) {
+	t.Log("Build a v1beta1 component with an argument append patch")
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
@@ -110,7 +111,10 @@ func TestDCD_RoundTrip_ContainerArgsPatches(t *testing.T) {
 		},
 	}
 
+	t.Log("Round-trip the component through v1alpha1 conversion")
 	got := dcdRoundTripFromV1beta1(t, src)
+
+	t.Log("Verify the v1beta1-only append patch is preserved exactly")
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}

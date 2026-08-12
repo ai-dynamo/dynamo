@@ -302,6 +302,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecContainerArgsPatches(t *test
 		name     string
 		template *corev1.PodTemplateSpec
 		target   string
+		append   []string
 		want     []string
 	}{
 		{
@@ -327,18 +328,36 @@ func TestValidateDynamoComponentDeploymentSharedSpecContainerArgsPatches(t *test
 			target: "missing",
 			want:   []string{"spec.components[0].containerArgsPatches[0].name"},
 		},
+		{
+			name: "rejects empty argument",
+			template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"},
+			}}},
+			target: consts.MainContainerName,
+			append: []string{"--flag", ""},
+			want:   []string{"spec.components[0].containerArgsPatches[0].append[1]"},
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Log("Choose explicit append arguments or the valid default")
+			appendArgs := test.append
+			if appendArgs == nil {
+				appendArgs = []string{"--flag"}
+			}
+
+			t.Log("Build a component with a named container argument patch")
 			spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				PodTemplate:            test.template,
 				RuntimeVersionOverride: "1.1.0",
 				ContainerArgsPatches: []nvidiacomv1beta1.ContainerArgsPatch{{
 					Name:   test.target,
-					Append: []string{"--flag"},
+					Append: appendArgs,
 				}},
 			}
+
+			t.Log("Validate the patch target against rendered and pod-template containers")
 			errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
 			assertFieldPaths(t, errs, test.want)
 		})

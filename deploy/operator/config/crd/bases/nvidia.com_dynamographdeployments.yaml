@@ -12247,6 +12247,7 @@ spec:
                             append:
                               description: append contains arguments added after defaults and normal overrides.
                               items:
+                                minLength: 1
                                 type: string
                               minItems: 1
                               type: array

@@ -239,6 +239,7 @@ type ContainerArgsPatch struct {
 
 	// append contains arguments added after defaults and normal overrides.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
 	Append []string `json:"append"`
 }
 

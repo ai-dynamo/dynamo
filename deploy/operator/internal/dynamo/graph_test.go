@@ -6175,6 +6175,7 @@ func TestGenerateBasePodSpecAppendsContainerArgsAfterDefaultsAndOverrides(t *tes
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Log("Build a frontend component with an explicit argument append patch")
 			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeFrontend,
 			})
@@ -6188,6 +6189,7 @@ func TestGenerateBasePodSpecAppendsContainerArgsAfterDefaultsAndOverrides(t *tes
 				Append: []string{"--router-mode", "kv"},
 			}}
 
+			t.Log("Render the final pod specification")
 			podSpec, err := GenerateBasePodSpec(
 				component,
 				BackendFrameworkVLLM,
@@ -6203,6 +6205,8 @@ func TestGenerateBasePodSpecAppendsContainerArgsAfterDefaultsAndOverrides(t *tes
 				nil,
 			)
 			require.NoError(t, err)
+
+			t.Log("Verify appended arguments follow generated defaults or replacement arguments")
 			assert.Equal(t, test.wantArgs, podSpec.Containers[0].Args)
 		})
 	}

@@ -142,6 +142,7 @@ func TestApplyUsesStructuralListSemantics(t *testing.T) {
 func TestApplyExtractsExplicitBetaArgsAppendPatch(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Apply an args append directive to the generated frontend main container")
 	result, warnings, err := Apply(
 		mustObject(t, betaBlueprintYAML),
 		mustObject(t, `
@@ -149,7 +150,7 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 spec:
   components:
-  - name: Worker
+  - name: Frontend
     podTemplate:
       spec:
         containers:
@@ -164,19 +165,64 @@ spec:
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 
-	worker := mustBetaWorker(t, result)
+	t.Log("Verify the directive is materialized without replacing generated container args")
+	frontend := mustBetaComponent(t, result, "Frontend")
 	main := findNamedObject(
 		t,
-		mustNestedSlice(t, worker, "podTemplate", "spec", "containers"),
+		mustNestedSlice(t, frontend, "podTemplate", "spec", "containers"),
 		"main",
 	)
 	require.NotNil(t, main)
-	assert.Equal(t, []interface{}{"--base"}, main["args"], "normal args remain untouched until pod rendering")
+	assert.NotContains(t, main, "args", "generated defaults remain owned by pod rendering")
 	assert.NotContains(t, main, "$patch")
 	assert.Equal(t, []interface{}{
 		map[string]interface{}{
 			"name":   "main",
 			"append": []interface{}{"--router-mode", "kv"},
+		},
+	}, frontend["containerArgsPatches"])
+}
+
+func TestApplyExtractsBetaArgsAppendPatchForExistingSidecar(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Apply an args append directive to a sidecar present in the generated blueprint")
+	result, warnings, err := Apply(
+		mustObject(t, betaBlueprintYAML),
+		mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - name: sidecar
+          $patch:
+            args: append
+          args:
+          - --verbose
+`),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	t.Log("Verify the existing sidecar remains intact and receives a typed append patch")
+	worker := mustBetaWorker(t, result)
+	sidecar := findNamedObject(
+		t,
+		mustNestedSlice(t, worker, "podTemplate", "spec", "containers"),
+		"sidecar",
+	)
+	require.NotNil(t, sidecar)
+	assert.Equal(t, "sidecar-image", sidecar["image"])
+	assert.NotContains(t, sidecar, "args")
+	assert.NotContains(t, sidecar, "$patch")
+	assert.Equal(t, []interface{}{
+		map[string]interface{}{
+			"name":   "sidecar",
+			"append": []interface{}{"--verbose"},
 		},
 	}, worker["containerArgsPatches"])
 }
@@ -185,19 +231,24 @@ func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		modifier  string
-		argsLine  string
-		wantError string
+		name          string
+		containerName string
+		modifier      string
+		argsLine      string
+		wantError     string
 	}{
-		{name: "unsupported operation", modifier: "replace", argsLine: "          args: [--flag]\n", wantError: "only supports args: append"},
-		{name: "missing args", modifier: "append", wantError: "args must be non-empty"},
-		{name: "non-string args", modifier: "append", argsLine: "          args: [--flag, 7]\n", wantError: "list of strings"},
+		{name: "unsupported operation", containerName: "main", modifier: "replace", argsLine: "          args: [--flag]\n", wantError: "only supports args: append"},
+		{name: "missing args", containerName: "main", modifier: "append", wantError: "args must be non-empty"},
+		{name: "non-string args", containerName: "main", modifier: "append", argsLine: "          args: [--flag, 7]\n", wantError: "list of strings"},
+		{name: "empty string arg", containerName: "main", modifier: "append", argsLine: "          args: [--flag, \"\"]\n", wantError: "args[1] must be non-empty"},
+		{name: "unknown sidecar", containerName: "missing", modifier: "append", argsLine: "          args: [--flag]\n", wantError: "is not present in the generated blueprint"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+
+			t.Log("Apply an invalid args append directive")
 			override := fmt.Sprintf(`
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -207,11 +258,13 @@ spec:
     podTemplate:
       spec:
         containers:
-        - name: main
+        - name: %s
           $patch:
             args: %s
-%s`, test.modifier, test.argsLine)
+%s`, test.containerName, test.modifier, test.argsLine)
 			_, _, err := Apply(mustObject(t, betaBlueprintYAML), mustObject(t, override))
+
+			t.Log("Verify the invalid directive fails before structural merge")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.wantError)
 		})
@@ -640,9 +693,14 @@ func mustNestedStringSlice(t *testing.T, object map[string]interface{}, fields .
 
 func mustBetaWorker(t *testing.T, object *unstructured.Unstructured) map[string]interface{} {
 	t.Helper()
+	return mustBetaComponent(t, object, "Worker")
+}
+
+func mustBetaComponent(t *testing.T, object *unstructured.Unstructured, name string) map[string]interface{} {
+	t.Helper()
 	components := mustNestedSlice(t, object.Object, "spec", "components")
-	component := findNamedObject(t, components, "Worker")
-	require.NotNil(t, component, "missing Worker component")
+	component := findNamedObject(t, components, name)
+	require.NotNil(t, component, "missing %s component", name)
 	return component
 }
 
