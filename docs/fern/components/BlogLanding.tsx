@@ -5,6 +5,16 @@
 
 const ARTICLES = [
   {
+    title: "Dynamo Bulwark: Taking Cold Restarts Off the Serving Path",
+    description:
+      "A pre-initialized shadow engine shares GPU-resident weights with the active one and takes over in seconds, turning a three-node cascade from a 150-second blackout into three brief promotions.",
+    href: "/dynamo/dev/digest/dynamo-bulwark",
+    date: "August 12, 2026",
+    readTime: "12 min read",
+    category: "Engineering",
+    art: "bulwark",
+  },
+  {
     title: "DynoSim: Simulating the Pareto Frontier",
     description:
       "Explore serving configurations with a workload-driven Dynamo simulator before committing scarce GPU time to cluster validation.",
