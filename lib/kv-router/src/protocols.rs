@@ -500,17 +500,14 @@ pub enum ResetScope {
 pub enum WireResidencyDomain {
     #[default]
     Missing,
-    Value(Box<str>),
+    Known(ResidencyDomain),
+    Unknown(Box<str>),
     Invalid,
 }
 
 impl WireResidencyDomain {
     pub fn explicit(domain: ResidencyDomain) -> Self {
-        let value = match domain {
-            ResidencyDomain::Worker => "worker",
-            ResidencyDomain::CacheOwner => "cache_owner",
-        };
-        Self::Value(value.into())
+        Self::Known(domain)
     }
 
     fn is_missing(&self) -> bool {
@@ -520,11 +517,8 @@ impl WireResidencyDomain {
     pub fn parse(&self) -> Result<Option<ResidencyDomain>, UnsupportedResidencyDomain> {
         match self {
             Self::Missing => Ok(None),
-            Self::Value(value) if value.as_ref() == "worker" => Ok(Some(ResidencyDomain::Worker)),
-            Self::Value(value) if value.as_ref() == "cache_owner" => {
-                Ok(Some(ResidencyDomain::CacheOwner))
-            }
-            Self::Value(_) | Self::Invalid => Err(UnsupportedResidencyDomain),
+            Self::Known(domain) => Ok(Some(*domain)),
+            Self::Unknown(_) | Self::Invalid => Err(UnsupportedResidencyDomain),
         }
     }
 }
@@ -536,7 +530,9 @@ impl Serialize for WireResidencyDomain {
     {
         match self {
             Self::Missing | Self::Invalid => serializer.serialize_none(),
-            Self::Value(value) => serializer.serialize_str(value),
+            Self::Known(ResidencyDomain::Worker) => serializer.serialize_str("worker"),
+            Self::Known(ResidencyDomain::CacheOwner) => serializer.serialize_str("cache_owner"),
+            Self::Unknown(value) => serializer.serialize_str(value),
         }
     }
 }
@@ -551,11 +547,19 @@ impl<'de> Visitor<'de> for WireResidencyDomainVisitor {
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Value(value.into()))
+        Ok(match value {
+            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
+            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
+            value => WireResidencyDomain::Unknown(value.into()),
+        })
     }
 
     fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(WireResidencyDomain::Value(value.into_boxed_str()))
+        Ok(match value.as_str() {
+            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
+            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
+            _ => WireResidencyDomain::Unknown(value.into_boxed_str()),
+        })
     }
 
     fn visit_char<E>(self, _value: char) -> Result<Self::Value, E> {
