@@ -80,7 +80,7 @@ class StageRunner(Protocol):
 
 @runtime_checkable
 class TensorCarrier(Protocol):
-    """Tensor transport used when a NIXL edge touches this process."""
+    """Runtime-bound carrier used when a NIXL edge touches this process."""
 
     async def export_tensor(self, tensor: Any, transfer_id: str) -> Mapping[str, Any]:
         ...
