@@ -229,6 +229,57 @@ func TestPrefillScoreCancelsPendingReservation(t *testing.T) {
 	}
 }
 
+func TestPrefillScoreReleasesLateErrorResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reserveStarted := make(chan struct{})
+	allowReserveReturn := make(chan struct{})
+	releaseCalls := make(chan string, 1)
+	scorer := &DynPrefillScorer{
+		reservePrefill: func(string, string, string) (*dynscorer.RoutingResult, error) {
+			close(reserveStarted)
+			<-allowReserveReturn
+			return nil, errors.New("reservation failed after activation")
+		},
+		cancelPrefill: func(string) error {
+			close(allowReserveReturn)
+			return nil
+		},
+		releasePrefill: func(bookingID string) error {
+			releaseCalls <- bookingID
+			return nil
+		},
+	}
+	cycleState := schedtypes.NewCycleState()
+	cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: true})
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "model",
+		Headers:     map[string]string{},
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{"model": "model", "prompt": "hello"},
+		},
+	}
+
+	scoresCh := make(chan map[schedtypes.Endpoint]float64, 1)
+	go func() {
+		scoresCh <- scorer.Score(ctx, cycleState, req, nil)
+	}()
+	<-reserveStarted
+	cancel()
+	<-scoresCh
+
+	bookingID := bookingIDFromRequest(req)
+	select {
+	case got := <-releaseCalls:
+		if got != bookingID {
+			t.Fatalf("late release booking ID = %q, want %q", got, bookingID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late error-valued reservation result was not released")
+	}
+}
+
 func TestResponseBodyBoundsPersistentPrefillMarkRetries(t *testing.T) {
 	bookingID := ensureBookingState(schedtypes.NewCycleState()).ID
 	markCalls := 0

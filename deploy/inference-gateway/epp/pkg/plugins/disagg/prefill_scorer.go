@@ -231,10 +231,10 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 				"bookingID", bookingID)
 		}
 		go func(bookingID string) {
-			outcome := <-resultCh
-			if outcome.err != nil {
-				return
-			}
+			// Rust can retain an active reservation after returning an error when
+			// its first cleanup attempt fails. Release is idempotent for every
+			// other late outcome.
+			<-resultCh
 			if cleanupErr := s.releaseLatePrefillReservation(bookingID); cleanupErr != nil {
 				logger.V(logutil.DEFAULT).Error(cleanupErr, "DynPrefillScorer: failed to release late prefill reservation",
 					"bookingID", bookingID)
