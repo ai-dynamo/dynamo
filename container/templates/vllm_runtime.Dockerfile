@@ -86,9 +86,11 @@ ENV PATH=/opt/uv/bin:${PATH}
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -u 1000 -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && mkdir -p /home/dynamo/.cache/vllm /opt/dynamo \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
-    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /home/dynamo/.cache/vllm /opt/dynamo /workspace \
+    # Arbitrary OpenShift UIDs need to create the vLLM and Triton caches under $HOME.
+    && chmod g+rwx /home/dynamo /home/dynamo/.cache /home/dynamo/.cache/vllm \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
 

@@ -106,9 +106,16 @@ Empty strings are treated as absent. In particular, an empty `nvext.cache_salt` 
 non-empty top-level compatibility value. Requests without a salt retain the unsalted hashing and
 cache-reuse behavior.
 
-`DYN_ENABLE_FRONTEND_NVEXT=false` disables both the `nvext` form and routing-header overrides,
-including `x-tenant-id`. The top-level backend-compatibility field is not part of the NvExt
-protocol. Cache salt is an isolation key, not an authentication or authorization mechanism;
+The `nvext` protocol is enabled by default. To turn it off, set `DYN_DISABLE_FRONTEND_NVEXT` to a
+truthy value (`1`, `true`, `yes`, or `on`, case-insensitive). The frontend then drops
+`request.nvext` at handler entry and ignores every routing-override header, along with the
+response-side `extra_fields` opt-in. That includes `x-tenant-id`, which is what sets
+`cache_salt`, so per-tenant cache isolation stops applying: requests fall back to unsalted
+hashing and can share cache entries across tenants. It also includes the worker and rank
+overrides (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
+`x-dynamo-prefill-dp-rank`) and their aliases. The top-level
+backend-compatibility field is not part of the NvExt protocol. Cache salt is an isolation key,
+not an authentication or authorization mechanism;
 gateways must still authenticate the tenant identity they place in `x-tenant-id`.
 
 Session identity is header-only. Use the coding-agent headers or Dynamo
