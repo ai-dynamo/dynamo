@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 -->
 <svg viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Dynamo Search candidate deployment mock</title>
-  <desc id="desc">A deployment dialog showing the selected DynamoGraphDeploymentCandidate as syntax-highlighted YAML, a choice between Rolling Update and Replace, and a Deploy button.</desc>
+  <desc id="desc">A deployment dialog showing the selected DynamoGraphDeploymentCandidate as syntax-highlighted YAML. New DGD is selected, Update existing is unavailable because the topology changed, Replace existing is disruptive, traffic routing remains external, and a Deploy button confirms the action.</desc>
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="8" stdDeviation="18" flood-color="#091425" flood-opacity="0.28"/>
@@ -97,33 +97,41 @@ SPDX-License-Identifier: Apache-2.0
     <text x="214" y="718" fill="#64748B">  ···</text>
   </g>
 
-  <text x="880" y="202" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">TARGET DGD</text>
-  <rect x="880" y="214" width="370" height="44" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
-  <text x="896" y="242" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#0F172A">minimax-production</text>
-  <text x="880" y="282" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NAMESPACE</text>
-  <rect x="880" y="294" width="370" height="44" rx="7" fill="#F8FAFC" stroke="#CBD5E1"/>
-  <text x="896" y="322" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#475569">inference</text>
+  <text x="880" y="202" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">DEPLOYMENT ACTION</text>
 
-  <text x="880" y="378" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">DEPLOYMENT STRATEGY</text>
-  <rect x="880" y="391" width="370" height="95" rx="8" fill="#F3FAE8" stroke="#76B900" stroke-width="2"/>
-  <circle cx="906" cy="420" r="9" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <circle cx="906" cy="420" r="5" fill="#76B900"/>
-  <text x="928" y="425" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">Rolling Update</text>
-  <text x="904" y="451" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Update the existing DGD while keeping</text>
-  <text x="904" y="470" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">ready capacity serving traffic.</text>
+  <rect x="880" y="214" width="370" height="92" rx="8" fill="#F3FAE8" stroke="#76B900" stroke-width="2"/>
+  <circle cx="906" cy="242" r="9" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <circle cx="906" cy="242" r="5" fill="#76B900"/>
+  <text x="928" y="247" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">New DGD</text>
+  <rect x="1141" y="229" width="87" height="23" rx="11.5" fill="#DDF3BC"/>
+  <text x="1154" y="245" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#4D7C0F">SELECTED</text>
+  <text x="904" y="275" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Create minimax-production-g4. The existing</text>
+  <text x="904" y="293" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">DGD and its traffic route stay unchanged.</text>
 
-  <rect x="880" y="500" width="370" height="95" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
-  <circle cx="906" cy="529" r="9" fill="#FFFFFF" stroke="#94A3B8" stroke-width="2"/>
-  <text x="928" y="534" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">Replace</text>
-  <text x="904" y="560" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Replace the target DGD with the selected</text>
-  <text x="904" y="579" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">candidate in one deployment operation.</text>
+  <rect x="880" y="320" width="370" height="92" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <circle cx="906" cy="348" r="9" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="928" y="353" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#94A3B8">Update minimax-production</text>
+  <rect x="1137" y="335" width="91" height="23" rx="11.5" fill="#E2E8F0"/>
+  <text x="1148" y="351" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#64748B">UNAVAILABLE</text>
+  <text x="904" y="381" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">The candidate changes the graph topology and</text>
+  <text x="904" y="399" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">cannot be applied safely in place.</text>
 
-  <rect x="880" y="618" width="370" height="82" rx="8" fill="#FFF7E6" stroke="#F59E0B"/>
-  <circle cx="905" cy="644" r="10" fill="#F59E0B"/>
-  <text x="902" y="649" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">!</text>
-  <text x="925" y="645" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#92400E">Review before deployment</text>
-  <text x="904" y="670" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">Simulation does not guarantee deployment health.</text>
-  <text x="904" y="688" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">The candidate can change the graph topology.</text>
+  <rect x="880" y="426" width="370" height="92" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <circle cx="906" cy="454" r="9" fill="#FFFFFF" stroke="#94A3B8" stroke-width="2"/>
+  <text x="928" y="459" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">Replace minimax-production</text>
+  <text x="904" y="487" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Delete and recreate the DGD with this spec.</text>
+  <text x="904" y="505" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#B45309">Traffic interruption is expected.</text>
+
+  <text x="880" y="551" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NEW DGD NAME</text>
+  <rect x="880" y="563" width="370" height="44" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="896" y="591" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#0F172A">minimax-production-g4</text>
+
+  <rect x="880" y="627" width="370" height="89" rx="8" fill="#FFF7E6" stroke="#F59E0B"/>
+  <circle cx="905" cy="653" r="10" fill="#F59E0B"/>
+  <text x="902" y="658" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">!</text>
+  <text x="925" y="654" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#92400E">Traffic routing is unchanged</text>
+  <text x="904" y="680" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">After the new DGD is Ready, update its Ingress,</text>
+  <text x="904" y="698" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">LoadBalancer, or HTTPRoute separately.</text>
 
   <line x1="150" y1="768" x2="1290" y2="768" stroke="#E2E8F0"/>
   <rect x="1030" y="789" width="94" height="40" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
