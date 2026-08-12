@@ -1399,6 +1399,33 @@ async fn postprocessor_parsing_stream_strip_path_eof_flush_drops_nvext() {
     );
 }
 
+#[tokio::test]
+async fn postprocessor_parsing_stream_strip_path_flushes_partial_prefix_after_usage_chunk() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"enable_thinking": false})).unwrap());
+
+    let input_stream = stream::iter(
+        vec![mock_content_chunk("<thi"), mock_usage_only_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<_> = output_stream.collect().await;
+
+    let content = output_chunks
+        .iter()
+        .filter_map(|output| output.data.as_ref())
+        .flat_map(|data| data.inner.choices.iter())
+        .filter_map(|choice| choice.delta.content.as_ref())
+        .map(get_text)
+        .collect::<String>();
+    assert_eq!(content, "<thi");
+}
+
 /// Same envelope defect on the `force_nonempty_content` flush. This path is the
 /// one the flag added, so a repeated `nvext` here is a regression introduced by
 /// the feature rather than a pre-existing leak.

@@ -4798,7 +4798,13 @@ impl OpenAIPreprocessor {
                 }
 
                 response.data = Some(data);
-                state.last_response = Some(response.clone());
+                if response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| !data.inner.choices.is_empty())
+                {
+                    state.last_response = Some(response.clone());
+                }
 
                 Some((response, state))
             } else if state.eof_flushed {
@@ -4816,21 +4822,23 @@ impl OpenAIPreprocessor {
                     // it here.
                     scrub_synthetic_chunk_metadata(&mut response)?;
                     let data = response.data.as_mut()?;
-                    data.inner.choices.retain_mut(|choice| {
-                        if let Some(buffer) = flushed.remove(&choice.index) {
-                            choice.delta.role = None;
+                    let mut template = data.inner.choices.first()?.clone();
+                    template.delta.role = None;
+                    template.delta.tool_calls = None;
+                    template.delta.function_call = None;
+                    template.delta.refusal = None;
+                    template.delta.reasoning_content = None;
+                    template.finish_reason = None;
+                    template.logprobs = None;
+                    data.inner.choices = flushed
+                        .drain()
+                        .map(|(index, buffer)| {
+                            let mut choice = template.clone();
+                            choice.index = index;
                             choice.delta.content = Some(ChatCompletionMessageContent::Text(buffer));
-                            choice.delta.tool_calls = None;
-                            choice.delta.function_call = None;
-                            choice.delta.refusal = None;
-                            choice.delta.reasoning_content = None;
-                            choice.finish_reason = None;
-                            choice.logprobs = None;
-                            true
-                        } else {
-                            false
-                        }
-                    });
+                            choice
+                        })
+                        .collect();
 
                     if data.inner.choices.is_empty() {
                         None
