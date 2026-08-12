@@ -30,7 +30,7 @@ subtitle: Static GPU power-cap ownership, admission, projection, and rollout saf
 | Cap or topology changes | Delete and recreate the DGD |
 | Total-budget changes | Restart the Planner |
 | Proven guarantee | Admitted scale-ups do not push an in-budget ready baseline above the static requested-cap projection |
-| Excluded guarantee | Effective caps, measured draw, or facility power remain within the budget |
+| Excluded guarantee | Hardware-enforced caps, measured draw, or facility power remain within the budget |
 
 ## Goals and Non-Goals
 
@@ -43,10 +43,12 @@ The static design has four goals:
 
 The design does not:
 
-- observe instantaneous GPU power or the effective hardware cap;
+- observe instantaneous GPU power or the hardware-enforced cap;
 - coordinate budgets across DGDs, namespaces, clusters, or racks;
 - lower replica counts solely because the current deployment is over budget;
 - retarget caps on a live DGD;
+- support power-aware planning for multiple Pods on one physical GPU, Multi-Instance GPU (MIG)
+  partitions, or GPU allocation through Dynamic Resource Allocation (DRA);
 - enable power awareness for aggregated, virtual, replay, or Global Planner environments; or
 - change the existing GPU-budget unit for multinode workers.
 
@@ -84,8 +86,9 @@ the requested limit from the DGD, verifies its propagation on Pods before cachin
 the annotation.
 
 This ownership boundary prevents the Planner and Power Agent from competing over a cap. It also
-creates the main limitation: the Planner knows the requested cap, while the Power Agent knows the
-effective cap and whether the hardware write succeeded. No feedback path connects them.
+creates the main limitation: the Planner knows the requested cap, while the Power Agent computes the
+post-clamp target and tracks the actuator write outcome. The Power Agent does not read the cap back
+after every write, and no enforcement feedback path connects it to the Planner.
 
 ## Admission Contract
 
@@ -93,8 +96,7 @@ The DGD validating webhook establishes the static inputs before the Planner star
 power-annotated component, it:
 
 - requires the annotation value to be a positive decimal integer;
-- rejects GPU allocation through Dynamic Resource Allocation (DRA), including GPU Memory Service and
-  consumed resource claims;
+- rejects GPU allocation through DRA, including GPU Memory Service and consumed resource claims;
 - rejects adding, removing, or changing the power annotation after creation;
 - rejects changes to the effective scalar `nvidia.com/gpu` count, preferring the `main` container
   limit over its request; and
@@ -246,7 +248,7 @@ If either role is unstable, the final power boundary:
 
 - suppresses every proposed scale-up;
 - continues to allow scale-down;
-- logs one warning for a continuous unstable interval; and
+- logs at most one warning per continuous unstable interval when it suppresses a scale-up; and
 - leaves already-issued desired counts untouched.
 
 This deployment-wide hold is conservative. It cannot distinguish the settled target of one rolling
@@ -280,7 +282,7 @@ an in-flight desired count and must remain observable.
 
 | Input state | Result |
 | --- | --- |
-| Effective proposal fits | Preserve the proposal |
+| Post-GPU-clamp proposal fits | Preserve the proposal |
 | Both roles are proposed and exceed the ceiling | Apply the pair clamp within the ceiling, respect `min_endpoint`, and never exceed either post-GPU-clamp count |
 | One role is proposed and exceeds the residual budget | Charge the peer at its ready count and shrink only the proposed role |
 | The fixed peer leaves less than one role's minimum footprint | Suppress that role's scale-up instead of mutating the peer |
@@ -311,15 +313,15 @@ Pods; the deployment-wide rollout hold covers those states conservatively.
 | Current replicas are automatically reduced when already over budget | Not guaranteed | The clamp changes only adjustable proposals and has no emergency reconciliation policy |
 | A runtime DGD or Pod read failure becomes a rollout hold | Not guaranteed | The exception propagates out of the Planner run loop instead of producing an unstable snapshot |
 | GPU hardware enforces the requested DGD value exactly | Not guaranteed | The Power Agent can clamp to hardware limits, apply its safe default for malformed or conflicting annotations, or fail an actuator write |
-| Actual draw stays below `total_gpu_power_limit` | Not guaranteed | The Planner observes neither effective caps nor measured draw |
+| Actual draw stays below `total_gpu_power_limit` | Not guaranteed | The Planner observes neither hardware-enforced caps nor measured draw |
 | A shared rack or cluster stays below a facility budget | Not guaranteed | The budget applies to one DGD and has no global allocator |
 | A cap update becomes visible on the existing DGD | Not supported | Admission makes the power tuple immutable |
 
-The distinction between requested and effective caps is safety-critical. If a requested value is below
-a GPU's supported minimum, the Power Agent can apply a higher effective value. Malformed or conflicting
-annotations on a GPU can select the configured safe-default cap, and an actuator failure can leave
-hardware outside the Planner's model. Treat `total_gpu_power_limit` as an admission policy, not a
-facility protection mechanism.
+The distinction between requested caps, post-clamp targets, and hardware-enforced caps is
+safety-critical. If a requested value is below a GPU's supported minimum, the Power Agent selects a
+higher post-clamp target. Malformed or conflicting annotations on a GPU can select the configured
+safe-default cap, and an actuator failure can leave hardware outside the Planner's model. Treat
+`total_gpu_power_limit` as an admission policy, not a facility protection mechanism.
 
 ## Observability
 
@@ -332,9 +334,9 @@ Planner publishes:
 | `dynamo_planner_power_projected_watts` | Ready replica counts multiplied by cached watts per replica |
 | `dynamo_planner_power_budget_utilization` | Projected watts divided by the budget |
 
-These metrics contain requested-cap projections. They do not report measured power, effective caps,
-actuator health, the proposed target, the modeled parallel peak, or the clamp reason. Clamp and
-rollout-hold details are logged.
+These metrics contain requested-cap projections. They do not report measured power,
+hardware-enforced caps, actuator health, the proposed target, the modeled parallel peak, or the clamp
+reason. Clamp and rollout-hold details are logged.
 
 ## Test Evidence
 
@@ -359,34 +361,107 @@ enforcement test or validate a facility-level power ceiling.
 
 ### Close the Enforcement Feedback Gap
 
-Have the Power Agent publish enforcement status for each physical GPU, keyed by GPU UUID. Include DGD,
-component, and Pod identity; requested and effective caps; cap generation; actuator backend; apply
-outcome; and observation time. Feed fresh status into the Planner's final power-budget boundary and
-use effective caps for worst-case admission. Treat measured draw as an optimization signal with
-explicit headroom, not as proof that a later workload spike will fit.
+A future feedback contract must distinguish these values:
+
+- **Requested cap:** the committed DGD intent.
+- **Post-clamp target:** the value that the Power Agent intends to write after applying the physical
+  GPU's supported range or selecting the configured safe default.
+- **Enforced cap:** a fresh power-limit read from the same GPU UUID after a successful actuator write.
+  A write result or post-clamp target alone is not enforcement evidence.
+- **Measured draw:** instantaneous consumption, which is an optimization signal with explicit
+  headroom, not proof that a later workload spike will fit.
+- **Cap-intent revision:** the monotonically increasing identity of a requested-cap transaction,
+  scoped to a DGD UID and component.
+
+Have the Power Agent atomically publish the exact cap-intent revision, requested cap, post-clamp
+target, enforced-cap readback, actuator backend, apply and readback outcomes, and observation time.
+Key the report by DGD UID, component, Pod UID, allocation epoch, and GPU UUID. The allocation epoch
+identifies one Pod-to-GPU binding and changes when either side of that binding changes. Publish no
+enforced cap when the write or identity-bound readback fails. Refresh hardware readback periodically
+so external cap changes become stale or mismatched status instead of trusted state. The Planner
+accepts an enforced cap only when the report has the expected allocation identity and meets a defined
+freshness limit; missing, stale, or unverifiable status blocks scale-up and retains its conservative
+charge.
+
+Define two conservative bounds. The intent bound for requested cap `R` is the maximum, across every
+eligible physical GPU, of both the post-clamp value of `R` and the post-clamp safe-default value. The
+unenforced bound is the maximum current, factory-default, or supported settable limit across those
+GPUs. Charge an unassigned or newly assigned GPU at the unenforced bound until identity-bound apply
+and readback succeed. A pre-workload enforcement barrier can instead prevent the workload from using
+the GPU until that success and reserve the intent bound. Treat the safe default as enforced only after
+readback. After placement binds a Pod to a known GPU, use that GPU's constraints for both bounds. If
+eligible placement, GPU constraints, the safe default, or enforcement status is unknown or stale, do
+not admit scale-up.
 
 ### Make Cap Updates Transactional
 
-Define a versioned handoff before allowing cap retargeting:
+Before allowing changes to the currently immutable DGD cap annotation, define one DGD-UID-scoped
+transaction resource with proposed and committed cap intent, a scale-up fence, an inventory epoch,
+and a reservation ledger. Updating only the DGD `podTemplate` is insufficient because it does not
+define an in-place update for existing Pods.
 
-- the DGD declares cap intent and a generation;
-- Power Agents report the generation and effective cap for each managed physical GPU;
-- the Planner admits scale-up only after every relevant managed GPU reports the expected generation; and
-- incomplete or stale generations fail closed.
+Keep ownership explicit:
 
-This removes the static delete-and-recreate lifecycle without restoring Planner-owned Pod patching.
+- The Planner evaluates the power budget and authorizes cap-intent commit, but does not deliver caps,
+  patch Pods, or enforce the fence by itself.
+- The operator maintains the transaction resource and a monotonic inventory epoch. The epoch changes
+  when desired counts, Pod lifecycle, GPU assignment, enforcement value, or enforcement freshness
+  changes. Timestamp-only status refreshes do not change it.
+- The operator and admission path enforce the fence for every replica increase and every new
+  DGD-owned Pod, regardless of which supported scaler requested the change.
+- Power Agents consume only committed intent, apply it to physical GPUs, and publish enforcement
+  status.
 
-### Define Shared-GPU and Dynamic Allocation Semantics
+Use this transaction sequence:
 
-Define physical GPU ownership before supporting multiple Pods per GPU, Multi-Instance GPU (MIG), or
-DRA-backed allocation. Choose admission-time exclusivity or an explicit arbitration policy for
-matching caps, conflicting caps, and unannotated co-tenants. Map resource claims and partitioned GPUs
-to the physical device that owns the cap. Account for existing Pods from their observed assignments
-and effective caps, while pricing future replicas from DGD intent.
+1. Accept at most one active cap transition for a DGD. Close the operator-enforced scale-up fence and
+   wait until the operator reports it observed before collecting admission inputs. Scale-down and Pod
+   deletion can continue, but each change advances the inventory epoch and forces reevaluation.
+2. Build one consistent snapshot from the transaction resource. Include desired counts; ready,
+   pending, surge, and terminating Pods; GPU assignments; reservations; and fresh enforcement status.
+   Do not attempt a compare-and-set across independent Pod and status objects.
+3. Maintain the ledger in physical-GPU units. Create base reservations for every GPU implied by the
+   desired replica counts, bind those reservations to Pods and GPUs as placement progresses, and add
+   separate reservations for surge or terminating GPUs not represented by the desired slots. Charge
+   an assigned GPU with fresh readback at the higher of its current enforced cap and its
+   placement-specific proposed intent bound. Charge a GPU without successful identity-bound apply and
+   readback, including an unassigned reservation, at the unenforced bound unless a pre-workload
+   enforcement barrier reserves the higher of the committed and proposed intent bounds. Retain every
+   unresolved and additional reservation in later admission decisions.
+4. Commit any proposed revision when its conservative transition peak fits the budget. If the baseline
+   is already over budget, also permit a component-wise non-increasing revision when neither its
+   requested caps nor intent bounds increase; retain the fence and prohibit all scale-up while it
+   reconciles toward the lower caps. In both cases, use a compare-and-set on the transaction
+   resource's inventory epoch and resource version, and retry from a new snapshot if either changed.
+5. Expose only the committed revision to Power Agents. Apply it to GPUs owned by already-running Pods
+   without recreating the Pods. The operator can deliver committed intent through in-place live Pod
+   annotation updates, or Power Agents can observe the transaction resource directly.
+6. When an unassigned reservation receives a GPU, retain its unenforced bound until successful apply
+   and readback, then atomically replace that bound with the assigned GPU's transition charge. Do not
+   omit or double-count it. A pre-workload barrier must keep the workload stopped through this swap.
+   Continue charging additional surge and terminating reservations until the operator confirms that
+   their GPUs are gone.
+7. Require every assigned GPU to report a fresh, identity-matched enforced cap for the exact committed
+   revision. Only genuinely unassigned desired capacity can remain reconciled through an explicit
+   conservative reservation. The operator releases the fence only after the Planner authorizes
+   release against an unchanged inventory epoch and an in-budget inventory that includes all remaining
+   reservations.
+
+Power Agent actuation and reporting must remain monotonic across restarts. Persist the last accepted
+revision high-water mark at its actual DGD UID and component scope, and reject an older revision before
+calling the actuator. Key each enforcement report separately by Pod UID, allocation epoch, and GPU
+UUID in addition to that revision scope. Update enforcement status with a monotonic compare-and-set so
+a delayed report cannot overwrite newer state. Retry a failed transition or supersede it with a newer
+compensating revision that passes the same fenced admission flow; never recover by replaying an older
+revision. A failed, incomplete, or stale assigned-GPU transition remains unreconciled and retains its
+fence and reservations until it is repaired or superseded.
+
+This protocol removes the static delete-and-recreate lifecycle without requiring a Pod restart, DGD
+replacement, or Planner-owned Pod patching.
 
 ### Define Over-Budget Reconciliation
 
-Specify behavior for budget decreases, effective-cap increases, failed cap application, and external
+Specify behavior for budget decreases, enforced-cap increases, failed cap application, and external
 replica changes. The policy must define role priority, `min_endpoint` behavior, service-level objective
 interactions, emergency cooldown rules, and recovery without oscillation.
 
@@ -411,18 +486,19 @@ cannot satisfy the two budgets under different interpretations.
 ### Add Decision-Level Telemetry
 
 Build on the existing Power Agent metrics for applied limits, actuator failures, safe-default use, cap
-clamping, multi-Pod placement, and Kubernetes LIST failures. Add bounded Planner counters for clamp and
-hold reasons, gauges for target and peak watts, cached cap generation and age, and effective-cap
-health. Use GPU UUIDs for enforcement identity, define freshness and alert thresholds, and retire
-stale identity series after device re-enumeration. Use this evidence before enabling automated
-remediation or adaptive control.
+clamping, unsupported multi-Pod placement, and Kubernetes LIST failures. Add bounded Planner counters
+for clamp and hold reasons, gauges for target and peak watts, cached cap-intent revision and age, and
+enforced-cap health. Use GPU UUIDs for enforcement identity, define freshness and alert thresholds,
+and retire stale identity series after device re-enumeration. Use this evidence before enabling
+automated remediation or adaptive control.
 
 ### Qualify Enforcement on Real Hardware
 
 Run a gated GPU qualification path for both NVML and DCGM. Verify annotation propagation, cap
 clamping, and restoration with an independent hardware read across supported GPU SKUs, drivers, and
 DCGM versions. Cover DCGM reconnect and device re-enumeration, Power Agent restart and shutdown,
-orphan recovery, safe-default selection, and shared-GPU conflicts.
+orphan recovery, safe-default selection, and safe-default containment of unsupported multi-Pod
+conflicts.
 
 ### Scale Kubernetes Observation and Failure Recovery
 
@@ -430,8 +506,8 @@ Replace the Power Agent's periodic per-node Pod LIST and the Planner's per-tick 
 watch or informer-backed caches. Define relist, freshness, backoff, and resynchronization behavior,
 and keep Planner Kubernetes I/O off the asynchronous event loop. Decide whether transient Planner
 read failures trigger bounded retries or a fail-closed scale-up hold instead of terminating the run
-loop. This work improves control-plane scale and availability but does not close the effective-cap or
-reconciliation gaps.
+loop. This work improves control-plane scale and availability but does not close the enforcement
+feedback or reconciliation gaps.
 
 ## Code Reference Map
 
