@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 171 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 172 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">73 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">67 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
 
@@ -3387,6 +3387,12 @@ See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="kvRouter" type="KVRouterSpec">
+KVRouter configures KV-cache-aware routing for the generated deployment.
+See [KVRouterSpec](#kvrouterspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="mocker" type="MockerSpec">
 Mocker configures the simulated (mocker) backend for testing without GPUs.
 See [MockerSpec](#mockerspec).
@@ -3543,6 +3549,19 @@ Interconnect describes the primary GPU-to-GPU interconnect *within a node*. Sema
 
 <ParamField path="rdma" type="boolean">
 RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement. Semantics / usage:   - This is capability metadata used for profiling, planning, and deployment decisions.   - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,     GPUDirect settings). It only expresses availability/intent.   - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating     RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery     is unavailable, it may remain unset. Impact of wrong / missing values:   - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or     deployments to assume RDMA is available; depending on the runtime transport selection and     fallback behavior, this can lead to connection/setup failures or performance regressions.   - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and     fall back to non-RDMA transports, usually remaining functional but potentially slower.   - If unset and undiscovered, consumers should treat RDMA availability as unknown and use     conservative defaults / fallback transports.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="kvrouterspec" title="KVRouterSpec">
+KVRouterSpec configures KV-cache-aware routing.
+
+
+**Kind:** `type`
+**Appears in:** [FeaturesSpec](#featuresspec)
+
+<ParamField path="enabled" type="boolean">
+Enabled indicates whether to enable KV-cache-aware routing in the generated DGD. KV routing optimizes request scheduling based on KV cache locality.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
