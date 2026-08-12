@@ -57,10 +57,16 @@ def test_aisimulate_native_runtime_imports_from_installed_distribution():
     assert callable(runtime.run_replay_json)
 
 
-def test_aisimulate_has_no_console_script():
+def test_aisimulate_publishes_only_the_public_console_script():
     distribution = importlib.metadata.distribution("aisimulate")
 
-    assert all(entry.group != "console_scripts" for entry in distribution.entry_points)
+    scripts = {
+        entry.name: entry.value
+        for entry in distribution.entry_points
+        if entry.group == "console_scripts"
+    }
+
+    assert scripts == {"aisimulate": "aisimulate.cli:main"}
 
 
 def test_ai_dynamo_has_no_aisimulate_extra():
@@ -100,6 +106,24 @@ def test_importing_sweeper_does_not_import_dynamo():
     )
 
 
+def test_importing_public_cli_does_not_import_dynamo():
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import aisimulate.cli; "
+                "assert not any(name == 'dynamo' or name.startswith('dynamo.') "
+                "for name in sys.modules)"
+            ),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
 def test_ai_dynamo_registers_optional_sweeper_providers():
     distribution = importlib.metadata.distribution("ai-dynamo")
     entry_points = {
@@ -111,6 +135,19 @@ def test_ai_dynamo_registers_optional_sweeper_providers():
     assert entry_points == {
         "dynamo.planner": "dynamo.planner.simulation:create_provider",
         "dynamo.router": "dynamo.router.simulation:create_provider",
+    }
+
+
+def test_ai_dynamo_registers_optional_dynamo_runner():
+    distribution = importlib.metadata.distribution("ai-dynamo")
+    entry_points = {
+        entry_point.name: entry_point.value
+        for entry_point in distribution.entry_points
+        if entry_point.group == "aisimulate.runner_factories"
+    }
+
+    assert entry_points == {
+        "dynamo": "dynamo.replay.simulation:DynamoReplayRunnerFactory"
     }
 
 

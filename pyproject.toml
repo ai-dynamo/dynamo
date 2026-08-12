@@ -129,6 +129,9 @@ sglang_tests = "dynamo.sglang.tests.conftest"
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
 
+[project.entry-points."aisimulate.runner_factories"]
+dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
+
 [dependency-groups]
 docs = [
     # Core Sphinx

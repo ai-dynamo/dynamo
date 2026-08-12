@@ -84,9 +84,9 @@ iff that set intersects `_SLA_TARGETS`. So an SLA is mandatory when:
 - `target` is `goodput` or `goodput_per_gpu`, **or**
 - `target` is `pareto` **and** its objectives include one of those.
 
-A satisfying SLA is `e2e_ms`, **or** both `ttft_ms` and `itl_ms`. Note SLA is *not* gated
-during feasibility (`is_feasible` checks only the GPU budget) — it lives entirely inside
-the goodput metric, so an aggregate latency gate would double-count it.
+A satisfying SLA is `e2e_ms`, **or** both `ttft_ms` and `itl_ms`. By default, SLA is not gated
+during feasibility (`is_feasible` checks only the GPU budget) — it lives inside the goodput metric,
+so an aggregate latency gate would double-count it.
 
 `SLATarget` shape (ms, each `> 0`, `extra="forbid"`):
 
@@ -95,6 +95,12 @@ the goodput metric, so an aggregate latency gate would double-count it.
 | `ttft_ms` | time-to-first-token bound — pair with `itl_ms` |
 | `itl_ms` | inter-token-latency bound — pair with `ttft_ms` |
 | `e2e_ms` | end-to-end bound — standalone alternative |
+| `strict` | additionally gate aggregate mean latency; default `false` |
+
+Set `strict: true` for the legacy `--strict-sla` behavior. Strict mode runs before scalar ranking
+or Pareto dominance, so rejected candidates do not appear in terminal, JSON, or CSV results. It is
+an additional aggregate gate: goodput objectives still use their per-request SLA-satisfying
+throughput metric.
 
 ## Pareto
 

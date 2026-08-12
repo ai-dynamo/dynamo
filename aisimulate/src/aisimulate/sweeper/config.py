@@ -69,6 +69,10 @@ class SLATarget(BaseModel):
     ttft_ms: float | None = Field(default=None, gt=0)
     itl_ms: float | None = Field(default=None, gt=0)
     e2e_ms: float | None = Field(default=None, gt=0)
+    # Legacy AIC ``--strict-sla`` compatibility. Goodput normally scores the
+    # SLA-satisfying request subset without rejecting a candidate whose aggregate
+    # mean misses the target. Strict mode additionally gates that aggregate result.
+    strict: bool = False
 
 
 # Goodput-based scalar targets — the only ones that need an SLA (their metric counts

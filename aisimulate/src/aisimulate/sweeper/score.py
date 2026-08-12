@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import math
 
-from .config import Candidate, OptimizationTarget
+from .config import Candidate, OptimizationTarget, SLATarget
 
 # trace_report keys the report always carries (goodput_* only when an SLA was
 # supplied to the replay). Surfaced into Candidate.metrics for inspection.
@@ -104,6 +104,28 @@ def is_feasible(used_gpus: int, gpu_budget: int) -> bool:
     high-goodput config whose mean is dragged over by the tail.
     """
     return used_gpus <= gpu_budget
+
+
+def sla_violations(report: dict[str, float], sla: SLATarget) -> list[str]:
+    """Return missing or over-limit aggregate latency metrics for strict SLA mode."""
+
+    checks: list[tuple[str, str, float]] = []
+    if sla.e2e_ms is not None:
+        checks.append(("mean_e2e_latency_ms", "e2e_ms", sla.e2e_ms))
+    else:
+        if sla.ttft_ms is not None:
+            checks.append(("mean_ttft_ms", "ttft_ms", sla.ttft_ms))
+        if sla.itl_ms is not None:
+            checks.append(("mean_tpot_ms", "itl_ms", sla.itl_ms))
+
+    violations: list[str] = []
+    for metric, label, limit in checks:
+        value = report.get(metric)
+        if value is None:
+            violations.append(f"missing {metric}")
+        elif value > limit:
+            violations.append(f"{label}={value:g} > {limit:g}")
+    return violations
 
 
 def objective_vector(

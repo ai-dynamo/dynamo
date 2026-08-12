@@ -66,7 +66,7 @@ from .replay import (
 )
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
-from .score import is_feasible, make_candidate, pareto_front, rank
+from .score import is_feasible, make_candidate, pareto_front, rank, sla_violations
 from .search_space import BranchSpace, enumerate_branches
 
 logger = logging.getLogger(__name__)
@@ -535,6 +535,15 @@ def _score_prepared(
             "infeasible",
             f"over gpu_budget: used_gpus={int(sample['used_gpus'])} > gpu_budget={config.search_space.gpu_budget}",
         )
+    if goal.sla is not None and goal.sla.strict:
+        violations = sla_violations(report, goal.sla)
+        if violations:
+            return (
+                None,
+                None,
+                "infeasible",
+                "strict SLA not met: " + ", ".join(violations),
+            )
     if goal.is_pareto:
         candidate = make_candidate(
             sample,

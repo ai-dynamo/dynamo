@@ -323,6 +323,16 @@ def test_goodput_requires_complete_sla():
     )
 
 
+def test_strict_sla_is_serialized_for_runner_and_scoring():
+    goal = OptimizationGoal(
+        target=OptimizationTarget.THROUGHPUT,
+        sla=SLATarget(ttft_ms=2000, itl_ms=30, strict=True),
+    )
+
+    assert goal.sla is not None and goal.sla.strict is True
+    assert goal.model_dump(mode="json")["sla"]["strict"] is True
+
+
 def test_scalar_target_directions():
     assert OptimizationTarget.THROUGHPUT.maximize
     assert OptimizationTarget.THROUGHPUT_PER_GPU.maximize

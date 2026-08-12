@@ -75,7 +75,7 @@ def test_cli_rejects_invalid_config(tmp_path):
     assert "invalid config" in result.stderr
 
 
-def test_cli_requires_an_injected_replay_runtime(monkeypatch, tmp_path, capsys):
+def test_cli_runs_engine_stack_and_writes_results(monkeypatch, tmp_path, capsys):
     config_path = tmp_path / "valid.yaml"
     config_path.write_text(
         "search_space:\n"
@@ -87,18 +87,53 @@ def test_cli_requires_an_injected_replay_runtime(monkeypatch, tmp_path, capsys):
         "  request_rate: 1\n"
         "  num_request_ratio: 3\n"
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["aisimulate.sweeper", "--config", str(config_path)],
+    candidate = sweeper.Candidate(
+        config={"backend": "vllm", "deployment_mode": "agg"},
+        used_gpus=4,
+        score=12.0,
+        metrics={"output_throughput_tok_s": 48.0},
+    )
+    seen = {}
+
+    def run_sweep(config, *, stack, show_progress):
+        seen["config"] = config
+        seen["stack"] = stack
+        seen["show_progress"] = show_progress
+        return [candidate]
+
+    monkeypatch.setattr(cli, "_run_sweep", run_sweep)
+    output_dir = tmp_path / "results"
+
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config_path),
+                "--stack",
+                "engine",
+                "--no-progress",
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+        == 0
     )
 
-    with pytest.raises(SystemExit, match="2"):
-        cli.main()
+    captured = capsys.readouterr()
+    assert "top 1 of 1 candidates" in captured.out
+    assert 'config={"backend":"vllm","deployment_mode":"agg"}' in captured.out
+    assert seen["stack"] == "engine"
+    assert seen["show_progress"] is False
+    assert (output_dir / "sweep_results.json").is_file()
+    assert (output_dir / "best_config_topn.csv").is_file()
 
-    error = capsys.readouterr().err
-    assert "no default replay runtime" in error
-    assert "Sweeper(runner_factory=...).run(config)" in error
+
+def test_module_cli_uses_shared_runner_discovery(monkeypatch):
+    factory = object()
+
+    monkeypatch.setattr(cli, "resolve_runner_factory", lambda stack: factory)
+
+    assert cli._runner_factory("dynamo") is factory
 
 
 def test_runner_wrapper_preserves_no_candidate_exit(capsys):
@@ -141,6 +176,6 @@ def test_runner_wrapper_preserves_pareto_objectives_and_concurrency(capsys):
 
     output = capsys.readouterr().out
     assert "pareto front (1 non-dominated)" in output
-    assert "throughput_per_gpu=12" in output
-    assert "throughput_per_user=6" in output
-    assert "concurrency=8" in output
+    assert '"throughput_per_gpu":12.0' in output
+    assert '"throughput_per_user":6.0' in output
+    assert 'config={"concurrency":8}' in output

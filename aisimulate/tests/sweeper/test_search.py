@@ -24,7 +24,7 @@ from aisimulate.sweeper.search_space import BranchSpace
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
 
-def _config(gpu_budget=32, **sweep_overrides):
+def _config(gpu_budget=32, *, goal=None, **sweep_overrides):
     sweep = {
         "max_rounds": 1,
         "candidates_per_round": 3,
@@ -41,7 +41,7 @@ def _config(gpu_budget=32, **sweep_overrides):
         },
         workload={"trace_path": TRACE},
         sweep=sweep,
-        goal={"target": "throughput"},
+        goal=goal or {"target": "throughput"},
     )
 
 
@@ -179,6 +179,47 @@ def test_ranks_feasible_best_first_and_passes_replay_specs(monkeypatch):
     assert factory.worker_ids == [0]
     assert all(isinstance(spec, ReplaySpec) for spec in factory.runner.specs)
     assert factory.runner.closed
+
+
+def test_strict_sla_gates_aggregate_latency_violations(monkeypatch):
+    branch = _branch(_pc())
+    _stub(monkeypatch, branch)
+
+    class HighLatencyRunner(_FakeRunner):
+        def run(self, spec: ReplaySpec) -> ReplayReport:
+            report = super().run(spec)
+            return ReplayReport(
+                metrics={
+                    **report.metrics,
+                    "mean_ttft_ms": 2500.0,
+                    "mean_tpot_ms": 20.0,
+                }
+            )
+
+    sampler_seen = {}
+
+    def sampler_factory(branch, study_id, objectives=None):
+        sampler = _FakeSampler(branch, study_id, objectives)
+        sampler_seen["sampler"] = sampler
+        return sampler
+
+    candidates = _run_sweep(
+        _config(
+            goal={
+                "target": "throughput",
+                "sla": {"ttft_ms": 2000.0, "itl_ms": 30.0, "strict": True},
+            }
+        ),
+        runner_factory=_FakeRunnerFactory(HighLatencyRunner()),
+        sampler_factory=sampler_factory,
+        show_progress=False,
+    )
+
+    assert candidates == []
+    assert sampler_seen["sampler"].scored
+    assert set(sampler_seen["sampler"].scored) == {
+        ("infeasible", "strict SLA not met: ttft_ms=2500 > 2000")
+    }
 
 
 def test_parallel_batch_uses_worker_sized_timeout_waves(monkeypatch):

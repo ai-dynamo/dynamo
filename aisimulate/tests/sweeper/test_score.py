@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from aisimulate.sweeper.config import Candidate, OptimizationTarget
+from aisimulate.sweeper.config import Candidate, OptimizationTarget, SLATarget
 from aisimulate.sweeper.score import (
     is_feasible,
     make_candidate,
@@ -15,6 +15,7 @@ from aisimulate.sweeper.score import (
     objective_vector,
     pareto_front,
     rank,
+    sla_violations,
     score_report,
 )
 
@@ -138,6 +139,20 @@ def test_is_feasible_budget_only():
     assert is_feasible(used_gpus=16, gpu_budget=32)
     assert is_feasible(used_gpus=32, gpu_budget=32)  # at the budget
     assert not is_feasible(used_gpus=64, gpu_budget=32)  # over budget
+
+
+def test_strict_sla_reports_missing_and_over_limit_metrics():
+    sla = SLATarget(ttft_ms=700.0, itl_ms=30.0, strict=True)
+
+    assert sla_violations(REPORT, sla) == ["ttft_ms=800 > 700"]
+    assert sla_violations({"mean_ttft_ms": 600.0}, sla) == ["missing mean_tpot_ms"]
+    assert (
+        sla_violations(
+            {"mean_e2e_latency_ms": 1200.0},
+            SLATarget(e2e_ms=1200.0, strict=True),
+        )
+        == []
+    )
 
 
 def test_throughput_per_user_objective():

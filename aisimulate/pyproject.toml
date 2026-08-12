@@ -42,6 +42,9 @@ dependencies = [
     "tqdm>=4.0.0",
 ]
 
+[project.scripts]
+aisimulate = "aisimulate.cli:main"
+
 [project.optional-dependencies]
 test = [
     "pytest>=8.3.5",

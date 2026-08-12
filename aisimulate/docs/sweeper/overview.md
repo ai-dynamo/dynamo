@@ -29,9 +29,19 @@ of a replay. Sweeper imports a provider only when its adapter name appears in th
 - [Results](results.md) describes `ReplaySpec` and `Candidate` output.
 - [Sweep Configuration Providers](sweep-config-provider.md) documents the extension ABI.
 
-## Python Entry Point
+## Entry Points
 
-`Sweeper` is the only public execution interface. Supply a replay runtime explicitly:
+Run an engine-only recommendation from a validated YAML configuration:
+
+```bash
+aisimulate recommend --stack engine --config sweep.yaml --output-dir results
+```
+
+Use `--stack dynamo` when the Dynamo package is installed and the configuration uses Dynamo
+providers. Dynamo is imported only for that stack. `--output json` produces a versioned
+machine-readable result on standard output.
+
+Python applications can inject any compatible replay runtime explicitly:
 
 ```python
 from aisimulate.sweeper import SmartSearchConfig, Sweeper
@@ -39,9 +49,6 @@ from aisimulate.sweeper import SmartSearchConfig, Sweeper
 config = SmartSearchConfig.from_yaml("sweep.yaml")
 candidates = Sweeper(runner_factory=my_runner_factory).run(config)
 ```
-
-The standalone `python -m aisimulate.sweeper` command validates configuration but deliberately does
-not choose a replay implementation.
 
 ## Compatibility
 

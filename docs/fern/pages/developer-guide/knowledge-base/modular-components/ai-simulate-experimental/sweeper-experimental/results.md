@@ -55,3 +55,36 @@ print(best.metrics)
 
 Exact repeated suggestions reuse a result from the current `run` call. The cache does not persist
 between calls, even when the same `Sweeper` instance is reused.
+
+## CLI Output
+
+The CLI exposes the same result contract in human- and machine-readable forms:
+
+```bash
+# Complete JSON envelope on standard output
+aisimulate recommend --stack engine --config sweep.yaml --output json
+
+# Persist JSON plus a flattened CSV summary
+aisimulate recommend --stack engine --config sweep.yaml --output-dir results --top-n 5
+```
+
+`sweep_results.json` carries a schema version, result type, goal, and every returned `Candidate`
+without flattening. A scalar search also writes `best_config_topn.csv`. A Pareto search writes the
+complete non-dominated set to `pareto.csv`; it does not manufacture a top-N ordering for a front
+whose points are mutually non-dominated.
+
+## Legacy Workflow Differences
+
+The new Sweeper preserves the legacy AIConfigurator behaviors that belong to configuration search:
+engine and optional Dynamo execution, backend/topology comparison, ranked or Pareto results, top-N
+scalar recommendations, strict aggregate SLA filtering, concise validation failures, and saved
+machine-readable output.
+
+The following workflows intentionally remain outside Sweeper:
+
+- support-matrix queries and single-point static estimates;
+- deployment artifact generation;
+- one CLI flag per modeling knob and exhaustive experiment-file execution.
+
+Those workflows have different ownership and should consume the versioned result contract rather
+than add legacy-only translation paths to Sweeper.

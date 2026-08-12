@@ -14,17 +14,21 @@ Edit the canonical source instead of this Fern copy.
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.
 
-From a source checkout, install AI Simulate and run its neutral example:
+From a source checkout, install AI Simulate and run the engine-only CLI:
 
 ```bash
 python -m pip install -e ./aisimulate
-python aisimulate/examples/sweeper/run_sweep.py \
-  --config aisimulate/examples/sweeper/sweep.yaml
+aisimulate recommend --stack engine \
+  --config aisimulate/examples/sweeper/configs/smart_sweep.yaml \
+  --output-dir results
 ```
 
-The example runner returns deterministic metrics so you can inspect orchestration without importing
-an application framework. A production composition supplies a `RunnerFactory` that executes real
-replay:
+The command uses the engine-only replay stack by default. Select `--stack dynamo` to load the
+optional Dynamo replay composition and configured Dynamo providers. The command prints top
+recommendations and writes lossless JSON plus `best_config_topn.csv`; Pareto searches write
+`pareto.csv` instead.
+
+Applications can supply a `RunnerFactory` directly:
 
 ```python
 from aisimulate.sweeper import SmartSearchConfig, Sweeper
