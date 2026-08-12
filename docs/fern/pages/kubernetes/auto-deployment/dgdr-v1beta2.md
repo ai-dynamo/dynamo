@@ -12,9 +12,10 @@ a Pareto front. During the search, Dynamo publishes a bounded set of
 `DynamoGraphDeploymentCandidate` (DGDC) resources. Each candidate contains a complete
 `DynamoGraphDeployment` (DGD) spec that you can inspect and deploy.
 
-Each accepted DGDR generation creates an immutable `DynamoGraphDeploymentRun`. The run owns the
-Sweeper Job, its DGDCs, progress, and report references. This lets one DGDR retain a history of
-independent searches without keeping completed Jobs alive.
+Each accepted change to the DGDR spec creates an immutable `DynamoGraphDeploymentRun`. Its spec is
+a complete copy of the request that started it. The run owns the Sweeper Job, its DGDCs, progress,
+and report references. This lets one DGDR retain a history of independent searches without keeping
+completed Jobs alive.
 
 > [!WARNING]
 > **Experimental.** The `v1beta2` API and its unstructured search parameters can change in a future
@@ -426,12 +427,51 @@ evaluated the configuration; it does not indicate that the configuration has bee
 
 ## Start a New Search
 
-Changing a search input creates a new immutable run for the new DGDR generation. Use
-`status.activeRunRef` to find the run currently being evaluated. Run and candidate labels identify
-the generation and input hash that produced each result.
+Changing a search input creates a new immutable run for the new DGDR generation. The run contains a
+complete copy of the accepted DGDR spec, so later edits to the request do not change an active or
+completed run. Use `status.activeRunRef` to find the run currently being evaluated. Run and
+candidate labels identify the generation and input hash that produced each result.
 
 Changes that affect the model, hardware, workload, objective, search budget, or unstructured
 parameters require new evaluations. Metadata-only changes do not change the search input.
+
+For recurring trace-based searches, write every completed trace to a new location and update the
+trace source. An object-storage URI identifies a trace directly:
+
+```yaml
+spec:
+  workload:
+    trace:
+      source:
+        uri: s3://dynamo-traces/qwen/2026-08-12.jsonl
+```
+
+For a trace stored on a PersistentVolumeClaim (PVC), update the path within the claim:
+
+```yaml
+spec:
+  workload:
+    trace:
+      source:
+        pvc:
+          claimName: workload-traces
+          path: qwen/2026-08-12.jsonl
+```
+
+DGDR treats the contents at a trace location as immutable. Updating the URI or PVC path starts the
+new run; it does not require a separate trigger or content digest.
+
+To repeat a search without changing its inputs, change `spec.rerun.reason`:
+
+```yaml
+spec:
+  rerun:
+    reason: "Repeat after Sweeper upgrade on 2026-08-12"
+```
+
+Every new value requests one run and is copied into that run's DGDR snapshot. Reapplying the same
+value does not request another run. If a trace is replaced at the same location, change
+`spec.rerun.reason` because Kubernetes cannot observe the content change.
 
 To capture traffic from an active DGD and repeat this workflow on a schedule, see [Continuous
 Profiling](continuous-profiling.md). That higher-level workflow treats the active DGD as the
