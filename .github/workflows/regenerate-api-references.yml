@@ -20,12 +20,20 @@
 # degrades to a branch when it cannot, so it is correct under either
 # permission state and needs no flag day.
 #
-# Direct push is blocked today: main is covered by two rulesets that each
-# require a pull request, and GitHub enforces the union. @ai-dynamo/autobots
-# already has bypass on ruleset 4130136 ("Required PR Checks"), but 3932713
-# ("Default branches") grants bypass to nobody and overrules it, so every push
-# dies on GH013. Granting autobots bypass on 3932713 turns this into a pure
-# push with no change here.
+# Direct push to main from a workflow does work, via OPS_BOT_PAT as
+# dynamo-ops: @ai-dynamo/autobots (whose sole member is dynamo-ops) holds
+# bypass on ruleset 4130136, and that is sufficient even though 3932713 also
+# carries a pull_request rule with no bypass. Demonstrated 2026-08-11T23:57Z,
+# when community-events-refresh.yml landed 3d77ee344 -- its first successful
+# run after five failures.
+#
+# The fallback stays because that demonstration is narrower than it looks. It
+# was one manual workflow_dispatch. The four scheduled runs before it failed on
+# GH013, an identical dispatch on 08-10 also failed, and no scheduled run has
+# succeeded yet -- so something changed that is not visible in the rulesets,
+# and `on: push`, the mode this workflow actually uses, is untested by either.
+# Until a scheduled or push-triggered run lands a commit, treat direct push as
+# unproven in this mode and let the fallback carry it.
 #
 # The fallback exists because a workflow that fails 100% of the time is worse
 # than one that degrades: community-events-refresh.yml pushes to main and has
@@ -55,6 +63,12 @@ jobs:
   regenerate:
     name: Regenerate API references
     runs-on: ubuntu-latest
+    # This job pushes with a PAT, and a PAT push re-triggers `on: push` (unlike
+    # GITHUB_TOKEN, which GitHub suppresses to avoid exactly this). Without the
+    # guard every run that pushes causes a second run. That run regenerates
+    # nothing and exits, so it terminates either way, but it doubles the run
+    # count and makes the history read as if two merges drifted.
+    if: github.actor != 'dynamo-ops'
     steps:
       - name: Checkout main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
