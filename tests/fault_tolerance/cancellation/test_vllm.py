@@ -71,9 +71,6 @@ class DynamoWorkerProcess(ManagedProcess):
         self.mode = mode
         # Allocate system port for this worker.
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
-        # Allocate FPM port up front so partially constructed workers still
-        # release it through the shared cleanup path.
-        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
         # Register port cleanup early so partially constructed workers still release ports.
         request.addfinalizer(self._release_worker_ports)
         self.frontend_port = frontend_port
@@ -145,10 +142,6 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
-        # Always set an explicit per-test FPM port to avoid collisions with
-        # the backend default (20380) under parallel test execution.
-        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
-
         # Set KV events config and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker
         if mode == WorkerMode.PREFILL:
@@ -208,7 +201,6 @@ class DynamoWorkerProcess(ManagedProcess):
         cleanup_errors = []
         for port_attr in (
             "system_port",
-            "fpm_port",
             "kv_event_port",
             "nixl_side_channel_port",
         ):
