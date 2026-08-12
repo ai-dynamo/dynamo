@@ -276,22 +276,37 @@ pub(crate) fn build_agent_context_trace_state(
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
 ) -> Option<AgentContextTraceState> {
-    let agent_context = common_request.agent_context.clone()?;
+    let agent_context = common_request.agent_context.as_ref()?;
+    Some(build_agent_context_trace_state_from_agent(
+        common_request,
+        tracker,
+        context,
+        agent_context,
+    ))
+}
+
+pub(crate) fn build_agent_context_trace_state_from_agent(
+    common_request: &PreprocessedRequest,
+    tracker: &Option<Arc<RequestTracker>>,
+    context: &Context<()>,
+    agent_context: &AgentContext,
+) -> AgentContextTraceState {
     let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
         .and_then(|c| c.x_request_id)
         .or_else(|| {
             context
-                .get::<String>(super::X_REQUEST_ID_CONTEXT_KEY)
+                .get_optional::<String>(super::X_REQUEST_ID_CONTEXT_KEY)
                 .ok()
-                .map(|v| v.as_ref().clone())
+                .flatten()
+                .map(|value| value.as_ref().clone())
         });
-    Some(AgentContextTraceState {
-        agent_context,
+    AgentContextTraceState {
+        agent_context: agent_context.clone(),
         request_model: common_request.model.clone(),
         request_tracker: tracker.clone(),
         x_request_id,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
-    })
+    }
 }
 
 pub(crate) fn record_backend_finish_reason_metadata(

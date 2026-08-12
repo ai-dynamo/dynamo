@@ -1347,13 +1347,14 @@ impl ModelManager {
         &self,
         model: &str,
         capability: &str,
+        include_trace_config: bool,
     ) -> Result<GenerateWorkerRuntime, ModelManagerError> {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_generate_worker_runtime_for_capability(capability)
+            .get_generate_worker_runtime_for_capability(capability, include_trace_config)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --

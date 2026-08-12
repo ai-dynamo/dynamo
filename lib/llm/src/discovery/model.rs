@@ -33,7 +33,12 @@ use crate::types::{
 /// Generate runtime state selected atomically from one worker set.
 pub(crate) struct GenerateWorkerRuntime {
     pub(crate) engine: GenerateStreamingEngine,
-    pub(crate) parsing_options: ParsingOptions,
+    pub(crate) trace_config: Option<GenerateTraceConfig>,
+}
+
+/// Generate metadata needed only while request-end tracing is active.
+pub(crate) struct GenerateTraceConfig {
+    pub(crate) tool_call_parser: Option<String>,
     pub(crate) kv_cache_block_size: u32,
 }
 
@@ -622,6 +627,7 @@ impl Model {
     pub(crate) fn get_generate_worker_runtime_for_capability(
         &self,
         capability: &str,
+        include_trace_config: bool,
     ) -> Result<GenerateWorkerRuntime, ModelManagerError> {
         self.select_worker_set_with(|worker_set| {
             if !worker_set.supports_runtime_capability(capability) {
@@ -629,8 +635,23 @@ impl Model {
             }
             Some(GenerateWorkerRuntime {
                 engine: worker_set.generate_engine.clone()?,
-                parsing_options: worker_set.parsing_options(),
-                kv_cache_block_size: worker_set.card().kv_cache_block_size,
+                trace_config: include_trace_config.then(|| GenerateTraceConfig {
+                    tool_call_parser: worker_set
+                        .card()
+                        .runtime_config
+                        .tool_call_parser
+                        .clone()
+                        .or_else(|| {
+                            worker_set
+                                .card()
+                                .runtime_config
+                                .reasoning_parser
+                                .as_ref()
+                                .filter(|parser| matches!(parser.as_str(), "kimi_k3" | "kimi-k3"))
+                                .cloned()
+                        }),
+                    kv_cache_block_size: worker_set.card().kv_cache_block_size,
+                }),
             })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))

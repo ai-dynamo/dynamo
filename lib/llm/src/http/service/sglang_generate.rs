@@ -280,10 +280,12 @@ async fn handler(
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return adapt_openai_error(response);
     }
-    let generate_context = match state
-        .manager()
-        .get_generate_worker_runtime_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
-    {
+    let request_trace = SglangRequestTrace::new();
+    let generate_context = match state.manager().get_generate_worker_runtime_for_capability(
+        &model,
+        SGLANG_GENERATE_CAPABILITY,
+        request_trace.needs_runtime_config(),
+    ) {
         Ok(context) => context,
         Err(error) => {
             let status = match error {
@@ -297,8 +299,7 @@ async fn handler(
     };
     let crate::discovery::GenerateWorkerRuntime {
         engine,
-        parsing_options,
-        kv_cache_block_size,
+        trace_config,
     } = generate_context;
 
     let request_context = resolve_request_context(&headers, request.rid.as_deref());
@@ -318,14 +319,7 @@ async fn handler(
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
-    let (mut preprocessed, context) = context.into_parts();
-    let request_trace = SglangRequestTrace::prepare(
-        &mut preprocessed,
-        &context,
-        kv_cache_block_size,
-        parsing_options,
-    );
-    let context = context.map(|_| preprocessed);
+    let (request_trace, context) = request_trace.prepare(context, trace_config);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
@@ -439,7 +433,7 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
-    let stream = request_trace.wrap(stream, request_id.clone());
+    let stream = request_trace.wrap(stream, request_id);
     let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
         result
             .map(|value| Event::default().data(value.to_string()))
