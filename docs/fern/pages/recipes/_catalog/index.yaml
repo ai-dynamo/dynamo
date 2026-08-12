@@ -11,6 +11,7 @@
 schema_version: 1
 recipes:
 - kimi-k3
+- qwen-3-8-2-4t-a95b
 - glm-5-2
 - inkling
 - kimi-k2-6
