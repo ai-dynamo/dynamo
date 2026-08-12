@@ -55,17 +55,24 @@ pub trait OutputOptionsProvider {
 /// emitted, and changing it would break every frontend in the N-2
 /// compatibility window, so it stays fixed.
 ///
-/// Deserialization is deliberately more permissive, because Python engine
-/// adapters report request-level failures with the [`Display`] form instead —
-/// `"error: <message>"` (for example `dynamo.vllm`'s custom-encoder path) — and
-/// some report a bare `"error"` with no message at all. The derived reader
-/// rejects both, and rejecting them costs the caller the one thing that makes
-/// the failure actionable: a malformed terminal chunk fails the whole
-/// request-plane response, so the backend's message is dropped and the caller
-/// gets an unattributed 500. Accept every form the fleet emits and normalize
-/// here, at the wire boundary.
+/// Deserialization additionally accepts the [`Display`] form,
+/// `"error: <message>"`, because Python engine adapters report request-level
+/// failures that way — `dynamo.vllm`'s custom-encoder path, among others. That
+/// is not a producer mistake: `Display` and [`FromStr`] define exactly that
+/// convention, so a producer matching this type's own string rendering lands on
+/// it. Rejecting it costs the caller the one thing that makes the failure
+/// actionable, since a terminal chunk the reader cannot parse fails the whole
+/// request-plane response and the backend's message is dropped for an
+/// unattributed 500.
+///
+/// Note the deliberate limit: a bare `"error"` carrying no message is *not*
+/// accepted. That form discards information at the producer, and inventing a
+/// stand-in message here would mask the bug rather than surface it. Producers
+/// should report request-level failures out of band instead — raising
+/// `dynamo._core.InvalidArgument` yields a 400 carrying the real message.
 ///
 /// [`Display`]: std::fmt::Display
+/// [`FromStr`]: std::str::FromStr
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     #[serde(rename = "eos")]
@@ -86,11 +93,6 @@ pub enum FinishReason {
     #[serde(rename = "content_filter")]
     ContentFilter,
 }
-
-/// Stands in for the message when a producer reports a bare `"error"`. The
-/// failure is still surfaced as [`FinishReason::Error`]; only the detail is
-/// missing, and an empty string would reach the caller as an empty error body.
-const UNSPECIFIED_ERROR: &str = "engine reported an error without a message";
 
 impl std::fmt::Display for FinishReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,8 +118,8 @@ impl std::str::FromStr for FinishReason {
             "cancelled" | "abort" => Ok(FinishReason::Cancelled),
             "content_filter" => Ok(FinishReason::ContentFilter),
             // The `Display` form, and what the Python engine adapters emit.
+            // A bare "error" is deliberately not accepted; see the type docs.
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
-            "error" => Ok(FinishReason::Error(UNSPECIFIED_ERROR.to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
     }
@@ -855,11 +857,6 @@ mod tests {
                 r#""error: CustomEncoder failed: error: nested""#,
                 FinishReason::Error("CustomEncoder failed: error: nested".into()),
             ),
-            // Producers that signal failure without a message.
-            (
-                r#""error""#,
-                FinishReason::Error(UNSPECIFIED_ERROR.to_string()),
-            ),
         ];
         for (json, expected) in cases {
             assert_eq!(
@@ -885,9 +882,13 @@ mod tests {
         );
     }
 
+    /// A bare `"error"` stays rejected on purpose. Producers emitting it are
+    /// discarding a message they hold; accepting it here would paper over that
+    /// with invented text instead of leaving the defect visible.
     #[test]
     fn test_finish_reason_rejects_unknown_forms() {
         for json in [
+            r#""error""#,
             r#""nonsense""#,
             r#"{"nonsense":"boom"}"#,
             r#"{"error":"a","stop":"b"}"#,
