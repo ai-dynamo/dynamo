@@ -25,79 +25,19 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/scale"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
-
-type groveScaleUpdate struct {
-	namespace string
-	resource  schema.GroupResource
-	name      string
-	replicas  int32
-}
-
-type recordingGroveScaleClient struct {
-	currentReplicas int32
-	getErrors       map[string]error
-	updates         []groveScaleUpdate
-}
-
-func (c *recordingGroveScaleClient) Scales(namespace string) scale.ScaleInterface {
-	return &recordingGroveScaleInterface{client: c, namespace: namespace}
-}
-
-type recordingGroveScaleInterface struct {
-	client    *recordingGroveScaleClient
-	namespace string
-}
-
-func (s *recordingGroveScaleInterface) Get(
-	_ context.Context,
-	resource schema.GroupResource,
-	name string,
-	_ metav1.GetOptions,
-) (*autoscalingv1.Scale, error) {
-	if err := s.client.getErrors[name]; err != nil {
-		return nil, err
-	}
-	return &autoscalingv1.Scale{
-		ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1"},
-		Spec:       autoscalingv1.ScaleSpec{Replicas: s.client.currentReplicas},
-	}, nil
-}
-
-func (s *recordingGroveScaleInterface) Update(
-	_ context.Context,
-	resource schema.GroupResource,
-	scaleObject *autoscalingv1.Scale,
-	_ metav1.UpdateOptions,
-) (*autoscalingv1.Scale, error) {
-	s.client.updates = append(s.client.updates, groveScaleUpdate{
-		namespace: s.namespace,
-		resource:  resource,
-		name:      scaleObject.Name,
-		replicas:  scaleObject.Spec.Replicas,
-	})
-	return scaleObject, nil
-}
-
-func (*recordingGroveScaleInterface) Patch(
-	context.Context,
-	schema.GroupVersionResource,
-	string,
-	types.PatchType,
-	[]byte,
-	metav1.PatchOptions,
-) (*autoscalingv1.Scale, error) {
-	return nil, errors.New("unexpected scale patch")
-}
 
 func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
@@ -122,9 +62,17 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 			},
 		},
 	})
-	scaleClient := &recordingGroveScaleClient{currentReplicas: 1}
+	frontend := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
+	worker := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1}}
+	gated := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-gated", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithRESTMapper(groveScaleRESTMapper()).
+		WithObjects(frontend, worker, gated).
+		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
+		Build()
 
-	err := newGroveScaler(scaleClient).Reconcile(
+	err := newGroveScaler(kubeClient).Reconcile(
 		context.Background(),
 		dgd,
 		map[string]*checkpoint.CheckpointInfo{
@@ -136,26 +84,77 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	assert.ElementsMatch(t, []groveScaleUpdate{
-		{
-			namespace: "default",
-			resource:  consts.PodCliqueGVR.GroupResource(),
-			name:      "graph-0-frontend",
-			replicas:  2,
-		},
-		{
-			namespace: "default",
-			resource:  consts.PodCliqueScalingGroupGVR.GroupResource(),
-			name:      "graph-0-worker",
-			replicas:  3,
-		},
-		{
-			namespace: "default",
-			resource:  consts.PodCliqueGVR.GroupResource(),
-			name:      "graph-0-gated",
-			replicas:  0,
-		},
-	}, scaleClient.updates)
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(frontend), frontend))
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(worker), worker))
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(gated), gated))
+	assert.Equal(t, int32(2), frontend.Spec.Replicas)
+	assert.Equal(t, int32(3), worker.Spec.Replicas)
+	assert.Equal(t, int32(0), gated.Spec.Replicas)
+}
+
+func groveScaleInterceptor(funcs interceptor.Funcs, onUpdate func()) interceptor.Funcs {
+	funcs.SubResourceGet = func(
+		ctx context.Context,
+		reader client.Client,
+		subResourceName string,
+		object client.Object,
+		subResource client.Object,
+		_ ...client.SubResourceGetOption,
+	) error {
+		if subResourceName != "scale" {
+			return errors.New("unexpected subresource get")
+		}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+			return err
+		}
+		scaleObject := subResource.(*autoscalingv1.Scale)
+		scaleObject.ObjectMeta = metav1.ObjectMeta{
+			Name:            object.GetName(),
+			Namespace:       object.GetNamespace(),
+			ResourceVersion: object.GetResourceVersion(),
+		}
+		switch resource := object.(type) {
+		case *unstructured.Unstructured:
+			replicas, found, err := unstructured.NestedInt64(resource.Object, "spec", "replicas")
+			if err != nil || !found {
+				return errors.New("scale resource has no replicas")
+			}
+			scaleObject.Spec.Replicas = int32(replicas)
+		default:
+			return errors.New("unexpected scale resource")
+		}
+		return nil
+	}
+	funcs.SubResourceUpdate = func(
+		ctx context.Context,
+		writer client.Client,
+		subResourceName string,
+		object client.Object,
+		options ...client.SubResourceUpdateOption,
+	) error {
+		if subResourceName != "scale" {
+			return errors.New("unexpected subresource update")
+		}
+		updateOptions := &client.SubResourceUpdateOptions{}
+		updateOptions.ApplyOptions(options)
+		scaleObject := updateOptions.SubResourceBody.(*autoscalingv1.Scale)
+		if err := writer.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+			return err
+		}
+		switch resource := object.(type) {
+		case *unstructured.Unstructured:
+			if err := unstructured.SetNestedField(resource.Object, int64(scaleObject.Spec.Replicas), "spec", "replicas"); err != nil {
+				return err
+			}
+		default:
+			return errors.New("unexpected scale resource")
+		}
+		if onUpdate != nil {
+			onUpdate()
+		}
+		return writer.Update(ctx, object)
+	}
+	return funcs
 }
 
 func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
@@ -172,23 +171,42 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 	})
 
 	t.Run("not found is retried by a later reconciliation", func(t *testing.T) {
-		scaleClient := &recordingGroveScaleClient{
-			getErrors: map[string]error{
-				"graph-0-worker": apierrors.NewNotFound(
-					consts.PodCliqueGVR.GroupResource(),
-					"graph-0-worker",
-				),
-			},
-		}
-		require.NoError(t, newGroveScaler(scaleClient).Reconcile(context.Background(), dgd, nil))
-		assert.Empty(t, scaleClient.updates)
+		kubeClient := fake.NewClientBuilder().
+			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+			WithRESTMapper(groveScaleRESTMapper()).
+			Build()
+		require.NoError(t, newGroveScaler(kubeClient).Reconcile(context.Background(), dgd, nil))
 	})
 
 	t.Run("other errors are propagated", func(t *testing.T) {
-		scaleClient := &recordingGroveScaleClient{
-			getErrors: map[string]error{"graph-0-worker": errors.New("scale read failed")},
-		}
-		err := newGroveScaler(scaleClient).Reconcile(context.Background(), dgd, nil)
+		kubeClient := fake.NewClientBuilder().
+			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+			WithRESTMapper(groveScaleRESTMapper()).
+			WithInterceptorFuncs(interceptor.Funcs{
+				SubResourceGet: func(context.Context, client.Client, string, client.Object, client.Object, ...client.SubResourceGetOption) error {
+					return errors.New("scale read failed")
+				},
+			}).
+			Build()
+		err := newGroveScaler(kubeClient).Reconcile(context.Background(), dgd, nil)
 		require.ErrorContains(t, err, "scale read failed")
 	})
+}
+
+func groveScaleRESTMapper() meta.RESTMapper {
+	groupVersion := schema.GroupVersion{Group: consts.PodCliqueGVR.Group, Version: consts.PodCliqueGVR.Version}
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{groupVersion})
+	mapper.AddSpecific(
+		groupVersion.WithKind("PodClique"),
+		consts.PodCliqueGVR,
+		consts.PodCliqueGVR,
+		meta.RESTScopeNamespace,
+	)
+	mapper.AddSpecific(
+		groupVersion.WithKind("PodCliqueScalingGroup"),
+		consts.PodCliqueScalingGroupGVR,
+		consts.PodCliqueScalingGroupGVR,
+		meta.RESTScopeNamespace,
+	)
+	return mapper
 }

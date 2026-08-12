@@ -23,23 +23,29 @@ import (
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/scale"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // ScaleResource scales any Kubernetes resource using the Scale subresource
-func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr schema.GroupVersionResource, namespace, name string, replicas int32) error {
+func ScaleResource(ctx context.Context, kubeClient client.Client, gvr schema.GroupVersionResource, namespace, name string, replicas int32) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Scaling resource", "gvr", gvr, "name", name, "namespace", namespace, "replicas", replicas)
 
-	if scaleClient == nil {
-		logger.Error(nil, "Scale client is nil")
-		return fmt.Errorf("scale client is nil")
-	}
-
-	currentScale, err := scaleClient.Scales(namespace).Get(ctx, gvr.GroupResource(), name, metav1.GetOptions{})
+	// Build the parent resource used to address its scale subresource.
+	gvk, err := kubeClient.RESTMapper().KindFor(gvr)
 	if err != nil {
+		return fmt.Errorf("failed to resolve kind for %s: %w", gvr.String(), err)
+	}
+	resource := &unstructured.Unstructured{}
+	resource.SetGroupVersionKind(gvk)
+	resource.SetNamespace(namespace)
+	resource.SetName(name)
+
+	currentScale := &autoscalingv1.Scale{}
+	if err := kubeClient.SubResource("scale").Get(ctx, resource, currentScale); err != nil {
 		logger.Error(err, "Failed to get current scale - resource may not support scale subresource", "gvr", gvr, "name", name, "namespace", namespace, "groupResource", gvr.GroupResource())
 		return fmt.Errorf("failed to get current scale for %s %s (resource may not support scale subresource): %w", gvr.Resource, name, err)
 	}
@@ -65,8 +71,7 @@ func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr sche
 	}
 
 	logger.V(1).Info("Updating scale", "gvr", gvr, "name", name, "newReplicas", replicas)
-	_, err = scaleClient.Scales(namespace).Update(ctx, gvr.GroupResource(), scaleObj, metav1.UpdateOptions{})
-	if err != nil {
+	if err := kubeClient.SubResource("scale").Update(ctx, resource, client.WithSubResourceBody(scaleObj)); err != nil {
 		logger.Error(err, "Failed to update scale", "gvr", gvr, "name", name, "replicas", replicas)
 		return fmt.Errorf("failed to update scale for %s %s: %w", gvr.Resource, name, err)
 	}

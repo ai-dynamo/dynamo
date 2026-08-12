@@ -26,12 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/scale"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -362,11 +357,6 @@ func (e *TestEnv) RuntimeConfig() *commoncontroller.RuntimeConfig {
 	return e.rt.runtimeConfig
 }
 
-// ScaleClient returns a scale client configured for this envtest API server.
-func (e *TestEnv) ScaleClient() (scale.ScalesGetter, error) {
-	return newScaleClient(e.rt.config)
-}
-
 // StartManager starts a namespace-scoped controller manager configured by setup.
 func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 	e.tb.Helper()
@@ -476,21 +466,6 @@ func defaultRuntimeConfig(cfg *configv1alpha1.OperatorConfiguration) *commoncont
 	gate.Checkpoint = cfg.Checkpoint.Enabled
 	gate.GPUDiscovery = cfg.Namespace.Restricted == "" || ptr.Deref(cfg.GPU.DiscoveryEnabled, true)
 	return &commoncontroller.RuntimeConfig{Gate: gate}
-}
-
-func newScaleClient(config *rest.Config) (scale.ScalesGetter, error) {
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
-	return scale.NewForConfig(
-		config,
-		restMapper,
-		dynamic.LegacyAPIPathResolverFunc,
-		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
-	)
 }
 
 func crdDirectoryPaths(opts Options) []string {

@@ -210,13 +210,9 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				t.Fatalf("select profiler image: %v", err)
 			}
 
-			t.Log("Create the scale client and start the production DGDR-to-terminal-workload controller chain")
+			t.Log("Start the production DGDR-to-terminal-workload controller chain")
 			operatorConfig := clusterTestRestrictedConfig(env.Namespace())
 			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
-			scaleClient, err := env.ScaleClient()
-			if err != nil {
-				t.Fatalf("create scale client: %v", err)
-			}
 			env.StartManager(func(mgr ctrl.Manager) error {
 				setupOptions := SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig}
 				if err := SetupDynamoGraphDeploymentRequest(mgr, DynamoGraphDeploymentRequestSetupOptions{
@@ -228,7 +224,6 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				}
 				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
 					SetupOptions: setupOptions,
-					ScaleClient:  scaleClient,
 				}); err != nil {
 					return err
 				}

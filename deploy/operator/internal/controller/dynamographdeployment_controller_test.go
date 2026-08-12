@@ -46,7 +46,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -659,31 +658,6 @@ func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRet
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, got[0].NamespacedName)
 }
 
-// mockScaleClient implements scale.ScalesGetter for testing
-type mockScaleClient struct{}
-
-func (m *mockScaleClient) Scales(namespace string) scale.ScaleInterface {
-	return &mockScaleInterface{}
-}
-
-// mockScaleInterface implements scale.ScaleInterface for testing
-type mockScaleInterface struct{}
-
-func (m *mockScaleInterface) Get(ctx context.Context, resource schema.GroupResource, name string, opts metav1.GetOptions) (*autoscalingv1.Scale, error) {
-	// Return a dummy scale object - we don't actually need scaling in the test
-	return &autoscalingv1.Scale{}, nil
-}
-
-func (m *mockScaleInterface) Update(ctx context.Context, resource schema.GroupResource, scale *autoscalingv1.Scale, opts metav1.UpdateOptions) (*autoscalingv1.Scale, error) {
-	// Return success without actually doing anything
-	return scale, nil
-}
-
-func (m *mockScaleInterface) Patch(ctx context.Context, gvr schema.GroupVersionResource, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions) (*autoscalingv1.Scale, error) {
-	// Return a dummy scale object
-	return &autoscalingv1.Scale{}, nil
-}
-
 func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 	ctx := context.Background()
 
@@ -1022,9 +996,10 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			fakeKubeClient := fake.NewClientBuilder().
 				WithScheme(s).
+				WithRESTMapper(groveScaleRESTMapper()).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
-				WithInterceptorFuncs(tt.interceptorFuncs).
+				WithInterceptorFuncs(groveScaleInterceptor(tt.interceptorFuncs, nil)).
 				Build()
 
 			recorder := events.NewFakeRecorder(100)
@@ -1033,7 +1008,6 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: tt.draEnabled}},
-				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1100,6 +1074,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 
 	fakeKubeClient := fake.NewClientBuilder().
 		WithScheme(s).
+		WithRESTMapper(groveScaleRESTMapper()).
 		WithObjects(dgd).
 		Build()
 
@@ -1108,7 +1083,6 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
-		ScaleClient:   &mockScaleClient{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil

@@ -56,7 +56,7 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 			Namespace:  "default",
 			Generation: 1,
 		},
-		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 0},
 		Status: grovev1alpha1.PodCliqueStatus{
 			Replicas:           1,
 			ReadyReplicas:      1,
@@ -67,12 +67,13 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	}
 
 	podCliqueReads := 0
-	scaleClient := &recordingGroveScaleClient{}
+	scaleUpdates := 0
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithRESTMapper(groveScaleRESTMapper()).
 		WithObjects(dgd, podClique).
 		WithStatusSubresource(dgd, podClique).
-		WithInterceptorFuncs(interceptor.Funcs{
+		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{
 			Get: func(
 				ctx context.Context,
 				reader client.WithWatch,
@@ -81,19 +82,17 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 				options ...client.GetOption,
 			) error {
 				if _, ok := object.(*grovev1alpha1.PodClique); ok {
-					require.Len(t, scaleClient.updates, 1, "readiness must be observed after scaling")
 					podCliqueReads++
 				}
 				return reader.Get(ctx, key, object, options...)
 			},
-		}).
+		}, func() { scaleUpdates++ })).
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &commoncontroller.RuntimeConfig{},
-		ScaleClient:   scaleClient,
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(string, string) ([]string, error) {
 				return nil, nil
@@ -109,5 +108,6 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
+	assert.Equal(t, 1, scaleUpdates)
 	assert.Equal(t, 1, podCliqueReads)
 }
