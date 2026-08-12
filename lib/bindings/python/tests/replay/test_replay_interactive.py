@@ -182,6 +182,177 @@ def test_interactive_lifecycle_correlation_and_final_report_conversion():
         session.now_ms()
 
 
+def test_interactive_event_and_pending_python_schema_is_exact():
+    event_keys = [
+        "logical_request_id",
+        "attempt_id",
+        "group_id",
+        "internal_uuid",
+        "session_id",
+        "authored_turn_index",
+        "timestamp_ms",
+        "pool_id",
+        "worker_id",
+        "dp_rank",
+        "terminal_status",
+        "input_length",
+        "requested_output_length",
+        "emitted_output_count",
+        "reused_input_tokens",
+        "ttft_ms",
+        "e2e_latency_ms",
+        "priority",
+        "strict_priority",
+        "policy_class",
+        "routing_constraints",
+        "eligible_pool_ids",
+        "candidates",
+    ]
+    pending_keys = [
+        "logical_request_id",
+        "attempt_id",
+        "group_id",
+        "internal_uuid",
+        "session_id",
+        "authored_turn_index",
+        "ready_at_ms",
+        "input_length",
+        "priority",
+        "strict_priority",
+        "policy_class",
+        "routing_constraints",
+        "eligible_pool_ids",
+        "candidates",
+    ]
+    candidate_keys = [
+        "target",
+        "active",
+        "draining",
+        "eligible",
+        "constraint_reason",
+        "in_flight_requests",
+        "queued_requests",
+        "running_requests",
+        "queued_tokens",
+        "running_tokens",
+        "max_num_seqs",
+        "preemption_count",
+        "kv_prefix_overlap_tokens",
+        "kv_capacity_blocks",
+        "kv_occupied_blocks",
+        "kv_free_blocks",
+        "tags",
+        "taints",
+        "capabilities",
+    ]
+    session = OfflineReplaySession(
+        pools=[
+            PoolSpec(
+                pool_id="pool-a",
+                engine_args=_pool_engine_args(
+                    speedup_ratio=1000.0,
+                    num_gpu_blocks=64,
+                ),
+                workers=[
+                    WorkerSpec(
+                        worker_id=7,
+                        tags=("primary",),
+                        taints=("trusted",),
+                        capabilities=("chat",),
+                    )
+                ],
+            )
+        ],
+        trace_block_size=4,
+        router="external",
+    )
+    request = _request("schema", 0).to_native()
+    request["routing_constraints"] = ReplayRoutingConstraints(
+        required_taints=("trusted",),
+        preferred_taints={"trusted": 2.0},
+    ).to_native()
+    session.submit(request)
+    session.settle_current_time()
+
+    placement_wrapper = session.drain_events()[0]
+    placement = placement_wrapper["event"]
+    assert list(placement_wrapper) == ["event_type", "event"]
+    assert placement_wrapper["event_type"] == "placement_needed"
+    assert list(placement) == event_keys
+    assert {
+        key: placement[key]
+        for key in (
+            "pool_id",
+            "worker_id",
+            "dp_rank",
+            "terminal_status",
+            "requested_output_length",
+            "reused_input_tokens",
+            "ttft_ms",
+            "e2e_latency_ms",
+            "policy_class",
+        )
+    } == {
+        "pool_id": None,
+        "worker_id": None,
+        "dp_rank": None,
+        "terminal_status": None,
+        "requested_output_length": None,
+        "reused_input_tokens": None,
+        "ttft_ms": None,
+        "e2e_latency_ms": None,
+        "policy_class": None,
+    }
+    assert list(placement["routing_constraints"]) == [
+        "required_taints",
+        "preferred_taints",
+    ]
+    assert placement["routing_constraints"] == {
+        "required_taints": ["trusted"],
+        "preferred_taints": {"trusted": 2.0},
+    }
+    candidate = placement["candidates"][0]
+    assert list(candidate) == candidate_keys
+    assert list(candidate["target"]) == ["pool_id", "worker_id", "dp_rank"]
+    assert candidate["target"] == {
+        "pool_id": "pool-a",
+        "worker_id": 7,
+        "dp_rank": 0,
+    }
+    assert candidate["constraint_reason"] is None
+
+    pending = session.pending_placements()[0]
+    assert list(pending) == pending_keys
+    assert list(pending["routing_constraints"]) == [
+        "required_taints",
+        "preferred_taints",
+    ]
+    assert list(pending["candidates"][0]) == candidate_keys
+    assert pending["policy_class"] is None
+
+    session.assign("schema", WorkerTarget(pool_id="pool-a", worker_id=7))
+    lifecycle = [placement_wrapper] + _drive_external_to_terminals(session, {"schema"})
+    assert {event["event_type"] for event in lifecycle} == {
+        "placement_needed",
+        "routed",
+        "queued",
+        "admitted",
+        "first_token",
+        "terminal",
+    }
+    assert all(list(event) == ["event_type", "event"] for event in lifecycle)
+    assert all(list(event["event"]) == event_keys for event in lifecycle)
+    terminal = next(
+        event["event"] for event in lifecycle if event["event_type"] == "terminal"
+    )
+    assert terminal["terminal_status"] == "completed"
+    assert all(
+        event["event"]["terminal_status"] is None
+        for event in lifecycle
+        if event["event_type"] != "terminal"
+    )
+
+
 def test_interactive_agentic_append_releases_child_from_parent_terminal():
     session = OfflineReplaySession(
         _engine_args(),

@@ -16,19 +16,21 @@ use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
 use dynamo_mocker::replay::{
-    OfflineReplaySession as RsOfflineReplaySession, ReplayAgenticRequest as RsReplayAgenticRequest,
-    ReplayAgenticWorkflow as RsReplayAgenticWorkflow, ReplayArgsMode,
+    OfflineReplaySession as RsOfflineReplaySession, PoolRouter as RsPoolRouter,
+    PoolSpec as RsPoolSpec, ReplayAgenticRequest as RsReplayAgenticRequest,
+    ReplayAgenticWorkflow as RsReplayAgenticWorkflow, ReplayArgsMode, ReplayEvent as RsReplayEvent,
+    ReplayEventData as RsReplayEventData, ReplayPendingPlacement as RsReplayPendingPlacement,
+    ReplayPlacementCandidate as RsReplayPlacementCandidate,
     ReplayRequestSpec as RsReplayRequestSpec,
     ReplayRoutingConstraints as RsReplayRoutingConstraints, ReplayScalingDecision,
-    ReplayScalingPolicy, ReplayScalingSnapshot,
-    ReplaySessionOptions as RsReplaySessionOptions,
-    ReplaySessionRouter as RsReplaySessionRouter,
-    PoolRouter as RsPoolRouter, PoolSpec as RsPoolSpec, WorkerSpec as RsWorkerSpec,
-    WorkerTarget as RsWorkerTarget,
+    ReplayScalingPolicy, ReplayScalingSnapshot, ReplaySessionOptions as RsReplaySessionOptions,
+    ReplaySessionRouter as RsReplaySessionRouter, ReplayTerminalStatus as RsReplayTerminalStatus,
+    WorkerSpec as RsWorkerSpec, WorkerTarget as RsWorkerTarget,
 };
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
+    types::{PyDict, PyList},
 };
 use pythonize::{depythonize, pythonize};
 use serde::{Deserialize, Serialize};
@@ -1237,6 +1239,281 @@ where
     pythonize(py, value).map(Bound::unbind).map_err(to_pyerr)
 }
 
+// Events and pending placements are the high-volume interactive boundary. Keep
+// these owned conversions in Serde declaration order: the exhaustive matches
+// and destructures make additions to the public Rust schema fail compilation.
+fn replay_terminal_status_name(status: RsReplayTerminalStatus) -> &'static str {
+    match status {
+        RsReplayTerminalStatus::Completed => "completed",
+        RsReplayTerminalStatus::Rejected => "rejected",
+        RsReplayTerminalStatus::Canceled => "canceled",
+        RsReplayTerminalStatus::Failed => "failed",
+    }
+}
+
+fn replay_worker_target_to_python<'py>(
+    py: Python<'py>,
+    target: RsWorkerTarget,
+) -> PyResult<Bound<'py, PyDict>> {
+    let RsWorkerTarget {
+        pool_id,
+        worker_id,
+        dp_rank,
+    } = target;
+    let value = PyDict::new(py);
+    value.set_item(pyo3::intern!(py, "pool_id"), pool_id)?;
+    value.set_item(pyo3::intern!(py, "worker_id"), worker_id)?;
+    value.set_item(pyo3::intern!(py, "dp_rank"), dp_rank)?;
+    Ok(value)
+}
+
+fn replay_routing_constraints_to_python<'py>(
+    py: Python<'py>,
+    constraints: RsReplayRoutingConstraints,
+) -> PyResult<Bound<'py, PyDict>> {
+    let RsReplayRoutingConstraints {
+        required_taints,
+        preferred_taints,
+    } = constraints;
+    let preferred_taints_value = PyDict::new(py);
+    for (taint, weight) in preferred_taints {
+        preferred_taints_value.set_item(taint, weight)?;
+    }
+
+    let value = PyDict::new(py);
+    value.set_item(pyo3::intern!(py, "required_taints"), required_taints)?;
+    value.set_item(
+        pyo3::intern!(py, "preferred_taints"),
+        preferred_taints_value,
+    )?;
+    Ok(value)
+}
+
+fn replay_placement_candidates_to_python<'py>(
+    py: Python<'py>,
+    candidates: Vec<RsReplayPlacementCandidate>,
+) -> PyResult<Bound<'py, PyList>> {
+    let values = PyList::empty(py);
+    for candidate in candidates {
+        values.append(replay_placement_candidate_to_python(py, candidate)?)?;
+    }
+    Ok(values)
+}
+
+fn replay_placement_candidate_to_python<'py>(
+    py: Python<'py>,
+    candidate: RsReplayPlacementCandidate,
+) -> PyResult<Bound<'py, PyDict>> {
+    let RsReplayPlacementCandidate {
+        target,
+        active,
+        draining,
+        eligible,
+        constraint_reason,
+        in_flight_requests,
+        queued_requests,
+        running_requests,
+        queued_tokens,
+        running_tokens,
+        max_num_seqs,
+        preemption_count,
+        kv_prefix_overlap_tokens,
+        kv_capacity_blocks,
+        kv_occupied_blocks,
+        kv_free_blocks,
+        tags,
+        taints,
+        capabilities,
+    } = candidate;
+    let value = PyDict::new(py);
+    value.set_item(
+        pyo3::intern!(py, "target"),
+        replay_worker_target_to_python(py, target)?,
+    )?;
+    value.set_item(pyo3::intern!(py, "active"), active)?;
+    value.set_item(pyo3::intern!(py, "draining"), draining)?;
+    value.set_item(pyo3::intern!(py, "eligible"), eligible)?;
+    value.set_item(pyo3::intern!(py, "constraint_reason"), constraint_reason)?;
+    value.set_item(pyo3::intern!(py, "in_flight_requests"), in_flight_requests)?;
+    value.set_item(pyo3::intern!(py, "queued_requests"), queued_requests)?;
+    value.set_item(pyo3::intern!(py, "running_requests"), running_requests)?;
+    value.set_item(pyo3::intern!(py, "queued_tokens"), queued_tokens)?;
+    value.set_item(pyo3::intern!(py, "running_tokens"), running_tokens)?;
+    value.set_item(pyo3::intern!(py, "max_num_seqs"), max_num_seqs)?;
+    value.set_item(pyo3::intern!(py, "preemption_count"), preemption_count)?;
+    value.set_item(
+        pyo3::intern!(py, "kv_prefix_overlap_tokens"),
+        kv_prefix_overlap_tokens,
+    )?;
+    value.set_item(pyo3::intern!(py, "kv_capacity_blocks"), kv_capacity_blocks)?;
+    value.set_item(pyo3::intern!(py, "kv_occupied_blocks"), kv_occupied_blocks)?;
+    value.set_item(pyo3::intern!(py, "kv_free_blocks"), kv_free_blocks)?;
+    value.set_item(pyo3::intern!(py, "tags"), tags)?;
+    value.set_item(pyo3::intern!(py, "taints"), taints)?;
+    value.set_item(pyo3::intern!(py, "capabilities"), capabilities)?;
+    Ok(value)
+}
+
+fn replay_event_data_to_python<'py>(
+    py: Python<'py>,
+    data: RsReplayEventData,
+) -> PyResult<Bound<'py, PyDict>> {
+    let RsReplayEventData {
+        logical_request_id,
+        attempt_id,
+        group_id,
+        internal_uuid,
+        session_id,
+        authored_turn_index,
+        timestamp_ms,
+        pool_id,
+        worker_id,
+        dp_rank,
+        terminal_status,
+        input_length,
+        requested_output_length,
+        emitted_output_count,
+        reused_input_tokens,
+        ttft_ms,
+        e2e_latency_ms,
+        priority,
+        strict_priority,
+        policy_class,
+        routing_constraints,
+        eligible_pool_ids,
+        candidates,
+    } = data;
+    let value = PyDict::new(py);
+    value.set_item(pyo3::intern!(py, "logical_request_id"), logical_request_id)?;
+    value.set_item(pyo3::intern!(py, "attempt_id"), attempt_id)?;
+    value.set_item(pyo3::intern!(py, "group_id"), group_id)?;
+    value.set_item(
+        pyo3::intern!(py, "internal_uuid"),
+        internal_uuid.to_string(),
+    )?;
+    value.set_item(pyo3::intern!(py, "session_id"), session_id)?;
+    value.set_item(
+        pyo3::intern!(py, "authored_turn_index"),
+        authored_turn_index,
+    )?;
+    value.set_item(pyo3::intern!(py, "timestamp_ms"), timestamp_ms)?;
+    value.set_item(pyo3::intern!(py, "pool_id"), pool_id)?;
+    value.set_item(pyo3::intern!(py, "worker_id"), worker_id)?;
+    value.set_item(pyo3::intern!(py, "dp_rank"), dp_rank)?;
+    value.set_item(
+        pyo3::intern!(py, "terminal_status"),
+        terminal_status.map(replay_terminal_status_name),
+    )?;
+    value.set_item(pyo3::intern!(py, "input_length"), input_length)?;
+    value.set_item(
+        pyo3::intern!(py, "requested_output_length"),
+        requested_output_length,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "emitted_output_count"),
+        emitted_output_count,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "reused_input_tokens"),
+        reused_input_tokens,
+    )?;
+    value.set_item(pyo3::intern!(py, "ttft_ms"), ttft_ms)?;
+    value.set_item(pyo3::intern!(py, "e2e_latency_ms"), e2e_latency_ms)?;
+    value.set_item(pyo3::intern!(py, "priority"), priority)?;
+    value.set_item(pyo3::intern!(py, "strict_priority"), strict_priority)?;
+    value.set_item(pyo3::intern!(py, "policy_class"), policy_class)?;
+    value.set_item(
+        pyo3::intern!(py, "routing_constraints"),
+        replay_routing_constraints_to_python(py, routing_constraints)?,
+    )?;
+    value.set_item(pyo3::intern!(py, "eligible_pool_ids"), eligible_pool_ids)?;
+    value.set_item(
+        pyo3::intern!(py, "candidates"),
+        replay_placement_candidates_to_python(py, candidates)?,
+    )?;
+    Ok(value)
+}
+
+fn replay_event_parts(event: RsReplayEvent) -> (&'static str, RsReplayEventData) {
+    match event {
+        RsReplayEvent::PlacementNeeded(data) => ("placement_needed", data),
+        RsReplayEvent::Routed(data) => ("routed", data),
+        RsReplayEvent::Queued(data) => ("queued", data),
+        RsReplayEvent::Admitted(data) => ("admitted", data),
+        RsReplayEvent::FirstToken(data) => ("first_token", data),
+        RsReplayEvent::Terminal(data) => ("terminal", data),
+    }
+}
+
+fn replay_events_to_python(py: Python<'_>, events: Vec<RsReplayEvent>) -> PyResult<PyObject> {
+    let values = PyList::empty(py);
+    for event in events {
+        let (event_type, data) = replay_event_parts(event);
+        let value = PyDict::new(py);
+        value.set_item(pyo3::intern!(py, "event_type"), event_type)?;
+        value.set_item(
+            pyo3::intern!(py, "event"),
+            replay_event_data_to_python(py, data)?,
+        )?;
+        values.append(value)?;
+    }
+    Ok(values.into_any().unbind())
+}
+
+fn replay_pending_placements_to_python(
+    py: Python<'_>,
+    pending: Vec<RsReplayPendingPlacement>,
+) -> PyResult<PyObject> {
+    let values = PyList::empty(py);
+    for placement in pending {
+        let RsReplayPendingPlacement {
+            logical_request_id,
+            attempt_id,
+            group_id,
+            internal_uuid,
+            session_id,
+            authored_turn_index,
+            ready_at_ms,
+            input_length,
+            priority,
+            strict_priority,
+            policy_class,
+            routing_constraints,
+            eligible_pool_ids,
+            candidates,
+        } = placement;
+        let value = PyDict::new(py);
+        value.set_item(pyo3::intern!(py, "logical_request_id"), logical_request_id)?;
+        value.set_item(pyo3::intern!(py, "attempt_id"), attempt_id)?;
+        value.set_item(pyo3::intern!(py, "group_id"), group_id)?;
+        value.set_item(
+            pyo3::intern!(py, "internal_uuid"),
+            internal_uuid.to_string(),
+        )?;
+        value.set_item(pyo3::intern!(py, "session_id"), session_id)?;
+        value.set_item(
+            pyo3::intern!(py, "authored_turn_index"),
+            authored_turn_index,
+        )?;
+        value.set_item(pyo3::intern!(py, "ready_at_ms"), ready_at_ms)?;
+        value.set_item(pyo3::intern!(py, "input_length"), input_length)?;
+        value.set_item(pyo3::intern!(py, "priority"), priority)?;
+        value.set_item(pyo3::intern!(py, "strict_priority"), strict_priority)?;
+        value.set_item(pyo3::intern!(py, "policy_class"), policy_class)?;
+        value.set_item(
+            pyo3::intern!(py, "routing_constraints"),
+            replay_routing_constraints_to_python(py, routing_constraints)?,
+        )?;
+        value.set_item(pyo3::intern!(py, "eligible_pool_ids"), eligible_pool_ids)?;
+        value.set_item(
+            pyo3::intern!(py, "candidates"),
+            replay_placement_candidates_to_python(py, candidates)?,
+        )?;
+        values.append(value)?;
+    }
+    Ok(values.into_any().unbind())
+}
+
 fn parse_interactive_router(router: &str) -> PyResult<RsReplaySessionRouter> {
     if router == "external" {
         return Ok(RsReplaySessionRouter::External);
@@ -1358,12 +1635,12 @@ impl PyOfflineReplaySession {
 
     fn drain_events(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let events = self.inner.drain_events().map_err(to_pyerr)?;
-        pythonize_interactive(py, &events)
+        replay_events_to_python(py, events)
     }
 
     fn pending_placements(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let pending = self.inner.pending_placements().map_err(to_pyerr)?;
-        pythonize_interactive(py, &pending)
+        replay_pending_placements_to_python(py, pending)
     }
 
     fn assign(&mut self, logical_request_id: &str, target: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -2264,11 +2541,251 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
+        RsReplayEvent, RsReplayEventData, RsReplayPendingPlacement, RsReplayPlacementCandidate,
+        RsReplayRoutingConstraints, RsReplayTerminalStatus, RsWorkerTarget,
         build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
-        validate_disagg_replay_mode,
+        replay_event_parts, replay_terminal_status_name, validate_disagg_replay_mode,
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
     use dynamo_mocker::loadgen::ArrivalSpec;
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    fn direct_worker_target_value(target: RsWorkerTarget) -> Value {
+        let RsWorkerTarget {
+            pool_id,
+            worker_id,
+            dp_rank,
+        } = target;
+        json!({
+            "pool_id": pool_id,
+            "worker_id": worker_id,
+            "dp_rank": dp_rank,
+        })
+    }
+
+    fn direct_routing_constraints_value(constraints: RsReplayRoutingConstraints) -> Value {
+        let RsReplayRoutingConstraints {
+            required_taints,
+            preferred_taints,
+        } = constraints;
+        json!({
+            "required_taints": required_taints,
+            "preferred_taints": preferred_taints,
+        })
+    }
+
+    fn direct_candidate_value(candidate: RsReplayPlacementCandidate) -> Value {
+        let RsReplayPlacementCandidate {
+            target,
+            active,
+            draining,
+            eligible,
+            constraint_reason,
+            in_flight_requests,
+            queued_requests,
+            running_requests,
+            queued_tokens,
+            running_tokens,
+            max_num_seqs,
+            preemption_count,
+            kv_prefix_overlap_tokens,
+            kv_capacity_blocks,
+            kv_occupied_blocks,
+            kv_free_blocks,
+            tags,
+            taints,
+            capabilities,
+        } = candidate;
+        json!({
+            "target": direct_worker_target_value(target),
+            "active": active,
+            "draining": draining,
+            "eligible": eligible,
+            "constraint_reason": constraint_reason,
+            "in_flight_requests": in_flight_requests,
+            "queued_requests": queued_requests,
+            "running_requests": running_requests,
+            "queued_tokens": queued_tokens,
+            "running_tokens": running_tokens,
+            "max_num_seqs": max_num_seqs,
+            "preemption_count": preemption_count,
+            "kv_prefix_overlap_tokens": kv_prefix_overlap_tokens,
+            "kv_capacity_blocks": kv_capacity_blocks,
+            "kv_occupied_blocks": kv_occupied_blocks,
+            "kv_free_blocks": kv_free_blocks,
+            "tags": tags,
+            "taints": taints,
+            "capabilities": capabilities,
+        })
+    }
+
+    fn direct_candidates_value(candidates: Vec<RsReplayPlacementCandidate>) -> Value {
+        Value::Array(candidates.into_iter().map(direct_candidate_value).collect())
+    }
+
+    fn direct_event_data_value(data: RsReplayEventData) -> Value {
+        let RsReplayEventData {
+            logical_request_id,
+            attempt_id,
+            group_id,
+            internal_uuid,
+            session_id,
+            authored_turn_index,
+            timestamp_ms,
+            pool_id,
+            worker_id,
+            dp_rank,
+            terminal_status,
+            input_length,
+            requested_output_length,
+            emitted_output_count,
+            reused_input_tokens,
+            ttft_ms,
+            e2e_latency_ms,
+            priority,
+            strict_priority,
+            policy_class,
+            routing_constraints,
+            eligible_pool_ids,
+            candidates,
+        } = data;
+        json!({
+            "logical_request_id": logical_request_id,
+            "attempt_id": attempt_id,
+            "group_id": group_id,
+            "internal_uuid": internal_uuid.to_string(),
+            "session_id": session_id,
+            "authored_turn_index": authored_turn_index,
+            "timestamp_ms": timestamp_ms,
+            "pool_id": pool_id,
+            "worker_id": worker_id,
+            "dp_rank": dp_rank,
+            "terminal_status": terminal_status.map(replay_terminal_status_name),
+            "input_length": input_length,
+            "requested_output_length": requested_output_length,
+            "emitted_output_count": emitted_output_count,
+            "reused_input_tokens": reused_input_tokens,
+            "ttft_ms": ttft_ms,
+            "e2e_latency_ms": e2e_latency_ms,
+            "priority": priority,
+            "strict_priority": strict_priority,
+            "policy_class": policy_class,
+            "routing_constraints": direct_routing_constraints_value(routing_constraints),
+            "eligible_pool_ids": eligible_pool_ids,
+            "candidates": direct_candidates_value(candidates),
+        })
+    }
+
+    fn direct_event_value(event: RsReplayEvent) -> Value {
+        let (event_type, data) = replay_event_parts(event);
+        json!({
+            "event_type": event_type,
+            "event": direct_event_data_value(data),
+        })
+    }
+
+    fn direct_pending_placement_value(placement: RsReplayPendingPlacement) -> Value {
+        let RsReplayPendingPlacement {
+            logical_request_id,
+            attempt_id,
+            group_id,
+            internal_uuid,
+            session_id,
+            authored_turn_index,
+            ready_at_ms,
+            input_length,
+            priority,
+            strict_priority,
+            policy_class,
+            routing_constraints,
+            eligible_pool_ids,
+            candidates,
+        } = placement;
+        json!({
+            "logical_request_id": logical_request_id,
+            "attempt_id": attempt_id,
+            "group_id": group_id,
+            "internal_uuid": internal_uuid.to_string(),
+            "session_id": session_id,
+            "authored_turn_index": authored_turn_index,
+            "ready_at_ms": ready_at_ms,
+            "input_length": input_length,
+            "priority": priority,
+            "strict_priority": strict_priority,
+            "policy_class": policy_class,
+            "routing_constraints": direct_routing_constraints_value(routing_constraints),
+            "eligible_pool_ids": eligible_pool_ids,
+            "candidates": direct_candidates_value(candidates),
+        })
+    }
+
+    fn serialization_candidate(with_optional_values: bool) -> RsReplayPlacementCandidate {
+        RsReplayPlacementCandidate {
+            target: RsWorkerTarget::new("pool-a", 7, 2),
+            active: true,
+            draining: false,
+            eligible: with_optional_values,
+            constraint_reason: (!with_optional_values).then(|| "taint mismatch".to_string()),
+            in_flight_requests: 3,
+            queued_requests: with_optional_values.then_some(4),
+            running_requests: with_optional_values.then_some(5),
+            queued_tokens: with_optional_values.then_some(6),
+            running_tokens: with_optional_values.then_some(7),
+            max_num_seqs: with_optional_values.then_some(8),
+            preemption_count: with_optional_values.then_some(9),
+            kv_prefix_overlap_tokens: with_optional_values.then_some(10),
+            kv_capacity_blocks: with_optional_values.then_some(11),
+            kv_occupied_blocks: with_optional_values.then_some(12),
+            kv_free_blocks: with_optional_values.then_some(13),
+            tags: vec!["tag-a".to_string()],
+            taints: vec!["taint-a".to_string()],
+            capabilities: vec!["chat".to_string()],
+        }
+    }
+
+    fn serialization_constraints() -> RsReplayRoutingConstraints {
+        RsReplayRoutingConstraints {
+            required_taints: vec!["taint-a".to_string()],
+            preferred_taints: BTreeMap::from([("taint-b".to_string(), 1.25)]),
+        }
+    }
+
+    fn serialization_event_data(
+        ordinal: usize,
+        terminal_status: Option<RsReplayTerminalStatus>,
+    ) -> RsReplayEventData {
+        let populated = ordinal % 2 == 1;
+        RsReplayEventData {
+            logical_request_id: format!("request-{ordinal}"),
+            attempt_id: format!("attempt-{ordinal}"),
+            group_id: "group-a".to_string(),
+            internal_uuid: Uuid::from_u128(ordinal as u128 + 1),
+            session_id: "session-a".to_string(),
+            authored_turn_index: ordinal,
+            timestamp_ms: ordinal as f64 + 0.5,
+            pool_id: populated.then(|| "pool-a".to_string()),
+            worker_id: populated.then_some(7),
+            dp_rank: populated.then_some(2),
+            terminal_status,
+            input_length: 16,
+            requested_output_length: populated.then_some(8),
+            emitted_output_count: ordinal,
+            reused_input_tokens: populated.then_some(4),
+            ttft_ms: populated.then_some(1.5),
+            e2e_latency_ms: populated.then_some(2.5),
+            priority: -3,
+            strict_priority: 4,
+            policy_class: populated.then(|| "latency".to_string()),
+            routing_constraints: serialization_constraints(),
+            eligible_pool_ids: vec!["pool-a".to_string()],
+            candidates: vec![
+                serialization_candidate(true),
+                serialization_candidate(false),
+            ],
+        }
+    }
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {
@@ -2279,6 +2796,70 @@ mod tests {
             "disagg replay only supports replay_mode='offline'"
         );
         assert!(validate_disagg_replay_mode("offline").is_ok());
+    }
+
+    #[test]
+    fn direct_interactive_schema_matches_generic_serde_for_every_variant() {
+        let events = vec![
+            RsReplayEvent::PlacementNeeded(serialization_event_data(0, None)),
+            RsReplayEvent::Routed(serialization_event_data(
+                1,
+                Some(RsReplayTerminalStatus::Completed),
+            )),
+            RsReplayEvent::Queued(serialization_event_data(
+                2,
+                Some(RsReplayTerminalStatus::Rejected),
+            )),
+            RsReplayEvent::Admitted(serialization_event_data(
+                3,
+                Some(RsReplayTerminalStatus::Canceled),
+            )),
+            RsReplayEvent::FirstToken(serialization_event_data(
+                4,
+                Some(RsReplayTerminalStatus::Failed),
+            )),
+            RsReplayEvent::Terminal(serialization_event_data(
+                5,
+                Some(RsReplayTerminalStatus::Completed),
+            )),
+        ];
+        let direct_events =
+            Value::Array(events.clone().into_iter().map(direct_event_value).collect());
+        assert_eq!(
+            direct_events,
+            serde_json::to_value(&events).expect("generic event serialization")
+        );
+
+        let pending = vec![RsReplayPendingPlacement {
+            logical_request_id: "request-pending".to_string(),
+            attempt_id: "attempt-pending".to_string(),
+            group_id: "group-a".to_string(),
+            internal_uuid: Uuid::from_u128(99),
+            session_id: "session-a".to_string(),
+            authored_turn_index: 6,
+            ready_at_ms: 7.5,
+            input_length: 16,
+            priority: -3,
+            strict_priority: 4,
+            policy_class: None,
+            routing_constraints: serialization_constraints(),
+            eligible_pool_ids: vec!["pool-a".to_string()],
+            candidates: vec![
+                serialization_candidate(true),
+                serialization_candidate(false),
+            ],
+        }];
+        let direct_pending = Value::Array(
+            pending
+                .clone()
+                .into_iter()
+                .map(direct_pending_placement_value)
+                .collect(),
+        );
+        assert_eq!(
+            direct_pending,
+            serde_json::to_value(&pending).expect("generic pending-placement serialization")
+        );
     }
 
     #[test]
