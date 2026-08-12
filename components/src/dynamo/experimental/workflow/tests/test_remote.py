@@ -6,10 +6,13 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
+import torch
 
 from dynamo.experimental.workflow import (
     DeploymentSpec,
     InlineBinding,
+    NixlTensorFanout,
+    NixlTensorRef,
     RemoteBinding,
     StageContext,
     StageContract,
@@ -35,12 +38,46 @@ CONTRACT = StageContract(
 )
 
 
-def _context() -> StageContext:
+def _context(timeout=None, request_context=None):
+    loop = asyncio.get_running_loop()
     return StageContext(
         workflow_name="remote-wire",
         stage_id="normalize",
         attempt_id="request-1",
+        invocation_id="request-1:normalize",
+        deadline=None if timeout is None else loop.time() + timeout,
+        _cancelled=asyncio.Event(),
+        request_context=request_context,
     )
+
+
+def test_request_envelope_round_trip_is_strict_and_versioned() -> None:
+    envelope = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="normalize",
+        contract_id="normalize",
+        attempt_id="request-1",
+        invocation_id="request-1:normalize",
+        timeout_seconds=1.5,
+        inputs={"text": "HELLO"},
+        output_transfers={},
+    )
+
+    assert StageRequestEnvelope.from_dict(envelope.to_dict()) == envelope
+    bad = envelope.to_dict()
+    bad["extra"] = True
+    with pytest.raises(WorkflowExecutionError, match="unknown fields"):
+        StageRequestEnvelope.from_dict(bad)
+
+    bad = envelope.to_dict()
+    bad["schema"] = f"{STAGE_REQUEST_SCHEMA}.future"
+    with pytest.raises(WorkflowExecutionError, match="unsupported.*schema"):
+        StageRequestEnvelope.from_dict(bad)
+
+    bad = envelope.to_dict()
+    bad["version"] = 0.0
+    with pytest.raises(WorkflowExecutionError, match="unsupported.*version"):
+        StageRequestEnvelope.from_dict(bad)
 
 
 class _Client:
@@ -97,14 +134,14 @@ async def test_remote_client_sends_inputs_and_accepts_one_response_mapping() -> 
     transport = _Client([{"normalized": "hello"}])
 
     result = await RemoteStageClient(transport).run(
-        "normalize", CONTRACT, {"text": "HELLO"}, _context()
+        "normalize", CONTRACT, {"text": "HELLO"}, _context(timeout=1.0), {}
     )
 
     assert result == {"normalized": "hello"}
     assert transport.request == {"text": "HELLO"}
 
 
-async def test_remote_client_creates_a_stage_scoped_transport_context() -> None:
+async def test_remote_client_creates_an_invocation_scoped_transport_context() -> None:
     transport = _Client([{"normalized": "hello"}])
     parent = _ParentContext()
 
@@ -112,8 +149,8 @@ async def test_remote_client_creates_a_stage_scoped_transport_context() -> None:
         "normalize",
         CONTRACT,
         {"text": "HELLO"},
-        _context(),
-        request_context=parent,
+        _context(request_context=parent),
+        {},
     )
 
     assert [child.context_id for child in parent.children] == ["request-1:normalize"]
@@ -122,28 +159,13 @@ async def test_remote_client_creates_a_stage_scoped_transport_context() -> None:
 
 async def test_remote_client_rejects_missing_or_duplicate_response_mapping() -> None:
     client = RemoteStageClient(_Client([]))
-    with pytest.raises(WorkflowExecutionError, match="no response mapping"):
-        await client.run("normalize", CONTRACT, {"text": "HELLO"}, _context())
+    with pytest.raises(WorkflowExecutionError, match="no terminal response"):
+        await client.run("normalize", CONTRACT, {"text": "HELLO"}, _context(), {})
 
     response = {"normalized": "hello"}
     client = RemoteStageClient(_Client([response, response]))
-    parent = _ParentContext()
-    with pytest.raises(WorkflowExecutionError, match="multiple response mappings"):
-        await client.run(
-            "normalize",
-            CONTRACT,
-            {"text": "HELLO"},
-            _context(),
-            request_context=parent,
-        )
-    assert parent.children[0].is_stopped()
-
-
-async def test_remote_client_rejects_non_mapping_response() -> None:
-    client = RemoteStageClient(_Client(["hello"]))
-
-    with pytest.raises(WorkflowExecutionError, match="non-mapping response"):
-        await client.run("normalize", CONTRACT, {"text": "HELLO"}, _context())
+    with pytest.raises(WorkflowExecutionError, match="multiple terminal responses"):
+        await client.run("normalize", CONTRACT, {"text": "HELLO"}, _context(), {})
 
 
 async def test_remote_client_adds_stage_context_to_transport_failures() -> None:
@@ -169,12 +191,22 @@ class _Runner:
         assert context.workflow_name is None
         assert context.stage_id == "normalize"
         assert context.attempt_id == "request-1:normalize"
-        assert not hasattr(context, "request_context")
+        assert context.invocation_id == "request-1:normalize"
+        assert context.deadline is None
         return {"normalized": inputs["text"].strip().lower()}
 
 
 async def test_remote_server_validates_and_runs_stage_contract() -> None:
-    transport_context = _ChildContext("request-1:normalize")
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="normalize",
+        contract_id="normalize",
+        attempt_id="request-1",
+        invocation_id="request-1:normalize",
+        timeout_seconds=None,
+        inputs={"text": " HELLO "},
+        output_transfers={},
+    )
 
     responses = [
         response
@@ -183,7 +215,34 @@ async def test_remote_server_validates_and_runs_stage_contract() -> None:
         )
     ]
 
-    assert responses == [{"normalized": "hello"}]
+    assert len(responses) == 1
+    assert StageResponseEnvelope.from_dict(responses[0]).outputs == {
+        "normalized": "hello"
+    }
+
+
+async def test_remote_server_enforces_deadline() -> None:
+    class BlockingRunner:
+        contract = CONTRACT
+
+        async def run(self, inputs, context):
+            await asyncio.Event().wait()
+
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="normalize",
+        contract_id="normalize",
+        attempt_id="request-1",
+        invocation_id="request-1:normalize",
+        timeout_seconds=0.01,
+        inputs={"text": "hello"},
+        output_transfers={},
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await RemoteStageServer("normalize", BlockingRunner()).generate(
+            request.to_dict()
+        ).__anext__()
 
 
 async def test_remote_server_cancels_runner_when_transport_stops() -> None:
@@ -199,11 +258,22 @@ async def test_remote_server_cancels_runner_when_transport_stops() -> None:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
+                assert context.cancelled
                 self.cancelled.set()
                 raise
 
     runner = BlockingRunner()
     transport_context = _ChildContext("request-1:normalize")
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="normalize",
+        contract_id="normalize",
+        attempt_id="request-1",
+        invocation_id="request-1:normalize",
+        timeout_seconds=None,
+        inputs={"text": "hello"},
+        output_transfers={},
+    )
     response = asyncio.create_task(
         RemoteStageServer("normalize", runner)
         .generate({"text": "hello"}, context=transport_context)
@@ -271,6 +341,7 @@ class _TextEncoder:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
         self.calls += 1
         return {"tokens": inputs["text"].lower().split()}
 
@@ -281,6 +352,7 @@ class _KeywordClassifier:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
         tokens = inputs["tokens"]
         workflow_hits = sum(token == "workflow" for token in tokens)
         score = workflow_hits / max(1, len(tokens))
@@ -293,6 +365,7 @@ class _TextGenerator:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
         return {"text": " ".join(reversed(inputs["tokens"]))}
 
 
@@ -302,6 +375,7 @@ class _Response:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
         return {"chunk": {"text": inputs["text"], "scores": inputs["scores"]}}
 
 
@@ -369,11 +443,9 @@ async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() ->
     runtime = _Runtime(clients)
     executor = await WorkflowOrchestrator.bind(plan, runtime=runtime)
 
-    request_context = _ParentContext()
     result = await executor.run(
         {"text": "Dynamo workflow runs across processes"},
         attempt_id="remote-example-1",
-        request_context=request_context,
     )
 
     assert result == {
@@ -382,11 +454,6 @@ async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() ->
     }
     assert encoder_runner.calls == 1
     assert runtime.endpoint_ids == sorted(endpoint_ids.values())
-    assert sorted(child.context_id for child in request_context.children) == [
-        "remote-example-1:classifier",
-        "remote-example-1:encoder",
-        "remote-example-1:generator",
-    ]
 
 
 async def test_remote_branches_join_in_an_inline_response_stage() -> None:
@@ -443,3 +510,114 @@ async def test_remote_branches_join_in_an_inline_response_stage() -> None:
             "scores": {"workflow": 0.5, "other": 0.5},
         }
     }
+
+
+async def test_tensor_server_imports_input_and_exports_per_consumer() -> None:
+    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
+
+    class TensorRunner:
+        contract = StageContract(
+            id="tensor",
+            inputs={"tensor": tensor_spec},
+            outputs={"tensor": tensor_spec},
+        )
+
+        async def run(self, inputs, context):
+            return {"tensor": inputs["tensor"] * 2}
+
+    class Carrier:
+        def __init__(self):
+            self.exports = []
+
+        async def import_tensor(self, reference):
+            assert reference == {"remote": "reference"}
+            return torch.ones((2, 4), dtype=torch.float32)
+
+        async def export_tensor(self, tensor, transfer_id):
+            return (await self.export_tensor_fanout(tensor, (transfer_id,)))[
+                transfer_id
+            ]
+
+        async def export_tensor_fanout(self, tensor, transfer_ids):
+            assert torch.equal(tensor, torch.full((2, 4), 2.0))
+            self.exports.extend(transfer_ids)
+            return {
+                transfer_id: NixlTensorRef(
+                    transfer_id=transfer_id,
+                    lease_id=f"lease-{transfer_id}",
+                    shape=tuple(tensor.shape),
+                    dtype="float32",
+                    device="cpu",
+                    rdma_metadata={"opaque": transfer_id},
+                ).to_dict()
+                for transfer_id in transfer_ids
+            }
+
+    carrier = Carrier()
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="tensor",
+        contract_id="tensor",
+        attempt_id="request-1",
+        invocation_id="request-1:tensor",
+        timeout_seconds=None,
+        inputs={"tensor": {"remote": "reference"}},
+        output_transfers={"tensor": ("classifier.tensor", "generator.tensor")},
+    )
+
+    responses = [
+        response
+        async for response in RemoteStageServer(
+            "tensor", TensorRunner(), carrier
+        ).generate(request.to_dict())
+    ]
+    outputs = StageResponseEnvelope.from_dict(responses[0]).outputs
+    fanout = NixlTensorFanout.from_dict(outputs["tensor"])
+
+    assert set(fanout.transfers) == {"classifier.tensor", "generator.tensor"}
+    assert carrier.exports == ["classifier.tensor", "generator.tensor"]
+
+
+async def test_tensor_import_is_bounded_by_remote_stage_deadline() -> None:
+    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
+    import_cancelled = asyncio.Event()
+
+    class TensorRunner:
+        contract = StageContract(
+            id="tensor",
+            inputs={"tensor": tensor_spec},
+            outputs={"result": ValueSpec(type="json")},
+        )
+
+        async def run(self, inputs, context):
+            raise AssertionError("runner must not start before its tensor arrives")
+
+    class BlockingCarrier:
+        async def import_tensor(self, reference):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                import_cancelled.set()
+
+        async def export_tensor(self, tensor, transfer_id):
+            raise AssertionError("no tensor output is declared")
+
+        async def export_tensor_fanout(self, tensor, transfer_ids):
+            raise AssertionError("no tensor output is declared")
+
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="tensor",
+        contract_id="tensor",
+        attempt_id="request-1",
+        invocation_id="request-1:tensor",
+        timeout_seconds=0.01,
+        inputs={"tensor": {"remote": "reference"}},
+        output_transfers={},
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await RemoteStageServer("tensor", TensorRunner(), BlockingCarrier()).generate(
+            request.to_dict()
+        ).__anext__()
+    assert import_cancelled.is_set()

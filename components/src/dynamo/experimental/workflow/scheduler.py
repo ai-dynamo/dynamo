@@ -29,12 +29,21 @@ class GraphScheduler:
         request_context: Any = None,
     ) -> dict[str, Any]:
         tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        tensor_exports: dict[
+            ValueRef, asyncio.Task[Mapping[str, Mapping[str, Any]]]
+        ] = {}
 
         async def run_stage(stage: StageIR) -> dict[str, Any]:
-            stage_inputs = {
-                name: await resolve(reference)
-                for name, reference in stage.inputs.items()
-            }
+            stage_inputs = {}
+            for name, reference in stage.inputs.items():
+                value = await resolve_raw(reference)
+                stage_inputs[name] = await self._dispatcher.resolve_edge(
+                    reference,
+                    stage.id,
+                    name,
+                    value,
+                    tensor_exports,
+                )
             return await self._dispatcher.call(
                 stage.id,
                 stage_inputs,
@@ -46,7 +55,7 @@ class GraphScheduler:
                 request_context=request_context,
             )
 
-        async def resolve(reference: ValueRef) -> Any:
+        async def resolve_raw(reference: ValueRef) -> Any:
             if reference.input_name is not None:
                 return inputs[reference.input_name]
             stage_id = cast(str, reference.stage_id)
@@ -61,12 +70,19 @@ class GraphScheduler:
 
         try:
             output_values = await asyncio.gather(
-                *(resolve(reference) for reference in self._workflow.outputs.values())
+                *(
+                    resolve_raw(reference)
+                    for reference in self._workflow.outputs.values()
+                )
             )
             return dict(zip(self._workflow.outputs, output_values))
         except BaseException:
             for task in tasks.values():
                 if not task.done():
                     task.cancel()
+            for task in tensor_exports.values():
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+            await asyncio.gather(*tensor_exports.values(), return_exceptions=True)
             raise
