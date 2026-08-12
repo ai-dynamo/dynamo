@@ -33,6 +33,13 @@ spec:
               value: /model-cache
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "64Gi"
+            limits:
+              cpu: "2"
+              memory: "64Gi"
           # The checkpoint can run for hours on a cold PVC.
           args:
             - |

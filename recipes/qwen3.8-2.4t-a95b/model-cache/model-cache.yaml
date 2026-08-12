@@ -10,6 +10,6 @@ spec:
     - ReadWriteMany
   resources:
     requests:
-      storage: 3000Gi
+      storage: 6000Gi
   # Edit this
   storageClassName: "your-storage-class-name"
