@@ -27,13 +27,20 @@ const (
 type Failure_Code int32
 
 const (
-	Failure_UNSPECIFIED           Failure_Code = 0
-	Failure_INVALID_REQUEST       Failure_Code = 1
+	// No failure code was supplied.
+	Failure_UNSPECIFIED Failure_Code = 0
+	// The request is malformed or unsupported. PageBroker did not mutate transaction state.
+	Failure_INVALID_REQUEST Failure_Code = 1
+	// The transaction is unknown or has reached the opposite terminal state.
 	Failure_TRANSACTION_NOT_FOUND Failure_Code = 2
-	Failure_TRANSACTION_CONFLICT  Failure_Code = 3
-	Failure_INSUFFICIENT_STORAGE  Failure_Code = 4
-	Failure_STORAGE_ERROR         Failure_Code = 5
-	Failure_INTERNAL_ERROR        Failure_Code = 6
+	// The transaction ID or checkpoint destination conflicts with an existing transaction or output.
+	Failure_TRANSACTION_CONFLICT Failure_Code = 3
+	// Tmpfs staging lacks space. PageBroker did not create staging for this request.
+	Failure_INSUFFICIENT_STORAGE Failure_Code = 4
+	// Storage I/O failed. The caller may Abort the transaction before retrying with a new transaction ID.
+	Failure_STORAGE_ERROR Failure_Code = 5
+	// An unexpected broker failure occurred. The caller may Abort the transaction before retrying.
+	Failure_INTERNAL_ERROR Failure_Code = 6
 )
 
 // Enum value maps for Failure_Code.
@@ -464,6 +471,8 @@ func (x *PrepareStagedCheckpointRequest) GetIoEngine() *IOEngine {
 	return nil
 }
 
+// Completes a live transaction. Repeating Commit for a committed transaction returns CommitComplete;
+// Commit for an aborted or unknown transaction returns TRANSACTION_NOT_FOUND.
 type CommitRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -500,6 +509,8 @@ func (*CommitRequest) Descriptor() ([]byte, []int) {
 	return file_pagebroker_proto_rawDescGZIP(), []int{7}
 }
 
+// Releases PageBroker state for a live transaction. Repeating Abort for an aborted transaction returns
+// AbortComplete; Abort for a committed or unknown transaction returns TRANSACTION_NOT_FOUND.
 type AbortRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -537,9 +548,11 @@ func (*AbortRequest) Descriptor() ([]byte, []int) {
 }
 
 type Request struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RequestId     *string                `protobuf:"bytes,1,req,name=request_id,json=requestId" json:"request_id,omitempty"`
-	TransactionId *string                `protobuf:"bytes,2,req,name=transaction_id,json=transactionId" json:"transaction_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Snapshot assigns an ID to each request.
+	RequestId *string `protobuf:"bytes,1,req,name=request_id,json=requestId" json:"request_id,omitempty"`
+	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while live.
+	TransactionId *string `protobuf:"bytes,2,req,name=transaction_id,json=transactionId" json:"transaction_id,omitempty"`
 	// Types that are valid to be assigned to Command:
 	//
 	//	*Request_StagedRestore
@@ -842,6 +855,8 @@ func (*CommitComplete) Descriptor() ([]byte, []int) {
 	return file_pagebroker_proto_rawDescGZIP(), []int{13}
 }
 
+// Confirms only that PageBroker transaction state/content was released; it says nothing about the target
+// process or CUDA state.
 type AbortComplete struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields

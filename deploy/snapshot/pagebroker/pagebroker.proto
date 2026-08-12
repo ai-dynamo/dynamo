@@ -41,12 +41,18 @@ message PrepareStagedCheckpointRequest
   required StorageBackend destination = 1;
   required IOEngine io_engine = 2;
 }
+// Completes a live transaction. Repeating Commit for a committed transaction returns CommitComplete;
+// Commit for an aborted or unknown transaction returns TRANSACTION_NOT_FOUND.
 message CommitRequest {}
+// Releases PageBroker state for a live transaction. Repeating Abort for an aborted transaction returns
+// AbortComplete; Abort for a committed or unknown transaction returns TRANSACTION_NOT_FOUND.
 message AbortRequest {}
 
 message Request
 {
+  // Snapshot assigns an ID to each request.
   required string request_id = 1;
+  // Snapshot assigns a unique transaction ID before the first request and does not reuse it while live.
   required string transaction_id = 2;
   oneof command
   {
@@ -68,16 +74,25 @@ message StagedCheckpointDirectory
   required string image_directory = 1;
 }
 message CommitComplete {}
+// Confirms only that PageBroker transaction state/content was released; it says nothing about the target
+// process or CUDA state.
 message AbortComplete {}
 message Failure
 {
   enum Code {
+    // No failure code was supplied.
     UNSPECIFIED = 0;
+    // The request is malformed or unsupported. PageBroker did not mutate transaction state.
     INVALID_REQUEST = 1;
+    // The transaction is unknown or has reached the opposite terminal state.
     TRANSACTION_NOT_FOUND = 2;
+    // The transaction ID or checkpoint destination conflicts with an existing transaction or output.
     TRANSACTION_CONFLICT = 3;
+    // Tmpfs staging lacks space. PageBroker did not create staging for this request.
     INSUFFICIENT_STORAGE = 4;
+    // Storage I/O failed. The caller may Abort the transaction before retrying with a new transaction ID.
     STORAGE_ERROR = 5;
+    // An unexpected broker failure occurred. The caller may Abort the transaction before retrying.
     INTERNAL_ERROR = 6;
   }
   required Code code = 1;
