@@ -32,7 +32,7 @@ Dynamo provides support for improving latency and throughput for multimodal work
     Cache vision encoder embeddings to skip re-encoding repeated multimodal content
   </Card>
   <Card title="Multimodal KV Routing" icon="regular arrows-split-up-and-left" href="multimodal-kv-routing.md">
-    Route multimodal requests to workers with the best KV cache overlap
+    Include multimodal identity in cache-aware, load-balanced worker selection
   </Card>
   <Card title="Encoder Disaggregation" icon="regular microchip" href="encoder-disaggregation.md">
     Separate vision encoding into a dedicated worker for independent scaling

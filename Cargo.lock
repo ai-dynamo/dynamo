@@ -2470,6 +2470,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-example-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-custom-policy-example-disagg-filter-score-pick",
+ "dynamo-custom-policy-example-simple-filter-score-pick",
+ "dynamo-custom-policy-example-simple-stacked-score-pick",
+ "dynamo-kv-router",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-disagg-filter-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-epp"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "dynamo-custom-policy-example-catalog",
+ "dynamo-ext-proc",
+ "dynamo-kv-router",
+ "tokio",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-simple-filter-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-simple-stacked-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
 name = "dynamo-data-gen"
 version = "1.4.0"
 dependencies = [
@@ -2592,8 +2637,6 @@ dependencies = [
  "async-nats 0.49.1",
  "async-stream",
  "async-trait",
- "aws-config",
- "aws-sdk-s3",
  "axum 0.8.4",
  "axum-server",
  "base64 0.22.1",
@@ -2818,9 +2861,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.1.0"
+version = "5.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "696b6df4c817c16dc0a619d43f6af5ecc4f045a6b6be7ef516bfe502f977764b"
+checksum = "97fd951c32c033f4f220b6087db91d7f7d475f1bf1f886c8e60798ac1cf4cc9a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2891,13 +2934,14 @@ dependencies = [
  "educe",
  "either",
  "etcd-client",
+ "fastrand",
  "figment",
+ "fs4",
  "futures",
  "humantime",
  "jsonschema",
  "k8s-openapi",
  "kube",
- "libc",
  "local-ip-address",
  "log",
  "lru 0.16.4",
@@ -3001,9 +3045,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.7.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a81f7b7693282f4693a3b4c60174e14260cf011ab493a7ca9b4deb2fa98ecee"
+checksum = "821c767e896f1f225b6411a5ce41dba7f114c2c97db862a13fd962195665075e"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3084,6 +3128,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
+ "tonic-health",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3108,7 +3153,15 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
 ]
 
 [[package]]
@@ -3379,21 +3432,24 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.2.1"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8728655e193e0d08d7a95d63cf1fdb9b768d282cab0a112ecb006615bae9f067"
+checksum = "35ff8cf975d8f772e7d4c3be439659b0b23b1ae1086ebee7204573807053ff7f"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
  "hf-hub 0.4.3",
  "icu_normalizer",
+ "libc",
  "memchr",
  "pcre2",
  "rayon",
+ "regex-syntax",
  "serde",
  "serde_json",
  "strum",
  "thiserror 2.0.18",
+ "ureq",
 ]
 
 [[package]]

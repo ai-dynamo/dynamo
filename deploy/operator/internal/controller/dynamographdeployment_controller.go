@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -29,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +42,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -70,7 +72,7 @@ type DynamoGraphDeploymentReconciler struct {
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
-	Recorder              record.EventRecorder
+	Recorder              events.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
@@ -116,21 +118,46 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	// Handle finalizer
-	deleted, err := commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
-	if err != nil {
-		logger.Error(err, "failed to handle the finalizer")
-		if dynamoDeployment.GetDeletionTimestamp().IsZero() {
-			programResult := newWorkloadProgramResult(dynamoDeployment)
-			programResult.Fail(dynamoDeployment.Generation, "failed_to_handle_the_finalizer", err)
-			if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
-				logger.Error(statusErr, "unable to update status after finalizer failure")
-			}
+
+	// Finalize deleting resources before validating their now-immutable live configuration.
+	if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
+		_, err = commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+		if err != nil {
+			logger.Error(err, "failed to handle the finalizer")
 		}
 		return ctrl.Result{}, err
 	}
-	if deleted {
+
+	// Reject unsupported stored configurations before any primary-resource mutation.
+	var compatibilityErrs []error
+	for i := range dynamoDeployment.Spec.Components {
+		component := &dynamoDeployment.Spec.Components[i]
+		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(component.Experimental) {
+			compatibilityErrs = append(
+				compatibilityErrs,
+				fmt.Errorf("component %q: %w", component.ComponentName, compatibilityErr),
+			)
+		}
+	}
+	if compatibilityErr := errors.Join(compatibilityErrs...); compatibilityErr != nil {
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, reasonFailedToReconcileResources, compatibilityErr)
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+			logger.Error(statusErr, "unable to update status after compatibility failure")
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, nil
+	}
+
+	// Add the finalizer only after the live object passes compatibility preflight.
+	if _, err = commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r); err != nil {
+		logger.Error(err, "failed to handle the finalizer")
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, "failed_to_handle_the_finalizer", err)
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+			logger.Error(statusErr, "unable to update status after finalizer failure")
+		}
+		return ctrl.Result{}, err
 	}
 
 	program := r.selectWorkloadProgram(dynamoDeployment)
@@ -162,7 +189,7 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 	}
 	if r.Recorder != nil {
 		for _, event := range result.Events {
-			r.Recorder.Event(dgd, event.Type, event.Reason, event.Message)
+			r.Recorder.Eventf(dgd, nil, event.Type, event.Reason, "Update", "%s", event.Message)
 		}
 	}
 	return nil
@@ -196,7 +223,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			predicate.GenerationChangedPredicate{},
+			generationOrDeletionChangedPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
@@ -252,7 +279,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	return ctrlBuilder.Complete(observedReconciler)
 }
 
-func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
+func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 

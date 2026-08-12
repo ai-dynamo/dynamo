@@ -1780,7 +1780,7 @@ class KvRouterConfig:
 
         Args:
             overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
-            overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit and can make adjusted prefill cost negative.
+            overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit, with adjusted prefill cost clamped at zero.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
             decode_active_request_weight: Experimental block-equivalent decode cost added for each active request on a candidate worker (default: 0.0)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
@@ -1791,8 +1791,9 @@ class KvRouterConfig:
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
                 When enabled, the router adds placeholder blocks as tokens are generated
-                and applies fractional decay based on progress toward expected output
-                sequence length (agent_hints.osl in nvext).
+                and, with expected output sequence length (agent_hints.osl in nvext),
+                applies fractional decay to output blocks and the structurally exclusive
+                prompt suffix. Shared prompt blocks retain full weight.
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_track_prefill_tokens: Include prompt-side prefill tokens in active load accounting (default: True).
@@ -2275,6 +2276,17 @@ async def unregister_model(
     Unregister a model from the discovery system.
 
     If lora_name is provided, unregisters a LoRA adapter instead of a base model.
+    """
+    ...
+
+async def update_model_taints(
+    endpoint: Endpoint,
+    taints: Set[str],
+) -> None:
+    """Replace caller-managed taints on this worker's registered model.
+
+    Reserved 'dynamo.topology/' taints are derived from the model's topology
+    metadata and cannot be supplied by callers.
     """
     ...
 
@@ -3323,11 +3335,14 @@ class backend:
             served_model_name: Optional[str] = None,
             runtime_data: Optional[Dict[str, Any]] = None,
             llm: Optional["backend.LlmRegistration"] = None,
+            model_aliases: Optional[List[str]] = None,
         ) -> None: ...
         @property
         def model(self) -> str: ...
         @property
         def served_model_name(self) -> Optional[str]: ...
+        @property
+        def model_aliases(self) -> List[str]: ...
         @property
         def runtime_data(self) -> Dict[str, Any]: ...
         @property

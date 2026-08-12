@@ -191,7 +191,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			r.reader,
 			dcd.Namespace,
 			dynamo.ToAlphaCheckpointConfig(checkpointConfig),
-			r.runtimeConfig.Gate,
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")

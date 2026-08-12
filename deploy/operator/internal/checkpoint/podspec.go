@@ -103,7 +103,6 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	delete(labels, snapshotprotocol.RestoreTargetLabel)
 	delete(labels, snapshotprotocol.CheckpointSourceLabel)
 	delete(annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
-	delete(annotations, snapshotprotocol.CheckpointStatusAnnotation)
 	delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
 	delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)

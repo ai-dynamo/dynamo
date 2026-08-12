@@ -93,7 +93,7 @@ sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
 )
 ```
 
-The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. The counters remain zero when `DYN_TOKENIZER_CACHE=0`, encoding fails, or the tokenizer has no registered special-token boundaries.
+The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. When the cache is disabled with `DYN_TOKENIZER_CACHE=0`, the per-model series are never created, so they are absent from the scrape rather than reported as zero; detect that state with `absent()`, since a `== 0` comparison never matches a missing series. Only the literal value `0` disables the cache; values such as `false` or `off` leave it enabled. With the cache enabled, the counters remain zero when encoding fails or the tokenizer has no registered special-token boundaries.
 
 <ParamField path="dynamo_frontend_inter_token_latency_seconds" type="histogram">
   Inter-token latency in seconds.
@@ -140,7 +140,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_rejection_total" type="counter">
-  Total requests rejected because all workers were busy (surfaced to the client as HTTP 529 by default). Incremented when the router returns `ResourceExhausted`. Labeled by `model` and `endpoint` (the API route).
+  Total overload responses surfaced to the client as HTTP 529 by default. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges
@@ -281,6 +281,14 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 <ParamField path="dynamo_component_router_kv_hit_rate" type="histogram">
   Predicted KV cache hit rate at routing time (0.0–1.0).
+</ParamField>
+
+<ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+</ParamField>
+
+<ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
+  Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
 ### Per-request routing overhead

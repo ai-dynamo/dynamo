@@ -18,7 +18,7 @@ python -m dynamo.frontend &
 
 # run decode worker on GPU 0, without enabling KVBM
 # NOTE: remove --enforce-eager for production use
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --enforce-eager &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --enforce-eager --disaggregation-mode decode --disable-hybrid-kv-cache-manager &
 
 # run prefill worker on GPU 1 with KVBM enabled using 20GB of CPU cache
 # NOTE: remove --enforce-eager for production use
@@ -28,6 +28,7 @@ CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model "$MODEL" \
     --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --enforce-eager \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &

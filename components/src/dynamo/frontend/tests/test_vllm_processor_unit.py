@@ -14,9 +14,19 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _tool_guidance_parity import (
+    TOOL_GUIDANCE_PARITY_CASES,
+    assistant_response_format,
+    classify_guidance_source,
+    parity_tool,
+    tool_choice_value,
+)
 from transformers import AutoTokenizer
+from vllm.sampling_params import StructuredOutputsParams
 
-from dynamo.frontend.prepost import _prepare_request
+from dynamo.frontend import prepost as prepost_module
+from dynamo.frontend.prepost import _prepare_request, build_tool_call_guided_decoding
+from dynamo.llm.exceptions import InvalidArgument
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module
@@ -42,11 +52,16 @@ def _resolve_qwen3_tool_parser_class():
         return Qwen3CoderToolParser
 
 
-# Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
+# Needs vllm packages, but never touches a GPU.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
+    # This file builds a real tokenizer. The marker declares it in the session
+    # predownload manifest (tests/conftest.py), which is what keeps it fetchable
+    # on a lane that predownloads and flips HF_HUB_OFFLINE; the CPU lane has no
+    # predownload consumer today, so there it is fetched live.
+    pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -747,6 +762,7 @@ async def test_generator_preserves_zero_top_logprobs(
                 chat_template_kwargs={},
                 engine_prompt={"prompt": "Hello"},
                 prompt_token_ids=[1],
+                guided_decoding=None,
             )
         ),
     )
@@ -1015,6 +1031,624 @@ class TestSchemaAwareToolParser:
         assert args["profile"] == {"name": "Alice", "age": 30}
 
 
+class _FakeStructuralTag:
+    def __init__(self, value):
+        self.value = value
+
+    def model_dump(self):
+        return self.value
+
+
+class _FakeStructuralTagParser:
+    structural_tag_model = None
+
+    def __init__(self):
+        self.requests = []
+
+    def get_structural_tag(self, request, *, reasoning=False):
+        self.requests.append(request)
+        strict = [tool.function.strict for tool in request.tools]
+        return _FakeStructuralTag({"format": {"strict": strict}})
+
+
+class _FakeGrammarToolParser:
+    def get_structural_tag(self, request, *, reasoning=False):
+        return None
+
+
+class _FakeAdjustRequestGrammarToolParser(_FakeGrammarToolParser):
+    def __init__(self, tokenizer, tools):
+        del tokenizer, tools
+
+    def adjust_request(self, request):
+        request.structured_outputs = StructuredOutputsParams(
+            grammar='root ::= "<tool_call>"'
+        )
+        return request
+
+
+class _FakePassthroughToolParser(_FakeGrammarToolParser):
+    def __init__(self, tokenizer, tools):
+        del tokenizer, tools
+
+    def adjust_request(self, request):
+        return request
+
+
+class _FakeResponseFormatConsumingToolParser(_FakeAdjustRequestGrammarToolParser):
+    def adjust_request(self, request):
+        request.response_format = None
+        return super().adjust_request(request)
+
+
+class _FakeNativeSyntaxToolParser(_FakeGrammarToolParser):
+    # Mirrors parsers like Gemma4Engine/PoolsideV1 that emit native tool syntax
+    # and decline a forced JSON constraint for required/named choices.
+    supports_required_and_named = False
+
+
+class TestPreprocessRawRequestControls:
+    """Transport-only controls must survive the preprocess_chat_request boundary.
+
+    Regression: preprocess_chat_request passed the validated model into
+    _prepare_request, making its dict-only reads of chat_template_args and root
+    thinking unreachable. Direct _prepare_request tests do not cover this path.
+    """
+
+    @staticmethod
+    def _renderer():
+        return SimpleNamespace(
+            render_messages_async=AsyncMock(
+                return_value=(None, {"prompt_token_ids": [1]})
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_template_args_survive_preprocess(self, tokenizer):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            renderer=self._renderer(),
+            tool_parser_class=None,
+        )
+        assert result.chat_template_kwargs.get("enable_thinking") is False
+
+    @pytest.mark.asyncio
+    async def test_root_thinking_suppresses_deployment_default(self, tokenizer):
+        # An explicit root thinking control must block the deployment default
+        # from injecting its own thinking_mode.
+        result = await prepost_module.preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": True,
+            },
+            tokenizer=tokenizer,
+            renderer=self._renderer(),
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+        assert "thinking_mode" not in result.chat_template_kwargs
+
+
+class TestToolCallGuidedDecoding:
+    def _request(self, tokenizer, **overrides):
+        raw_request = {**TOOL_REQUEST, "tool_choice": "auto", **overrides}
+        request, _, _, _, _ = _prepare_request(
+            raw_request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        return request
+
+    def test_mode_off_emits_no_guidance(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer),
+            parser,
+            structural_tag_mode="off",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
+        )
+
+        assert guided is None
+        assert parser.requests == []
+
+    # Forced choices need a JSON constraint even when structural tags are disabled.
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+    )
+    def test_forced_choice_uses_json_guidance_when_mode_off(
+        self, tokenizer, tool_choice
+    ):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice=tool_choice),
+            parser,
+            structural_tag_mode="off",
+        )
+
+        assert guided is not None
+        assert set(guided) == {"json"}
+        assert parser.requests == []
+
+    # Parsers that require native tool syntax must not get a forced JSON schema.
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+    )
+    def test_forced_choice_skips_json_for_native_syntax_parser(
+        self, tokenizer, tool_choice
+    ):
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice=tool_choice),
+            _FakeNativeSyntaxToolParser(),
+            structural_tag_mode="off",
+        )
+
+        assert guided is None
+
+    def test_strict_schema_uses_copy(self, tokenizer):
+        request = self._request(tokenizer)
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
+        )
+
+        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
+        assert request.tools[0].function.strict is None
+        assert parser.requests[0].messages is request.messages
+
+    # Auto schema mode must preserve an omitted strict flag as unset.
+    def test_auto_schema_preserves_unset_strict(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer),
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="auto",
+        )
+
+        assert guided == {"structural_tag": {"format": {"strict": [None]}}}
+
+    # Parser-created grammar must survive preprocessing as guided decoding.
+    @pytest.mark.asyncio
+    async def test_parser_adjust_request_generated_grammar_is_forwarded(
+        self, tokenizer
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "required"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeAdjustRequestGrammarToolParser,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
+            structural_tag_schema="strict",
+        )
+
+        assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+
+    # Explicit assistant constraints must override automatic tool-call guidance.
+    @pytest.mark.parametrize(
+        "assistant_constraint, expected",
+        [
+            (
+                {"response_format": {"type": "json_object"}},
+                {"json": {"type": "object"}},
+            ),
+            ({"guided_regex": "yes|no"}, {"regex": "yes|no"}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_assistant_guidance_takes_precedence_over_auto_tool_guidance(
+        self, tokenizer, assistant_constraint, expected
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                **TOOL_REQUEST,
+                "tool_choice": "auto",
+                **assistant_constraint,
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert result.guided_decoding == expected
+
+    # A forced tool choice with a client-provided structured_outputs constraint
+    # is a conflict: reject it rather than silently reuse or replace it. (The
+    # parser-generated case is covered by the test above, which is not rejected.)
+    @pytest.mark.asyncio
+    async def test_forced_choice_with_client_structured_outputs_is_rejected(
+        self, tokenizer
+    ):
+        with pytest.raises(InvalidArgument):
+            await prepost_module.preprocess_chat_request(
+                {
+                    **TOOL_REQUEST,
+                    "tool_choice": "required",
+                    "structured_outputs": {"grammar": 'root ::= "not_a_tool_call"'},
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=_FakePassthroughToolParser,
+                structural_tag_mode="on",
+            )
+
+    # A forced tool choice plus an explicit constraint is a client error (400),
+    # matching the Rust path, not a silently dropped constraint.
+    @pytest.mark.asyncio
+    async def test_forced_choice_with_explicit_constraint_is_rejected(self, tokenizer):
+        with pytest.raises(InvalidArgument):
+            await prepost_module.preprocess_chat_request(
+                {
+                    **TOOL_REQUEST,
+                    "tool_choice": "required",
+                    "guided_regex": "yes|no",
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=_FakePassthroughToolParser,
+                structural_tag_mode="on",
+            )
+
+    # response_format is scoped to the message returned to the user, not to tool
+    # calls, so a forced tool choice drops it and keeps the tool constraint -- it
+    # is NOT the 400 that guided_*/structured_outputs get. This matches
+    # preprocessor/tool_choice.rs (clears gd.json) and vLLM's own
+    # ToolParser.adjust_request (sets response_format = None).
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+        ids=["required", "named"],
+    )
+    @pytest.mark.parametrize(
+        "response_format",
+        [
+            {"type": "json_object"},
+            {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+            },
+        ],
+        ids=["json_object", "json_schema"],
+    )
+    @pytest.mark.asyncio
+    async def test_forced_choice_with_response_format_keeps_tool_guidance(
+        self, tokenizer, tool_choice, response_format
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                **TOOL_REQUEST,
+                "tool_choice": tool_choice,
+                "response_format": response_format,
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+            structural_tag_mode="on",
+        )
+
+        # The parser's tool grammar survives; response_format is dropped rather
+        # than rejected or allowed to win.
+        assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+
+    # response_format={"type": "structural_tag"} is not a content format -- vLLM
+    # normalizes it into structured_outputs.structural_tag, a grammar over the
+    # whole token stream. A forced choice must reject it rather than silently
+    # discard it the way the json_object/json_schema variants are dropped.
+    @pytest.mark.asyncio
+    async def test_forced_choice_with_structural_tag_response_format_is_rejected(
+        self, tokenizer
+    ):
+        with pytest.raises(InvalidArgument):
+            await prepost_module.preprocess_chat_request(
+                {
+                    **TOOL_REQUEST,
+                    "tool_choice": "required",
+                    "response_format": {
+                        "type": "structural_tag",
+                        "format": {"type": "any_text"},
+                    },
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=_FakePassthroughToolParser,
+                structural_tag_mode="on",
+            )
+
+    # On the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path, an already-typed `tools`
+    # list means the request is never re-validated, so `tool_choice` stays a raw
+    # dict. vLLM branches on the typed named param: get_json_schema_from_tools
+    # returns None for a dict (no constraint at all) and get_structural_tag raises
+    # AttributeError on .model_dump(). Normalize once at the validation boundary.
+    def _fast_path_named_request(self, tokenizer):
+        typed_tools = _prepare_request(
+            TOOL_REQUEST, tokenizer=tokenizer, tool_parser_class=None
+        )[0].tools
+        return prepost_module._validate_chat_completion_request(
+            {
+                **TOOL_REQUEST,
+                "tools": typed_tools,
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            }
+        )
+
+    def test_raw_named_tool_choice_is_normalized_at_the_boundary(self, tokenizer):
+        request = self._fast_path_named_request(tokenizer)
+        assert not isinstance(request.tool_choice, dict)
+        assert request.tool_choice.function.name == "get_weather"
+
+    def test_normalized_named_choice_still_builds_json_schema(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._fast_path_named_request(tokenizer), None
+        )
+        assert guided is not None, "named forced choice must still be constrained"
+        assert "json" in guided
+
+    def test_normalized_named_choice_does_not_break_structural_tag(self, tokenizer):
+        # Regression: a raw dict reached vLLM's structural-tag registry and raised
+        # AttributeError on .model_dump(), surfacing as a 500 rather than a
+        # constraint. Uses the REAL hermes parser -- a fake never reaches the
+        # registry, so it cannot reproduce this.
+        from vllm.tool_parsers import ToolParserManager
+
+        hermes_cls = ToolParserManager.get_tool_parser("hermes")
+        request = self._fast_path_named_request(tokenizer)
+        parser = hermes_cls(tokenizer, request.tools)
+
+        guided = build_tool_call_guided_decoding(
+            request, parser, structural_tag_mode="on"
+        )
+
+        assert guided is not None
+        assert "structural_tag" in guided
+
+    # A malformed tool_choice object is not a named tool choice, so it must not be
+    # treated as forced and must not trigger the forced-choice conflict check.
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [{}, {"type": "function"}, {"type": "function", "function": {}}],
+        ids=["empty", "no_function", "no_name"],
+    )
+    def test_malformed_tool_choice_is_not_forced(self, tool_choice):
+        assert prepost_module._is_named_tool_choice(tool_choice) is False
+        assert prepost_module._is_forced_tool_choice(tool_choice) is False
+
+    # Legacy guided_* must resolve to a single constraint, not a merged dict.
+    @pytest.mark.asyncio
+    async def test_legacy_guided_fields_yield_single_constraint(self, tokenizer):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "guided_json": {"type": "object"},
+                "guided_regex": "\\d+",
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=None,
+        )
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    # Keep vLLM's guidance decisions aligned with the shared backend matrix.
+    @pytest.mark.parametrize(
+        "case",
+        TOOL_GUIDANCE_PARITY_CASES,
+        ids=lambda case: case.name,
+    )
+    @pytest.mark.asyncio
+    async def test_shared_tool_guidance_policy(self, tokenizer, case):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        if case.has_tools:
+            request["tools"] = [parity_tool()]
+            request["tool_choice"] = tool_choice_value(case.tool_choice)
+        if case.has_assistant_constraint:
+            request["response_format"] = assistant_response_format()
+
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert (
+            classify_guidance_source(
+                result.guided_decoding,
+                has_assistant_constraint=case.has_assistant_constraint,
+            )
+            == case.expected
+        )
+
+    def test_tool_choice_none_does_not_request_vllm_guidance(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice="none"),
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
+        )
+
+        assert guided is None
+        assert parser.requests == []
+
+    @pytest.mark.parametrize(
+        "schema_mode, expects_unconstrained_schema",
+        [("auto", True), ("strict", False)],
+    )
+    def test_vllm_parser_receives_schema_mode(
+        self, tokenizer, schema_mode, expects_unconstrained_schema
+    ):
+        tools = [
+            TOOL_REQUEST["tools"][0],
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_temperature",
+                    "description": "Get the temperature for a location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                    "strict": False,
+                },
+            },
+        ]
+        tools[0] = {
+            **tools[0],
+            "function": {**tools[0]["function"], "strict": True},
+        }
+        request = self._request(tokenizer, tools=tools)
+        parser = _FakeStructuralTagParser()
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema=schema_mode,
+        )
+
+        assert guided is not None
+        strict_values = guided["structural_tag"]["format"]["strict"]
+        assert strict_values == [True, not expects_unconstrained_schema]
+
+    def test_auto_scope_requires_parallel_tool_calls_to_be_explicit(self, tokenizer):
+        explicit_request = self._request(tokenizer, parallel_tool_calls=False)
+        request = type(explicit_request).model_construct(
+            _fields_set=explicit_request.model_fields_set - {"parallel_tool_calls"},
+            **explicit_request.__dict__,
+        )
+
+        assert request.parallel_tool_calls is False
+        assert "parallel_tool_calls" not in request.model_fields_set
+        assert not prepost_module._should_build_tool_call_guidance(
+            request,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
+        )
+
+    @pytest.mark.parametrize(
+        "mode, tool_choice, scope, strict, parallel, expected",
+        [
+            ("off", "auto", "always", False, None, False),
+            ("off", "none", "always", False, None, False),
+            (
+                "on",
+                {"type": "function", "function": {"name": "get_weather"}},
+                "auto",
+                False,
+                None,
+                True,
+            ),
+            ("on", "none", "auto", False, None, False),
+            ("on", "required", "auto", False, None, True),
+            ("on", "auto", "always", False, None, True),
+            ("on", "auto", "auto", True, None, True),
+            ("on", "auto", "auto", False, False, True),
+            ("on", "auto", "auto", False, None, False),
+        ],
+    )
+    def test_runtime_policy_matrix(
+        self,
+        tokenizer,
+        mode,
+        tool_choice,
+        scope,
+        strict,
+        parallel,
+        expected,
+    ):
+        request = self._request(
+            tokenizer,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel,
+            tools=[
+                {
+                    **TOOL_REQUEST["tools"][0],
+                    "function": {
+                        **TOOL_REQUEST["tools"][0]["function"],
+                        "strict": strict,
+                    },
+                }
+            ],
+        )
+
+        assert (
+            prepost_module._should_build_tool_call_guidance(
+                request,
+                structural_tag_mode=mode,
+                structural_tag_scope=scope,
+            )
+            is expected
+        )
+
+
 # ---------------------------------------------------------------------------
 # _prepare_request: chat_template_kwargs forwarding
 # ---------------------------------------------------------------------------
@@ -1174,3 +1808,75 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
+
+
+def test_runtime_config_structural_tag_options(vllm_processor_module):
+    mdc = SimpleNamespace(
+        runtime_config=lambda: {
+            "structural_tag_mode": "on",
+            "structural_tag_scope": "always",
+            "structural_tag_schema": "strict",
+        }
+    )
+
+    assert vllm_processor_module._runtime_config_structural_tag_options(mdc) == (
+        "on",
+        "always",
+        "strict",
+    )
+
+
+# Regression: MistralTokenizer (--tokenizer-mode mistral) has no chat_template
+# attribute; a direct read used to crash vLLM preprocessing.
+
+
+def _make_mistral_tokenizer():
+    # Bare instance: these tests only touch attribute access, not tokenization.
+    from vllm.tokenizers.mistral import MistralTokenizer
+
+    return MistralTokenizer.__new__(MistralTokenizer)
+
+
+def test_mistral_tokenizer_has_no_chat_template_attribute():
+    """Direct read raises; getattr is safe; the attribute is assignable."""
+    tok = _make_mistral_tokenizer()
+
+    with pytest.raises(AttributeError):
+        _ = tok.chat_template
+
+    assert getattr(tok, "chat_template", None) is None
+    tok.chat_template = "x"
+    assert tok.chat_template == "x"
+
+
+def test_ensure_chat_template_mistral_no_crash(vllm_processor_module, tmp_path):
+    """_ensure_chat_template leaves a MistralTokenizer untouched (no attribute)."""
+    tok = _make_mistral_tokenizer()
+
+    vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
+
+    assert not hasattr(tok, "chat_template")
+
+
+def test_ensure_chat_template_mistral_ignores_on_disk_template(
+    vllm_processor_module, tmp_path
+):
+    """A chat_template.jinja beside a Mistral model is not attached to it."""
+    (tmp_path / "chat_template.jinja").write_text("{{ messages }}")
+    tok = _make_mistral_tokenizer()
+
+    vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
+
+    assert not hasattr(tok, "chat_template")
+
+
+def test_ensure_chat_template_preserves_existing_hf_template(
+    vllm_processor_module, tokenizer, tmp_path
+):
+    """An HF tokenizer's existing chat_template is left untouched."""
+    existing = tokenizer.chat_template
+    assert existing is not None
+
+    vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
+
+    assert tokenizer.chat_template == existing

@@ -46,11 +46,12 @@ For deployment modes and quick start steps, see the [Router Guide](router-guide.
 - Use dynamic discovery with KV routing so the router can track worker instances and KV cache state
 
 **Multimodal Support:**
-- **Image routing via multimodal hashes**: Supported in the documented TRT-LLM and vLLM router paths.
+- **Image routing via multimodal hashes**: Supported in the documented SGLang, TRT-LLM, and vLLM router paths. SGLang needs the hash-forwarding patch that Dynamo's own image ships; a custom build without it serves the request but routes on the text prefix alone.
 - **Other backend or modality combinations**: Check the backend-specific multimodal docs before relying on multimodal hash routing.
 
 **Limitations:**
 - Static endpoints are not supported with KV routing; use dynamic discovery so the router can track worker instances and KV cache state
+- With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware. Direct, power-of-two, least-loaded, and device-aware-weighted modes fail startup. Session affinity is supported with LoRA only in KV mode; LoRA plus random or round-robin affinity is rejected.
 
 For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, `--router-mode power-of-two`, `--router-mode least-loaded`, or `--router-mode device-aware-weighted` with both static and dynamic endpoints.
 
@@ -67,6 +68,7 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 - **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Test layers from Rust unit tests to fixture-backed replay and full process E2E
+- **[Multi-DC KV Routing](multi-dc-kv-routing.md)**: Cross-datacenter KV routing and the DC Relay (experimental)
 - **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service for independent scaling
 - **[Standalone Selection Service](standalone-selection.md)**: Expose KV-aware selection and reservation accounting over HTTP
 - **[Standalone Slot Tracker](standalone-slot-tracker.md)**: Run active-request load accounting as a separate HTTP service
