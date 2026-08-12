@@ -49,6 +49,36 @@ impl SharedFinishReasonMetadata {
         self.state.lock()
     }
 
+    pub(super) fn record_backend_finish_reason(
+        &self,
+        choice_index: Option<u32>,
+        backend_finish_reason: Option<String>,
+        stop_reason: Option<dynamo_protocols::types::StopReason>,
+    ) {
+        self.lock()
+            .record_backend_finish_reason(choice_index, backend_finish_reason, stop_reason);
+    }
+
+    pub(super) fn record_choice_finish_reason(
+        &self,
+        choice_index: u32,
+        finish_reason: dynamo_protocols::types::FinishReason,
+    ) {
+        self.lock()
+            .record_choice_finish_reason(choice_index, finish_reason);
+    }
+
+    pub(super) fn record_tool_call(
+        &self,
+        choice_index: u32,
+        tool_call_index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) {
+        self.lock()
+            .record_tool_call_chunk(choice_index, tool_call_index, id, name);
+    }
+
     #[cfg(feature = "request-trace-bench")]
     #[doc(hidden)]
     pub fn record_tool_call_chunk_for_bench(

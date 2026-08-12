@@ -11,6 +11,7 @@ mod record;
 mod replay;
 #[cfg(feature = "request-trace-s3")]
 mod s3_sink;
+mod sglang;
 pub mod sink;
 mod tool_relay;
 pub mod types;
@@ -39,6 +40,7 @@ pub(crate) use integration::{
 };
 pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
+pub(crate) use sglang::SglangRequestTrace;
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
     RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTracePayload,
