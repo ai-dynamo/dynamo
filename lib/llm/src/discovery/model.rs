@@ -40,6 +40,7 @@ pub(crate) struct GenerateWorkerRuntime {
 /// Generate metadata read only while request-end tracing is active.
 pub(crate) struct GenerateTraceConfig {
     pub(crate) tool_call_parser: Option<String>,
+    pub(crate) tokenizer: Option<crate::tokenizers::Tokenizer>,
     pub(crate) kv_cache_block_size: u32,
 }
 
@@ -683,6 +684,7 @@ impl Model {
                                     .cloned()
                             },
                         ),
+                        tokenizer: worker_set.generate_trace_tokenizer.clone(),
                         kv_cache_block_size: card.kv_cache_block_size,
                     }
                 }),
