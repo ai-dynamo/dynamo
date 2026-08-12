@@ -166,7 +166,7 @@ async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
     assert runtime_config.data_parallel_size == 2
     assert json.loads(
         runtime_config.runtime_data[ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY]
-    ) == {"4": "tcp://worker-a:23280", "5": "tcp://worker-a:23281"}
+    ) == {"4": "tcp://worker-a:24000", "5": "tcp://worker-a:24001"}
 
 
 @pytest.mark.asyncio
