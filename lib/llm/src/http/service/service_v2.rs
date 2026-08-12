@@ -866,13 +866,21 @@ impl HttpService {
         &self.route_docs
     }
 
-    pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+    /// Updates runtime availability for model-backed endpoints.
+    ///
+    /// Batch API availability is configured when the service is built and cannot be changed here.
+    pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) -> Result<()> {
+        if endpoint_type == EndpointType::Batch {
+            anyhow::bail!("batch endpoint availability is fixed when the HTTP service is built");
+        }
+
         self.state.flags.set(&endpoint_type, enable);
         tracing::info!(
             "{} endpoints {}",
             endpoint_type.as_str(),
             if enable { "enabled" } else { "disabled" }
         );
+        Ok(())
     }
 }
 
@@ -1105,6 +1113,7 @@ impl HttpServiceConfigBuilder {
             &config.request_template,
             anthropic_endpoints_enabled,
             generate_endpoint_enabled,
+            config.enable_batch_endpoints,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1224,6 +1233,7 @@ impl HttpServiceConfigBuilder {
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
         enable_generate_endpoint: bool,
+        enable_batch_endpoints: bool,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
@@ -1245,11 +1255,6 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
-        let (batch_docs, batch_route) = super::openai::batch_router(
-            state.clone(),
-            var(HTTP_SVC_FILES_PATH_ENV).ok(),
-            var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
-        );
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
@@ -1259,7 +1264,15 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
-        endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
+
+        if enable_batch_endpoints {
+            let (batch_docs, batch_route) = super::openai::batch_router(
+                state.clone(),
+                var(HTTP_SVC_FILES_PATH_ENV).ok(),
+                var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+            );
+            endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
+        }
 
         if enable_anthropic_endpoints {
             tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
@@ -1328,6 +1341,32 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[test]
+    fn batch_endpoint_enablement_is_fixed_at_build_time() {
+        let disabled = HttpService::builder().build().unwrap();
+        let error = disabled
+            .enable_model_endpoint(EndpointType::Batch, true)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "batch endpoint availability is fixed when the HTTP service is built"
+        );
+        assert!(!disabled.state.flags.get(&EndpointType::Batch));
+
+        let enabled = HttpService::builder()
+            .enable_batch_endpoints(true)
+            .build()
+            .unwrap();
+        let error = enabled
+            .enable_model_endpoint(EndpointType::Batch, false)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "batch endpoint availability is fixed when the HTTP service is built"
+        );
+        assert!(enabled.state.flags.get(&EndpointType::Batch));
     }
 
     #[tokio::test]
