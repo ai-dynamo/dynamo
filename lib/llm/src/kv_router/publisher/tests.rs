@@ -313,6 +313,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            source_kind: None,
         };
 
         let out = convert_event(
@@ -346,6 +347,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            source_kind: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -361,6 +363,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            source_kind: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -417,6 +420,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            source_kind: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -432,6 +436,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            source_kind: None,
         };
 
         let out1 = convert_event(
@@ -533,6 +538,7 @@ mod test_event_processing {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            source_kind: None,
         };
         let out = convert_event(
             raw_evt,
@@ -550,7 +556,7 @@ mod test_event_processing {
     #[test]
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
-        let raw_evt = RawKvEvent::AllBlocksCleared;
+        let raw_evt = RawKvEvent::AllBlocksCleared { source_kind: None };
         let out = convert_event(
             raw_evt,
             1,
@@ -1604,6 +1610,7 @@ mod tests_startup_helpers {
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
                 locality: None,
+                source_kind: None,
             }],
             data_parallel_rank: Some(0),
         };

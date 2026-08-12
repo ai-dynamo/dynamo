@@ -29,6 +29,7 @@ mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
+mod state_agent;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
@@ -46,6 +47,10 @@ pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheUpdate,
 };
 use sinks::EventPlanePublisher;
+pub use state_agent::{
+    KvStateAgent, KvStateAgentConfig, KvStateAgentRawMode, KvStateAgentSlotConfig,
+    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+};
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 

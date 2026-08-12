@@ -12,7 +12,7 @@ use dynamo_kv_router::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
         ThreadPoolIndexer, record_unsupported_residency_event,
     },
-    protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
+    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -42,9 +42,12 @@ pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
     RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
+pub(crate) use recovery::{
+    RuntimeWorkerQueryTransport, start_subscriber, start_worker_kv_query_endpoint,
+    start_worker_kv_query_endpoint_with_status,
+};
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
-pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
@@ -78,6 +81,19 @@ pub enum Indexer {
 }
 
 impl Indexer {
+    /// Publish a control-plane projection snapshot for subsequent lookups.
+    ///
+    /// Discovery and attachment reconciliation stay in lib/llm; router-core
+    /// only consumes this immutable resolved view.
+    pub fn set_residency_projection(&self, projection: ResidencyProjection) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_projection(projection)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
     pub(crate) fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }

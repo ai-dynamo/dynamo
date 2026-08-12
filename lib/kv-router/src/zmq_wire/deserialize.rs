@@ -10,7 +10,9 @@ use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use crate::protocols::BlockExtraInfo;
 
 use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
-use super::filter::{BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField};
+use super::filter::{
+    BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField, KvCacheSpecKind,
+};
 use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
@@ -53,6 +55,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
         let mut locality: Option<Option<Locality>> = None;
+        let mut source_kind: Option<Option<String>> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -99,6 +102,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "locality" => {
                     locality = Some(map.next_value()?);
                 }
+                "source_kind" => {
+                    source_kind = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -136,6 +142,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                     locality: locality.unwrap_or(None),
+                    source_kind: source_kind.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -149,9 +156,12 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                     locality: locality.unwrap_or(None),
+                    source_kind: source_kind.unwrap_or(None),
                 })
             }
-            Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
+            Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared {
+                source_kind: source_kind.unwrap_or(None),
+            }),
             Some("Ignored") => Ok(RawKvEvent::Ignored),
             Some(other) => Err(de::Error::unknown_variant(
                 other,
@@ -191,29 +201,18 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
-                let mut block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = None;
-                let mut metadata = KvCacheEventMetadata::default();
-
-                for _ in 0..4 {
-                    let trailing: Option<BlockStoredTrailingField> =
-                        seq.next_element()?.unwrap_or(None);
-                    match trailing {
-                        Some(BlockStoredTrailingField::Common(trailing)) => {
-                            metadata.record_trailing(trailing);
-                        }
-                        Some(BlockStoredTrailingField::BlockMmInfos(infos)) => {
-                            block_mm_infos = Some(infos);
-                        }
-                        None => {}
-                    }
+                let mut trailing = Vec::new();
+                while let Some(field) = seq.next_element::<Option<BlockStoredTrailingField>>()? {
+                    trailing.push(field);
                 }
 
-                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                let parsed = parse_block_stored_trailing::<A::Error>(trailing)?;
 
                 let cache_namespace =
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
-                let block_mm_infos =
-                    block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
+                let block_mm_infos = parsed
+                    .block_mm_infos
+                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
                 let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
 
                 Ok(RawKvEvent::BlockStored {
@@ -226,10 +225,11 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     cache_namespace,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
-                    group_idx: metadata.group_idx,
-                    kv_cache_spec_kind: metadata.kv_cache_spec_kind,
-                    kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
-                    locality: None,
+                    group_idx: parsed.metadata.group_idx,
+                    kv_cache_spec_kind: parsed.metadata.kv_cache_spec_kind,
+                    kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
+                    locality: parsed.locality,
+                    source_kind: parsed.source_kind,
                 })
             }
             "BlockRemoved" => {
@@ -237,30 +237,26 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
-                let mut metadata = KvCacheEventMetadata::default();
-
-                for _ in 0..3 {
-                    let trailing: Option<KvCacheEventTrailingField> =
-                        seq.next_element()?.unwrap_or(None);
-                    if let Some(trailing) = trailing {
-                        metadata.record_trailing(trailing);
-                    }
+                let mut trailing = Vec::new();
+                while let Some(field) = seq.next_element::<Option<KvCacheEventTrailingField>>()? {
+                    trailing.push(field);
                 }
-
-                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                let parsed = parse_common_trailing::<A::Error>(trailing)?;
 
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium,
-                    group_idx: metadata.group_idx,
-                    kv_cache_spec_kind: metadata.kv_cache_spec_kind,
-                    kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
-                    locality: None,
+                    group_idx: parsed.metadata.group_idx,
+                    kv_cache_spec_kind: parsed.metadata.kv_cache_spec_kind,
+                    kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
+                    locality: parsed.locality,
+                    source_kind: parsed.source_kind,
                 })
             }
             "AllBlocksCleared" => {
+                let source_kind: Option<String> = seq.next_element()?.unwrap_or(None);
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(RawKvEvent::AllBlocksCleared)
+                Ok(RawKvEvent::AllBlocksCleared { source_kind })
             }
             "Ignored" => {
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
@@ -271,6 +267,156 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 &["BlockStored", "BlockRemoved", "AllBlocksCleared", "Ignored"],
             )),
         }
+    }
+}
+
+struct ParsedCommonTrailing {
+    metadata: KvCacheEventMetadata,
+    locality: Option<Locality>,
+    source_kind: Option<String>,
+}
+
+struct ParsedBlockStoredTrailing {
+    metadata: KvCacheEventMetadata,
+    block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+    locality: Option<Locality>,
+    source_kind: Option<String>,
+}
+
+fn parse_block_stored_trailing<E>(
+    trailing: Vec<Option<BlockStoredTrailingField>>,
+) -> Result<ParsedBlockStoredTrailing, E>
+where
+    E: de::Error,
+{
+    let has_legacy_mm_infos = trailing
+        .iter()
+        .flatten()
+        .any(|field| matches!(field, BlockStoredTrailingField::BlockMmInfos(_)));
+
+    if trailing.len() >= 4 && !has_legacy_mm_infos {
+        let common = trailing
+            .into_iter()
+            .map(|field| match field {
+                Some(BlockStoredTrailingField::Common(field)) => Some(field),
+                Some(BlockStoredTrailingField::BlockMmInfos(_)) => unreachable!(),
+                None => None,
+            })
+            .collect();
+        let parsed = parse_fixed_trailing::<E>(common)?;
+        return Ok(ParsedBlockStoredTrailing {
+            metadata: parsed.metadata,
+            block_mm_infos: None,
+            locality: parsed.locality,
+            source_kind: parsed.source_kind,
+        });
+    }
+
+    // Compatibility shim for the older short tuple forms. They appended
+    // metadata opportunistically and could include block_mm_infos directly.
+    let mut metadata = KvCacheEventMetadata::default();
+    let mut block_mm_infos = None;
+    for field in trailing.into_iter().flatten() {
+        match field {
+            BlockStoredTrailingField::Common(field) => metadata.record_legacy_trailing(field),
+            BlockStoredTrailingField::BlockMmInfos(infos) => block_mm_infos = Some(infos),
+        }
+    }
+    Ok(ParsedBlockStoredTrailing {
+        metadata,
+        block_mm_infos,
+        locality: None,
+        source_kind: None,
+    })
+}
+
+fn parse_common_trailing<E>(
+    trailing: Vec<Option<KvCacheEventTrailingField>>,
+) -> Result<ParsedCommonTrailing, E>
+where
+    E: de::Error,
+{
+    if trailing.len() >= 4 {
+        return parse_fixed_trailing::<E>(trailing);
+    }
+
+    // Compatibility shim for legacy tuples that omitted unused positional
+    // slots and therefore did not have a fixed trailing-field layout.
+    let mut metadata = KvCacheEventMetadata::default();
+    for field in trailing.into_iter().flatten() {
+        metadata.record_legacy_trailing(field);
+    }
+    Ok(ParsedCommonTrailing {
+        metadata,
+        locality: None,
+        source_kind: None,
+    })
+}
+
+fn parse_fixed_trailing<E>(
+    mut trailing: Vec<Option<KvCacheEventTrailingField>>,
+) -> Result<ParsedCommonTrailing, E>
+where
+    E: de::Error,
+{
+    // Current production order is group, cache kind, sliding window, locality,
+    // then source kind. New fields must remain append-only.
+    trailing.resize_with(5, || None);
+    let mut fields = trailing.into_iter();
+    let group_idx = parse_unsigned::<E>(fields.next().flatten(), "group_idx")?;
+    let kv_cache_spec_kind = parse_text::<E>(fields.next().flatten(), "kv_cache_spec_kind")?
+        .map(|kind| KvCacheSpecKind::from_wire(&kind));
+    let kv_cache_spec_sliding_window =
+        parse_unsigned::<E>(fields.next().flatten(), "kv_cache_spec_sliding_window")?;
+    let locality = parse_text::<E>(fields.next().flatten(), "locality")?.map(|locality| {
+        match locality.as_str() {
+            "LOCAL" => Locality::Local,
+            "REMOTE" => Locality::Remote,
+            _ => Locality::Unknown,
+        }
+    });
+    let source_kind = parse_text::<E>(fields.next().flatten(), "source_kind")?;
+
+    Ok(ParsedCommonTrailing {
+        metadata: KvCacheEventMetadata {
+            group_idx,
+            kv_cache_spec_kind,
+            kv_cache_spec_sliding_window,
+        },
+        locality,
+        source_kind,
+    })
+}
+
+fn parse_unsigned<E>(
+    field: Option<KvCacheEventTrailingField>,
+    name: &'static str,
+) -> Result<Option<u32>, E>
+where
+    E: de::Error,
+{
+    match field {
+        Some(KvCacheEventTrailingField::Unsigned(value)) => Ok(Some(value)),
+        Some(KvCacheEventTrailingField::Text(_)) => Err(E::custom(format_args!(
+            "expected unsigned integer or nil for {name}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn parse_text<E>(
+    field: Option<KvCacheEventTrailingField>,
+    name: &'static str,
+) -> Result<Option<String>, E>
+where
+    E: de::Error,
+{
+    match field {
+        Some(KvCacheEventTrailingField::Text(value)) => Ok(Some(value)),
+        Some(KvCacheEventTrailingField::Unsigned(_)) => {
+            Err(E::custom(format_args!("expected string or nil for {name}")))
+        }
+        None => Ok(None),
     }
 }
 

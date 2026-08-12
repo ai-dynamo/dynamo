@@ -10,8 +10,8 @@ use crate::protocols::BlockExtraInfo;
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(super) enum KvCacheEventTrailingField {
-    GroupIdx(u32),
-    KvCacheSpecKind(KvCacheSpecKind),
+    Unsigned(u32),
+    Text(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,17 +107,17 @@ pub(crate) struct KvCacheEventMetadata {
 }
 
 impl KvCacheEventMetadata {
-    pub(super) fn record_trailing(&mut self, trailing: KvCacheEventTrailingField) {
+    pub(super) fn record_legacy_trailing(&mut self, trailing: KvCacheEventTrailingField) {
         match trailing {
-            KvCacheEventTrailingField::GroupIdx(value) => {
+            KvCacheEventTrailingField::Unsigned(value) => {
                 if self.group_idx.is_none() {
                     self.group_idx = Some(value);
                 } else if self.kv_cache_spec_sliding_window.is_none() {
                     self.kv_cache_spec_sliding_window = Some(value);
                 }
             }
-            KvCacheEventTrailingField::KvCacheSpecKind(kind) => {
-                self.kv_cache_spec_kind = Some(kind);
+            KvCacheEventTrailingField::Text(kind) => {
+                self.kv_cache_spec_kind = Some(KvCacheSpecKind::from_wire(&kind));
             }
         }
     }

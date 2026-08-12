@@ -288,7 +288,12 @@ async fn zmq_multipart_parsing() {
             .expect("send 1-frame");
 
         // 4-frame (bad).
-        let good_payload = TestBatch(0.0, vec![RawKvEvent::AllBlocksCleared], None).encode();
+        let good_payload = TestBatch(
+            0.0,
+            vec![RawKvEvent::AllBlocksCleared { source_kind: None }],
+            None,
+        )
+        .encode();
         pub_handle
             .send_frames(vec![vec![], vec![0u8; 8], good_payload.clone(), vec![0u8]])
             .await

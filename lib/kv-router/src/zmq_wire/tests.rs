@@ -52,6 +52,32 @@ fn test_deserialize_bigram_block_stored_sequence() {
     }
 }
 
+#[test]
+fn source_kind_is_additive_on_positional_events() {
+    let stored = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Some("CPU_PINNED"),
+        Option::<String>::None,
+        Option::<u8>::None,
+        Option::<u32>::None,
+        Some("full_attention"),
+        Option::<u32>::None,
+        Some("LOCAL"),
+        Some("kvcc"),
+    );
+    let stored: RawKvEvent = from_slice(&to_vec(&stored).unwrap()).unwrap();
+    assert_eq!(stored.source_kind(), Ok(KvEventSourceKind::Kvcc));
+    assert_eq!(stored.locality(), Some(Locality::Local));
+
+    let cleared: RawKvEvent = from_slice(&to_vec(&("AllBlocksCleared", "kvcc")).unwrap()).unwrap();
+    assert_eq!(cleared.source_kind(), Ok(KvEventSourceKind::Kvcc));
+}
+
 #[derive(Serialize)]
 struct MapBlockStoredFixture {
     #[serde(rename = "type")]
@@ -68,6 +94,8 @@ struct MapBlockStoredFixture {
     extra_keys: Option<Vec<Option<Vec<String>>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     locality: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_kind: Option<&'static str>,
 }
 
 impl Default for MapBlockStoredFixture {
@@ -83,6 +111,7 @@ impl Default for MapBlockStoredFixture {
             cache_salt: None,
             extra_keys: None,
             locality: None,
+            source_kind: None,
         }
     }
 }
@@ -94,6 +123,20 @@ struct MapBlockRemovedFixture {
     block_hashes: Vec<BlockHashValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     locality: Option<&'static str>,
+}
+
+#[test]
+fn source_kind_is_additive_on_named_map_events() {
+    let encoded = to_vec_named(&MapBlockStoredFixture {
+        medium: Some("CPU_PINNED".to_string()),
+        locality: Some("LOCAL"),
+        source_kind: Some("kvcc"),
+        ..Default::default()
+    })
+    .unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+    assert_eq!(event.source_kind(), Ok(KvEventSourceKind::Kvcc));
+    assert_eq!(event.locality(), Some(Locality::Local));
 }
 
 #[test]
@@ -644,6 +687,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     };
     let child = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(2)],
@@ -659,6 +703,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     };
 
     assert!(normalizer.preprocess(parent, worker).is_some());
@@ -703,6 +748,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     };
 
     assert!(normalizer.preprocess(event, worker).is_some());
@@ -735,6 +781,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
+            source_kind: None,
         };
 
     let parent_a = stored(Some("tenant-a"), vec![BlockHashValue::Unsigned(1)], None);
@@ -773,6 +820,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     };
     let child = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(2)],
@@ -788,6 +836,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     };
 
     assert!(normalizer.preprocess(parent, worker).is_some());
@@ -834,6 +883,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
     let placement_event = convert_event(
@@ -908,6 +958,7 @@ fn cpu_block_stored(fixture: CpuBlockStoredFixture<'_>) -> RawKvEvent {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     }
 }
 
@@ -1089,6 +1140,7 @@ fn raw_placement_event(
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality,
+            source_kind: None,
         },
         TestEventKind::BlockRemoved => RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(1)],
@@ -1097,6 +1149,7 @@ fn raw_placement_event(
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality,
+            source_kind: None,
         },
     }
 }
@@ -1271,6 +1324,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
     let placement = convert_event(
@@ -1315,6 +1369,7 @@ fn namespaced_block_stored(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        source_kind: None,
     }
 }
 

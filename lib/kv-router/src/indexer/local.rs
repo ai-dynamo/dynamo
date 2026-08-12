@@ -313,6 +313,11 @@ impl LocalKvIndexer {
         start_id.unwrap() >= first_buffered
     }
 
+    /// Newest locally applied outbound event cursor.
+    pub fn current_event_id(&self) -> u64 {
+        self.current_buffer_last_event_id().unwrap_or(0)
+    }
+
     /// Record an event in the buffer
     fn record_event(&self, event: RouterEvent) -> bool {
         let mut buffer = self.event_buffer.lock().unwrap();
@@ -353,6 +358,28 @@ impl LocalKvIndexer {
     /// This forwards the event to the underlying indexer and records it on success.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         let result = self.apply_event_by_tier(&event).await;
+        self.record_applied_event(event, result).await
+    }
+
+    /// Apply one state-agent event through a result-bearing backend path.
+    ///
+    /// The legacy publisher keeps its best-effort queue-admission behavior.
+    /// State-agent publication and recovery cursors require the stronger
+    /// boundary: record the event only after the selected physical index has
+    /// acknowledged the mutation.
+    pub async fn apply_event_with_buffer_acknowledged(
+        &self,
+        event: RouterEvent,
+    ) -> Result<(), KvRouterError> {
+        let result = self.apply_event_by_tier_acknowledged(&event).await;
+        self.record_applied_event(event, result).await
+    }
+
+    async fn record_applied_event(
+        &self,
+        event: RouterEvent,
+        result: Result<(), KvRouterError>,
+    ) -> Result<(), KvRouterError> {
         if result.is_ok() {
             let should_invalidate = matches!(event.event.data, KvCacheEventData::Cleared);
             let detected_gap = self.record_event(event);
@@ -721,9 +748,7 @@ impl LocalKvIndexer {
 
     async fn apply_event_to_lower_tier(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         self.get_or_create_lower_tier_indexer(event.storage_tier)
-            .apply_event(event)
-            .await;
-        Ok(())
+            .enqueue_event(event)
     }
 
     async fn apply_event_by_tier(&self, event: &RouterEvent) -> Result<(), KvRouterError> {
@@ -747,6 +772,34 @@ impl LocalKvIndexer {
         } else {
             self.apply_event_to_lower_tier(event.clone()).await
         }
+    }
+
+    async fn apply_event_by_tier_acknowledged(
+        &self,
+        event: &RouterEvent,
+    ) -> Result<(), KvRouterError> {
+        let targets_primary = match event.targets_primary() {
+            Ok(targets_primary) => targets_primary,
+            Err(error) => {
+                record_unsupported_residency_event(Some(&self.metrics), event);
+                return Err(KvRouterError::Unsupported(error.to_string()));
+            }
+        };
+        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+            if targets_primary {
+                self.indexer.apply_event_and_wait(event.clone()).await?;
+            }
+            for indexer in self.all_lower_tier_indexers() {
+                indexer.apply_event_and_wait(event.clone()).await?;
+            }
+        } else if targets_primary {
+            self.indexer.apply_event_and_wait(event.clone()).await?;
+        } else {
+            self.get_or_create_lower_tier_indexer(event.storage_tier)
+                .apply_event_and_wait(event.clone())
+                .await?;
+        }
+        Ok(())
     }
 
     fn get_or_create_lower_tier_indexer(
@@ -852,14 +905,31 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::LocalKvIndexer;
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
     use crate::indexer::{
         KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation, WorkerKvQueryResponse,
     };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain, RouterEvent,
-        StorageTier, WorkerWithDpRank,
+        KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain, ResidencyProjection,
+        RouterEvent, StorageTier, WorkerWithDpRank,
     };
+
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        )
+    }
 
     fn lower_tier_store_event(
         worker_id: u64,
@@ -897,7 +967,7 @@ mod tests {
         block_hash: u64,
         residency_domain: ResidencyDomain,
     ) -> RouterEvent {
-        RouterEvent::with_residency_domain(
+        let event = RouterEvent::with_residency_domain(
             worker_id,
             KvCacheEvent {
                 event_id,
@@ -914,7 +984,11 @@ mod tests {
             },
             StorageTier::HostPinned,
             residency_domain,
-        )
+        );
+        match residency_domain {
+            ResidencyDomain::Worker => event,
+            ResidencyDomain::CacheOwner => event.with_state_source(cache_owner_id()),
+        }
     }
 
     fn lower_tier_hits(
@@ -940,9 +1014,20 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(parent_hash)),
         );
 
+        let projection = ResidencyProjection::new([(
+            cache_owner_id(),
+            WorkerWithDpRank::new(worker_id, dp_rank),
+        )])
+        .unwrap();
         lower_tier_indexer
             .backend()
-            .query_contiguous_hits(&[LocalBlockHash(tokens_hash)], &continuations)
+            .query_match_details_with_options_and_projection(
+                &[LocalBlockHash(tokens_hash)],
+                &continuations,
+                false,
+                &projection,
+            )
+            .hits
             .get(&WorkerWithDpRank::new(worker_id, dp_rank))
             .copied()
             .unwrap_or(0)
@@ -1145,10 +1230,13 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 tier.backend()
-                    .query_contiguous_hits(
+                    .query_match_details_with_options_and_projection(
                         &[LocalBlockHash(11), LocalBlockHash(12)],
-                        &continuations
+                        &continuations,
+                        false,
+                        &ResidencyProjection::new([(cache_owner_id(), worker)]).unwrap(),
                     )
+                    .hits
                     .get(&worker),
                 Some(&2)
             );

@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::StorageTier as RouterStorageTier;
-use dynamo_kv_router::zmq_wire::{Locality, RawKvEvent};
+use dynamo_kv_router::zmq_wire::{KvEventSourceKind, Locality, RawKvEvent};
 
 use super::SharedCacheStatusTracker;
 use super::tracker::{
@@ -153,6 +153,10 @@ fn process_event(
     data_parallel_rank: Option<i32>,
     engine_source: EventSource,
 ) {
+    if event.source_kind() != Ok(KvEventSourceKind::Framework) {
+        tracing::warn!("Ignoring non-framework event on the legacy consolidator stream");
+        return;
+    }
     // G1-only ingress: this source is the engine's local device (G1) cache.
     // Non-local events (REMOTE / unknown locality), native lower-tier media
     // (CPU offload, vLLM STORAGE), and unrecognized media (fail-closed) belong
@@ -260,7 +264,7 @@ fn process_event(
             }
         }
 
-        RawKvEvent::AllBlocksCleared => {
+        RawKvEvent::AllBlocksCleared { .. } => {
             tracing::debug!("Processing AllBlocksCleared");
             tracker.handle_clear_all();
         }
@@ -290,6 +294,7 @@ mod tests {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality,
+            source_kind: None,
         }
     }
 
