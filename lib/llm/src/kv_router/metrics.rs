@@ -44,7 +44,8 @@
 //!
 //! See also: `docs/observability/metrics.md` (Router Metrics section).
 
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use dynamo_runtime::component::Component;
@@ -80,6 +81,36 @@ fn async_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
 }
 
+/// Process-wide cache of component-scoped metric structs, keyed by the
+/// component's `namespace.component` path.
+type ComponentMetricsCache<T> = LazyLock<Mutex<HashMap<String, Arc<T>>>>;
+
+const fn component_metrics_cache<T>() -> ComponentMetricsCache<T> {
+    LazyLock::new(|| Mutex::new(HashMap::new()))
+}
+
+/// Memoize a component-scoped metric struct **per component**, not per process.
+///
+/// `Component::metrics()` injects `dynamo_namespace` / `dynamo_component` from the
+/// component's position in the metrics hierarchy, so the metrics a struct owns are
+/// only correct for the component that created them. A single process can host
+/// several components: a frontend that discovers the same model in more than one
+/// namespace builds one router per namespace. Memoizing these structs in a plain
+/// `OnceLock` let the first component to initialize win, and every other namespace's
+/// router then incremented counters carrying the first namespace's labels. Keying by
+/// component keeps one correctly-labeled set per namespace.
+fn component_scoped<T>(
+    cache: &ComponentMetricsCache<T>,
+    component: &Component,
+    init: impl FnOnce() -> Arc<T>,
+) -> Arc<T> {
+    let mut entries = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    entries
+        .entry(component.to_string())
+        .or_insert_with(init)
+        .clone()
+}
+
 // ---------------------------------------------------------------------------
 // KV publisher metrics
 // ---------------------------------------------------------------------------
@@ -100,17 +131,17 @@ pub(crate) struct KvPublisherMetrics {
     pub zmq_suspicious_events_total: IntCounterVec,
 }
 
-static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
+static KV_PUBLISHER_METRICS: ComponentMetricsCache<KvPublisherMetrics> = component_metrics_cache();
 
 impl KvPublisherMetrics {
-    /// Create from a Component, memoized in a static OnceLock.
+    /// Create from a Component, memoized per component.
     /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
     /// injects hierarchy labels (including `worker_id`), and registers with the
     /// DRT `MetricsRegistry`.
     pub fn from_component(component: &Component) -> Arc<Self> {
-        KV_PUBLISHER_METRICS
-            .get_or_init(|| Arc::new(Self::build(component)))
-            .clone()
+        component_scoped(&KV_PUBLISHER_METRICS, component, || {
+            Arc::new(Self::build(component))
+        })
     }
 
     /// Register the publisher's metrics against any metrics hierarchy.
@@ -200,8 +231,20 @@ impl KvPublisherMetrics {
     }
 }
 
+/// The KV publisher metrics for this process, for the ZMQ listener and event
+/// processor, which sit too deep in the publisher to carry a `Component`.
+///
+/// The publisher only runs worker-side, where the process owns a single component,
+/// so the cache holds at most one entry. If a process ever registers more than one,
+/// return `None` rather than attribute the sample to a foreign `dynamo_namespace`.
 pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
-    KV_PUBLISHER_METRICS.get().cloned()
+    let entries = KV_PUBLISHER_METRICS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match entries.len() {
+        1 => entries.values().next().cloned(),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,43 +257,42 @@ pub(crate) struct KvZmqIngressMetrics {
     lifecycle_total: IntCounterVec,
 }
 
-static KV_ZMQ_INGRESS_METRICS: OnceLock<Arc<KvZmqIngressMetrics>> = OnceLock::new();
+static KV_ZMQ_INGRESS_METRICS: ComponentMetricsCache<KvZmqIngressMetrics> =
+    component_metrics_cache();
 
 impl KvZmqIngressMetrics {
     pub(crate) fn from_component(component: &Component) -> Arc<Self> {
-        KV_ZMQ_INGRESS_METRICS
-            .get_or_init(|| {
-                let metrics = component.metrics();
-                let sources = metrics
-                    .create_intgaugevec(
-                        "router_kv_zmq_ingress_sources",
-                        "Number of direct-ZMQ KV ingress sources by lifecycle state",
-                        &["state"],
-                        &[],
-                    )
-                    .expect("failed to create router_kv_zmq_ingress_sources gauge");
-                let batches_total = metrics
-                    .create_intcounter(
-                        "router_kv_zmq_ingress_batches_total",
-                        "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
-                        &[],
-                    )
-                    .expect("failed to create router_kv_zmq_ingress_batches_total counter");
-                let lifecycle_total = metrics
-                    .create_intcountervec(
-                        "router_kv_zmq_ingress_lifecycle_total",
-                        "Total direct-ZMQ KV ingress lifecycle transitions and errors",
-                        &["action"],
-                        &[],
-                    )
-                    .expect("failed to create router_kv_zmq_ingress_lifecycle_total counter");
-                Arc::new(Self {
-                    sources,
-                    batches_total,
-                    lifecycle_total,
-                })
+        component_scoped(&KV_ZMQ_INGRESS_METRICS, component, || {
+            let metrics = component.metrics();
+            let sources = metrics
+                .create_intgaugevec(
+                    "router_kv_zmq_ingress_sources",
+                    "Number of direct-ZMQ KV ingress sources by lifecycle state",
+                    &["state"],
+                    &[],
+                )
+                .expect("failed to create router_kv_zmq_ingress_sources gauge");
+            let batches_total = metrics
+                .create_intcounter(
+                    "router_kv_zmq_ingress_batches_total",
+                    "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
+                    &[],
+                )
+                .expect("failed to create router_kv_zmq_ingress_batches_total counter");
+            let lifecycle_total = metrics
+                .create_intcountervec(
+                    "router_kv_zmq_ingress_lifecycle_total",
+                    "Total direct-ZMQ KV ingress lifecycle transitions and errors",
+                    &["action"],
+                    &[],
+                )
+                .expect("failed to create router_kv_zmq_ingress_lifecycle_total counter");
+            Arc::new(Self {
+                sources,
+                batches_total,
+                lifecycle_total,
             })
-            .clone()
+        })
     }
 
     pub(crate) fn increment_sources(&self, state: &'static str) {
@@ -286,62 +328,60 @@ pub(crate) struct ActiveSequenceZmqIngressMetrics {
     forced_aborts_total: IntCounter,
 }
 
-static ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceZmqIngressMetrics>> =
-    OnceLock::new();
+static ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS: ComponentMetricsCache<ActiveSequenceZmqIngressMetrics> =
+    component_metrics_cache();
 
 impl ActiveSequenceZmqIngressMetrics {
     pub(crate) fn from_component(component: &Component) -> Arc<Self> {
-        ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS
-            .get_or_init(|| {
-                let metrics = component.metrics();
-                let counter = |name, help| {
-                    metrics
-                        .create_intcounter(name, help, &[])
-                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
-                };
-                Arc::new(Self {
-                    tracked_sources: metrics
-                        .create_intgauge(
-                            "router_active_sequence_zmq_ingress_sources",
-                            "Number of tracked direct-ZMQ active-sequence sources",
-                            &[],
-                        )
-                        .expect("failed to create router_active_sequence_zmq_ingress_sources"),
-                    sequence_gaps_total: counter(
-                        "router_active_sequence_zmq_ingress_sequence_gaps_total",
-                        "Missing direct-ZMQ active-sequence envelopes inferred from sequence gaps",
-                    ),
-                    out_of_order_total: counter(
-                        "router_active_sequence_zmq_ingress_out_of_order_total",
-                        "Non-increasing direct-ZMQ active-sequence envelope sequences",
-                    ),
-                    reconnects_total: counter(
-                        "router_active_sequence_zmq_ingress_reconnects_total",
-                        "Direct-ZMQ active-sequence source reconnect attempts",
-                    ),
-                    replacements_total: counter(
-                        "router_active_sequence_zmq_ingress_replacements_total",
-                        "Direct-ZMQ active-sequence source task replacements",
-                    ),
-                    envelope_decode_errors_total: counter(
-                        "router_active_sequence_zmq_ingress_envelope_decode_errors_total",
-                        "Direct-ZMQ active-sequence envelope decode errors",
-                    ),
-                    payload_decode_errors_total: counter(
-                        "router_active_sequence_zmq_ingress_payload_decode_errors_total",
-                        "Direct-ZMQ active-sequence payload decode errors",
-                    ),
-                    identity_errors_total: counter(
-                        "router_active_sequence_zmq_ingress_identity_errors_total",
-                        "Direct-ZMQ active-sequence frame and envelope identity mismatches",
-                    ),
-                    forced_aborts_total: counter(
-                        "router_active_sequence_zmq_ingress_forced_aborts_total",
-                        "Direct-ZMQ active-sequence source tasks aborted after join timeout",
-                    ),
-                })
+        component_scoped(&ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS, component, || {
+            let metrics = component.metrics();
+            let counter = |name, help| {
+                metrics
+                    .create_intcounter(name, help, &[])
+                    .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+            };
+            Arc::new(Self {
+                tracked_sources: metrics
+                    .create_intgauge(
+                        "router_active_sequence_zmq_ingress_sources",
+                        "Number of tracked direct-ZMQ active-sequence sources",
+                        &[],
+                    )
+                    .expect("failed to create router_active_sequence_zmq_ingress_sources"),
+                sequence_gaps_total: counter(
+                    "router_active_sequence_zmq_ingress_sequence_gaps_total",
+                    "Missing direct-ZMQ active-sequence envelopes inferred from sequence gaps",
+                ),
+                out_of_order_total: counter(
+                    "router_active_sequence_zmq_ingress_out_of_order_total",
+                    "Non-increasing direct-ZMQ active-sequence envelope sequences",
+                ),
+                reconnects_total: counter(
+                    "router_active_sequence_zmq_ingress_reconnects_total",
+                    "Direct-ZMQ active-sequence source reconnect attempts",
+                ),
+                replacements_total: counter(
+                    "router_active_sequence_zmq_ingress_replacements_total",
+                    "Direct-ZMQ active-sequence source task replacements",
+                ),
+                envelope_decode_errors_total: counter(
+                    "router_active_sequence_zmq_ingress_envelope_decode_errors_total",
+                    "Direct-ZMQ active-sequence envelope decode errors",
+                ),
+                payload_decode_errors_total: counter(
+                    "router_active_sequence_zmq_ingress_payload_decode_errors_total",
+                    "Direct-ZMQ active-sequence payload decode errors",
+                ),
+                identity_errors_total: counter(
+                    "router_active_sequence_zmq_ingress_identity_errors_total",
+                    "Direct-ZMQ active-sequence frame and envelope identity mismatches",
+                ),
+                forced_aborts_total: counter(
+                    "router_active_sequence_zmq_ingress_forced_aborts_total",
+                    "Direct-ZMQ active-sequence source tasks aborted after join timeout",
+                ),
             })
-            .clone()
+        })
     }
 
     pub(crate) fn source_started(&self) {
@@ -395,7 +435,8 @@ pub(crate) struct RouterWorkerStatusMetrics {
     pub kv_event_source_mismatch_workers: IntGaugeVec,
 }
 
-static ROUTER_WORKER_STATUS_METRICS: OnceLock<Arc<RouterWorkerStatusMetrics>> = OnceLock::new();
+static ROUTER_WORKER_STATUS_METRICS: ComponentMetricsCache<RouterWorkerStatusMetrics> =
+    component_metrics_cache();
 
 impl RouterWorkerStatusMetrics {
     /// Create component-scoped gauges for standalone router observability.
@@ -404,10 +445,9 @@ impl RouterWorkerStatusMetrics {
     /// `dynamo_component`. It reserves `worker_id` for the metric producer, so
     /// the backend worker ID discovered by the router uses `router_worker_id`.
     pub fn from_component(component: &Component) -> Arc<Self> {
-        ROUTER_WORKER_STATUS_METRICS
-            .get_or_init(|| {
-                let metrics = component.metrics();
-                let registered = metrics
+        component_scoped(&ROUTER_WORKER_STATUS_METRICS, component, || {
+            let metrics = component.metrics();
+            let registered = metrics
                     .create_intgaugevec(
                         router::WORKER_REGISTERED,
                         "Whether the router currently has this worker/dp_rank registered (1 = registered)",
@@ -415,7 +455,7 @@ impl RouterWorkerStatusMetrics {
                         &[],
                     )
                     .expect("failed to create router_worker_registered gauge");
-                let kv_event_source_mismatch_workers = metrics
+            let kv_event_source_mismatch_workers = metrics
                     .create_intgaugevec(
                         router::KV_EVENT_SOURCE_MISMATCH_WORKERS,
                         "Number of serving workers with missing or ambiguous KV sources, explicitly disabled KV event publishing, or without an expected RecoveryTarget",
@@ -430,12 +470,11 @@ impl RouterWorkerStatusMetrics {
                     )
                     .expect("failed to create router_kv_event_source_mismatch_workers gauge");
 
-                Arc::new(Self {
-                    registered,
-                    kv_event_source_mismatch_workers,
-                })
+            Arc::new(Self {
+                registered,
+                kv_event_source_mismatch_workers,
             })
-            .clone()
+        })
     }
 
     pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
@@ -831,6 +870,7 @@ impl RoutingOverheadMetrics {
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
 /// independently.
 pub struct RouterRequestMetrics {
+    requests_started_total: prometheus::IntCounter,
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
@@ -844,97 +884,83 @@ pub struct RouterRequestMetrics {
     pub overlap_blocks_lost: HistogramVec,
 }
 
-static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
-static ROUTER_REQUESTS_STARTED_TOTAL: OnceLock<prometheus::IntCounter> = OnceLock::new();
+static ROUTER_REQUEST_METRICS: ComponentMetricsCache<RouterRequestMetrics> =
+    component_metrics_cache();
 
 impl RouterRequestMetrics {
-    /// Returns the registered metrics if `from_component()` was called earlier.
-    pub fn get() -> Option<Arc<Self>> {
-        ROUTER_REQUEST_METRICS.get().cloned()
-    }
-
     /// Total requests admitted by the router scheduler.
     pub fn requests_started_total(&self) -> &prometheus::IntCounter {
-        ROUTER_REQUESTS_STARTED_TOTAL
-            .get()
-            .expect("router request metrics must be initialized")
+        &self.requests_started_total
     }
 
-    /// Create from a Component, memoized in a static OnceLock.
+    /// Create from a Component, memoized per component.
     /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
     /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
     /// Also adds `router_id` (discovery instance_id) to distinguish router instances.
     ///
     /// Called eagerly by `KvPushRouter::new()` so metrics appear as zeros at startup.
     pub fn from_component(component: &Component) -> Arc<Self> {
-        ROUTER_REQUEST_METRICS
-            .get_or_init(|| {
-                let instance_id = component.drt().discovery().instance_id();
-                let router_id = instance_id.to_string();
-                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
+        component_scoped(&ROUTER_REQUEST_METRICS, component, || {
+            let instance_id = component.drt().discovery().instance_id();
+            let router_id = instance_id.to_string();
+            let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
-                let metrics = component.metrics();
-                let requests_started_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
-                        "Total number of requests admitted by the router scheduler",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_requests_started_total");
-                assert!(
-                    ROUTER_REQUESTS_STARTED_TOTAL
-                        .set(requests_started_total)
-                        .is_ok(),
-                    "router_requests_started_total already initialized"
-                );
-                let requests_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_TOTAL),
-                        "Total number of requests processed by the router",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_requests_total");
-                let time_to_first_token_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
-                        "Time to first token observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 480.0, 18)),
-                    )
-                    .expect("failed to create router_time_to_first_token_seconds");
-                let inter_token_latency_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
-                        "Average inter-token latency observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 2.0, 13)),
-                    )
-                    .expect("failed to create router_inter_token_latency_seconds");
-                let input_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
-                        "Input sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 128000.0, 12)),
-                    )
-                    .expect("failed to create router_input_sequence_tokens");
-                let output_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
-                        "Output sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 32000.0, 10)),
-                    )
-                    .expect("failed to create router_output_sequence_tokens");
-                let kv_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::KV_HIT_RATE),
-                        "Predicted KV cache hit rate at routing time (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_kv_hit_rate");
-                let kv_transfer_estimated_latency_seconds = metrics
+            let metrics = component.metrics();
+            let requests_started_total = metrics
+                .create_intcounter(
+                    &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
+                    "Total number of requests admitted by the router scheduler",
+                    extra_labels,
+                )
+                .expect("failed to create router_requests_started_total");
+            let requests_total = metrics
+                .create_intcounter(
+                    &router_metric(frontend_service::REQUESTS_TOTAL),
+                    "Total number of requests processed by the router",
+                    extra_labels,
+                )
+                .expect("failed to create router_requests_total");
+            let time_to_first_token_seconds = metrics
+                .create_histogram(
+                    &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
+                    "Time to first token observed at the router",
+                    extra_labels,
+                    Some(generate_log_buckets(0.001, 480.0, 18)),
+                )
+                .expect("failed to create router_time_to_first_token_seconds");
+            let inter_token_latency_seconds = metrics
+                .create_histogram(
+                    &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
+                    "Average inter-token latency observed at the router",
+                    extra_labels,
+                    Some(generate_log_buckets(0.001, 2.0, 13)),
+                )
+                .expect("failed to create router_inter_token_latency_seconds");
+            let input_sequence_tokens = metrics
+                .create_histogram(
+                    &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
+                    "Input sequence length in tokens observed at the router",
+                    extra_labels,
+                    Some(generate_log_buckets(50.0, 128000.0, 12)),
+                )
+                .expect("failed to create router_input_sequence_tokens");
+            let output_sequence_tokens = metrics
+                .create_histogram(
+                    &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
+                    "Output sequence length in tokens observed at the router",
+                    extra_labels,
+                    Some(generate_log_buckets(50.0, 32000.0, 10)),
+                )
+                .expect("failed to create router_output_sequence_tokens");
+            let kv_hit_rate = metrics
+                .create_histogram(
+                    &router_metric(frontend_service::KV_HIT_RATE),
+                    "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                    extra_labels,
+                    Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+                )
+                .expect("failed to create router_kv_hit_rate");
+            let kv_transfer_estimated_latency_seconds = metrics
                     .create_histogram(
                         &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
                         "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
@@ -942,23 +968,23 @@ impl RouterRequestMetrics {
                         Some(generate_log_buckets(0.001, 10.0, 15)),
                     )
                     .expect("failed to create router_kv_transfer_estimated_latency_seconds");
-                let shared_cache_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
-                        "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_hit_rate");
-                let shared_cache_beyond_blocks = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
-                        "Shared cache blocks beyond device overlap for the selected worker",
-                        extra_labels,
-                        Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_beyond_blocks");
-                let non_max_overlap_selections_total = metrics
+            let shared_cache_hit_rate = metrics
+                .create_histogram(
+                    &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
+                    "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
+                    extra_labels,
+                    Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+                )
+                .expect("failed to create router_shared_cache_hit_rate");
+            let shared_cache_beyond_blocks = metrics
+                .create_histogram(
+                    &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
+                    "Shared cache blocks beyond device overlap for the selected worker",
+                    extra_labels,
+                    Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
+                )
+                .expect("failed to create router_shared_cache_beyond_blocks");
+            let non_max_overlap_selections_total = metrics
                     .create_intcountervec(
                         &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
                         "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
@@ -966,7 +992,7 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_non_max_overlap_selections_total");
-                let overlap_blocks_lost = metrics
+            let overlap_blocks_lost = metrics
                     .create_histogramvec(
                         &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
                         "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
@@ -975,23 +1001,23 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
                     )
                     .expect("failed to create router_overlap_blocks_lost");
-                non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-                overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                Arc::new(Self {
-                    requests_total,
-                    time_to_first_token_seconds,
-                    inter_token_latency_seconds,
-                    input_sequence_tokens,
-                    output_sequence_tokens,
-                    kv_hit_rate,
-                    kv_transfer_estimated_latency_seconds,
-                    shared_cache_hit_rate,
-                    shared_cache_beyond_blocks,
-                    non_max_overlap_selections_total,
-                    overlap_blocks_lost,
-                })
+            non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
+            overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+            Arc::new(Self {
+                requests_started_total,
+                requests_total,
+                time_to_first_token_seconds,
+                inter_token_latency_seconds,
+                input_sequence_tokens,
+                output_sequence_tokens,
+                kv_hit_rate,
+                kv_transfer_estimated_latency_seconds,
+                shared_cache_hit_rate,
+                shared_cache_beyond_blocks,
+                non_max_overlap_selections_total,
+                overlap_blocks_lost,
             })
-            .clone()
+        })
     }
 
     /// Record a selection that sacrificed KV cache overlap.
@@ -1011,38 +1037,37 @@ pub struct RemoteIndexerMetrics {
     pub write_failures_total: prometheus::IntCounter,
 }
 
-static REMOTE_INDEXER_METRICS: OnceLock<Arc<RemoteIndexerMetrics>> = OnceLock::new();
+static REMOTE_INDEXER_METRICS: ComponentMetricsCache<RemoteIndexerMetrics> =
+    component_metrics_cache();
 
 impl RemoteIndexerMetrics {
     pub fn from_component(component: &Component) -> Arc<Self> {
-        REMOTE_INDEXER_METRICS
-            .get_or_init(|| {
-                let instance_id = component.drt().discovery().instance_id();
-                let router_id = instance_id.to_string();
-                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
+        component_scoped(&REMOTE_INDEXER_METRICS, component, || {
+            let instance_id = component.drt().discovery().instance_id();
+            let router_id = instance_id.to_string();
+            let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
-                let metrics = component.metrics();
-                let query_failures_total = metrics
-                    .create_intcounter(
-                        router::REMOTE_INDEXER_QUERY_FAILURES_TOTAL,
-                        "Total number of remote indexer overlap queries that failed",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_remote_indexer_query_failures_total");
-                let write_failures_total = metrics
-                    .create_intcounter(
-                        router::REMOTE_INDEXER_WRITE_FAILURES_TOTAL,
-                        "Total number of remote indexer routing-decision writes that failed",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_remote_indexer_write_failures_total");
+            let metrics = component.metrics();
+            let query_failures_total = metrics
+                .create_intcounter(
+                    router::REMOTE_INDEXER_QUERY_FAILURES_TOTAL,
+                    "Total number of remote indexer overlap queries that failed",
+                    extra_labels,
+                )
+                .expect("failed to create router_remote_indexer_query_failures_total");
+            let write_failures_total = metrics
+                .create_intcounter(
+                    router::REMOTE_INDEXER_WRITE_FAILURES_TOTAL,
+                    "Total number of remote indexer routing-decision writes that failed",
+                    extra_labels,
+                )
+                .expect("failed to create router_remote_indexer_write_failures_total");
 
-                Arc::new(Self {
-                    query_failures_total,
-                    write_failures_total,
-                })
+            Arc::new(Self {
+                query_failures_total,
+                write_failures_total,
             })
-            .clone()
+        })
     }
 
     pub fn increment_query_failures(&self) {
@@ -1566,5 +1591,89 @@ mod kv_publisher_registration_tests {
                 .contains("conflicts with auto-injected const label"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+mod namespace_scoping_tests {
+    use super::*;
+    use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use prometheus::core::Collector;
+
+    fn namespace_label(desc: &prometheus::core::Desc) -> &str {
+        desc.const_label_pairs
+            .iter()
+            .find(|l| l.name() == labels::NAMESPACE)
+            .expect("metric should carry a dynamo_namespace label")
+            .value()
+    }
+
+    /// A process that hosts more than one namespace — a frontend that discovers the
+    /// same model in several namespaces builds one router per namespace — must emit
+    /// one correctly-labeled metric set per namespace. These used to be memoized in a
+    /// process-global `OnceLock`, so the first namespace to initialize won and every
+    /// other namespace's traffic was counted under its label.
+    #[tokio::test]
+    async fn router_request_metrics_are_scoped_per_namespace() {
+        let drt = create_test_drt_async().await;
+        let comp_a = drt
+            .namespace("pair_a")
+            .unwrap()
+            .component("backend")
+            .unwrap();
+        let comp_b = drt
+            .namespace("pair_b")
+            .unwrap()
+            .component("backend")
+            .unwrap();
+
+        let metrics_a = RouterRequestMetrics::from_component(&comp_a);
+        let metrics_b = RouterRequestMetrics::from_component(&comp_b);
+
+        assert!(
+            !Arc::ptr_eq(&metrics_a, &metrics_b),
+            "each namespace must get its own metric set"
+        );
+        assert_eq!(
+            namespace_label(&metrics_a.requests_total.desc()[0]),
+            "pair_a"
+        );
+        assert_eq!(
+            namespace_label(&metrics_b.requests_total.desc()[0]),
+            "pair_b"
+        );
+
+        // The same component still memoizes, so repeat calls do not re-register.
+        assert!(Arc::ptr_eq(
+            &metrics_a,
+            &RouterRequestMetrics::from_component(&comp_a)
+        ));
+
+        // Counters must not be shared: incrementing pair_b leaves pair_a at zero.
+        metrics_b.requests_started_total().inc();
+        assert_eq!(metrics_a.requests_started_total().get(), 0);
+        assert_eq!(metrics_b.requests_started_total().get(), 1);
+    }
+
+    #[tokio::test]
+    async fn router_worker_status_metrics_are_scoped_per_namespace() {
+        let drt = create_test_drt_async().await;
+        let comp_a = drt
+            .namespace("pair_c")
+            .unwrap()
+            .component("backend")
+            .unwrap();
+        let comp_b = drt
+            .namespace("pair_d")
+            .unwrap()
+            .component("backend")
+            .unwrap();
+
+        let metrics_a = RouterWorkerStatusMetrics::from_component(&comp_a);
+        let metrics_b = RouterWorkerStatusMetrics::from_component(&comp_b);
+
+        assert!(!Arc::ptr_eq(&metrics_a, &metrics_b));
+        assert_eq!(namespace_label(&metrics_a.registered.desc()[0]), "pair_c");
+        assert_eq!(namespace_label(&metrics_b.registered.desc()[0]), "pair_d");
     }
 }
