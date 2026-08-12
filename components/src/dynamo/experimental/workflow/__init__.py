@@ -5,6 +5,7 @@
 
 from dynamo.experimental.workflow.bindings import InlineBinding, RemoteBinding
 from dynamo.experimental.workflow.builder import StageHandle, Workflow
+from dynamo.experimental.workflow.endpoint import WorkflowEndpointHandler
 from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
 from dynamo.experimental.workflow.orchestrator import WorkflowOrchestrator
 from dynamo.experimental.workflow.remote import RemoteStageClient, RemoteStageServer
@@ -28,6 +29,7 @@ __all__ = [
     "ValueRef",
     "Workflow",
     "WorkflowIR",
+    "WorkflowEndpointHandler",
     "WorkflowExecutionError",
     "WorkflowOrchestrator",
     "WorkflowValidationError",
