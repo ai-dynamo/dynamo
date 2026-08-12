@@ -86,9 +86,7 @@ def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
     return None
 
 
-def _forward_pass_metrics_source(
-    dynamo_config: DynamoConfig, *, fpm_trace_relay_supported: bool = True
-) -> Optional[str]:
+def _forward_pass_metrics_source(dynamo_config: DynamoConfig) -> Optional[str]:
     """Resolve the FPM opt-in source while preserving the legacy port switch."""
     if os.environ.get("DYN_FORWARDPASS_METRIC_PORT"):
         return "DYN_FORWARDPASS_METRIC_PORT"
@@ -96,8 +94,6 @@ def _forward_pass_metrics_source(
         return None
 
     unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
-    if unsupported_role is None and not fpm_trace_relay_supported:
-        unsupported_role = "unified backend"
     if unsupported_role is None:
         return "--fpm-trace/DYN_FPM_TRACE"
 
@@ -307,17 +303,12 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
-async def parse_args(
-    args: list[str], *, fpm_trace_relay_supported: bool = True
-) -> Config:
+async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
-        fpm_trace_relay_supported: Whether this entry point constructs the
-            Dynamo relay required for trace-based FPM activation.
-
     Returns:
         Config object with server_args and dynamo_args.
 
@@ -360,7 +351,7 @@ async def parse_args(
     dynamo_config.validate()
 
     # Dealing with SGLang native configs
-    temp_config_file = None  # Track temp file for cleanup
+    temp_config_file = None
     if dynamo_config.disagg_config and dynamo_config.disagg_config_key:
         section_data = _load_disagg_config_section(
             dynamo_config.disagg_config, dynamo_config.disagg_config_key
@@ -373,21 +364,25 @@ async def parse_args(
         unknown.append("--config")
         unknown.append(temp_config_file)
 
-    if "--config" in unknown:
-        config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
-        unknown = config_merger.merge_config_with_args(unknown)
+    try:
+        if "--config" in unknown:
+            config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
+            unknown = config_merger.merge_config_with_args(unknown)
 
-    unknown = _normalize_multimodal_disaggregation_args(unknown, dynamo_config)
-    dynamo_config.validate_multimodal_topology()
+        unknown = _normalize_multimodal_disaggregation_args(unknown, dynamo_config)
+        dynamo_config.validate_multimodal_topology()
 
-    parsed_args = sglang_only_parser.parse_args(unknown)
-
-    # Clean up temp file if created
-    if temp_config_file and os.path.exists(temp_config_file):
-        try:
-            os.unlink(temp_config_file)
-        except Exception:
-            logging.warning(f"Failed to clean up temp config file: {temp_config_file}")
+        parsed_args = sglang_only_parser.parse_args(unknown)
+    finally:
+        if temp_config_file and os.path.exists(temp_config_file):
+            try:
+                os.unlink(temp_config_file)
+            except OSError as e:
+                logging.warning(
+                    "Failed to clean up temp config file %s: %s",
+                    temp_config_file,
+                    e,
+                )
 
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
 
@@ -518,10 +513,7 @@ async def parse_args(
     video_generation_worker = dynamo_config.video_generation_worker
 
     # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
-    fpm_source = _forward_pass_metrics_source(
-        dynamo_config,
-        fpm_trace_relay_supported=fpm_trace_relay_supported,
-    )
+    fpm_source = _forward_pass_metrics_source(dynamo_config)
     if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
         parsed_args.enable_forward_pass_metrics = True
         logging.info("Enabled forward_pass_metrics from %s", fpm_source)

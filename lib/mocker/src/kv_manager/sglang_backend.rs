@@ -118,9 +118,9 @@ pub struct SglangKvManager {
     kv_event_publishers: KvEventPublishers,
     dp_rank: u32,
     next_event_id: u64,
-    /// Maps each physical page to the block hash assigned during Stored
-    /// events, so Removed events can use the same block hash.
-    page_to_block_hash: FxHashMap<KvPageId, ExternalSequenceBlockHash>,
+    /// Maps each dense physical page ID to the block hash assigned during
+    /// Stored events, so Removed events can use the same block hash.
+    page_to_block_hash: Vec<Option<ExternalSequenceBlockHash>>,
     /// Tracks how many live pool slots currently advertise the same logical
     /// block hash so router events reflect logical block visibility, not
     /// transient slot ownership.
@@ -179,14 +179,24 @@ impl SglangKvManager {
         kv_event_publishers: KvEventPublishers,
         dp_rank: u32,
     ) -> Self {
+        let page_to_block_hash = if kv_event_publishers.is_empty() {
+            Vec::new()
+        } else {
+            vec![None; total_tokens / page_size]
+        };
         Self {
             cache: RadixCache::new(total_tokens, page_size),
             kv_event_publishers,
             dp_rank,
             next_event_id: 0,
-            page_to_block_hash: FxHashMap::default(),
+            page_to_block_hash,
             block_hash_refcounts: FxHashMap::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn page_metadata_len(&self) -> usize {
+        self.page_to_block_hash.len()
     }
 
     pub fn cache(&self) -> &RadixCache {
@@ -794,6 +804,10 @@ impl SglangKvManager {
         if self.kv_event_publishers.is_empty() {
             return 0;
         }
+        if self.page_to_block_hash.is_empty() {
+            self.page_to_block_hash
+                .resize(self.cache.total_tokens() / self.cache.page_size(), None);
+        }
 
         let block_size = self.cache.page_size();
         let complete_len =
@@ -808,70 +822,58 @@ impl SglangKvManager {
             pages.len()
         );
 
-        let first_block_start = first_new_token / block_size * block_size;
-        let Some(first_unpublished_block) = (first_block_start..complete_len)
-            .step_by(block_size)
-            .find(|&block_start| {
-                let page = pages[block_start / block_size];
-                !self.page_to_block_hash.contains_key(&page)
-            })
+        let first_page = first_new_token / block_size;
+        let Some(first_unpublished_page) = (first_page..complete_pages)
+            .find(|&page_idx| self.page_to_block_hash[pages[page_idx].index()].is_none())
         else {
             return 0;
         };
 
-        let mut computed_blocks = Vec::new();
-        let first_unpublished_page = first_unpublished_block / block_size;
         let local_hashes = &page_hashes[first_unpublished_page..complete_pages];
+        let mut parent_hash = None;
+        let mut blocks = Vec::new();
+        let mut publishing = false;
 
         for (block_idx, tokens_hash) in local_hashes.iter().copied().enumerate() {
-            let block_start = first_unpublished_block + block_idx * block_size;
-            let page_idx = block_start / block_size;
+            let page_idx = first_unpublished_page + block_idx;
             let page = pages[page_idx];
-            if self.page_to_block_hash.contains_key(&page) {
+            let page_slot = page.index();
+            if self.page_to_block_hash[page_slot].is_some() {
                 continue;
             }
 
-            let parent_hash = if block_start == 0 {
+            let block_parent_hash = if page_idx == 0 {
                 None
             } else {
-                self.page_to_block_hash.get(&pages[page_idx - 1]).copied()
+                self.page_to_block_hash[pages[page_idx - 1].index()]
             };
-            let block_hash = match parent_hash {
+            let block_hash = match block_parent_hash {
                 Some(parent_hash) => {
                     ExternalSequenceBlockHash(compute_next_seq_hash(parent_hash.0, tokens_hash))
                 }
                 None => ExternalSequenceBlockHash(tokens_hash.0),
             };
 
-            self.page_to_block_hash.insert(page, block_hash);
+            self.page_to_block_hash[page_slot] = Some(block_hash);
             let refcount = self.block_hash_refcounts.entry(block_hash).or_default();
             *refcount += 1;
-            computed_blocks.push((
-                parent_hash,
-                KvCacheStoredBlockData {
+            if *refcount == 1 && !publishing {
+                publishing = true;
+                parent_hash = block_parent_hash;
+            }
+            if publishing {
+                blocks.push(KvCacheStoredBlockData {
                     block_hash,
                     tokens_hash,
                     mm_extra_info: None,
-                },
-                *refcount,
-            ));
+                });
+            }
         }
 
         let hashed_blocks = local_hashes.len();
-
-        let first_new = computed_blocks
-            .iter()
-            .position(|(_, _, refcount)| *refcount == 1);
-        let Some(first_new) = first_new else {
+        if blocks.is_empty() {
             return hashed_blocks;
-        };
-
-        let parent_hash = computed_blocks[first_new].0;
-        let blocks = computed_blocks
-            .into_iter()
-            .skip(first_new)
-            .map(|(_, block, _)| block)
-            .collect();
+        }
 
         let event = KvCacheEvent {
             event_id: self.next_event_id,
@@ -897,19 +899,23 @@ impl SglangKvManager {
         }
 
         let mut block_hashes = Vec::new();
-        for &page in evicted_pages {
-            let Some(block_hash) = self.page_to_block_hash.remove(&page) else {
+        for (page_idx, &page) in evicted_pages.iter().enumerate() {
+            let Some(block_hash) = self.page_to_block_hash[page.index()].take() else {
                 continue;
             };
-            let Some(refcount) = self.block_hash_refcounts.get_mut(&block_hash) else {
-                continue;
-            };
-            if *refcount > 1 {
-                *refcount -= 1;
-                continue;
+            if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                self.block_hash_refcounts.entry(block_hash)
+            {
+                if *entry.get() > 1 {
+                    *entry.get_mut() -= 1;
+                } else {
+                    entry.remove();
+                    if block_hashes.is_empty() {
+                        block_hashes.reserve_exact(evicted_pages.len() - page_idx);
+                    }
+                    block_hashes.push(block_hash);
+                }
             }
-            self.block_hash_refcounts.remove(&block_hash);
-            block_hashes.push(block_hash);
         }
 
         if block_hashes.is_empty() {
@@ -998,6 +1004,16 @@ mod tests {
                 _ => None,
             })
             .sum()
+    }
+
+    #[test]
+    fn dense_page_metadata_is_allocated_only_for_kv_events() {
+        let disabled = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
+        assert_eq!(disabled.page_metadata_len(), 0);
+
+        let (_buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+        let enabled = SglangKvManager::new(64, 4, KvEventPublishers::new(Some(sink), None), 0);
+        assert_eq!(enabled.page_metadata_len(), 16);
     }
 
     #[test]
@@ -1341,6 +1357,40 @@ mod tests {
         assert_eq!(
             store.blocks[0].block_hash,
             ExternalSequenceBlockHash(expected_sequence[0])
+        );
+    }
+
+    #[test]
+    fn reused_physical_page_replaces_dense_event_metadata() {
+        let sink = Arc::new(MockSink::new());
+        let mut mgr =
+            SglangKvManager::new(1, 1, KvEventPublishers::new(Some(sink.clone()), None), 0);
+
+        let first = mgr.allocate_for_request(&[1]).unwrap();
+        let page = first.lease.pages()[0];
+        assert!(mgr.abort(first.lease));
+
+        let second = mgr.allocate_for_request(&[2]).unwrap();
+        assert_eq!(second.lease.pages(), &[page]);
+
+        let events = sink.clone_events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].event_id, 0);
+        assert_eq!(events[1].event_id, 1);
+        assert_eq!(events[2].event_id, 2);
+        let KvCacheEventData::Stored(first_store) = &events[0].data else {
+            panic!("expected first stored event");
+        };
+        let KvCacheEventData::Removed(remove) = &events[1].data else {
+            panic!("expected removal before page reuse");
+        };
+        let KvCacheEventData::Stored(second_store) = &events[2].data else {
+            panic!("expected replacement stored event");
+        };
+        assert_eq!(remove.block_hashes, vec![first_store.blocks[0].block_hash]);
+        assert_ne!(
+            first_store.blocks[0].block_hash,
+            second_store.blocks[0].block_hash
         );
     }
 

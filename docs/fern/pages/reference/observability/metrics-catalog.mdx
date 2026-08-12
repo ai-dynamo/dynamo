@@ -93,7 +93,7 @@ sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
 )
 ```
 
-The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. The counters remain zero when `DYN_TOKENIZER_CACHE=0`, encoding fails, or the tokenizer has no registered special-token boundaries.
+The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. When the cache is disabled with `DYN_TOKENIZER_CACHE=0`, the per-model series are never created, so they are absent from the scrape rather than reported as zero; detect that state with `absent()`, since a `== 0` comparison never matches a missing series. Only the literal value `0` disables the cache; values such as `false` or `off` leave it enabled. With the cache enabled, the counters remain zero when encoding fails or the tokenizer has no registered special-token boundaries.
 
 <ParamField path="dynamo_frontend_inter_token_latency_seconds" type="histogram">
   Inter-token latency in seconds.
@@ -140,7 +140,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_rejection_total" type="counter">
-  Total requests rejected because all workers were busy (surfaced to the client as HTTP 529 by default). Incremented when the router returns `ResourceExhausted`. Labeled by `model` and `endpoint` (the API route).
+  Total overload responses surfaced to the client as HTTP 529 by default. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges

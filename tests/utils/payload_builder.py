@@ -47,7 +47,7 @@ for seeking out Aeloria, their skills and weaknesses, and any personal connectio
 
 # Deliberately distinct from other cache-test prompts and long enough to span
 # multiple vLLM cache blocks.
-CLEAR_KV_BLOCKS_PROMPT = """This is the unified vLLM block-clearing verification prompt, identified by the unique \
+CLEAR_KV_BLOCKS_PROMPT = """This is the vLLM block-clearing verification prompt, identified by the unique \
 phrase cobalt-orchid-riverstone. Imagine a research station built beside a quiet polar observatory where engineers \
 catalog unusual signals from distant stars. Describe how the team prepares its instruments, checks redundant clocks, \
 records atmospheric conditions, and compares each observation with the previous night. Include the roles of the lead \
@@ -158,7 +158,7 @@ def clear_kv_blocks_payload(
     max_tokens: int = 16,
     timeout: int = 60,
 ) -> ClearKVBlocksPayload:
-    """Create an admin-then-infer payload for unified vLLM cache clearing."""
+    """Create an admin-then-infer payload for vLLM cache clearing."""
     return ClearKVBlocksPayload(
         body={
             "messages": [{"role": "user", "content": CLEAR_KV_BLOCKS_PROMPT}],

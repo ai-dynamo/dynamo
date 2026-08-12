@@ -18,6 +18,10 @@ inputs:
     description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
     required: false
     default: ''
+  repository:
+    description: 'Container repository path. Required when registry is set.'
+    required: false
+    default: ''
   operator_tag:
     description: 'Operator image tag. Required when registry is set.'
     required: false
@@ -124,6 +128,9 @@ runs:
           BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+          while [[ "${BRANCH_SANITIZED}" =~ [^[:alnum:]]$ ]]; do
+            BRANCH_SANITIZED="${BRANCH_SANITIZED%?}"
+          done
           echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
           echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
         fi
@@ -389,6 +396,7 @@ runs:
       shell: bash
       env:
         REGISTRY: ${{ inputs.registry }}
+        REPOSITORY: ${{ inputs.repository }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
         CHECKPOINT_STORAGE_PVC_NAME: ${{ inputs.checkpoint_storage_pvc_name }}
@@ -405,11 +413,11 @@ runs:
 
         IMAGE_ARGS=()
         if [ -n "${REGISTRY}" ]; then
-          if [ -z "${OPERATOR_TAG}" ]; then
-            echo "::error::operator_tag is required when registry is set"
+          if [ -z "${REPOSITORY}" ] || [ -z "${OPERATOR_TAG}" ]; then
+            echo "::error::repository and operator_tag are required when registry is set"
             exit 1
           fi
-          OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+          OPERATOR_REPO="${REGISTRY}/${REPOSITORY}"
           echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
           # Automated CI passes a commit-scoped tag so the chart, CRDs,
           # and manager binary stay in sync. Manual workflows may still pass a
@@ -605,13 +613,54 @@ runs:
         EOF
         }
 
+        webhook_restarted=false
+
+        restart_operator_for_webhook() {
+          local old_pod
+          local ready_pod
+          local restart_deadline
+
+          old_pod=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+            | awk '$1 ~ /dynamo-platform-dynamo-operator-controller-manager/ {print $1; exit}' || true)
+          if [ -z "${old_pod}" ]; then
+            echo "::error::Operator pod disappeared before webhook recovery"
+            return 1
+          fi
+
+          # The certificate secret can be created after the optional volume was
+          # mounted. Restart once so kubelet projects the completed secret.
+          kubectl --kubeconfig="${VKUBECONFIG}" -n default \
+            get secret webhook-server-cert >/dev/null
+          echo "::warning::Admission webhook stayed unreachable; restarting operator once to remount its certificate"
+          kubectl --kubeconfig="${VKUBECONFIG}" -n default rollout restart \
+            deployment/dynamo-platform-dynamo-operator-controller-manager
+
+          restart_deadline=$((SECONDS + 300))
+          while true; do
+            ready_pod=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+              | awk -v old="${old_pod}" \
+                '$1 != old && $1 ~ /dynamo-platform-dynamo-operator-controller-manager/ && $2 == "1/1" {print $1; exit}' \
+              || true)
+            if [ -n "${ready_pod}" ]; then
+              echo "Replacement operator pod Ready: ${ready_pod}"
+              return 0
+            fi
+            if [ "${SECONDS}" -ge "${restart_deadline}" ]; then
+              echo "::error::Replacement operator pod not Ready after 300s"
+              return 1
+            fi
+            sleep 5
+          done
+        }
+
         SMOKE_OUTPUT=
         run_webhook_smoke_test() {
           local endpoint="$1"
+          local recover_operator="$2"
           local output
-          local deadline=$((SECONDS + 120))
+          local smoke_deadline=$((SECONDS + 120))
           local attempt=1
-          shift
+          shift 2
 
           while true; do
             if output=$("$@" 2>&1); then
@@ -626,7 +675,15 @@ runs:
               return 1
             fi
 
-            if [ "${SECONDS}" -ge "${deadline}" ]; then
+            if [ "${SECONDS}" -ge "${smoke_deadline}" ]; then
+              if [ "${recover_operator}" = true ] && [ "${webhook_restarted}" = false ]; then
+                restart_operator_for_webhook
+                webhook_restarted=true
+                smoke_deadline=$((SECONDS + 120))
+                attempt=1
+                continue
+              fi
+
               echo "::error::${endpoint} admission smoke test did not become reachable within 120s"
               printf '%s\n' "${output}" >&2
               return 1
@@ -643,7 +700,7 @@ runs:
           local smoke_function="$2"
           local origin_version
 
-          run_webhook_smoke_test "${version}" "${smoke_function}"
+          run_webhook_smoke_test "${version}" true "${smoke_function}"
           origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${SMOKE_OUTPUT}" | tail -1)
           if [ -z "${origin_version}" ]; then
             echo "::error::${version} request succeeded without the operator origin-version mutation"
@@ -689,7 +746,7 @@ runs:
           validatingwebhookconfiguration \
           podcliqueset-validating-webhook \
           pcs.validating.webhooks.grove.io
-        run_webhook_smoke_test 'Grove PodCliqueSet' smoke_grove
+        run_webhook_smoke_test 'Grove PodCliqueSet' false smoke_grove
         echo "Grove PodCliqueSet defaulting and validation webhooks are installed and healthy"
         echo "::endgroup::"
 

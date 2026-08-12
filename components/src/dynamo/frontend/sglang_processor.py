@@ -8,13 +8,14 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -76,6 +77,64 @@ def _normalize_eos_token_ids(value: Any) -> list[int]:
                     seen.add(token_id)
         return token_ids
     return []
+
+
+_I32_MIN = -(2**31)
+_I32_MAX = 2**31 - 1
+_U32_MAX = 2**32 - 1
+
+
+def _is_i32(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and _I32_MIN <= value <= _I32_MAX
+    )
+
+
+def _is_u32(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= _U32_MAX
+    )
+
+
+def _finite_float(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except OverflowError:
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
+    agent_hints = nvext.get("agent_hints")
+    if not isinstance(agent_hints, dict):
+        return None
+
+    routing: dict[str, Any] = {}
+    priority = agent_hints.get("priority")
+    if _is_i32(priority):
+        priority_value = cast(int, priority)
+        routing["priority"] = priority_value
+        routing["priority_jump"] = float(max(priority_value, 0))
+    else:
+        latency_sensitivity = _finite_float(agent_hints.get("latency_sensitivity"))
+        if latency_sensitivity is not None:
+            routing["priority_jump"] = latency_sensitivity
+
+    strict_priority = agent_hints.get("strict_priority")
+    if _is_u32(strict_priority):
+        routing["strict_priority"] = strict_priority
+
+    expected_output_tokens = agent_hints.get("osl")
+    if _is_u32(expected_output_tokens):
+        routing["expected_output_tokens"] = expected_output_tokens
+
+    return routing or None
 
 
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
@@ -330,6 +389,17 @@ def _build_dynamo_preproc(
     elif top_logprobs not in (None, 0):
         logprobs_val = top_logprobs
 
+    nvext = request.get("nvext") or {}
+    routing = request.get("routing")
+    nvext_routing = (
+        _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
+    )
+    if isinstance(routing, dict):
+        if nvext_routing:
+            routing = {**nvext_routing, **routing}
+    else:
+        routing = nvext_routing
+
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
@@ -366,7 +436,7 @@ def _build_dynamo_preproc(
         },
         "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
         "annotations": [],
-        "routing": request.get("routing"),
+        "routing": routing,
     }
 
     try:
@@ -378,7 +448,6 @@ def _build_dynamo_preproc(
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
-    nvext = request.get("nvext") or {}
     nvext_passthrough = {
         key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
     }
@@ -529,6 +598,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            prompt_token_ids=pre.prompt_token_ids,
         )
 
         async for item in self._generate_and_stream(
@@ -586,6 +656,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            prompt_token_ids=preproc_result.prompt_token_ids,
         )
 
         async for item in self._generate_and_stream(
@@ -623,6 +694,8 @@ class SglangProcessor:
             # finish_reason.  Use si=1 for the first chunk to minimize
             # TTFT, then switch to the configured interval.
             pending_token_ids: list[int] = []
+            pending_log_probs: list[float] | None = None
+            pending_top_logprobs: list[list[dict[str, Any]]] | None = None
             pending_usage: dict[str, Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
@@ -634,6 +707,91 @@ class SglangProcessor:
             image_count = len(_mm_counts.get("image_url", []))
             video_count = len(_mm_counts.get("video_url", []))
             audio_count = len(_mm_counts.get("audio_url", []))
+
+            def flush_pending(
+                *,
+                finish_reason: str | None,
+                stop_reason: Any | None,
+                engine_data: Any | None,
+            ) -> dict[str, Any]:
+                nonlocal pending_token_ids
+                nonlocal pending_log_probs
+                nonlocal pending_top_logprobs
+                nonlocal pending_usage
+                nonlocal first_chunk
+                nonlocal post_proc_total_ms
+                nonlocal token_count
+
+                chunk_token_count = len(pending_token_ids)
+                usage_for_metrics = pending_usage
+                mapped_response: dict[str, Any] = {
+                    "token_ids": pending_token_ids,
+                    "finish_reason": finish_reason,
+                }
+                if pending_log_probs is not None:
+                    mapped_response["log_probs"] = pending_log_probs
+                if pending_top_logprobs is not None:
+                    mapped_response["top_logprobs"] = pending_top_logprobs
+
+                if self.debug_perf:
+                    t_pp0 = time.monotonic()
+
+                choice = post.process_output(mapped_response)
+
+                if self.debug_perf:
+                    t_pp1 = time.monotonic()
+                    post_proc_total_ms += (t_pp1 - t_pp0) * 1000.0
+                    token_count += chunk_token_count
+
+                envelope: dict[str, Any] = {"_dynamo_annotated": True}
+                if choice:
+                    dynamo_out: dict[str, Any] = {
+                        "id": request_id,
+                        "choices": [choice],
+                        "created": created_ts,
+                        "model": request["model"],
+                        "object": "chat.completion.chunk",
+                    }
+                    if pending_usage:
+                        dynamo_out["usage"] = pending_usage
+                    response_nvext: dict[str, Any] = {}
+                    if stop_reason is not None and nvext_extra_field_requested(
+                        request, "stop_reason"
+                    ):
+                        response_nvext["stop_reason"] = stop_reason
+                    if engine_data is not None and nvext_extra_field_requested(
+                        request, "engine_data"
+                    ):
+                        response_nvext["engine_data"] = engine_data
+                    if response_nvext:
+                        dynamo_out["nvext"] = response_nvext
+
+                    envelope["data"] = dynamo_out
+
+                metrics: dict[str, Any] = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": cumulative_output_tokens,
+                    "chunk_tokens": chunk_token_count,
+                }
+                # Include nonzero counts on every frame (text-only carries nothing).
+                if image_count:
+                    metrics["image_count"] = image_count
+                if video_count:
+                    metrics["video_count"] = video_count
+                if audio_count:
+                    metrics["audio_count"] = audio_count
+                cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
+                if cached_tokens is not None:
+                    metrics["cached_tokens"] = cached_tokens
+                envelope["event"] = "llm_metrics"
+                envelope["comment"] = [json.dumps(metrics)]
+
+                pending_token_ids = []
+                pending_log_probs = None
+                pending_top_logprobs = None
+                pending_usage = None
+                first_chunk = False
+                return envelope
 
             async for dynamo_response in dynamo_stream:
                 if dynamo_response.is_error():
@@ -661,6 +819,25 @@ class SglangProcessor:
                     break
 
                 new_ids = engine_response["token_ids"]
+                log_probs = engine_response.get("log_probs")
+                top_logprobs = engine_response.get("top_logprobs")
+
+                if new_ids and pending_token_ids:
+                    pending_logprob_shape = (
+                        pending_log_probs is not None,
+                        pending_top_logprobs is not None,
+                    )
+                    chunk_logprob_shape = (
+                        log_probs is not None,
+                        top_logprobs is not None,
+                    )
+                    if pending_logprob_shape != chunk_logprob_shape:
+                        yield flush_pending(
+                            finish_reason=None,
+                            stop_reason=None,
+                            engine_data=None,
+                        )
+
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
                 raw_finish = engine_response.get("finish_reason")
@@ -672,76 +849,24 @@ class SglangProcessor:
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
+                if log_probs is not None:
+                    if pending_log_probs is None:
+                        pending_log_probs = []
+                    pending_log_probs.extend(log_probs)
+                if top_logprobs is not None:
+                    if pending_top_logprobs is None:
+                        pending_top_logprobs = []
+                    pending_top_logprobs.extend(top_logprobs)
 
                 # Flush on finish or when we've accumulated enough tokens.
                 # First chunk flushes immediately (si=1) to minimize TTFT.
                 flush_threshold = 1 if first_chunk else stream_interval
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
-                    usage_for_metrics = pending_usage
-                    mapped_response = {
-                        "token_ids": pending_token_ids,
-                        "finish_reason": finish_reason,
-                    }
-
-                    if self.debug_perf:
-                        t_pp0 = time.monotonic()
-
-                    choice = post.process_output(mapped_response)
-
-                    if self.debug_perf:
-                        t_pp1 = time.monotonic()
-                        post_proc_total_ms += (t_pp1 - t_pp0) * 1000.0
-                        token_count += len(pending_token_ids)
-
-                    envelope: dict[str, Any] = {"_dynamo_annotated": True}
-                    if choice:
-                        dynamo_out: dict[str, Any] = {
-                            "id": request_id,
-                            "choices": [choice],
-                            "created": created_ts,
-                            "model": request["model"],
-                            "object": "chat.completion.chunk",
-                        }
-                        if pending_usage:
-                            dynamo_out["usage"] = pending_usage
-                            pending_usage = None
-                        response_nvext: dict[str, Any] = {}
-                        if stop_reason is not None and nvext_extra_field_requested(
-                            request, "stop_reason"
-                        ):
-                            response_nvext["stop_reason"] = stop_reason
-                        if engine_data is not None and (
-                            nvext_extra_field_requested(request, "engine_data")
-                        ):
-                            response_nvext["engine_data"] = engine_data
-                        if response_nvext:
-                            dynamo_out["nvext"] = response_nvext
-
-                        envelope["data"] = dynamo_out
-
-                    metrics: dict[str, Any] = {
-                        "input_tokens": input_tokens,
-                        "output_tokens": cumulative_output_tokens,
-                        "chunk_tokens": len(pending_token_ids),
-                    }
-                    # Include nonzero counts on every frame (text-only carries nothing).
-                    if image_count:
-                        metrics["image_count"] = image_count
-                    if video_count:
-                        metrics["video_count"] = video_count
-                    if audio_count:
-                        metrics["audio_count"] = audio_count
-                    cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
-                    if cached_tokens is not None:
-                        metrics["cached_tokens"] = cached_tokens
-                    envelope["event"] = "llm_metrics"
-                    envelope["comment"] = [json.dumps(metrics)]
-
-                    yield envelope
-
-                    pending_token_ids = []
-                    pending_usage = None
-                    first_chunk = False
+                    yield flush_pending(
+                        finish_reason=finish_reason,
+                        stop_reason=stop_reason,
+                        engine_data=engine_data,
+                    )
         except Unknown:
             raise
         except Exception as e:

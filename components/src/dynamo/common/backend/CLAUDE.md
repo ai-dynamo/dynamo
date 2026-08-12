@@ -72,11 +72,9 @@ Python engine authors keep the split API.)
 ## Design Constraints
 
 - **ZERO duplication across engine implementations.** This is the #1 priority.
-  The entire reason this module exists is to eliminate the code duplication
-  that grew across vllm, sglang, and trtllm. Before writing any logic inside
-  a `LLMEngine` subclass, check whether the same logic already exists in
-  another engine. If it does, extract it into `Worker` or a shared
-  utility and have all engines call the shared version.
+  Before writing logic inside an engine subclass, check whether the same logic
+  already exists in another implementation. If it does, extract it into
+  `Worker` or a shared utility and have all engines call the shared version.
   When adding new features, always ask: "is this engine-specific or common?"
   If two or more engines would need the same code, it is common.
 
@@ -84,7 +82,7 @@ Python engine authors keep the split API.)
   owns runtime lifecycle. `BaseEngine` owns the modality-agnostic lifecycle;
   `LLMEngine` and `RawEngine` subclass it and differ *only* in the `generate`
   contract (token vs. raw media). Do not add per-engine mixins or intermediate
-  bases between a modality ABC and its concrete backend (e.g. `VllmLLMEngine`).
+  bases between a modality ABC and its concrete backend (e.g. `SampleLLMEngine`).
   A new media modality is a new `RawEngine` implementation, not a new
   engine trait or lifecycle.
 
@@ -130,8 +128,8 @@ Build the `completion_usage` dict inline. Finish reason normalization
 
 ## Adding a New Engine
 
-This is the in-process route. Sidecar-based integration for SGLang, vLLM, and
-TRT-LLM is under development.
+This module is the in-process route for custom engines. Built-in backend
+integrations use their own entry points or sidecar services.
 
 1. Create `<backend>/<backend>_engine.py` subclassing `LLMEngine`
 2. Implement `from_args()`, `start()`, `generate()`, `cleanup()` (required)
@@ -161,21 +159,20 @@ What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
   from `/v1/models`. The Encode role is a multimodal encoder upstream of
   P/D/Agg; backend-specific encoder implementations land separately.
 
-What the **engine** does with the mode (consumed in each backend's
-`generate()`):
+What the **engine** does with the mode in `generate()`:
 
 - `Prefill`: cap output to one token, run the engine through its
-  prefill-only path, pack the resulting handoff payload (vLLM's
-  `kv_transfer_params`, SGLang's bootstrap triple, TRT-LLM's encoded
-  `LlmDisaggregatedParams`) into the terminal chunk's
+  prefill-only path, and pack its handoff payload into the terminal chunk's
   `disaggregated_params`.
 - `Decode`: read `request.prefill_result.disaggregated_params`, fail
   loudly if missing (`require_prefill_result`), feed it into the
   engine's resume-from-KV-transfer call.
 - `Aggregated`: existing path, no branching.
 - `Encode`: produce the encoder handoff payload on the terminal chunk's
-  `encoder_result` (object-only) via `encoder_terminal_chunk`. The native
-  vLLM backend is text-only and rejects this role at startup.
+  `encoder_result` (object-only) via `encoder_terminal_chunk`.
+
+Each concrete engine defines its handoff payload and must reject unsupported
+roles during startup.
 
 `route_to_encoder` (on `WorkerConfig`; CLI `--route-to-encoder` / env
 `DYN_ROUTE_TO_ENCODER`) makes an `Aggregated` or `Prefill` worker advertise an
@@ -215,28 +212,14 @@ on the gauge side. Engines call it from their natural producer
 thread at the engine's own cadence — there is no framework poll
 loop.
 
-Per-backend producer:
-
-- **vLLM**: per-iteration stat-logger calls `publisher.publish(...)`.
-- **SGLang**: ZMQ pull loop on the leader node calls `publisher.publish(...)`
-  on every received `KvMetrics`.
-- **TRT-LLM**: a dedicated `_metrics_poll_loop` thread calls
-  `engine.llm.get_stats(timeout=0.2)` and then `publisher.publish(...)`.
-  The 200 ms `get_stats` cycle is the cost — driven by
-  `enable_iter_perf_stats=True` and `return_perf_metrics=True`, both
-  unconditional. If you run TRT-LLM without KV routing AND don't
-  scrape `dynamo_component_*`, opt out via
-  `--trtllm.enable_iter_perf_stats false` (and `--trtllm.return_perf_metrics false`);
-  the gauges will keep their seeded zero values and the poll thread
-  will run but find nothing to publish.
+Publish from the engine's existing statistics callback or producer thread.
+Do not add a framework polling loop solely to feed these gauges.
 
 ## Logging
 
-Keep logging **standardized across all three engines** (vllm, sglang, trtllm).
-When adding or changing a log message in one `llm_engine.py`, check
-whether the same lifecycle event is logged in the other two and update them
-to match. The goal is that operators see the same log shape regardless of
-backend, making it easier to triage issues across mixed deployments.
+Keep logging standardized across concrete engines. When adding or changing a
+log message, check whether the same lifecycle event is logged by other
+implementations and keep the shape consistent.
 
 Standardize on:
 - `logger.info` for lifecycle milestones: engine init complete, serving
@@ -248,42 +231,33 @@ Standardize on:
 
 ## Trace propagation
 
-Engines must forward W3C trace headers to their underlying inference engine
-so that vLLM / TRT-LLM / SGLang's internal OTel spans (scheduler, forward
-pass, KV transfer) nest under the framework's `engine.generate` span. Splat
-`telemetry.engine_trace_kwargs(context)` into the inference-engine call:
+If the underlying inference engine accepts W3C trace headers, forward them so
+its internal OpenTelemetry spans nest under the framework's `engine.generate`
+span. Splat `telemetry.engine_trace_kwargs(context)` into the call, overriding
+the keyword name or gate when required by the engine API:
 
 ```python
 from dynamo.common.backend import telemetry
 
-# vLLM / TRT-LLM: default kwarg name `trace_headers`, unconditional
-gen = self.engine_client.generate(
-    prompt, sampling_params, request_id,
+stream = self.engine.generate(
+    request,
     **telemetry.engine_trace_kwargs(context),
 )
 
-# SGLang: different kwarg name + gated on --enable-trace
-stream = await self.engine.async_generate(
-    ...,
+stream = self.engine.generate(
+    request,
     **telemetry.engine_trace_kwargs(
         context,
-        kwarg_name="external_trace_header",
-        enabled=self.enable_trace,
+        kwarg_name="trace_context",
+        enabled=self.trace_enabled,
     ),
 )
 ```
 
 `engine_trace_kwargs` returns an empty dict when no trace context is
 available or `enabled=False`, so the engine API kwarg is simply absent —
-downstream treats absence the same as `None`. Centralizes the build +
-gate logic so adding a new backend is one declaration, not three call
-sites that drift out of sync.
-
-| Backend | Method | Kwarg |
-|---|---|---|
-| vLLM | `engine_client.generate` | `trace_headers` (default) |
-| TRT-LLM | `engine.llm.generate_async` | `trace_headers` (default) |
-| SGLang | `engine.async_generate` | `external_trace_header`, gated on `enable_trace` |
+downstream treats absence the same as `None`. This centralizes header
+construction and keeps each engine's keyword mapping at one call site.
 
 For the lower-level `Context.trace_headers()` method or the
 `telemetry.trace_headers(context)` wrapper, see their docstrings — most
@@ -301,7 +275,7 @@ spans should be.
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by each backend's main (e.g. `sample_main.py`) |
-| `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang cumulative-array shape). The backend request handlers delegate here. |
+| `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang incremental-array shape). The backend request handlers delegate here. |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 
 The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:

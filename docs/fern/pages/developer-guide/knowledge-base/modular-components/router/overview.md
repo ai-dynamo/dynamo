@@ -46,7 +46,7 @@ For deployment modes and quick start steps, see the [Router Guide](router-guide.
 - Use dynamic discovery with KV routing so the router can track worker instances and KV cache state
 
 **Multimodal Support:**
-- **Image routing via multimodal hashes**: Supported in the documented TRT-LLM and vLLM router paths.
+- **Image routing via multimodal hashes**: Supported in the documented SGLang, TRT-LLM, and vLLM router paths. SGLang needs the hash-forwarding patch that Dynamo's own image ships; a custom build without it serves the request but routes on the text prefix alone.
 - **Other backend or modality combinations**: Check the backend-specific multimodal docs before relying on multimodal hash routing.
 
 **Limitations:**

@@ -32,21 +32,23 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     metrics::{
-        CancellationLabels, Endpoint,
+        CancellationLabels, Endpoint, ErrorType, InflightGuard,
         process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     },
     service_v2,
 };
+use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
-    AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
-    AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
-    chat_completion_to_anthropic_response,
+    AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
+    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
+    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
     apply_header_routing_overrides, session_affinity_from_headers,
 };
+use crate::protocols::common::input_trigger::classify_anthropic_request;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
@@ -56,7 +58,7 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
-use super::error::SanitizedError;
+use super::error::{SanitizedError, invalid_argument};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
 
@@ -132,21 +134,150 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // Handlers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+enum AnthropicRequestValidationError {
+    InvalidArgument(String),
+    NotImplemented(String),
+}
+
+impl AnthropicRequestValidationError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+        }
+    }
+
+    fn metric_error_type(&self) -> ErrorType {
+        match self {
+            Self::InvalidArgument(_) => ErrorType::Validation,
+            Self::NotImplemented(_) => ErrorType::NotImplemented,
+        }
+    }
+
+    fn anthropic_error_type(&self) -> &'static str {
+        match self {
+            Self::InvalidArgument(_) => "invalid_request_error",
+            Self::NotImplemented(_) => "api_error",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidArgument(message) | Self::NotImplemented(message) => message,
+        }
+    }
+}
+
+fn validate_anthropic_messages(
+    messages: &[AnthropicMessage],
+) -> Result<(), AnthropicRequestValidationError> {
+    if messages.is_empty() {
+        return Err(AnthropicRequestValidationError::InvalidArgument(
+            "messages: field required".to_string(),
+        ));
+    }
+
+    for (message_index, message) in messages.iter().enumerate() {
+        let AnthropicMessageContent::Blocks { content } = &message.content else {
+            continue;
+        };
+        if content.is_empty() {
+            return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                "messages[{message_index}].content: must contain at least one content block"
+            )));
+        }
+        for (block_index, block) in content.iter().enumerate() {
+            if let AnthropicContentBlock::Other(value) = block {
+                if !value.is_object() {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}]: content blocks must be objects"
+                    )));
+                }
+                let Some(block_type) = value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|block_type| !block_type.is_empty())
+                else {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}].type: must be a non-empty string"
+                    )));
+                };
+                return Err(AnthropicRequestValidationError::NotImplemented(format!(
+                    "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_anthropic_tools(
+    tools: Option<&[AnthropicTool]>,
+) -> Result<(), AnthropicRequestValidationError> {
+    for (tool_index, tool) in tools.unwrap_or_default().iter().enumerate() {
+        match tool.tool_type.as_deref() {
+            Some("") => {
+                return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                    "tools[{tool_index}].type: must be a non-empty string"
+                )));
+            }
+            Some("custom") | None => {
+                if tool.input_schema.is_none() {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "tools[{tool_index}].input_schema: field required for client tools"
+                    )));
+                }
+            }
+            Some(tool_type) => {
+                return Err(AnthropicRequestValidationError::NotImplemented(format!(
+                    "tools[{tool_index}]: server tool type \"{tool_type}\" is not supported"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
     Json(mut request): Json<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
-    // Validate required fields
-    if request.messages.is_empty() {
+    let request_id = get_or_create_request_id(&headers);
+    let streaming = request.stream;
+    let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&canonical_model)
+        .to_string();
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        &request_id,
+    );
+
+    if let Err(error) = validate_anthropic_messages(&request.messages) {
+        inflight_guard.mark_error(error.metric_error_type());
         return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "messages: field required",
+            error.status(),
+            error.anthropic_error_type(),
+            error.message(),
+        ));
+    }
+    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
+        inflight_guard.mark_error(error.metric_error_type());
+        return Err(anthropic_error(
+            error.status(),
+            error.anthropic_error_type(),
+            error.message(),
         ));
     }
     if request.max_tokens == 0 {
+        inflight_guard.mark_error(ErrorType::Validation);
         return Err(anthropic_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -156,20 +287,13 @@ async fn handler_anthropic_messages(
     gate_anthropic_nvext(&mut request, state.nvext_enabled());
 
     // Create request context
-    let request_id = get_or_create_request_id(&headers);
-    let streaming = request.stream;
-    let resolved_model = resolve_request_model(&request.model, template.as_ref());
-    // Canonicalize alias → primary for the metric label (see anthropic_messages).
-    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&canonical_model)
-            .to_string(),
+        model: metric_model,
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
     let metadata = extract_metadata_from_http(&headers).map_err(|err| {
+        inflight_guard.mark_error(ErrorType::Validation);
         anthropic_error(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "invalid_request_error",
@@ -178,7 +302,8 @@ async fn handler_anthropic_messages(
     })?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, &headers);
-    if let Some(agent_context) = agent_context_from_headers(&headers) {
+    if let Some(mut agent_context) = agent_context_from_headers(&headers) {
+        agent_context.input_trigger = Some(classify_anthropic_request(request.content()));
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity_from_headers(&headers) {
@@ -195,7 +320,15 @@ async fn handler_anthropic_messages(
     .await;
 
     let response = tokio::spawn(
-        anthropic_messages(state, template, request, headers, stream_handle).in_current_span(),
+        anthropic_messages(
+            state,
+            template,
+            request,
+            headers,
+            stream_handle,
+            inflight_guard,
+        )
+        .in_current_span(),
     )
     .await
     .map_err(|e| {
@@ -217,6 +350,7 @@ async fn anthropic_messages(
     mut request: Context<AnthropicCreateMessageRequest>,
     headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
+    mut inflight_guard: InflightGuard,
 ) -> Result<Response, Response> {
     let streaming = request.stream;
     let request_id = request.id().to_string();
@@ -264,16 +398,22 @@ async fn anthropic_messages(
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
             // canonical, customer-facing message so both APIs report the same
             // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                &super::openai::model_not_ready_message(&model),
-            ),
-            _ => anthropic_error(
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                &format!("Model '{}' not found", model),
-            ),
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                inflight_guard.mark_error(ErrorType::Unavailable);
+                anthropic_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "overloaded_error",
+                    &super::openai::model_not_ready_message(&model),
+                )
+            }
+            _ => {
+                inflight_guard.mark_error(ErrorType::NotFound);
+                anthropic_error(
+                    StatusCode::NOT_FOUND,
+                    "not_found_error",
+                    &format!("Model '{}' not found", model),
+                )
+            }
         })?;
 
     let (orig_request, context) = request.into_parts();
@@ -297,6 +437,7 @@ async fn anthropic_messages(
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        inflight_guard.mark_error(ErrorType::Validation);
         tracing::error!(
             request_id,
             error = %e,
@@ -315,6 +456,15 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
+    if let Err(error) = chat_request.validate() {
+        inflight_guard.mark_error(ErrorType::Validation);
+        let error = invalid_argument(error.to_string());
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            error.message(),
+        ));
+    }
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
@@ -361,14 +511,6 @@ async fn anthropic_messages(
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
-
-    // Create inflight_guard early to ensure all errors are counted
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
-        Endpoint::AnthropicMessages,
-        streaming,
-        request.id(),
-    );
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
@@ -603,6 +745,15 @@ async fn handler_count_tokens(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if let Err(error) = validate_anthropic_messages(&request.messages) {
+        return Err(anthropic_error(
+            error.status(),
+            error.anthropic_error_type(),
+            error.message(),
+        ));
+    }
+    // Count Tokens does not convert or execute tools, so keep tool definitions
+    // permissive here. TODO: Add validation when Anthropic server tools are supported.
     if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }

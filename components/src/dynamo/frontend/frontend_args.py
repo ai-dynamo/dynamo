@@ -302,7 +302,8 @@ class FrontendArgGroup(ArgGroup):
             default=0,
             help=(
                 "Maximum number of times a request may be migrated to a different engine worker. "
-                "When > 0, enables request migration on worker disconnect."
+                "When > 0, enables migration after worker disconnects, response timeouts, "
+                "incomplete streams, and worker-local overload rejection."
             ),
             arg_type=int,
         )
