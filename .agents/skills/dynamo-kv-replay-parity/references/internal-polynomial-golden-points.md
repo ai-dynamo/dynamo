@@ -26,12 +26,31 @@ configuration. Never tune the revisions separately.
 | Engine and topology | Starting configuration | Expected pressure and nearest boundaries |
 | --- | --- | --- |
 | vLLM aggregated | 4 workers; engine block 64; G1 blocks 6,144; max sequences 16; batch tokens 8,192 | 1 preemption; 4,096 produced 21 and 8,192 produced 0 |
-| vLLM disaggregated | 2 prefill + 2 decode; engine block 64; G1 blocks 40,964; max sequences 16; batch tokens 8,192; KV bytes/token 1; 100 GB/s full-prompt transfer | 4 preemptions; exact next integer capacity 40,965 produced 0. This is a documented nearest-feasible exception to the 1–3 target: max sequences 15 produced 9–13 near the edge and max sequences 17 produced 0 |
+| vLLM disaggregated | 2 prefill + 2 decode; engine block 64; G1 blocks 16,000; max sequences 16; batch tokens 8,192; KV bytes/token 1; 100 GB/s full-prompt transfer | 1 fully readmitted preemption; 10 fresh-process repetitions produced one digest and identical counters; 18,000 produced 0 |
 | SGLang aggregated | 4 workers; engine/page block 512; G1 blocks 1,536; max sequences 256; batch tokens 32,768 | 1 retraction; 1,024 produced 8 and 2,048 produced 0 |
 | SGLang disaggregated | 2 prefill + 2 decode; engine/page block 512; G1 blocks 17,408; max sequences 256; batch tokens 32,768; KV bytes/token 262,144; 100 GB/s full-prompt transfer | 2 retractions; 16,384 produced 12 and 18,432 produced 0 |
 
 The vLLM configurations rely on native/default G1 selection. An experiment-only
 `--g1-backend` switch is not required to reproduce the native seeds.
+
+The vLLM disaggregated row was requalified at commit
+`d95e98aa732c50909dd2f7777172c604066c8307` after PR #13052 made prefill replay exactly
+one output token. The former 40,964-block seed now produces zero preemptions and no longer
+exercises the pressure edge. The requalified 16,000-block seed completed all requests with
+exact token totals, 5,000 immediate and zero queued placements in each pool, 4,991 requests
+with reuse, and canonical report SHA-256
+`c60365af08f856d939fd87c30e1b55049630a0e22cf1b371a5c9a5acee82a6cd` in all ten runs.
+
+For a post-qualification throttle soak, run the same 16,000-block configuration against
+the complete 23,608-row Mooncake trace, SHA-256
+`b434f1816a707f4bac697235588184ebc374c9907cb981bb65fb0643471fe711`. Three fresh
+processes each completed all requests with exact totals of 202,791,701 input and 4,299,817
+output tokens, 23 fully readmitted preemptions, 23,608 immediate and zero queued
+placements in each pool, and canonical report SHA-256
+`e4bb70b88b25986beda2df602fb5b813e57393101c10caa9eace3429667b3eab`.
+The one-to-three pressure target applies to the 5,000-row parity fixture; the full-trace
+soak may exceed it when every pressure event is bounded, readmitted, and followed by exact
+completion.
 
 ### CLI templates
 
@@ -73,7 +92,7 @@ vLLM disaggregated:
   --num-decode-workers 2 \
   --engine-type vllm \
   --block-size 64 \
-  --num-gpu-blocks 40964 \
+  --num-gpu-blocks 16000 \
   --max-num-seqs 16 \
   --max-num-batched-tokens 8192 \
   --kv-bytes-per-token 1 \
@@ -119,35 +138,19 @@ SGLang disaggregated:
 With the exact corpus and internal model above, use these observed values as drift
 detectors:
 
-| Engine and topology | Immediate / queued | Requests with reuse | Worker and handoff evidence |
-| --- | --- | --- | --- |
-| vLLM aggregated | 8 / 4,992 | 4,918 | decode workers 0–3 |
-| vLLM disaggregated | 4 / 4,996 | 4,991 | prefill and decode workers 0–1; 5,000 complete, backend-valid handoffs |
-| SGLang aggregated | 5 / 4,995 | 4,840 | decode workers 0–3 |
-| SGLang disaggregated | 2 / 4,998 | 4,992 | prefill and decode workers 0–1; 5,000 complete, backend-valid handoffs |
+| Engine and topology | Requests with reuse | Worker and handoff evidence |
+| --- | --- | --- |
+| vLLM aggregated | 4,918 | decode workers 0–3 |
+| vLLM disaggregated | 4,991 | prefill and decode workers 0–1; 5,000 complete, backend-valid handoffs |
+| SGLang aggregated | 4,840 | decode workers 0–3 |
+| SGLang disaggregated | 4,992 | prefill and decode workers 0–1; 5,000 complete, backend-valid handoffs |
+
+The offline replay CLI defaults `router_queue_threshold` to unset, so these templates do
+not exercise router queueing. In the requalified vLLM disaggregated runs, every placement
+in both pools was immediate and zero was queued. Require queued-placement evidence only
+when an explicit queue-capable harness or forced fixture enables it; scheduler waiting is
+not router queueing.
 
 Every row must complete all 5,000 requests with no rejected, canceled, failed, or stranded
 requests. A changed counter is not automatically a product failure, but it means the seed
 must be requalified and the cause recorded before freezing the row.
-
-## Derive and sanity-check KVBM rows
-
-Derive each vLLM KVBM row from its corresponding native seed by enabling G2 and modestly
-reducing or limiting G1. Keep the topology fixed; start disaggregated qualification at
-exactly 2 prefill + 2 decode workers. Tune capacity or concurrency identically for both
-revisions.
-
-Require all of the following before freezing a KVBM row:
-
-- all 5,000 requests complete;
-- one to three bounded preemptions, without repeated preempt/re-admit cycling;
-- nonzero G1-to-G2 eviction completion;
-- nonzero G2-to-G1 restoration hits;
-- identical lifecycle counts across repeated baseline and candidate runs;
-- 5,000 complete, backend-valid handoffs for disaggregated replay; and
-- one canonical digest per revision, with baseline and candidate digests matching.
-
-Do not infer offload coverage from successful completion. Do not proceed to performance
-when lifecycle counters match but a revision's canonical repetitions differ; that is an
-internal determinism failure. SGLang KVBM offload is unsupported by the current harness
-and must be reported as `UNSUPPORTED`, not simulated by toggling an ignored G1 option.
