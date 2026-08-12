@@ -418,15 +418,28 @@ class AudioFormatter:
         fmt: str,
         stream_state: AudioStreamState,
     ) -> tuple[bytes, str]:
+        audio_np, num_channels = self._normalize_audio_layout(audio_np)
         pcm_bytes, _ = self._encode_audio(audio_np, sample_rate, "pcm")
         if fmt == "wav" and stream_state.first_chunk:
-            pcm_bytes = self._wav_stream_header(sample_rate) + pcm_bytes
+            pcm_bytes = self._wav_stream_header(sample_rate, num_channels) + pcm_bytes
         stream_state.first_chunk = False
         return pcm_bytes, "audio/wav" if fmt == "wav" else "audio/pcm"
 
     @staticmethod
-    def _wav_stream_header(sample_rate: int) -> bytes:
+    def _normalize_audio_layout(audio_np: np.ndarray) -> tuple[np.ndarray, int]:
+        """Return soundfile's frame-major layout and its channel count."""
+        if audio_np.ndim != 2:
+            return audio_np, 1
+        if audio_np.shape[1] in (1, 2):
+            return audio_np, int(audio_np.shape[1])
+        if audio_np.shape[0] in (1, 2):
+            return audio_np.T, int(audio_np.shape[0])
+        return audio_np, 1
+
+    @staticmethod
+    def _wav_stream_header(sample_rate: int, num_channels: int = 1) -> bytes:
         """Build a PCM WAV header whose payload length is not known yet."""
+        bytes_per_sample = 2
         return struct.pack(
             "<4sI4s4sIHHIIHH4sI",
             b"RIFF",
@@ -435,11 +448,11 @@ class AudioFormatter:
             b"fmt ",
             16,
             1,
-            1,
+            num_channels,
             sample_rate,
-            sample_rate * 2,
-            2,
-            16,
+            sample_rate * num_channels * bytes_per_sample,
+            num_channels * bytes_per_sample,
+            bytes_per_sample * 8,
             b"data",
             0xFFFFFFFF,
         )
@@ -447,6 +460,7 @@ class AudioFormatter:
     def _encode_audio(
         self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
     ) -> tuple:
+        audio_np, _ = self._normalize_audio_layout(audio_np)
         if speed != 1.0:
             try:
                 import librosa

@@ -446,8 +446,36 @@ class TestAudioFormatterFormat:
 
         assert chunks[0][:4] == b"RIFF"
         assert chunks[0][8:12] == b"WAVE"
+        assert int.from_bytes(chunks[0][22:24], "little") == 1
+        assert int.from_bytes(chunks[0][28:32], "little") == 48000
+        assert int.from_bytes(chunks[0][32:34], "little") == 2
         assert len(chunks[0]) == 48
         assert chunks[1] == b"\x00" * 4
+
+    @pytest.mark.asyncio
+    async def test_streaming_wav_preserves_stereo_layout(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
+
+        formatter = AudioFormatter("test", None, None)
+        frame_major = np.linspace(-0.5, 0.5, 16, dtype=np.float32).reshape(8, 2)
+
+        async def encode(audio):
+            response = await formatter.format(
+                {"audio": audio, "sr": 24000},
+                "req-1",
+                output_format="wav",
+                audio_stream_state=AudioStreamState(),
+            )
+            return base64.b64decode(response["data"][0]["b64_json"])
+
+        frame_major_chunk = await encode(frame_major)
+        assert frame_major_chunk == await encode(frame_major.T)
+        assert int.from_bytes(frame_major_chunk[22:24], "little") == 2
+        assert int.from_bytes(frame_major_chunk[28:32], "little") == 96000
+        assert int.from_bytes(frame_major_chunk[32:34], "little") == 4
+        assert len(frame_major_chunk) == 44 + 8 * 2 * 2
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────

@@ -4511,7 +4511,11 @@ async fn audio_speech(
     let stream = check_for_backend_error(stream, None)
         .await
         .inspect_err(|error_response| {
-            inflight.mark_error(extract_error_type_from_response(error_response));
+            let error_type = match error_response.0 {
+                StatusCode::BAD_REQUEST => ErrorType::Validation,
+                _ => extract_error_type_from_response(error_response),
+            };
+            inflight.mark_error(error_type);
         })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
