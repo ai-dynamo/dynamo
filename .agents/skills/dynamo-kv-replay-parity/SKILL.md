@@ -134,17 +134,19 @@ configuration, prove that it exercised every applicable path:
 
 - KV-overlap-sensitive routing;
 - immediate placement, plus queued placement only when queueing is explicitly enabled;
-- a small, bounded number of preemptions at the block-capacity edge;
+- the row's bounded preemption or retraction band at the block-capacity edge;
 - disaggregated prefill/decode handoff;
 - terminal cleanup.
 
 Use coverage counters, lifecycle traces, or report evidence rather than inferring these
-paths from successful completion. Target one to three preemptions per configuration. Zero
-means the edge was not exercised; repeated preempt/re-admit cycling, a rapidly growing
-preemption count, or failure to advance virtual time invalidates the fixture. Tune capacity
-or concurrency minimally and identically for baseline and candidate within the row or
-family, and back off rather than accepting a preemption flood. Never tune the revisions
-separately.
+paths from successful completion. Target the bounded pressure band recorded for the
+qualified seed. When no seed exists, start with one to three pressure events to prove the
+lifecycle. For throttle-oriented disaggregated vLLM and SGLang seeds, target 10 to 20 fully
+readmitted pressure events so repeated scheduling is exercised. Zero means the edge was
+not exercised; repeated preempt/re-admit cycling, a rapidly growing pressure count, or
+failure to advance virtual time invalidates the fixture. Tune capacity or concurrency
+minimally and identically for baseline and candidate within the row or family, and back
+off rather than accepting a pressure flood. Never tune the revisions separately.
 
 The offline replay CLI leaves the router queue threshold unset by default. In that mode,
 all route decisions are immediate and zero queued placements are expected; engine-side
@@ -169,7 +171,9 @@ cross-revision parity are established.
 
 ## Stage 4: Run byte parity
 
-Run the 5,000-request corpus for this authoritative matrix:
+Run the 5,000-request corpus for this authoritative matrix. Treat both disaggregated rows
+as the primary scheduler and handoff requalification. Keep the aggregated rows as
+secondary parity coverage for the corresponding engine semantics.
 
 | Engine semantics | Topology | Memory path | Routing |
 | --- | --- | --- | --- |
