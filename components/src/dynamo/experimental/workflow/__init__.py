@@ -12,6 +12,7 @@ from dynamo.experimental.workflow.plan import (
     InlineBinding,
     RemoteBinding,
 )
+from dynamo.experimental.workflow.remote import RemoteStageClient, RemoteStageServer
 from dynamo.experimental.workflow.runtime import (
     StageContext,
     StageRunner,
@@ -39,5 +40,7 @@ __all__ = [
     "ExecutionPlan",
     "InlineBinding",
     "RemoteBinding",
+    "RemoteStageClient",
+    "RemoteStageServer",
     "compile_workflow",
 ]
