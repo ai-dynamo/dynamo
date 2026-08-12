@@ -4155,6 +4155,33 @@ impl OpenAIPreprocessor {
         })
     }
 
+    /// Whether this request's stream can withhold every data frame while it
+    /// buffers, which is the only reason to force SSE keep-alive frames on.
+    ///
+    /// The HTTP handlers used to gate the heartbeat on
+    /// `wants_reasoning_as_content_when_empty && reasoning_parser.is_some()`,
+    /// but that is broader than the deferral it describes: the buffering only
+    /// runs when `postprocessor_parsing_stream` takes its `should_parse_reasoning`
+    /// branch. A `force_nonempty_content=true` request with reasoning disabled
+    /// (`enable_thinking=false`) defers nothing, yet still got heartbeats — and
+    /// the configured interval is opt-in precisely because some
+    /// OpenAI-compatible clients do not ignore SSE comment frames.
+    ///
+    /// Known gap: `skip_reasoning_for_guided_json` also suppresses the deferral,
+    /// but it is derived from guided-output inspection that is not available at
+    /// the HTTP layer, so a guided-JSON bypass still enables the heartbeat when
+    /// nothing is withheld. That direction is conservative — extra comment
+    /// frames on an opt-in path rather than a silent stream — and closing it
+    /// needs the guided-output derivation lifted out of the stream builder.
+    pub(crate) fn stream_can_defer_all_output(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        reasoning_parser.is_some()
+            && Self::wants_reasoning_as_content_when_empty(chat_template_args)
+            && !Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args)
+    }
+
     /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
     /// These swallow any leading text without an open `<think>` tag as
     /// reasoning_content, so they cannot run on guided-decoding output where

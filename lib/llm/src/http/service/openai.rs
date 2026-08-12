@@ -2636,6 +2636,14 @@ async fn chat_completions(
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
 
+    // Computed before `request` moves into `generate`. Only a stream that can
+    // withhold every data frame needs forced keep-alive frames.
+    let stream_can_defer_all_output =
+        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+            parsing_options.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2794,9 +2802,7 @@ async fn chat_completions(
                 }
             }
         };
-        let keep_alive = state.sse_keep_alive_for_response(
-            move_reasoning_to_content_when_empty && parsing_options.reasoning_parser.is_some(),
-        );
+        let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
         let stream = monitor_for_disconnects_with_activity(
             stream,
             ctx,
