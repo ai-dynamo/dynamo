@@ -162,6 +162,10 @@ For any new model, validate on representative prompts before rolling out broadly
     Use `default`, `fastokens`, or `basetenkenizer` for `DYN_TOKENIZER`. Values such as `fast`, `hf`, or `huggingface` are benchmark-runner aliases, not valid values for the frontend environment variable.
   </Accordion>
 
+  <Accordion title="Why does DYN_TOKENIZER_FALLBACK report an invalid value?">
+    `DYN_TOKENIZER_FALLBACK` is parsed strictly. Use `true`/`false`, `1`/`0`, `on`/`off`, or `yes`/`no`. An invalid value fails model initialization instead of silently enabling the default fallback behavior. In dynamic mode, discovery retries the load while the frontend continues running.
+  </Accordion>
+
   <Accordion title="What happens when the model uses .model or .tiktoken files?">
     The `fastokens` and `basetenkenizer` settings have no effect for TikToken-format tokenizers. Dynamo uses the existing TikToken backend, so you should not expect either alternate-backend activation log or speedup.
   </Accordion>

@@ -31,7 +31,7 @@ Use this backend for supported `tokenizer.json` models when you need Baseten Tok
 #### Compatibility notes:
 
 - Works with standard BPE `tokenizer.json` files (Qwen, LLaMA, GPT-family, Mistral, DeepSeek, etc.).
-- If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace by default. Disable tokenizer fallback to reject incompatible tokenizers during model initialization. In dynamic mode, discovery retries the load while the frontend continues running.
+- If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace by default. Use `--no-tokenizer-fallback` to reject incompatible tokenizers during model initialization.
 - Special tokens declared only in a sibling `tokenizer_config.json` are preserved for Baseten encoding and decoding and for Dynamo's L1 prefix-cache boundaries.
 - Has no effect on TikToken-format tokenizers (`.model` / `.tiktoken` files), which always use the TikToken backend.
 
@@ -42,7 +42,7 @@ Set the backend with a CLI flag or environment variable. The CLI flag takes prec
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
 | `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens`, `basetenkenizer` | `default` |
-| `--tokenizer-fallback` / `--no-tokenizer-fallback` | `DYN_TOKENIZER_FALLBACK` | enabled, disabled | enabled |
+| `--tokenizer-fallback` / `--no-tokenizer-fallback` | `DYN_TOKENIZER_FALLBACK` | `true`/`false`, `1`/`0`, `on`/`off`, `yes`/`no` | `true` |
 
 **Examples:**
 
