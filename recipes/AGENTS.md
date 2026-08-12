@@ -19,17 +19,19 @@ SPDX-License-Identifier: Apache-2.0
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and a
   `components` list. The matrix, recipe-local base and Components, and shared
   Components are source. A dimension value may also select `templates` and set
-  `values`. Shared template sources live in `recipes/kustomize/templates/`; a
-  template directory has `kustomization.yaml.j2` and optional `values.yaml`.
+  `values`. Each template selection has a source relative to the matrix and a
+  generated `path` under the overlay's `components/` directory. Shared template
+  sources live in `recipes/kustomize/templates/`; a template directory has
+  `kustomization.yaml.j2` and optional `values.yaml`.
   `unfold` evaluates the template with strict sandboxed Jinja, the variant values,
   and the fully rendered base indexed as `base.<lowercase-kind>[metadata.name]`.
   Use `base.<lowercase-kind> | only` only when exactly one such resource is
   required. Templates render one Component. `unfold` materializes the complete
-  template directory under the generated Component, so its local Kustomize paths
-  remain valid; additional `*.j2` files render without their suffix. Select
-  shared Components through the matrix's `components` list. Kustomize is both
-  the authoring model and recipe
-  documentation: the base and Components explain settings, public overlay
+  template directory at its selected path under the generated overlay, so its
+  local Kustomize paths remain valid; additional `*.j2` files render without
+  their suffix. A template may select shared Components; `unfold` rebases those
+  external paths for the generated location. Kustomize is both the authoring
+  model and recipe documentation: the base and Components explain settings, public overlay
   `kustomization.yaml` files document a concrete variant, and `deploy-*.yaml`
   files are the fully materialized result. Users may apply a checked-in manifest
   with `kubectl apply -f`, a checked-in public overlay with `kubectl apply -k`,

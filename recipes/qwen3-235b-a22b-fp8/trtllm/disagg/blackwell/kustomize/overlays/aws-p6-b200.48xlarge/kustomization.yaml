@@ -12,5 +12,4 @@ sortOptions:
 resources:
   - "../../base"
 components:
-  - "../../../../../../../kustomize/components/aws-efa"
-  - "generated-components/00-aws-efa-p6-b200.48xlarge"
+  - "components/efa"

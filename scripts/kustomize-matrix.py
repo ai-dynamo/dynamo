@@ -31,7 +31,8 @@ OPENAPI_GENERATOR = REPO_ROOT / "scripts/generate_kustomize_openapi.py"
 KUSTOMIZATION_FILE = "kustomization.yaml"
 TEMPLATE_KUSTOMIZATION_FILE = "kustomization.yaml.j2"
 TEMPLATE_VALUES_FILE = "values.yaml"
-GENERATED_COMPONENTS_DIR = "generated-components"
+TEMPLATE_COMPONENTS_DIR = "components"
+LEGACY_TEMPLATE_COMPONENTS_DIR = "generated-components"
 GENERATED_OVERLAY_PREFIX = "# Regenerate: scripts/kustomize-matrix.py unfold "
 GENERATED_TEMPLATE_PREFIX = "# Template source: "
 GENERATED_MANIFEST_PREFIX = "#   scripts/kustomize-matrix.py render "
@@ -51,10 +52,16 @@ TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass(frozen=True)
+class TemplateSelection:
+    source: Path
+    output_path: Path
+
+
+@dataclass(frozen=True)
 class MatrixValue:
     name: str
     components: tuple[Path, ...]
-    templates: tuple[Path, ...]
+    templates: tuple[TemplateSelection, ...]
     values: dict[str, Any]
 
 
@@ -62,7 +69,7 @@ class MatrixValue:
 class MatrixVariant:
     name: str
     components: tuple[Path, ...]
-    templates: tuple[Path, ...]
+    templates: tuple[TemplateSelection, ...]
     values: dict[str, Any]
 
 
@@ -167,23 +174,40 @@ def resolve_component_paths(
     return components
 
 
-def resolve_template_paths(
+def resolve_template_selections(
     values: Any, matrix_path: Path, context: str
-) -> tuple[Path, ...]:
-    if not isinstance(values, list) or not all(
-        isinstance(value, str) for value in values
-    ):
-        raise ValueError(f"{context} must be a list of template paths")
+) -> tuple[TemplateSelection, ...]:
+    if not isinstance(values, list):
+        raise ValueError(f"{context} must be a list of template mappings")
 
-    templates = tuple((matrix_path.parent / value).resolve() for value in values)
-    for template in templates:
-        template_file = template / TEMPLATE_KUSTOMIZATION_FILE
+    templates: list[TemplateSelection] = []
+    for index, value in enumerate(values):
+        item_context = f"{context}[{index}]"
+        if not isinstance(value, dict) or set(value) != {"source", "path"}:
+            raise ValueError(f"{item_context} must contain exactly source and path")
+        source_value = require_string(value.get("source"), f"{item_context}.source")
+        output_value = require_string(value.get("path"), f"{item_context}.path")
+        output_path = Path(output_value)
+        if (
+            output_path.is_absolute()
+            or output_path == Path(".")
+            or len(output_path.parts) < 2
+            or output_path.parts[0] != TEMPLATE_COMPONENTS_DIR
+            or any(part in {".", ".."} for part in output_path.parts)
+        ):
+            raise ValueError(
+                f"{item_context}.path must be a relative path under "
+                f"{TEMPLATE_COMPONENTS_DIR}/: {output_value!r}"
+            )
+        source = (matrix_path.parent / source_value).resolve()
+        template_file = source / TEMPLATE_KUSTOMIZATION_FILE
         if not template_file.is_file():
             raise ValueError(
                 "Kustomize template must contain "
-                f"{TEMPLATE_KUSTOMIZATION_FILE}: {display_path(template)}"
+                f"{TEMPLATE_KUSTOMIZATION_FILE}: {display_path(source)}"
             )
-    return templates
+        templates.append(TemplateSelection(source=source, output_path=output_path))
+    return tuple(templates)
 
 
 def load_variant_values(value: Any, context: str) -> dict[str, Any]:
@@ -263,7 +287,7 @@ def load_matrix(path: str) -> MatrixConfig:
                         matrix_path,
                         f"{context}.components",
                     ),
-                    templates=resolve_template_paths(
+                    templates=resolve_template_selections(
                         raw_value.get("templates", []),
                         matrix_path,
                         f"{context}.templates",
@@ -325,9 +349,13 @@ def expand_matrix(config: MatrixConfig) -> list[MatrixVariant]:
                 f"variant {name!r} selects the same Component more than once"
             )
         templates = tuple(template for value in values for template in value.templates)
-        if len(set(templates)) != len(templates):
+        if len({template.source for template in templates}) != len(templates):
             raise ValueError(
                 f"variant {name!r} selects the same template more than once"
+            )
+        if len({template.output_path for template in templates}) != len(templates):
+            raise ValueError(
+                f"variant {name!r} assigns the same local Component path more than once"
             )
         variant_values: dict[str, Any] = {}
         for value in values:
@@ -358,10 +386,9 @@ def overlay_path(config: MatrixConfig, variant: MatrixVariant) -> Path:
 
 
 def generated_template_component_path(
-    config: MatrixConfig, variant: MatrixVariant, index: int, template: Path
+    config: MatrixConfig, variant: MatrixVariant, template: TemplateSelection
 ) -> Path:
-    name = f"{index:02d}-{template.parent.name}-{template.name}"
-    return overlay_path(config, variant) / GENERATED_COMPONENTS_DIR / name
+    return overlay_path(config, variant) / template.output_path
 
 
 def build_base_resource_index(source: Path) -> dict[str, ResourceCollection]:
@@ -411,8 +438,8 @@ def build_base_resource_index(source: Path) -> dict[str, ResourceCollection]:
     return index
 
 
-def template_values(template: Path) -> dict[str, Any]:
-    values_path = template / TEMPLATE_VALUES_FILE
+def template_values(template: TemplateSelection) -> dict[str, Any]:
+    values_path = template.source / TEMPLATE_VALUES_FILE
     if not values_path.exists():
         return {}
     return load_variant_values(
@@ -421,16 +448,16 @@ def template_values(template: Path) -> dict[str, Any]:
 
 
 def merged_template_values(
-    templates: tuple[Path, ...], overrides: dict[str, Any]
+    templates: tuple[TemplateSelection, ...], overrides: dict[str, Any]
 ) -> dict[str, Any]:
     merged: dict[str, Any] = {}
-    value_sources: dict[str, Path] = {}
+    value_sources: dict[str, TemplateSelection] = {}
     for template in templates:
         for key, value in template_values(template).items():
             if key in merged:
                 raise ValueError(
-                    f"templates {display_path(value_sources[key])} and "
-                    f"{display_path(template)} both define value {key!r}"
+                    f"templates {display_path(value_sources[key].source)} and "
+                    f"{display_path(template.source)} both define value {key!r}"
                 )
             merged[key] = value
             value_sources[key] = template
@@ -478,17 +505,17 @@ def render_jinja_template(
 
 
 def render_template_assets(
-    template: Path,
+    template: TemplateSelection,
     component_dir: Path,
     base: dict[str, ResourceCollection],
     values: dict[str, Any],
 ) -> dict[Path, GeneratedContent]:
-    source_kustomization = template / TEMPLATE_KUSTOMIZATION_FILE
+    source_kustomization = template.source / TEMPLATE_KUSTOMIZATION_FILE
     assets: dict[Path, GeneratedContent] = {}
-    for source_path in template.rglob("*"):
+    for source_path in template.source.rglob("*"):
         if not source_path.is_file() or source_path == source_kustomization:
             continue
-        relative_source = source_path.relative_to(template)
+        relative_source = source_path.relative_to(template.source)
         if relative_source == Path(TEMPLATE_VALUES_FILE):
             continue
         relative_output = (
@@ -499,7 +526,7 @@ def render_template_assets(
         output_path = component_dir / relative_output
         if output_path in assets:
             raise ValueError(
-                f"template {display_path(template)} produces duplicate asset "
+                f"template {display_path(template.source)} produces duplicate asset "
                 f"{relative_output}"
             )
         assets[output_path] = (
@@ -510,23 +537,62 @@ def render_template_assets(
     return assets
 
 
+def external_component_path_replacements(
+    component: dict[str, Any], template: TemplateSelection, component_dir: Path
+) -> dict[str, str]:
+    replacements: dict[str, str] = {}
+    for key in ("bases", "components", "resources"):
+        references = component.get(key)
+        if not isinstance(references, list):
+            continue
+        for reference in references:
+            if not isinstance(reference, str) or "://" in reference:
+                continue
+            source = (template.source / reference).resolve()
+            if not source.is_dir() or source.is_relative_to(template.source):
+                continue
+            replacements[reference] = relative_path(source, component_dir)
+    return replacements
+
+
+def rebase_rendered_component_paths(
+    rendered: str, replacements: dict[str, str], template: TemplateSelection
+) -> str:
+    for source, replacement in replacements.items():
+        pattern = re.compile(
+            rf"^(?P<prefix>\s*-\s*)(?P<quote>[\"']?)"
+            rf"{re.escape(source)}(?P=quote)(?P<suffix>\s*(?:#.*)?)$",
+            re.MULTILINE,
+        )
+        rendered, count = pattern.subn(
+            rf"\g<prefix>\g<quote>{replacement}\g<quote>\g<suffix>", rendered
+        )
+        if count == 0:
+            raise ValueError(
+                f"failed to rebase Component path {source!r} in "
+                f"{display_path(template.source)}"
+            )
+    return rendered
+
+
 def render_template_component(
-    template: Path,
+    template: TemplateSelection,
     base: dict[str, ResourceCollection],
     values: dict[str, Any],
+    component_dir: Path | None = None,
 ) -> str:
-    source_path = template / TEMPLATE_KUSTOMIZATION_FILE
+    source_path = template.source / TEMPLATE_KUSTOMIZATION_FILE
     rendered = render_jinja_template(source_path, base, values)
 
     try:
         documents = list(yaml.safe_load_all(rendered))
     except yaml.YAMLError as exc:
         raise ValueError(
-            f"template {display_path(template)} rendered invalid YAML: {exc}"
+            f"template {display_path(template.source)} rendered invalid YAML: {exc}"
         ) from exc
     if len(documents) != 1 or not isinstance(documents[0], dict):
         raise ValueError(
-            f"template {display_path(template)} must render one Kustomize Component mapping"
+            f"template {display_path(template.source)} must render one Kustomize Component mapping"
         )
     component = documents[0]
     if (
@@ -534,7 +600,13 @@ def render_template_component(
         or component.get("kind") != "Component"
     ):
         raise ValueError(
-            f"template {display_path(template)} must render a v1alpha1 Kustomize Component"
+            f"template {display_path(template.source)} must render a v1alpha1 Kustomize Component"
+        )
+    if component_dir:
+        rendered = rebase_rendered_component_paths(
+            rendered,
+            external_component_path_replacements(component, template, component_dir),
+            template,
         )
     return rendered.rstrip() + "\n"
 
@@ -549,7 +621,7 @@ def remove_leading_spdx_header(content: str) -> str:
 
 
 def generated_template_kustomization(
-    config: MatrixConfig, template: Path, rendered: str
+    config: MatrixConfig, template: TemplateSelection, rendered: str
 ) -> str:
     return "\n".join(
         [
@@ -558,7 +630,7 @@ def generated_template_kustomization(
             "# Generated file. For repository contributors, do not edit this checked-in copy.",
             "# Regenerate this matrix's public overlays and template Components from the repository root:",
             f"{GENERATED_OVERLAY_PREFIX}{config.command_path}",
-            f"{GENERATED_TEMPLATE_PREFIX}{display_path(template)}",
+            f"{GENERATED_TEMPLATE_PREFIX}{display_path(template.source)}",
             "",
             remove_leading_spdx_header(rendered).rstrip(),
             "",
@@ -584,7 +656,9 @@ def unfolded_kustomization(
         "resources:",
         f"  - {json.dumps(relative_path(config.source, overlay_dir))}",
     ]
-    components = (*variant.components, *template_components)
+
+    # A template can own a generic dependency whose patch order must precede variant additions.
+    components = (*template_components, *variant.components)
     if components:
         lines.append("components:")
         lines.extend(
@@ -617,26 +691,33 @@ def is_current_generated_overlay(config: MatrixConfig, path: Path) -> bool:
 
 
 def generated_template_kustomizations(overlay_dir: Path) -> set[Path]:
-    generated_dir = overlay_dir / GENERATED_COMPONENTS_DIR
-    if not generated_dir.is_dir():
-        return set()
     generated: set[Path] = set()
-    for path in generated_dir.iterdir():
-        kustomization = path / KUSTOMIZATION_FILE
-        if not path.is_dir() or not kustomization.is_file():
+    for directory_name in (
+        TEMPLATE_COMPONENTS_DIR,
+        LEGACY_TEMPLATE_COMPONENTS_DIR,
+    ):
+        generated_dir = overlay_dir / directory_name
+        if not generated_dir.is_dir():
             continue
-        if GENERATED_TEMPLATE_PREFIX in kustomization.read_text(encoding="utf-8"):
-            generated.add(kustomization)
+        for kustomization in generated_dir.rglob(KUSTOMIZATION_FILE):
+            if GENERATED_TEMPLATE_PREFIX in kustomization.read_text(encoding="utf-8"):
+                generated.add(kustomization)
     return generated
 
 
 def remove_generated_template_kustomization(kustomization: Path) -> None:
     component_dir = kustomization.parent
     shutil.rmtree(component_dir)
-    try:
-        component_dir.parent.rmdir()
-    except OSError:
-        pass
+    for parent in component_dir.parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        if parent.name in (
+            TEMPLATE_COMPONENTS_DIR,
+            LEGACY_TEMPLATE_COMPONENTS_DIR,
+        ):
+            return
 
 
 def generated_content_matches(path: Path, content: GeneratedContent) -> bool:
@@ -671,16 +752,14 @@ def unfold_matrix(
     for variant in variants:
         template_components: list[Path] = []
         values = merged_template_values(variant.templates, variant.values)
-        for index, template in enumerate(variant.templates):
-            component_dir = generated_template_component_path(
-                config, variant, index, template
-            )
+        for template in variant.templates:
+            component_dir = generated_template_component_path(config, variant, template)
             kustomization = component_dir / KUSTOMIZATION_FILE
             assert base is not None
             expected[kustomization] = generated_template_kustomization(
                 config,
                 template,
-                render_template_component(template, base, values),
+                render_template_component(template, base, values, component_dir),
             )
             assets = render_template_assets(template, component_dir, base, values)
             expected.update(assets)
