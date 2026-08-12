@@ -61,11 +61,18 @@ shared:
     owners: [epp, ops, operator]   # epp+ops kept, operator added
 ```
 
-Nothing checks that restatement today. Omitting `epp` above would quietly take
-the file from them, and the same is true of an area `path_globs` entry nested
-inside another area's directory. Whether an owner should inherit down a subtree
-at all is an open question about the ownership model; until it is settled, a
-reviewer reading the `areas.yaml` diff is the control.
+The strict gate checks that restatement, so omitting `epp` above fails the
+build rather than quietly taking the file from them. Enclosure is resolved, not
+tiered: a shared row is measured against whoever owns the path immediately
+before it, which may have been decided by an ancestor several levels up or by
+an intermediate rule that already reassigned it. The catch-all never counts --
+every explicit row exists to replace it.
+
+That check covers `shared` rows only. An area `path_globs` entry nested inside
+another area's directory still replaces the outer owner silently. Whether an
+owner should inherit down a subtree at all is an open question about the
+ownership model; until it is settled, a reviewer reading the `areas.yaml` diff
+is the control there.
 
 For an invariant that should not emit another CODEOWNERS row, use
 `required_owners`. The strict gate checks every matching tracked file against
@@ -132,6 +139,9 @@ generated outputs together.
 - final last-match resolution removes an owner promised by `required_owners`,
   or a blocking file-type declaration (**ownership contract gate**) - coverage
   by the wrong team no longer counts as success; or
+- a `shared` row drops an owner granted by the row it overrides (**shared
+  additivity gate**) - the restatement `shared` requires is machine-checked,
+  not trusted; or
 - the committed `CODEOWNERS` or `CONTRIBUTORS.md` differs from what the sources
   produce (**drift check**) - so the outputs always match their sources.
 

@@ -31,6 +31,7 @@ from build_codeowners import (  # noqa: E402
     _dead_patterns,
     is_policy_change,
     ownership_contract_violations,
+    shared_additivity_violations,
     split_coverage,
     strict_failure,
 )
@@ -952,6 +953,135 @@ class TestOwnershipContracts:
             True, CoverageGate(blocking=[], warnings=[]), None, violations, [], None
         )
         assert message and "lost declared owners" in message
+
+
+class TestSharedAdditivity:
+    """The guard the removed ``inherits`` key promised.
+
+    A shared row replaces the row it sits after, so it must restate every
+    owner it means to keep. Enclosure is resolved rather than tiered: the
+    comparison is against whoever actually owns the path just before this
+    row, however many levels up that was decided.
+    """
+
+    def _spec(self) -> dict:
+        # runtime owns lib/, frontend takes over lib/protocols/, and a shared
+        # row co-owns a directory two levels below the ancestor. This is the
+        # ancestor-not-parent shape: the owner in force at the shared path is
+        # frontend, not runtime.
+        return {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "runtime",
+                    "github_team": "@runtime",
+                    "path_globs": ["lib/"],
+                },
+                {
+                    "label": "frontend",
+                    "github_team": "@frontend",
+                    "path_globs": ["lib/protocols/"],
+                },
+                {
+                    "label": "multimodal",
+                    "github_team": "@multimodal",
+                    "path_globs": [],
+                },
+            ],
+            "shared": [
+                {
+                    "glob": "lib/protocols/audios/",
+                    "owners": ["frontend", "multimodal"],
+                },
+            ],
+        }
+
+    def test_restating_the_effective_owner_passes(self) -> None:
+        # Measured against frontend (the intermediate override), not runtime
+        # (the ancestor) -- so listing frontend + multimodal is complete.
+        model = compute_resolution(self._spec())
+
+        assert shared_additivity_violations(model, ["lib/protocols/audios/a.rs"]) == []
+
+    def test_dropping_the_effective_owner_is_caught(self) -> None:
+        spec = self._spec()
+        spec["shared"][0]["owners"] = ["multimodal"]
+        model = compute_resolution(spec)
+
+        violations = shared_additivity_violations(model, ["lib/protocols/audios/a.rs"])
+
+        assert len(violations) == 1
+        assert violations[0].glob == "lib/protocols/audios/"
+        assert violations[0].missing == ("@frontend",)
+        assert violations[0].declared == ("@multimodal",)
+
+    def test_ancestor_owner_replaced_upstream_is_not_demanded(self) -> None:
+        # runtime stopped owning this path at lib/protocols/, by an ordinary
+        # area override. The shared row is not what dropped it, so it is not
+        # required to restate it.
+        model = compute_resolution(self._spec())
+
+        violations = shared_additivity_violations(model, ["lib/protocols/audios/a.rs"])
+
+        assert all("@runtime" not in v.missing for v in violations)
+
+    def test_catch_all_is_not_an_enclosing_owner(self) -> None:
+        # A shared row over a tree no area claims sits directly on the
+        # catch-all. Demanding it restate the catch-all team would fire on
+        # every such rule (22 real paths under deploy/power-agent/).
+        spec = self._spec()
+        spec["shared"].append({"glob": "unclaimed/", "owners": ["multimodal"]})
+        model = compute_resolution(spec)
+
+        assert shared_additivity_violations(model, ["unclaimed/a.py"]) == []
+
+    def test_row_a_later_rule_overrides_is_not_judged(self) -> None:
+        # When something outranks the shared row for a path, the shared row is
+        # not in force there and any loss belongs to whatever won.
+        spec = self._spec()
+        spec["areas"][2]["path_globs"] = ["lib/protocols/audios/nested/"]
+        spec["shared"][0]["owners"] = ["multimodal"]
+        model = compute_resolution(spec)
+
+        violations = shared_additivity_violations(
+            model, ["lib/protocols/audios/nested/a.rs"]
+        )
+
+        assert violations == []
+
+    def test_strict_gate_blocks_on_an_additivity_violation(self) -> None:
+        spec = self._spec()
+        spec["shared"][0]["owners"] = ["multimodal"]
+        model = compute_resolution(spec)
+        violations = shared_additivity_violations(model, ["lib/protocols/audios/a.rs"])
+
+        message = strict_failure(
+            True,
+            CoverageGate(blocking=[], warnings=[]),
+            None,
+            [],
+            [],
+            None,
+            violations,
+        )
+
+        assert message and "drops an owner" in message
+
+    def test_gate_stays_green_when_shared_rules_are_complete(self) -> None:
+        model = compute_resolution(self._spec())
+        violations = shared_additivity_violations(model, ["lib/protocols/audios/a.rs"])
+
+        message = strict_failure(
+            True,
+            CoverageGate(blocking=[], warnings=[]),
+            None,
+            [],
+            [],
+            None,
+            violations,
+        )
+
+        assert message is None
 
 
 def test_dead_patterns_include_advisory_rules() -> None:

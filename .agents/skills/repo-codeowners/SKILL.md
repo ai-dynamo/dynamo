@@ -108,9 +108,10 @@ Semantics worth knowing before you file one:
   `areas.yaml`; the CI gate fails any policy change that removes a declared
   owner from a matching path.
 - **`shared` rows list their complete owner set.** Owners kept plus owners
-  added. Nothing validates this, so omitting a team that a broader rule
-  grants silently takes the path from them. Check with `who_owns.py` after
-  regenerating.
+  added. The CI gate validates it: omitting a team that the rule you override
+  grants fails the build. The comparison is against whoever owns the path
+  immediately before your row, so a path an intermediate rule already
+  reassigned is measured against that owner, not a distant ancestor.
 
 ## Flow 4: Grant an external contributor area-scoped ownership
 

@@ -122,6 +122,93 @@ def ownership_contract_violations(
     return violations
 
 
+@dataclass(frozen=True)
+class SharedAdditivityViolation:
+    """A ``shared`` row that drops an owner the row it overrides granted."""
+
+    glob: str
+    path: str
+    missing: tuple[str, ...]
+    declared: tuple[str, ...]
+
+
+def shared_additivity_violations(
+    model: ResolvedModel, tree: list[str]
+) -> list[SharedAdditivityViolation]:
+    """Find ``shared`` rows that drop an owner their enclosing row grants.
+
+    A CODEOWNERS row replaces earlier rows outright, so a ``shared`` entry must
+    restate every owner it means to keep. ``inherits`` was removed on the
+    promise that this is machine-checked rather than trusted; this is that
+    check.
+
+    "Enclosing" is resolved, not tiered. For a shared row at index ``i``, the
+    owners it replaces are ``resolve_owners(rules[:i], path)`` -- the final
+    last-match answer over exactly the rows this one sits after. That sidesteps
+    the question of which ancestor counts as the parent: a shared row under
+    ``/lib/llm/`` (runtime) whose path is already overridden by
+    ``/lib/llm/src/protocols/`` (frontend) is measured against frontend, the
+    owner actually in force, not against runtime several levels up.
+
+    Rows a later rule overrides for a given path are skipped: the shared row is
+    not in force there, so any loss belongs to whatever outranks it.
+
+    The catch-all is never an enclosing rule. It is the fallback every explicit
+    row exists to replace, so counting it would demand that each shared entry
+    restate the catch-all team -- 22 paths under ``deploy/power-agent/`` alone.
+    """
+    lines, _ = render_codeowners(model, group=True, external=[])
+    # ``model.catch_all`` is a team, not a pattern; the row it emits is "*".
+    rules = [rule for rule in parse_codeowners("\n".join(lines)) if rule[0] != "*"]
+    label_to_team = model.label_to_team()
+    violations: list[SharedAdditivityViolation] = []
+    for spec in model.shared:
+        pattern = anchor(spec["glob"])
+        # Shared rows are emitted last, so the final row carrying this pattern
+        # is the shared one even when an area declares the same glob.
+        indexes = [i for i, (pat, _) in enumerate(rules) if pat == pattern]
+        if not indexes:
+            continue
+        index = indexes[-1]
+        declared = {label_to_team.get(o, o) for o in spec["owners"]}
+        enclosing_rules = rules[:index]
+        for path in tree:
+            if not match(pattern, path):
+                continue
+            # Only judge paths where this row actually decides the owners.
+            if set(resolve_owners(rules, path)) != declared:
+                continue
+            missing = set(resolve_owners(enclosing_rules, path)) - declared
+            if not missing:
+                continue
+            violations.append(
+                SharedAdditivityViolation(
+                    glob=spec["glob"],
+                    path=path,
+                    missing=tuple(sorted(missing)),
+                    declared=tuple(sorted(declared)),
+                )
+            )
+    return violations
+
+
+def print_shared_additivity_violations(
+    violations: list[SharedAdditivityViolation],
+) -> None:
+    """Print a bounded shared-additivity report."""
+    if not violations:
+        return
+    print(
+        f"shared additivity violations: {len(violations)} "
+        "(a shared rule dropped an owner the rule it overrides granted):"
+    )
+    for violation in violations[:15]:
+        print(
+            f"    {violation.path} (shared {violation.glob}): "
+            f"drops {list(violation.missing)}; declared {list(violation.declared)}"
+        )
+
+
 def print_ownership_violations(
     violations: list[OwnershipContractViolation],
 ) -> None:
@@ -172,6 +259,7 @@ def strict_failure(
     ownership_violations: list[OwnershipContractViolation],
     dead: list[str],
     newly_stale: list[str] | None,
+    additivity_violations: list[SharedAdditivityViolation] | None = None,
 ) -> str | None:
     """Return the fail-closed message for the active strict gate.
 
@@ -206,6 +294,12 @@ def strict_failure(
         return (
             f"!! strict: {len(ownership_violations)} path(s) lost declared "
             "owners after final CODEOWNERS precedence"
+        )
+    if additivity_violations:
+        return (
+            f"!! strict: {len(additivity_violations)} path(s) where a shared "
+            "rule drops an owner the rule it overrides granted -- restate "
+            "every retained owner under that entry's 'owners' in areas.yaml"
         )
     return None
 
@@ -400,6 +494,9 @@ def main() -> int:
         Path(args.repo), args.base, args.areas, args.changed_only, tree
     )
     violations = ownership_contract_violations(model, contract_tree)
+    # Scoped like the ownership contracts: a diff-aware run judges only the
+    # paths this change touches, so base-branch policy cannot red-X a PR.
+    additivity = shared_additivity_violations(model, contract_tree)
     dead = _dead_patterns(model, tree)
     if changed is None:
         newly_stale = None
@@ -408,9 +505,12 @@ def main() -> int:
         base_paths = merge_base_tree(Path(args.repo), args.base) if dead else []
         newly_stale = newly_stale_patterns(dead, base_paths)
     _print_summary(model, tree, unmatched, dead, newly_stale, violations)
+    print_shared_additivity_violations(additivity)
     gate = split_coverage(unmatched, changed)
     _print_warnings(gate, args.base)
-    failure = strict_failure(args.strict, gate, changed, violations, dead, newly_stale)
+    failure = strict_failure(
+        args.strict, gate, changed, violations, dead, newly_stale, additivity
+    )
     if failure:
         print(failure)
         return 1
