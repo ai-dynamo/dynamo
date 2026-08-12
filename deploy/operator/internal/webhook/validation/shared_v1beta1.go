@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -121,8 +122,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		allErrs = append(allErrs, v.validateExperimentalSpec(
 			spec.Experimental,
 			fldPath.Child("experimental"),
-			spec.ComponentType,
-			dynamo.GetMainContainerResources(spec),
+			experimentalSpecValidationOptions{
+				componentType: spec.ComponentType,
+				resources:     dynamo.GetMainContainerResources(spec),
+				containers:    podTemplateContainers(spec.PodTemplate),
+				grovePathway:  grovePathway,
+			},
 		)...)
 	}
 
@@ -189,42 +194,43 @@ func (v *sharedValidation) validateTopologyConstraint(
 	return nil
 }
 
+type experimentalSpecValidationOptions struct {
+	componentType nvidiacomv1beta1.ComponentType
+	resources     corev1.ResourceRequirements
+	containers    []corev1.Container
+	grovePathway  bool
+}
+
 // validateExperimentalSpec validates experimental. experimental and fldPath must not be nil.
 func (v *sharedValidation) validateExperimentalSpec(
 	experimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
-	componentType nvidiacomv1beta1.ComponentType,
-	resources corev1.ResourceRequirements,
+	options experimentalSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if experimental.GPUMemoryService != nil {
-		gpuMemoryServicePath := fldPath.Child("gpuMemoryService")
-		switch componentType {
-		case nvidiacomv1beta1.ComponentTypeWorker,
-			nvidiacomv1beta1.ComponentTypePrefill,
-			nvidiacomv1beta1.ComponentTypeDecode:
-		default:
-			allErrs = append(allErrs, field.Forbidden(
-				gpuMemoryServicePath,
-				"GPU memory service is only supported for worker, prefill, or decode components",
-			))
-		}
-
-		gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(resources)
-		if err != nil || gpuCount < 1 {
-			allErrs = append(allErrs, field.Forbidden(
-				gpuMemoryServicePath,
-				"GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
-			))
-		}
+		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
+			experimental.GPUMemoryService,
+			fldPath.Child("gpuMemoryService"),
+			options.componentType,
+			options.resources,
+			options.containers,
+		)...)
 	}
 	if experimental.Failover != nil {
 		allErrs = append(allErrs, v.validateFailoverSpec(
 			experimental.Failover,
 			fldPath.Child("failover"),
 			experimental.GPUMemoryService,
-			componentType,
-			resources,
+			options.componentType,
+			options.resources,
+		)...)
+	}
+	if experimental.Grove != nil {
+		allErrs = append(allErrs, v.validateGroveSpec(
+			experimental.Grove,
+			fldPath.Child("grove"),
+			options.grovePathway,
 		)...)
 	}
 	if experimental.Checkpoint != nil {
@@ -235,13 +241,70 @@ func (v *sharedValidation) validateExperimentalSpec(
 		)...)
 	}
 
-	if experimental.Checkpoint != nil && experimental.Checkpoint.Enabled &&
-		experimental.GPUMemoryService != nil && !features.MustGateFrom(v.ctx).Enabled(features.GMSSnapshot) {
+	for _, err := range checkpoint.ValidateCheckpointCompatibility(experimental) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("checkpoint"),
-			"GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
+			err.Error(),
 		))
 	}
+	return allErrs
+}
+
+// validateGPUMemoryServiceSpec validates gpuMemoryService. gpuMemoryService and fldPath must not be nil.
+func (v *sharedValidation) validateGPUMemoryServiceSpec(
+	gpuMemoryService *nvidiacomv1beta1.GPUMemoryServiceSpec,
+	fldPath *field.Path,
+	componentType nvidiacomv1beta1.ComponentType,
+	resources corev1.ResourceRequirements,
+	containers []corev1.Container,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Restrict GMS to component types that own GPU-backed workloads.
+	switch componentType {
+	case nvidiacomv1beta1.ComponentTypeWorker,
+		nvidiacomv1beta1.ComponentTypePrefill,
+		nvidiacomv1beta1.ComponentTypeDecode:
+	default:
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"GPU memory service is only supported for worker, prefill, or decode components",
+		))
+	}
+
+	// Require the main container to expose at least one GPU to GMS.
+	gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(resources)
+	if err != nil || gpuCount < 1 {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
+		))
+	}
+
+	// Skip container-client validation for the inter-pod topology.
+	if effectiveGMSMode(gpuMemoryService.Mode) != nvidiacomv1beta1.GMSModeIntraPod {
+		return allErrs
+	}
+
+	// Validate every GMS client reference at its indexed field path.
+	seen := make(map[string]struct{}, len(gpuMemoryService.ExtraClientContainers))
+	extraClientContainersPath := fldPath.Child("extraClientContainers")
+	for i, name := range gpuMemoryService.ExtraClientContainers {
+		clientPath := extraClientContainersPath.Index(i)
+		if _, exists := seen[name]; exists {
+			allErrs = append(allErrs, field.Duplicate(clientPath, name))
+			continue
+		}
+		seen[name] = struct{}{}
+		if !hasContainerNamed(containers, name) {
+			allErrs = append(allErrs, field.Invalid(
+				clientPath,
+				name,
+				"does not name a container in podTemplate.spec.containers",
+			))
+		}
+	}
+
 	return allErrs
 }
 
@@ -296,6 +359,22 @@ func (v *sharedValidation) validateFailoverSpec(
 	return allErrs
 }
 
+// validateGroveSpec validates grove. grove and fldPath must not be nil.
+// grovePathway is supplied by the owning resource.
+func (v *sharedValidation) validateGroveSpec(
+	grove *nvidiacomv1beta1.GroveSpec,
+	fldPath *field.Path,
+	grovePathway bool,
+) field.ErrorList {
+	if grove.ForceScalingGroup && !grovePathway {
+		return field.ErrorList{field.Forbidden(
+			fldPath.Child("forceScalingGroup"),
+			"is currently supported only for Grove-backed DynamoGraphDeployment components",
+		)}
+	}
+	return nil
+}
+
 // validateComponentCheckpointConfig validates checkpoint. checkpoint and fldPath must not be nil.
 // gms may be nil because checkpoint validates that sibling relationship.
 func (v *sharedValidation) validateComponentCheckpointConfig(
@@ -346,6 +425,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	fldPath *field.Path,
 	canModifyReplicas bool,
 	ownerKind schema.GroupKind,
+	validateGPUMemoryServiceNewState bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if (newComponent.ScalingAdapter != nil || oldComponent.ScalingAdapter != nil) && !canModifyReplicas &&
@@ -385,7 +465,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent.Experimental,
 			oldComponent.Experimental,
 			fldPath.Child("experimental"),
-			ownerKind,
+			experimentalSpecUpdateValidationOptions{
+				ownerKind:                        ownerKind,
+				componentType:                    newComponent.ComponentType,
+				resources:                        dynamo.GetMainContainerResources(newComponent),
+				containers:                       podTemplateContainers(newComponent.PodTemplate),
+				validateGPUMemoryServiceNewState: validateGPUMemoryServiceNewState,
+			},
 		)...)
 	} else if oldComponent.Experimental != nil {
 		oldGMS := gpuMemoryServiceForExperimental(oldComponent.Experimental)
@@ -402,6 +488,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				fldPath.Child("experimental", "failover"),
 				nil,
 				fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			))
+		}
+		if forceScalingGroupFor(oldComponent.Experimental) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("experimental", "grove", "forceScalingGroup"),
+				nil,
+				fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 			))
 		}
 	}
@@ -442,22 +535,40 @@ func (v *sharedValidation) validateTopologyConstraintUpdate(
 	)}
 }
 
+type experimentalSpecUpdateValidationOptions struct {
+	ownerKind                        schema.GroupKind
+	componentType                    nvidiacomv1beta1.ComponentType
+	resources                        corev1.ResourceRequirements
+	containers                       []corev1.Container
+	validateGPUMemoryServiceNewState bool
+}
+
 // validateExperimentalSpecUpdate validates an experimental spec update.
-// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and ownerKind.Kind must not be empty.
+// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and options.ownerKind.Kind must not be empty.
 func (v *sharedValidation) validateExperimentalSpecUpdate(
 	newExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	oldExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
-	ownerKind schema.GroupKind,
+	options experimentalSpecUpdateValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newGMS := newExperimental.GPUMemoryService
+	if newGMS != nil && options.validateGPUMemoryServiceNewState {
+		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
+			newGMS,
+			fldPath.Child("gpuMemoryService"),
+			options.componentType,
+			options.resources,
+			options.containers,
+		)...)
+	}
+
 	oldGMS := gpuMemoryServiceForExperimental(oldExperimental)
 	if isInterPodGMS(newGMS) != isInterPodGMS(oldGMS) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("gpuMemoryService", "mode"),
 			k8sptr.Deref(newGMS, nvidiacomv1beta1.GPUMemoryServiceSpec{}).Mode,
-			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
 		))
 	}
 
@@ -467,7 +578,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover"),
 			newFailover,
-			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
 		))
 	}
 	if isInterPodFailover(newFailover) && isInterPodFailover(oldFailover) &&
@@ -475,8 +586,44 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover", "numShadows"),
 			newFailover.NumShadows,
-			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
+			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", options.ownerKind.Kind),
+		))
+	}
+
+	oldGrove := groveForExperimental(oldExperimental)
+	if newExperimental.Grove != nil {
+		allErrs = append(allErrs, v.validateGroveSpecUpdate(
+			newExperimental.Grove,
+			oldGrove,
+			fldPath.Child("grove"),
+			options.ownerKind,
+		)...)
+	} else if oldGrove != nil && oldGrove.ForceScalingGroup {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("grove", "forceScalingGroup"),
+			nil,
+			fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", options.ownerKind.Kind),
 		))
 	}
 	return allErrs
+}
+
+// validateGroveSpecUpdate validates a grove update. newGrove and fldPath must
+// not be nil; oldGrove may be nil for an addition. false and omitted both
+// mean automatic selection, so only the effective opt-in is immutable.
+func (v *sharedValidation) validateGroveSpecUpdate(
+	newGrove *nvidiacomv1beta1.GroveSpec,
+	oldGrove *nvidiacomv1beta1.GroveSpec,
+	fldPath *field.Path,
+	ownerKind schema.GroupKind,
+) field.ErrorList {
+	oldForced := oldGrove != nil && oldGrove.ForceScalingGroup
+	if newGrove.ForceScalingGroup == oldForced {
+		return nil
+	}
+	return field.ErrorList{field.Invalid(
+		fldPath.Child("forceScalingGroup"),
+		newGrove.ForceScalingGroup,
+		fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
+	)}
 }

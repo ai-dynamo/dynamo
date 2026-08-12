@@ -35,7 +35,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.plugins.clock import Clock, VirtualClock
-from dynamo.planner.plugins.merge.types import ChainAugmentOutcome
+from dynamo.planner.plugins.merge.types import ChainAugmentOutcome, ComponentKey
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
 from dynamo.planner.plugins.types import ComponentTarget, ScalingProposal
@@ -282,10 +282,19 @@ def test_observe_fpm_feeds_installed_regression_without_crashing_disagg():
     )
 
 
-def _apply_outcome(targets):
+def _apply_outcome(targets, *, proposed=None):
+    if proposed is None:
+        proposed = {
+            target.sub_component_type
+            for target in targets
+            if target.replicas is not None
+        }
     return PipelineOutcome(
         execute_action="apply",
         final_proposal=ScalingProposal(targets=targets),
+        proposed_components=frozenset(
+            ComponentKey(sub_component_type=component) for component in proposed
+        ),
     )
 
 
@@ -364,6 +373,12 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
 
 
 def test_project_scale_to_budget_preserves_single_component_target_mask():
+    """Decode-only proposal: residual GPU clamp must not invent a prefill target.
+
+    Prefill is charged at its ready count against the residual ceiling, and
+    the proposal-mask invariant must keep ``num_prefill`` None so a
+    decode-only decision cannot rewrite prefill desired.
+    """
     cfg = PlannerConfig(
         mode="disagg",
         enable_load_scaling=True,
@@ -372,16 +387,128 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
         served_model_name="test",
         max_gpu_budget=4,
         min_gpu_budget=-1,
+        enable_power_awareness=True,
+        total_gpu_power_limit=100000,
     )
     adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
-    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=1)
-    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
+    wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=1)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=10)]
+    )
 
     dec = adapter._project_scale_to(outcome, wc)
 
     assert dec is not None
     assert dec.num_prefill is None
-    assert dec.num_decode == 2
+    # Prefill ready=1 charged against residual ceiling 3 → decode capped at 3.
+    assert dec.num_decode == 3
+
+
+def test_partial_decode_proposal_respects_residual_gpu_ceiling():
+    """Power-aware path: decode-only proposal must not assume prefill shrinks.
+
+    Current (7, 1), one GPU each, ceiling 8. With power awareness on, the
+    ready-equal prefill echo is masked to None before the GPU clamp, so the
+    residual path sizes decode against the residual 1 GPU — never emit decode
+    4 from a joint clamp that assumed prefill also dropped to 4.
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=True,
+        # High enough that power does not mask the GPU-ceiling bug.
+        total_gpu_power_limit=100000,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=7,
+        ready_num_decode=1,
+        expected_num_prefill=7,
+        expected_num_decode=1,
+    )
+
+    assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 1)
+
+    # Power-awareness masks the ready-equal prefill echo before the GPU clamp.
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=7),
+            ComponentTarget(sub_component_type="decode", replicas=7),
+        ],
+        proposed={"decode"},
+    )
+    dec = adapter._project_scale_to(outcome, wc)
+    assert dec is None or dec.num_prefill is None
+    applied_d = 1 if (dec is None or dec.num_decode is None) else dec.num_decode
+    assert applied_d <= 1
+    assert 7 + applied_d <= 8
+
+
+def test_residual_gpu_clamp_holds_when_fixed_peer_already_over_ceiling():
+    """Fixed peer alone over the GPU ceiling must not zero the proposed role.
+
+    ready prefill=9, ceiling=8, decode-only propose 4: residual_max is 0, so
+    proportional_clamp_single would return 0. Hold decode at its ready count
+    instead of emitting a spurious scale-to-zero.
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=True,
+        total_gpu_power_limit=100000,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=9,
+        ready_num_decode=1,
+        expected_num_prefill=9,
+        expected_num_decode=1,
+    )
+
+    assert adapter._apply_gpu_final_budget(None, 4, wc) == (None, 1)
+
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
+    dec = adapter._project_scale_to(outcome, wc)
+    # Held at settled decode=1, then suppressed as a proven stable no-op.
+    assert dec is None or dec.num_decode is None
+    assert dec is None or dec.num_prefill is None
+
+
+def test_power_off_partial_proposal_keeps_joint_gpu_clamp():
+    """Power-off disagg keeps the historical joint-then-discard GPU clamp.
+
+    Same (7,1)/decode-7/ceiling-8 inputs as the power-aware residual test, but
+    without power awareness the joint clamp emits decode 4 (Ted P2 scope
+    guard: residual sizing must not change power-off behavior).
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=False,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=7,
+        ready_num_decode=1,
+        expected_num_prefill=7,
+        expected_num_decode=1,
+    )
+    assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 4)
 
 
 def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():

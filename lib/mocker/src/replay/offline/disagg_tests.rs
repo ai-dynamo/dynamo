@@ -466,7 +466,9 @@ fn test_derive_stage_router_configs_force_required_overrides() {
 #[case(ReplayRouterMode::KvRouter)]
 fn test_trace_smoke_reports_decode_only_tokens(#[case] router_mode: ReplayRouterMode) {
     let config = disagg_config();
-    let requests = vec![request(1, 128, 3, 5.0)];
+    let mut planned = request(1, 128, 1, 5.0);
+    planned.output_token_ids = Some(vec![11, 12, 13]);
+    let requests = vec![planned];
 
     let router_config = (router_mode == ReplayRouterMode::KvRouter).then(router_config);
     let (collector, stats) = run_trace_collect(&config, requests, router_config, 1.0, router_mode);
@@ -1356,9 +1358,10 @@ fn destination_first_workload_materializes_for_decode_reservation_then_completes
     );
 
     runtime.apply_scaling(1, 1).unwrap();
-    let (_, stats) = runtime.run().unwrap();
+    let (collector, stats) = runtime.run().unwrap();
 
     assert_eq!(stats.request_snapshots[&uuid].phase, DisaggPhase::Done);
+    assert_eq!(collector.finish().request_counts.total_output_tokens, 4);
 }
 
 #[test]

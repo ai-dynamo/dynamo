@@ -111,7 +111,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         }
 
         // Convert tools
-        let tools = req.tools.as_ref().map(|t| convert_anthropic_tools(t));
+        let tools = req
+            .tools
+            .as_deref()
+            .map(convert_anthropic_tools)
+            .transpose()?;
 
         // Convert tool_choice
         let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
@@ -119,6 +123,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
+            .filter(|sequences| !sequences.is_empty())
             .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
@@ -132,9 +137,15 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
+                // Request cumulative usage on every chunk (not just the final
+                // one) so the Anthropic stream converter can stamp an
+                // authoritative per-chunk usage triple onto each
+                // `content_block_delta` and still report a token count if the
+                // client aborts mid-stream. Mirrors the running-usage behaviour
+                // of the OpenAI DeltaGenerator.
                 stream_options: Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                     include_usage: true,
-                    continuous_usage_stats: false,
+                    continuous_usage_stats: true,
                 }),
                 ..Default::default()
             },
@@ -459,22 +470,17 @@ fn convert_assistant_blocks(
 }
 
 /// Convert Anthropic tools to ChatCompletionTools.
-fn convert_anthropic_tools(tools: &[AnthropicTool]) -> Vec<ChatCompletionTool> {
+fn convert_anthropic_tools(
+    tools: &[AnthropicTool],
+) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
     tools
         .iter()
-        .filter_map(|tool| {
-            // Server tools (web_search, bash, etc.) don't have input_schema
-            // and can't be meaningfully converted to OpenAI function tools.
-            // They are backend-specific and handled separately.
-            let schema = tool.input_schema.clone().or_else(|| {
-                tracing::debug!(
-                    tool_name = %tool.name,
-                    tool_type = ?tool.tool_type,
-                    "Skipping server tool in OpenAI conversion (no input_schema)"
-                );
-                None
+        .enumerate()
+        .map(|(tool_index, tool)| {
+            let schema = tool.input_schema.clone().ok_or_else(|| {
+                anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
-            Some(ChatCompletionTool {
+            Ok(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
                     name: tool.name.clone(),
@@ -547,6 +553,11 @@ pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> Anthropi
     }
 }
 
+/// Generate an Anthropic-native `tool_use` id.
+pub(super) fn new_tool_use_id() -> String {
+    format!("toolu_{}", Uuid::new_v4().simple())
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -575,8 +586,14 @@ pub fn chat_completion_to_anthropic_response(
             for tc in tool_calls {
                 let input: serde_json::Value =
                     serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                let emitted_id = new_tool_use_id();
+                tracing::debug!(
+                    backend_id = %tc.id,
+                    emitted_id = %emitted_id,
+                    "minting Anthropic tool_use id"
+                );
                 content.push(AnthropicResponseContentBlock::ToolUse {
-                    id: tc.id,
+                    id: emitted_id,
                     name: tc.function.name,
                     input,
                 });
@@ -626,12 +643,23 @@ pub fn chat_completion_to_anthropic_response(
     }
 
     // Map usage through the same protocol conversion used by the streaming path.
+    //
+    // The fallback is reachable, not just defensive: the unary `/v1/messages`
+    // handler aggregates the backend stream, and the aggregator leaves `usage`
+    // as `None` unless some delta carried it. `AnthropicUsage::default()` would
+    // give `cache_creation_input_tokens: None`, which
+    // `skip_serializing_if = "Option::is_none"` drops from the response, so a
+    // no-usage backend would return a different set of usage keys than a
+    // reporting one. Construct the zero case explicitly to keep one shape.
     let usage = chat_resp
         .inner
         .usage
         .as_ref()
         .map(completion_usage_to_anthropic)
-        .unwrap_or_default();
+        .unwrap_or(AnthropicUsage {
+            cache_creation_input_tokens: Some(0),
+            ..Default::default()
+        });
 
     AnthropicMessageResponse {
         id: msg_id,
@@ -934,6 +962,12 @@ mod tests {
             output_config: None,
         };
 
+        let mut empty_req = req.clone();
+        empty_req.stop_sequences = Some(vec![]);
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.stop.is_none());
+        crate::engines::ValidateRequest::validate(&empty_chat_req).unwrap();
+
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.stop.is_some());
     }
@@ -1176,6 +1210,54 @@ mod tests {
         assert_eq!(serialized["cache_read_input_tokens"], 5);
         assert_eq!(serialized["cache_creation_input_tokens"], 0);
         assert_eq!(serialized["output_tokens"], 3);
+    }
+
+    /// The no-usage fallback must emit the same usage keys as a backend that
+    /// does report usage. The unary `/v1/messages` handler aggregates the
+    /// backend stream, and the aggregator leaves `usage` as `None` unless some
+    /// delta carried it, so this branch is reached in normal operation rather
+    /// than only in tests. `AnthropicUsage::default()` would leave
+    /// `cache_creation_input_tokens` as `None`, which `skip_serializing_if`
+    /// drops — giving a client a different key set depending on whether the
+    /// backend happened to report.
+    #[allow(deprecated)]
+    #[test]
+    fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-no-usage".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hi!".to_string(),
+                        )),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                // The aggregator never saw a usage-bearing delta.
+                usage: None,
+            },
+            nvext: None,
+        };
+
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
+
+        let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
+        assert_eq!(serialized["cache_creation_input_tokens"], 0);
     }
 
     #[allow(deprecated)]

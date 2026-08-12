@@ -443,8 +443,7 @@ impl LiveEffectsPublisher {
         self.publish_router_effects(self.captured_kv_events.drain(), None);
         self.publish_lifecycle(pending.pass.lifecycle_events).await;
         let metrics = core.pass_boundary_metrics(pending.pass.mocker_metrics);
-        self.record(PublishedEffect::Metrics);
-        let _ = self.metrics_tx.send(metrics);
+        self.publish_metrics(metrics);
         Ok(())
     }
 
@@ -475,6 +474,26 @@ impl LiveEffectsPublisher {
         .await
     }
 
+    fn publish_live_metrics<C: LiveBoundaryCore>(&self, core: &C) {
+        self.publish_metrics(core.live_metrics());
+    }
+
+    fn publish_metrics(&self, mut metrics: MockerMetrics) {
+        self.record(PublishedEffect::Metrics);
+        self.metrics_tx.send_modify(|current| {
+            // NOTE: This is a semantic latch, not optional smoothing. SGLang's cache fields are
+            // per-prefill observations, while `watch` retains only the latest value. DO NOT let a
+            // decode or idle snapshot with no prefill tokens erase a meaningful observation before
+            // consumers can read it. A real miss has a nonzero total and must replace the latch.
+            // This latch is specific to SGLang's aggregate cache observation; do not generalize it.
+            if metrics.sglang_cache_total_tokens == 0 {
+                metrics.sglang_cache_hit_tokens = current.sglang_cache_hit_tokens;
+                metrics.sglang_cache_total_tokens = current.sglang_cache_total_tokens;
+            }
+            *current = metrics;
+        });
+    }
+
     async fn apply_command_inner<C: LiveBoundaryCore>(
         &self,
         core: &mut C,
@@ -500,8 +519,7 @@ impl LiveEffectsPublisher {
                 let _ = reply.send(Ok(effects));
                 if allow_destination_admission {
                     self.publish_lifecycle(lifecycle_events).await;
-                    self.record(PublishedEffect::Metrics);
-                    let _ = self.metrics_tx.send(core.live_metrics());
+                    self.publish_live_metrics(core);
                 }
                 Some(command_result)
             }
@@ -523,8 +541,7 @@ impl LiveEffectsPublisher {
         let made_progress = !lifecycle_events.is_empty() || !kv_events.is_empty();
         self.publish_router_effects(kv_events, None);
         self.publish_lifecycle(lifecycle_events).await;
-        self.record(PublishedEffect::Metrics);
-        let _ = self.metrics_tx.send(core.live_metrics());
+        self.publish_live_metrics(core);
         made_progress
     }
 
@@ -550,8 +567,7 @@ impl LiveEffectsPublisher {
         let made_progress = !kv_events.is_empty() || !effects.lifecycle_events.is_empty();
         self.publish_router_effects(kv_events, None);
         self.publish_lifecycle(effects.lifecycle_events).await;
-        self.record(PublishedEffect::Metrics);
-        let _ = self.metrics_tx.send(core.live_metrics());
+        self.publish_live_metrics(core);
         made_progress
     }
 
@@ -760,6 +776,13 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
                     .await;
                 if discard_pending_output || outcome != Some(SchedulerCommandResult::Noop) {
                     pending.suppress_request_outputs(request_id);
+                }
+                if outcome == Some(SchedulerCommandResult::Applied) && core.live_is_empty() {
+                    // Cancellation updates occupancy immediately, but the
+                    // modeled pass may still own another request's output or
+                    // other pass-end effects. Publish current metrics without
+                    // ending that pass before its deadline.
+                    publisher.publish_live_metrics(core);
                 }
             }
             _ = &mut internal_deadline, if internal_deadline_ms.is_some() => {

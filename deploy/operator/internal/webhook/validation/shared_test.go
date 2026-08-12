@@ -151,6 +151,7 @@ func TestRuntimeVersionImageAbsenceRatcheting(t *testing.T) {
 			field.NewPath("spec"),
 			true,
 			schema.GroupKind{Group: nvidiacomv1beta1.GroupVersion.Group, Kind: "DynamoComponentDeployment"},
+			false,
 		)
 		assertFieldPaths(t, errs, nil)
 	})
@@ -362,8 +363,10 @@ func TestValidateExperimentalSpecDoesNotExposePodTemplate(t *testing.T) {
 	errs := validation.validateExperimentalSpec(
 		&nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: gms},
 		fldPath,
-		nvidiacomv1beta1.ComponentTypeWorker,
-		corev1.ResourceRequirements{},
+		experimentalSpecValidationOptions{
+			componentType: nvidiacomv1beta1.ComponentTypeWorker,
+			grovePathway:  true,
+		},
 	)
 	assertFieldPaths(t, errs, []string{"spec.components[0].experimental.gpuMemoryService"})
 	if errs[0].BadValue != "" {

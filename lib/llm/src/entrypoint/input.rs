@@ -14,6 +14,7 @@ use std::{
 };
 
 mod common;
+pub(crate) use common::build_preprocessed_routing_with_selector;
 pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
@@ -111,22 +112,13 @@ pub async fn run_input_with_frontend_route_extensions(
     engine_config: super::EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
 ) -> anyhow::Result<()> {
-    if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
-        tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
-    }
-    if let Err(e) = crate::request_trace::start_tool_event_ingest_from_policy(
-        drt.clone(),
-        engine_config.local_model(),
-    )
-    .await
-    {
-        tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
-    }
-
     // Frontend route extensions only apply to the HTTP frontend; reject them
     // once here rather than repeating the guard in every non-HTTP arm.
-    if !matches!(in_opt, Input::Http) && !frontend_route_extensions.is_empty() {
+    if !matches!(&in_opt, Input::Http) && !frontend_route_extensions.is_empty() {
         anyhow::bail!("frontend route extensions are only supported by HTTP input");
+    }
+    if !matches!(&in_opt, Input::Http) {
+        initialize_input(&drt, &engine_config).await;
     }
 
     match in_opt {
@@ -150,4 +142,21 @@ pub async fn run_input_with_frontend_route_extensions(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn initialize_input(
+    drt: &dynamo_runtime::DistributedRuntime,
+    engine_config: &super::EngineConfig,
+) {
+    if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
+    }
+    if let Err(e) = crate::request_trace::start_tool_event_ingest_from_policy(
+        drt.clone(),
+        engine_config.local_model(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
+    }
 }
