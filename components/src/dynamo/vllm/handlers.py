@@ -85,7 +85,7 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
-from dynamo.vllm.router_hints import enable_router_hint_support
+from dynamo.vllm.kv_hints import enable_kv_migrate_hint_support
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -818,39 +818,32 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
-    # Forward only Dynamo's router-generated hint from
-    # request.extra_args.kv_transfer_params into vLLM SamplingParams. Today,
-    # router_hint is the only kv_transfer_params key the Rust preprocessor adds,
-    # so do not pass through any other request-provided connector inputs. Copy
-    # extra_args before mutation because SamplingParams may reuse the
-    # default_sampling_params dict across requests.
-    if isinstance(extra_args, dict):
-        request_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-        if isinstance(request_kv_transfer_params, dict):
-            passthrough_router_hint = request_kv_transfer_params.get(
-                _ROUTER_HINT_EXTRA_ARGS_KEY
-            )
-            if isinstance(passthrough_router_hint, dict):
-                passthrough_extra_args = (
-                    dict(sampling_params.extra_args)
-                    if isinstance(sampling_params.extra_args, dict)
-                    else {}
-                )
-                existing_kv_transfer_params = passthrough_extra_args.get(
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                )
-                passthrough_kv_transfer_params = (
-                    dict(existing_kv_transfer_params)
-                    if isinstance(existing_kv_transfer_params, dict)
-                    else {}
-                )
-                passthrough_kv_transfer_params[
-                    _ROUTER_HINT_EXTRA_ARGS_KEY
-                ] = passthrough_router_hint
-                passthrough_extra_args[
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                ] = passthrough_kv_transfer_params
-                sampling_params.extra_args = passthrough_extra_args
+    # vLLM does not expose Dynamo's cross-engine hint envelope. Translate only
+    # MIGRATE into the connector's existing router_hint input.
+    kv_hints = request.get("kv_hints")
+    migrate = kv_hints.get("migrate") if isinstance(kv_hints, dict) else None
+    transfer_plan = migrate.get("transfer_plan") if isinstance(migrate, dict) else None
+    if isinstance(transfer_plan, dict):
+        passthrough_extra_args = (
+            dict(sampling_params.extra_args)
+            if isinstance(sampling_params.extra_args, dict)
+            else {}
+        )
+        existing_kv_transfer_params = passthrough_extra_args.get(
+            _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+        )
+        passthrough_kv_transfer_params = (
+            dict(existing_kv_transfer_params)
+            if isinstance(existing_kv_transfer_params, dict)
+            else {}
+        )
+        passthrough_kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = dict(
+            transfer_plan
+        )
+        passthrough_extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = (
+            passthrough_kv_transfer_params
+        )
+        sampling_params.extra_args = passthrough_extra_args
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -2219,7 +2212,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set.append(WorkerType.Encode)
 
         apply_data_parallel_runtime_config(runtime_config, self.dp_range)
-        enable_router_hint_support(
+        enable_kv_migrate_hint_support(
             runtime_config,
             self.config.engine_args,
             lora_worker_type,

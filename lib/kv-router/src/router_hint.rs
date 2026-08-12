@@ -1,32 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Router-generated hints that are attached to selected backend requests.
-
-use serde::{Deserialize, Serialize};
+//! Candidate KV chains retained for router-planned migration.
 
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
-
-/// Key for router-generated backend hints inside KV transfer params.
-pub const ROUTER_HINT_EXTRA_ARGS_KEY: &str = "router_hint";
-
-/// Worker runtime_data key. Boolean true means the worker can consume router_hint extra args.
-pub const ROUTER_HINT_RUNTIME_CAPABILITY_KEY: &str = "router_hint";
-
-/// Worker runtime_data key for matching router-hint sources to targets by backend role.
-pub const ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY: &str = "router_hint_worker_type";
-
-/// Worker runtime_data key for per-global-DP-rank advertised KVCC control endpoints.
-pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
-    "router_hint_source_control_endpoints";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RouterHint {
-    pub source_control_endpoint: String,
-    /// Root-aligned source-side KV block hashes. `block_hashes[i]`
-    /// corresponds to request block `i`; the target decides which suffix to fetch.
-    pub block_hashes: Vec<ExternalSequenceBlockHash>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterHintRootCandidates {

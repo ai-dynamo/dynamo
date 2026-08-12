@@ -9,13 +9,14 @@ use dynamo_kv_router::{
     SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{KvRouterError, RoutingDecisionHashes},
+    kv_hints::{KvHints, KvTransferPlan, MigrateHint},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
-    router_hint::{RouterHint, RouterHintRootCandidates},
+    router_hint::RouterHintRootCandidates,
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
@@ -176,7 +177,7 @@ pub enum FindBestMatchOutcome {
         cached_tokens: usize,
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
-        router_hint: Option<RouterHint>,
+        kv_hints: Option<KvHints>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -626,31 +627,32 @@ where
         cache_hit_for_worker(cache_hit_estimates, worker)
     }
 
-    fn has_router_hint_capable_workers(&self) -> bool {
-        // Router-hint capability is worker-level metadata. Check one
+    fn has_migrate_capable_workers(&self) -> bool {
+        // MIGRATE capability is worker-level metadata. Check one
         // representative DP rank here so the coarse request-path gate does not
         // scale with data_parallel_size. Follow-up: cache this from the runtime
         // config watch if the per-worker scan shows up in large-fleet routing
         // benchmarks.
         self.workers_with_configs.borrow().values().any(|config| {
             config
-                .router_hint_metadata_for_dp_rank(config.data_parallel_start_rank())
+                .kv_hint_migrate_metadata_for_dp_rank(config.data_parallel_start_rank())
                 .is_some()
         })
     }
 
-    fn router_hint_for_selection(
+    fn migrate_hint_for_selection(
         &self,
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
         candidates: Option<&RouterHintRootCandidates>,
-    ) -> Option<RouterHint> {
+    ) -> Option<KvHints> {
         let candidates = candidates?;
 
         let (block_hashes, source_control_endpoint) = {
             let configs = self.workers_with_configs.borrow();
             let target_config = configs.get(&target.worker_id)?;
-            let target_metadata = target_config.router_hint_metadata_for_dp_rank(target.dp_rank)?;
+            let target_metadata =
+                target_config.kv_hint_migrate_metadata_for_dp_rank(target.dp_rank)?;
 
             let prefix_blocks_to_beat =
                 usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
@@ -659,7 +661,7 @@ where
                     worker != target
                         && configs.get(&worker.worker_id).is_some_and(|config| {
                             config
-                                .router_hint_metadata_for_dp_rank(worker.dp_rank)
+                                .kv_hint_migrate_metadata_for_dp_rank(worker.dp_rank)
                                 .is_some_and(|source_metadata| {
                                     source_metadata.worker_type == target_metadata.worker_type
                                         && source_metadata.source_control_endpoint.is_some()
@@ -668,7 +670,7 @@ where
                 })?;
             let source_control_endpoint = configs
                 .get(&source.worker_id)?
-                .router_hint_metadata_for_dp_rank(source.dp_rank)?
+                .kv_hint_migrate_metadata_for_dp_rank(source.dp_rank)?
                 .source_control_endpoint?
                 .to_string();
             (block_hashes, source_control_endpoint)
@@ -678,9 +680,13 @@ where
             return None;
         }
 
-        Some(RouterHint {
-            source_control_endpoint,
-            block_hashes,
+        Some(KvHints {
+            migrate: Some(MigrateHint {
+                transfer_plan: KvTransferPlan {
+                    source_control_endpoint,
+                    block_hashes,
+                },
+            }),
         })
     }
 
@@ -969,15 +975,15 @@ where
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
-        let has_router_hint_capable_workers = self.has_router_hint_capable_workers();
-        let should_prepare_router_hint = is_admitted_routing && has_router_hint_capable_workers;
+        let has_migrate_capable_workers = self.has_migrate_capable_workers();
+        let should_prepare_migrate_hint = is_admitted_routing && has_migrate_capable_workers;
         let retain_router_hint_chain =
-            should_prepare_router_hint && self.indexer.supports_router_hint_chain_retention();
-        if should_prepare_router_hint && !retain_router_hint_chain {
+            should_prepare_migrate_hint && self.indexer.supports_router_hint_chain_retention();
+        if should_prepare_migrate_hint && !retain_router_hint_chain {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
             WARN_ONCE.call_once(|| {
                 tracing::warn!(
-                    "router_hint chain retention requires a local event-driven indexer with no approximate side indexer and no remote-recorded routing decisions; proceeding without router hints"
+                    "MIGRATE hint chain retention requires a local event-driven indexer with no approximate side indexer and no remote-recorded routing decisions; proceeding without migration hints"
                 );
             });
         }
@@ -1086,8 +1092,8 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
-        let router_hint = if is_admitted_routing {
-            self.router_hint_for_selection(
+        let kv_hints = if is_admitted_routing {
+            self.migrate_hint_for_selection(
                 response.best_worker,
                 response.target_cached_prefix_blocks,
                 response.router_hint_candidates.as_ref(),
@@ -1144,7 +1150,7 @@ where
                     cached_tokens: response.cached_tokens,
                     potential_decode_blocks: response.potential_decode_blocks as u64,
                     routing_hashes,
-                    router_hint,
+                    kv_hints,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(
@@ -2085,21 +2091,21 @@ mod tests {
         make_test_router_with_workers(selector, shared_cache, workers).await
     }
 
-    fn router_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {
-        router_hint_runtime_config_with_worker_type(endpoint, "prefill")
+    fn migrate_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {
+        migrate_hint_runtime_config_with_worker_type(endpoint, "prefill")
     }
 
-    fn router_hint_runtime_config_with_worker_type(
+    fn migrate_hint_runtime_config_with_worker_type(
         endpoint: Option<&str>,
         worker_type: &str,
     ) -> ModelRuntimeConfig {
         let mut runtime_config = ModelRuntimeConfig::default();
         runtime_config.runtime_data.insert(
-            dynamo_kv_router::router_hint::ROUTER_HINT_RUNTIME_CAPABILITY_KEY.to_string(),
+            dynamo_kv_router::kv_hints::KV_HINT_MIGRATE_CAPABILITY_KEY.to_string(),
             serde_json::Value::Bool(true),
         );
         runtime_config.runtime_data.insert(
-            dynamo_kv_router::router_hint::ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY.to_string(),
+            dynamo_kv_router::kv_hints::KV_HINT_MIGRATE_WORKER_TYPE_RUNTIME_KEY.to_string(),
             serde_json::Value::String(worker_type.to_string()),
         );
         if let Some(endpoint) = endpoint {
@@ -2109,7 +2115,7 @@ mod tests {
                 serde_json::Value::String(endpoint.to_string()),
             );
             runtime_config.runtime_data.insert(
-                dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+                dynamo_kv_router::kv_hints::KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
                     .to_string(),
                 serde_json::Value::Object(endpoints),
             );
@@ -2117,12 +2123,12 @@ mod tests {
         runtime_config
     }
 
-    fn router_hint_runtime_config_with_dp_endpoints(
+    fn migrate_hint_runtime_config_with_dp_endpoints(
         endpoints: &[(u32, &str)],
     ) -> ModelRuntimeConfig {
-        let mut runtime_config = router_hint_runtime_config(None);
+        let mut runtime_config = migrate_hint_runtime_config(None);
         runtime_config.runtime_data.insert(
-            dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+            dynamo_kv_router::kv_hints::KV_HINT_MIGRATE_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
                 .to_string(),
             serde_json::Value::Object(
                 endpoints
@@ -2140,11 +2146,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_hint_allows_other_dp_ranks_of_selected_target_worker() {
+    async fn migrate_hint_allows_other_dp_ranks_of_selected_target_worker() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
-            router_hint_runtime_config_with_dp_endpoints(&[
+            migrate_hint_runtime_config_with_dp_endpoints(&[
                 (0, "tcp://127.0.0.1:23280"),
                 (1, "tcp://127.0.0.1:23281"),
             ]),
@@ -2167,26 +2173,33 @@ mod tests {
         };
 
         let hint =
-            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+            router.migrate_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
 
         assert_eq!(
             hint,
-            Some(RouterHint {
-                source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
-                block_hashes: vec![
-                    ExternalSequenceBlockHash(101),
-                    ExternalSequenceBlockHash(102)
-                ],
+            Some(KvHints {
+                migrate: Some(MigrateHint {
+                    transfer_plan: KvTransferPlan {
+                        source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                        block_hashes: vec![
+                            ExternalSequenceBlockHash(101),
+                            ExternalSequenceBlockHash(102),
+                        ],
+                    },
+                }),
             })
         );
     }
 
     #[tokio::test]
-    async fn router_hint_skips_sources_without_usable_endpoint() {
+    async fn migrate_hint_skips_sources_without_usable_endpoint() {
         for source_endpoint in [None, Some("")] {
             let mut workers = HashMap::new();
-            workers.insert(7, router_hint_runtime_config(Some("tcp://127.0.0.1:23280")));
-            workers.insert(8, router_hint_runtime_config(source_endpoint));
+            workers.insert(
+                7,
+                migrate_hint_runtime_config(Some("tcp://127.0.0.1:23280")),
+            );
+            workers.insert(8, migrate_hint_runtime_config(source_endpoint));
             let router = make_test_router_with_workers(
                 InspectingSelector {
                     expected_hits: None,
@@ -2204,23 +2217,26 @@ mod tests {
                 owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
             };
 
-            let hint =
-                router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+            let hint = router.migrate_hint_for_selection(
+                WorkerWithDpRank::new(7, 0),
+                0,
+                Some(&candidates),
+            );
 
             assert_eq!(hint, None);
         }
     }
 
     #[tokio::test]
-    async fn router_hint_skips_sources_with_different_worker_type() {
+    async fn migrate_hint_skips_sources_with_different_worker_type() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
-            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
+            migrate_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
         );
         workers.insert(
             8,
-            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "decode"),
+            migrate_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "decode"),
         );
         let router = make_test_router_with_workers(
             InspectingSelector {
@@ -2240,29 +2256,29 @@ mod tests {
         };
 
         let hint =
-            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+            router.migrate_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
 
         assert_eq!(hint, None);
     }
 
     #[tokio::test]
-    async fn router_hint_selects_source_with_matching_worker_type() {
+    async fn migrate_hint_selects_source_with_matching_worker_type() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
-            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
+            migrate_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
         );
         workers.insert(
             8,
-            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "prefill"),
+            migrate_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "prefill"),
         );
         workers.insert(
             9,
-            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23282"), "decode"),
+            migrate_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23282"), "decode"),
         );
         workers.insert(
             10,
-            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23283"), "decode"),
+            migrate_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23283"), "decode"),
         );
         let router = make_test_router_with_workers(
             InspectingSelector {
@@ -2286,29 +2302,37 @@ mod tests {
         };
 
         let prefill_hint =
-            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+            router.migrate_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
         assert_eq!(
             prefill_hint,
-            Some(RouterHint {
-                source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
-                block_hashes: vec![
-                    ExternalSequenceBlockHash(101),
-                    ExternalSequenceBlockHash(102),
-                ],
+            Some(KvHints {
+                migrate: Some(MigrateHint {
+                    transfer_plan: KvTransferPlan {
+                        source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                        block_hashes: vec![
+                            ExternalSequenceBlockHash(101),
+                            ExternalSequenceBlockHash(102),
+                        ],
+                    },
+                }),
             })
         );
 
         let decode_hint =
-            router.router_hint_for_selection(WorkerWithDpRank::new(10, 0), 0, Some(&candidates));
+            router.migrate_hint_for_selection(WorkerWithDpRank::new(10, 0), 0, Some(&candidates));
         assert_eq!(
             decode_hint,
-            Some(RouterHint {
-                source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
-                block_hashes: vec![
-                    ExternalSequenceBlockHash(101),
-                    ExternalSequenceBlockHash(102),
-                    ExternalSequenceBlockHash(103),
-                ],
+            Some(KvHints {
+                migrate: Some(MigrateHint {
+                    transfer_plan: KvTransferPlan {
+                        source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
+                        block_hashes: vec![
+                            ExternalSequenceBlockHash(101),
+                            ExternalSequenceBlockHash(102),
+                            ExternalSequenceBlockHash(103),
+                        ],
+                    },
+                }),
             })
         );
     }

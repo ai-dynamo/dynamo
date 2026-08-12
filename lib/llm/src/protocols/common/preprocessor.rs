@@ -5,15 +5,16 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
+pub use dynamo_kv_router::kv_hints::{
+    KV_HINT_MIGRATE_CAPABILITY_KEY, KvHints, KvTransferPlan, MigrateHint,
+};
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
 
-const KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: &str = "kv_transfer_params";
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
@@ -358,6 +359,11 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
+    /// Framework-generated KV-cache actions for the selected backend request.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<KvHints>,
+
     /// Whether the backend should allow a reasoning phase before enforcing
     /// guided output. SGLang consumes this as its per-request
     /// `require_reasoning` engine argument.
@@ -456,20 +462,8 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
-    pub fn attach_router_hint(&mut self, hint: &RouterHint) -> serde_json::Result<()> {
-        let hint_value = serde_json::to_value(hint)?;
-        let mut map = extra_args_object(self.extra_args.take());
-        let mut kv_transfer_params = match map.remove(KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY) {
-            Some(serde_json::Value::Object(params)) => params,
-            Some(_) | None => serde_json::Map::new(),
-        };
-        kv_transfer_params.insert(ROUTER_HINT_EXTRA_ARGS_KEY.to_string(), hint_value);
-        map.insert(
-            KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY.to_string(),
-            serde_json::Value::Object(kv_transfer_params),
-        );
-        self.extra_args = Some(serde_json::Value::Object(map));
-        Ok(())
+    pub fn attach_kv_hints(&mut self, hints: KvHints) {
+        self.kv_hints = (!hints.is_empty()).then_some(hints);
     }
 
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
@@ -483,15 +477,6 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
-    }
-}
-
-fn extra_args_object(
-    extra_args: Option<serde_json::Value>,
-) -> serde_json::Map<String, serde_json::Value> {
-    match extra_args {
-        Some(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
     }
 }
 
@@ -537,10 +522,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attach_router_hint_preserves_extra_args_object() {
+    fn attach_kv_hints_sets_typed_envelope() {
         use dynamo_kv_router::{
+            kv_hints::{KvHints, KvTransferPlan, MigrateHint},
             protocols::ExternalSequenceBlockHash,
-            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
         };
 
         let mut req = PreprocessedRequest::builder()
@@ -549,73 +534,33 @@ mod tests {
             .stop_conditions(StopConditions::default())
             .sampling_options(SamplingOptions::default())
             .output_options(OutputOptions::default())
-            .extra_args(Some(serde_json::json!({
-                "caller": "kept",
-                "kv_transfer_params": {"existing": "kept"}
-            })))
             .build()
             .unwrap();
-        let hint = RouterHint {
-            source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-            block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
+        let hints = KvHints {
+            migrate: Some(MigrateHint {
+                transfer_plan: KvTransferPlan {
+                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                    block_hashes: vec![
+                        ExternalSequenceBlockHash(11),
+                        ExternalSequenceBlockHash(22),
+                    ],
+                },
+            }),
         };
 
-        req.attach_router_hint(&hint).unwrap();
-
-        let extra_args = req.extra_args.unwrap();
-        assert_eq!(extra_args["caller"], "kept");
+        req.attach_kv_hints(hints.clone());
+        assert_eq!(req.kv_hints, Some(hints));
         assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY]["existing"],
-            "kept"
+            serde_json::to_value(&req).unwrap()["kv_hints"],
+            serde_json::json!({
+                "migrate": {
+                    "transfer_plan": {
+                        "source_control_endpoint": "tcp://127.0.0.1:23280",
+                        "block_hashes": [11, 22],
+                    }
+                }
+            })
         );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["source_control_endpoint"],
-            "tcp://127.0.0.1:23280"
-        );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
-            serde_json::json!([11, 22])
-        );
-    }
-
-    #[test]
-    fn attach_router_hint_replaces_non_object_kv_transfer_params() {
-        use dynamo_kv_router::{
-            protocols::ExternalSequenceBlockHash,
-            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
-        };
-
-        for invalid_params in [
-            serde_json::Value::Null,
-            serde_json::json!("invalid"),
-            serde_json::json!(["invalid"]),
-        ] {
-            let mut req = PreprocessedRequest::builder()
-                .model("t".to_string())
-                .token_ids(vec![1])
-                .stop_conditions(StopConditions::default())
-                .sampling_options(SamplingOptions::default())
-                .output_options(OutputOptions::default())
-                .extra_args(Some(serde_json::json!({
-                    "caller": "kept",
-                    "kv_transfer_params": invalid_params
-                })))
-                .build()
-                .unwrap();
-            let hint = RouterHint {
-                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                block_hashes: vec![ExternalSequenceBlockHash(33)],
-            };
-
-            req.attach_router_hint(&hint).unwrap();
-
-            let extra_args = req.extra_args.unwrap();
-            assert_eq!(extra_args["caller"], "kept");
-            assert_eq!(
-                extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
-                serde_json::json!([33])
-            );
-        }
     }
 
     #[test]

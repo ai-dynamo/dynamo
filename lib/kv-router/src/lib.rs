@@ -15,6 +15,7 @@ mod lookup_update;
 
 pub mod identity;
 pub mod indexer;
+pub mod kv_hints;
 pub mod protocols;
 pub mod recovery;
 pub mod router_hint;
