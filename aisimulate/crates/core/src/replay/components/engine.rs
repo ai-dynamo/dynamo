@@ -554,21 +554,20 @@ where
                     EnginePassCompletion::new(self.stage, worker_id, started.pass_id),
                 );
             } else {
-                let settle_artifact_pass = effects.artifact_pass_start.is_some();
                 // Completing the pass mutates the authoritative scheduler even
                 // when it exposes no effects. Do not surface an empty
                 // zero-duration completion as progress: doing so immediately
                 // re-arms the still-ready worker and lets the virtual-time
-                // driver spin forever at the same timestamp. Artifact capture
-                // is the exception: its pass-start state must be settled by the
-                // matching completion hook even when the native payload is empty.
-                effects.immediate_completions = self
-                    .complete_pass(
-                        EnginePassCompletion::new(self.stage, worker_id, started.pass_id),
-                        now_ms,
-                    )?
+                // driver spin forever at the same timestamp. A pass that already
+                // exposed start effects is the exception: its matching completion
+                // hook remains observable even when the completion payload is empty.
+                let completions = self.complete_pass(
+                    EnginePassCompletion::new(self.stage, worker_id, started.pass_id),
+                    now_ms,
+                )?;
+                effects.immediate_completions = completions
                     .into_iter()
-                    .filter(|payload| settle_artifact_pass || payload.progress.made_progress)
+                    .filter(|payload| effects.should_retain_immediate_completion(payload.progress))
                     .collect();
             }
             effects.progress.made_progress = !effects.admissions.is_empty()
@@ -840,6 +839,7 @@ fn native_fpm(dp_rank: u32, wall_time_secs: f64, fpm: ForwardPassMetrics) -> For
 mod tests {
     use super::*;
     use crate::engine::{Backend, EngineConfig, KvEvent, SglangConfig, TimingModelConfig};
+    use crate::replay::components::AdmissionEvent;
     use crate::replay::{ReplayEngineConfig, ReplayEngineFactory, WorkerStage};
 
     #[derive(Debug, Default)]
@@ -1065,6 +1065,21 @@ mod tests {
         assert!(
             error.to_string().contains("effect-free zero-duration pass"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn pass_start_admission_retains_effect_free_immediate_completion() {
+        let mut effects: EngineEffects = EngineEffects::default();
+        effects.admissions.push(AdmissionEvent {
+            uuid: Uuid::from_u128(3),
+            reused_input_tokens: 0,
+        });
+
+        assert!(effects.should_retain_immediate_completion(EngineProgress::default()));
+        assert!(
+            !EngineEffects::<()>::default()
+                .should_retain_immediate_completion(EngineProgress::default())
         );
     }
 }

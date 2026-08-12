@@ -148,6 +148,20 @@ pub(crate) struct EngineEffects<Events: EngineEventBatch = ()> {
 }
 
 impl<Events: EngineEventBatch> EngineEffects<Events> {
+    pub(crate) fn has_observable_pass_start(&self) -> bool {
+        !self.admissions.is_empty()
+            || !self.pressure_events.is_empty()
+            || !self.pass_start_events.is_empty()
+            || self.artifact_pass_start.is_some()
+    }
+
+    pub(crate) fn should_retain_immediate_completion(
+        &self,
+        completion_progress: EngineProgress,
+    ) -> bool {
+        self.has_observable_pass_start() || completion_progress.made_progress
+    }
+
     pub(crate) fn schedule_completion(
         &mut self,
         at_ms: f64,
