@@ -20,7 +20,10 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
+        to_worker_selection_session_context,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -182,10 +185,10 @@ where
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
-        let session_id = request
+        let session_context = request
             .agent_context
             .as_ref()
-            .map(|context| context.session_id.clone());
+            .map(to_worker_selection_session_context);
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let selection_future = self
@@ -198,7 +201,7 @@ where
                 SelectionOptions {
                     affinity_worker,
                     policy_class,
-                    session_id,
+                    session_context,
                 },
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));

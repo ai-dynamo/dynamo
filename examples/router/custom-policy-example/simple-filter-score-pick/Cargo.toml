@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-custom-policy-example-disaggregated"
+name = "dynamo-custom-policy-example-simple-filter-score-pick"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Disaggregated custom worker-selection policy example for Dynamo"
+description = "Filter, scorer, and picker custom worker-selection policy example for Dynamo"
 
 [dependencies]
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
