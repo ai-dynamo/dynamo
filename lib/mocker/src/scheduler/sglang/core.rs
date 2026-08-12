@@ -81,6 +81,7 @@ impl ReservedSglangDecode {
 }
 
 impl SglangCore {
+    #[cfg(test)]
     pub(crate) fn new(args: MockEngineArgs) -> Self {
         Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
     }

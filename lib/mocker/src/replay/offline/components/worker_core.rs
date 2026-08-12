@@ -14,6 +14,7 @@ pub(crate) struct ReplayWorkerCore {
 }
 
 impl ReplayWorkerCore {
+    #[cfg(test)]
     pub(crate) fn new(args: MockEngineArgs) -> Self {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
@@ -65,6 +66,7 @@ impl ReplayWorkerCore {
         self.core.receive(request)
     }
 
+    #[cfg(test)]
     pub(crate) fn num_requests(&self) -> usize {
         self.core.num_requests()
     }
