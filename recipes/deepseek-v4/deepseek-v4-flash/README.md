@@ -124,6 +124,19 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 > The workers mount the PVC read-only with `HF_HUB_OFFLINE=1`, so they cannot fetch a checkpoint the
 > Job did not download. Downloading the wrong one leaves the worker unable to start.
 
+If the wrong checkpoint was already downloaded, reset before applying the other one. A Job's pod
+template is immutable, so re-applying `model-download.yaml` with a different `MODEL_NAME` is
+rejected rather than starting a second download, and the PVC holds one checkpoint:
+
+```bash
+# With no workers running (they hold the PVC open):
+kubectl delete job model-download -n ${NAMESPACE}
+kubectl delete pvc model-cache -n ${NAMESPACE}          # frees the ~160 GB already downloaded
+kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+Then apply the download Job for the checkpoint your variant serves, as above.
+
 ### Deploy
 
 Same flow for **every** variant (Agentic and Day-0): apply its `deploy.yaml`, then wait on its DGD.

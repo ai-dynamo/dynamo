@@ -12,6 +12,11 @@ repo id a ``deploy.yaml`` asks for must be obtainable from the family's download
 Job -- as its default ``MODEL_NAME``, as a repo id in an active ``hf download``
 line, or as a documented override value named in a comment.
 
+Obtainability alone would still pass a Job whose default is the checkpoint only
+a minority of variants serve, since the majority's checkpoint would remain
+obtainable as a documented override. So the default itself is checked too: no
+checkpoint may be requested by more variants than the default ``MODEL_NAME``.
+
 Scope is the two DeepSeek-V4 families deliberately. Other recipe families use
 different download mechanisms (inline ``snapshot_download`` calls, for example)
 and some carry pre-existing mismatches of their own; widening this test is a
@@ -19,8 +24,9 @@ separate change.
 """
 
 import re
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Set
+from typing import Any, Dict, Iterable, List, Sequence, Set
 
 import pytest
 import yaml
@@ -67,31 +73,49 @@ def _iter_nodes(node: Any) -> Iterable[Any]:
             yield from _iter_nodes(item)
 
 
+def _read_text(path: Path) -> str:
+    with path.open(encoding="utf-8") as manifest_file:
+        return manifest_file.read()
+
+
 def _load_documents(path: Path) -> List[Any]:
-    return [doc for doc in yaml.safe_load_all(path.read_text()) if doc is not None]
+    return [doc for doc in yaml.safe_load_all(_read_text(path)) if doc is not None]
+
+
+def _repo_ids_from_tokens(tokens: Sequence[str]) -> Set[str]:
+    """Extract checkpoint ids from model flags in a token sequence.
+
+    Both spellings occur in these recipes: ``--model <id>`` as two tokens and
+    ``--model=<id>`` as one.
+    """
+    found: Set[str] = set()
+    for index, token in enumerate(tokens):
+        name, separator, inline_value = token.partition("=")
+        if name not in MODEL_FLAGS:
+            continue
+        if separator:
+            value = inline_value
+        elif index + 1 < len(tokens):
+            value = tokens[index + 1]
+        else:
+            continue
+        candidate = value.strip("\"'")
+        if REPO_ID_RE.match(candidate):
+            found.add(candidate)
+    return found
 
 
 def _repo_ids_from_flags(text: str) -> Set[str]:
     """Extract checkpoint ids from ``--model <id>`` style flags in a script."""
     found: Set[str] = set()
     for line in text.splitlines():
-        tokens = line.replace("\\", " ").split()
-        for flag, value in zip(tokens, tokens[1:]):
-            if flag.split("=")[0] in MODEL_FLAGS:
-                candidate = value.strip("\"'")
-                if REPO_ID_RE.match(candidate):
-                    found.add(candidate)
+        found |= _repo_ids_from_tokens(line.replace("\\", " ").split())
     return found
 
 
 def _repo_ids_from_arg_list(items: List[Any]) -> Set[str]:
-    """Extract checkpoint ids from an args list of alternating flag/value items."""
-    found: Set[str] = set()
-    strings = [item for item in items if isinstance(item, str)]
-    for flag, value in zip(strings, strings[1:]):
-        if flag in MODEL_FLAGS and REPO_ID_RE.match(value.strip("\"'")):
-            found.add(value.strip("\"'"))
-    return found
+    """Extract checkpoint ids from an args list of flag and value items."""
+    return _repo_ids_from_tokens([item for item in items if isinstance(item, str)])
 
 
 def _repo_ids_from_env(node: Dict[str, Any], names: Iterable[str]) -> Set[str]:
@@ -126,6 +150,16 @@ def _referenced_checkpoints(deploy_path: Path) -> Set[str]:
     return found
 
 
+def _default_checkpoints(download_path: Path) -> Set[str]:
+    """The checkpoints the download Job fetches when applied unmodified."""
+    found: Set[str] = set()
+    for document in _load_documents(download_path):
+        for node in _iter_nodes(document):
+            if isinstance(node, dict):
+                found |= _repo_ids_from_env(node, ["MODEL_NAME"])
+    return found
+
+
 def _obtainable_checkpoints(download_path: Path) -> Set[str]:
     """Every checkpoint the download Job can be made to fetch.
 
@@ -133,14 +167,9 @@ def _obtainable_checkpoints(download_path: Path) -> Set[str]:
     download`` come from the parsed document; documented overrides come from the
     raw text, since YAML parsing discards comments.
     """
-    found: Set[str] = set()
+    found: Set[str] = _default_checkpoints(download_path)
 
-    for document in _load_documents(download_path):
-        for node in _iter_nodes(document):
-            if isinstance(node, dict):
-                found |= _repo_ids_from_env(node, ["MODEL_NAME"])
-
-    for raw_line in download_path.read_text().splitlines():
+    for raw_line in _read_text(download_path).splitlines():
         code, _, comment = raw_line.partition("#")
         if "hf download" in code:
             for token in code.split():
@@ -166,9 +195,11 @@ def test_every_deployed_checkpoint_is_downloadable(family: str) -> None:
     assert obtainable, f"no checkpoint repo id found in {download_path}"
 
     problems = []
+    demand: Counter = Counter()
     for deploy_path in deploy_paths:
         referenced = _referenced_checkpoints(deploy_path)
         assert referenced, f"no checkpoint repo id found in {deploy_path}"
+        demand.update(referenced)
         for checkpoint in sorted(referenced - obtainable):
             problems.append(f"{deploy_path.relative_to(REPO_ROOT)} serves {checkpoint}")
 
@@ -177,4 +208,18 @@ def test_every_deployed_checkpoint_is_downloadable(family: str) -> None:
         f"{sorted(obtainable)}, but these variants ask for a checkpoint it "
         f"neither downloads by default nor documents as an override:\n  "
         + "\n  ".join(problems)
+    )
+
+    # Obtainability is satisfied by a documented override, so it would also pass a
+    # Job whose default serves the minority of variants. Check the default too.
+    defaults = _default_checkpoints(download_path)
+    assert defaults, f"no default MODEL_NAME found in {download_path}"
+    best = max(demand.values())
+    assert all(demand[checkpoint] == best for checkpoint in defaults), (
+        f"{download_path.relative_to(REPO_ROOT)} defaults to {sorted(defaults)}, "
+        f"which fewer variants serve than "
+        f"{sorted(c for c, n in demand.items() if n == best)}. The default should "
+        f"be the checkpoint most variants ask for, so that the documented "
+        f"override is the exception rather than the rule. Variant demand: "
+        f"{dict(sorted(demand.items()))}."
     )
