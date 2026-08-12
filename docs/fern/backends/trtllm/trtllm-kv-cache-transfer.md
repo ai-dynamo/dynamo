@@ -29,10 +29,17 @@ TensorRT-LLM supports two NIXL communication backends: UCX and LIBFABRIC. By def
 
 TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV cache transfer between prefill and decode workers. To enable UCX as the KV cache transfer backend, set `cache_transceiver_config.backend: UCX` in your engine configuration YAML file.
 
-> [!NOTE]
-> Setting `TRTLLM_USE_UCX_KVCACHE=1` while `cache_transceiver_config.backend` is `DEFAULT` selects direct UCX, and is equivalent to setting `backend: UCX` in the configuration. Both produce a `UcxConnectionManager`.
->
-> This is a different transport from the default. With `backend: DEFAULT` and no environment variable, TensorRT-LLM uses the NIXL transfer agent with UCX underneath, which logs `NixlTransferAgent ... using NIXL backend: UCX`. To confirm which one a worker chose, read its startup log for the transceiver class rather than inferring it from the configuration.
+`cache_transceiver_config.backend` accepts the following values:
+
+| Value | Behavior |
+|-------|----------|
+| Not set | KV cache transfer is disabled. |
+| `DEFAULT` | Uses the backend named by the first of `TRTLLM_USE_NIXL_KVCACHE`, `TRTLLM_USE_UCX_KVCACHE`, `TRTLLM_USE_MOONCAKE_KVCACHE`, or `TRTLLM_USE_MPI_KVCACHE` that is set to `1`. Uses NIXL when none of them is set. |
+| `UCX`, `NIXL`, `MOONCAKE`, or `MPI` | Uses that backend and ignores the environment variables above. |
+
+The precedence above matches TensorRT-LLM 1.3.0rc22; check `CacheTransceiverConfig._resolve_default_backend` in `tensorrt_llm/llmapi/llm_args.py`.
+
+The two paths produce different transceivers, which is how you tell them apart at runtime: direct UCX logs `UcxConnectionManager`, while NIXL with UCX underneath logs `NixlTransferAgent ... using NIXL backend: UCX`. Read the worker's startup log for the transceiver class rather than inferring it from the configuration.
 
 ## AWS EFA
 
