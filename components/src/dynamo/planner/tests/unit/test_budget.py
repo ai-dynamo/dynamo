@@ -151,6 +151,16 @@ def test_clamp_pair_ceiling_never_grows_decode():
     assert new_p * 8 + new_d * 1 <= 20
 
 
+def test_clamp_pair_ceiling_cap_preserves_min_endpoint():
+    # The decode cap must not defeat the min_endpoint floor that every other
+    # branch of this function preserves. All current callers floor num_d at
+    # min_endpoint before calling, so this guards the ordering rather than a
+    # reachable caller today.
+    new_p, new_d = proportional_clamp_pair(10, 0, 8, 1, -1, 20, 1)
+    assert new_d >= 1
+    assert new_p * 8 + new_d * 1 <= 20
+
+
 def test_clamp_pair_ceiling_never_grows_either_pool():
     # Same invariant across a range of asymmetric shapes: the ceiling path is
     # a shrink, so neither pool may exceed its requested count.
