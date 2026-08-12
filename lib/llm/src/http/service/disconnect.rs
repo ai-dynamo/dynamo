@@ -308,6 +308,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
         // Recreating it for every token repeatedly clones a receiver and churns Notify state.
         let stopped = context.stopped();
         tokio::pin!(stopped);
+        let mut keep_alive_deadline =
+            keep_alive.map(|interval| tokio::time::Instant::now() + interval);
         let mut inactivity_deadline =
             inactivity_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
@@ -321,6 +323,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
+                            keep_alive_deadline = keep_alive
+                                .map(|interval| tokio::time::Instant::now() + interval);
                             inactivity_deadline = inactivity_timeout
                                 .map(|timeout| tokio::time::Instant::now() + timeout);
                             yield event;
@@ -368,11 +372,13 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     break;
                 }
                 _ = async {
-                    match keep_alive {
-                        Some(d) => tokio::time::sleep(d).await,
+                    match keep_alive_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending::<()>().await,
                     }
                 } => {
+                    keep_alive_deadline = keep_alive
+                        .map(|interval| tokio::time::Instant::now() + interval);
                     yield Event::default().comment("");
                 }
                 activity = async {
@@ -734,7 +740,7 @@ mod tests {
         let (metrics, guard, _context, handle) = setup_test(model, "req-keep-alive");
         let tracked_context = Arc::new(MockContext::with_kill_tracking());
         let engine_context: Arc<dyn AsyncEngineContext> = tracked_context.clone();
-        let (_activity_tx, activity_rx) = mpsc::unbounded_channel();
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
 
         let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
             hanging_stream(),
@@ -747,10 +753,24 @@ mod tests {
         );
         tokio::pin!(monitored);
 
-        tokio::time::advance(Duration::from_secs(6)).await;
-        assert!(monitored.next().await.unwrap().is_ok());
-        tokio::time::advance(Duration::from_secs(5)).await;
-        assert!(monitored.next().await.is_none());
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                activity_tx.send(()).unwrap();
+            }
+        });
+
+        let start = tokio::time::Instant::now();
+        let mut heartbeat_times = Vec::new();
+        while let Some(event) = monitored.next().await {
+            assert!(event.is_ok());
+            heartbeat_times.push(start.elapsed());
+            assert!(
+                heartbeat_times.len() < 10,
+                "heartbeat loop did not time out"
+            );
+        }
+        assert_eq!(heartbeat_times.first(), Some(&Duration::from_secs(5)));
         assert!(tracked_context.is_killed());
         assert_eq!(metrics.get_inflight_count(model), 0);
     }
