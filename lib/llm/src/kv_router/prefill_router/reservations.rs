@@ -13,6 +13,7 @@ use dynamo_kv_router::{
     selector::WorkerSelector,
     sequences::active_request_expiry_duration,
 };
+use futures::{StreamExt, stream};
 use parking_lot::Mutex;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -30,6 +31,9 @@ const RESERVATION_EXPIRY_GRACE: Duration = Duration::from_secs(60);
 const CANCELLED_RESERVATION_RETENTION: Duration = Duration::from_secs(60);
 const RESERVATION_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 const RESERVATION_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+// Four timeout waves cap each batch at 20 seconds, below the 30-second interval.
+const RESERVATION_REAPER_BATCH_SIZE: usize = 128;
+const RESERVATION_REAPER_CONCURRENCY: usize = 32;
 
 struct ActivePrefillReservation<Sel>
 where
@@ -39,6 +43,7 @@ where
     scheduler_id: String,
     worker: WorkerWithDpRank,
     created_at: Instant,
+    reap_attempts: u64,
 }
 
 impl<Sel> Clone for ActivePrefillReservation<Sel>
@@ -51,6 +56,7 @@ where
             scheduler_id: self.scheduler_id.clone(),
             worker: self.worker,
             created_at: self.created_at,
+            reap_attempts: self.reap_attempts,
         }
     }
 }
@@ -319,15 +325,46 @@ where
         }
     }
 
-    fn expired_active_ids(&self, now: Instant, retention: Duration) -> Vec<String> {
-        self.entries
-            .lock()
-            .iter()
-            .filter(|(_, entry)| {
-                matches!(entry, PrefillReservationEntry::Active(active)
-                    if now.saturating_duration_since(active.created_at) >= retention)
+    // Claim the least-attempted generation so retained failures cannot starve the backlog.
+    fn claim_expired_active_ids(
+        &self,
+        now: Instant,
+        retention: Duration,
+        limit: usize,
+    ) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let mut entries = self.entries.lock();
+        let minimum_attempts = entries
+            .values()
+            .filter_map(|entry| match entry {
+                PrefillReservationEntry::Active(active)
+                    if now.saturating_duration_since(active.created_at) >= retention =>
+                {
+                    Some(active.reap_attempts)
+                }
+                _ => None,
             })
-            .map(|(reservation_id, _)| reservation_id.clone())
+            .min();
+        let Some(minimum_attempts) = minimum_attempts else {
+            return Vec::new();
+        };
+
+        entries
+            .iter_mut()
+            .filter_map(|(reservation_id, entry)| match entry {
+                PrefillReservationEntry::Active(active)
+                    if now.saturating_duration_since(active.created_at) >= retention
+                        && active.reap_attempts == minimum_attempts =>
+                {
+                    active.reap_attempts = active.reap_attempts.saturating_add(1);
+                    Some(reservation_id.clone())
+                }
+                _ => None,
+            })
+            .take(limit)
             .collect()
     }
 
@@ -477,6 +514,7 @@ where
                     scheduler_id: scheduler_id.clone(),
                     worker,
                     created_at: Instant::now(),
+                    reap_attempts: 0,
                 };
                 match self.activate(reservation_id, reservation) {
                     Activation::Active => Ok(PrefillQueryOutcome::Routed {
@@ -543,30 +581,11 @@ where
         Ok(())
     }
 
-    /// Reap stale EPP-owned bookings. The task only weakly holds the manager,
-    /// so destroying the C router handle stops it without affecting the
-    /// prefill router's lifecycle.
-    pub fn spawn_reaper(manager: &Arc<Self>) {
-        let manager: Weak<Self> = Arc::downgrade(manager);
-
-        tokio::spawn(async move {
-            let retention = reservation_retention();
-            let mut interval = tokio::time::interval_at(
-                Instant::now() + RESERVATION_REAPER_INTERVAL,
-                RESERVATION_REAPER_INTERVAL,
-            );
-            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-            loop {
-                interval.tick().await;
-                let Some(manager) = manager.upgrade() else {
-                    return;
-                };
-                let now = Instant::now();
-                manager.expire_pending(now, retention);
-                manager.remove_expired_cancellations(now, CANCELLED_RESERVATION_RETENTION);
-                let expired = manager.expired_active_ids(now, retention);
-                for reservation_id in expired {
+    async fn release_expired_batch(self: &Arc<Self>, reservation_ids: Vec<String>) {
+        stream::iter(reservation_ids)
+            .for_each_concurrent(RESERVATION_REAPER_CONCURRENCY, |reservation_id| {
+                let manager = Arc::clone(self);
+                async move {
                     match tokio::time::timeout(
                         RESERVATION_RELEASE_TIMEOUT,
                         manager.release(&reservation_id),
@@ -590,6 +609,35 @@ where
                         }
                     }
                 }
+            })
+            .await;
+    }
+
+    /// Reap stale EPP-owned bookings. The task only weakly holds the manager,
+    /// so destroying the C router handle stops it without affecting the
+    /// prefill router's lifecycle.
+    pub fn spawn_reaper(manager: &Arc<Self>) {
+        let manager: Weak<Self> = Arc::downgrade(manager);
+
+        tokio::spawn(async move {
+            let retention = reservation_retention();
+            let mut interval = tokio::time::interval_at(
+                Instant::now() + RESERVATION_REAPER_INTERVAL,
+                RESERVATION_REAPER_INTERVAL,
+            );
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+                let Some(manager) = manager.upgrade() else {
+                    return;
+                };
+                let now = Instant::now();
+                manager.expire_pending(now, retention);
+                manager.remove_expired_cancellations(now, CANCELLED_RESERVATION_RETENTION);
+                let expired =
+                    manager.claim_expired_active_ids(now, retention, RESERVATION_REAPER_BATCH_SIZE);
+                manager.release_expired_batch(expired).await;
             }
         });
     }
@@ -872,6 +920,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_reaper_claims_bounded_fair_batches() {
+        let (_, chooser) = tracked_prefill_router().await;
+        let registry = EppReservationManager::default();
+        let created_at = Instant::now();
+        let now = created_at + Duration::from_secs(2);
+        let retention = Duration::from_secs(1);
+        let reservation_count = RESERVATION_REAPER_BATCH_SIZE + 1;
+
+        {
+            let mut entries = registry.entries.lock();
+            for index in 0..reservation_count {
+                let reservation_id = format!("stale-reservation-{index}");
+                entries.insert(
+                    reservation_id.clone(),
+                    PrefillReservationEntry::Active(ActivePrefillReservation {
+                        chooser: chooser.clone(),
+                        scheduler_id: scheduler_id(&reservation_id),
+                        worker: WorkerWithDpRank::new(7, 0),
+                        created_at,
+                        reap_attempts: 0,
+                    }),
+                );
+            }
+        }
+
+        let first_batch =
+            registry.claim_expired_active_ids(now, retention, RESERVATION_REAPER_BATCH_SIZE);
+        assert_eq!(first_batch.len(), RESERVATION_REAPER_BATCH_SIZE);
+
+        let second_batch =
+            registry.claim_expired_active_ids(now, retention, RESERVATION_REAPER_BATCH_SIZE);
+        assert_eq!(second_batch.len(), 1);
+        assert!(!first_batch.contains(&second_batch[0]));
+
+        let retry_batch =
+            registry.claim_expired_active_ids(now, retention, RESERVATION_REAPER_BATCH_SIZE);
+        assert_eq!(retry_batch.len(), RESERVATION_REAPER_BATCH_SIZE);
+        assert_eq!(registry.entries.lock().len(), reservation_count);
+    }
+
+    #[tokio::test]
     async fn cancelled_activation_retains_active_reservation_for_retry() {
         let (_, chooser) = tracked_prefill_router().await;
         let registry = EppReservationManager::default();
@@ -888,6 +977,7 @@ mod tests {
                 scheduler_id: scheduler_id("reservation-1"),
                 worker: WorkerWithDpRank::new(7, 0),
                 created_at: Instant::now(),
+                reap_attempts: 0,
             },
         );
         assert!(matches!(activation, Activation::Cancelled));
