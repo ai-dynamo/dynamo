@@ -5,14 +5,14 @@
 
 from dynamo.workflow.builder import StageDefinition, StageHandle, Workflow
 from dynamo.workflow.definition import StageRef, WorkflowDefinition, WorkflowHandler
+from dynamo.workflow.compiler import DeploymentSpec, compile_workflow
 from dynamo.workflow.ir import StageIR, WorkflowIR
+from dynamo.workflow.plan import EdgePlan, ExecutionPlan, LocalBinding
 from dynamo.workflow.runtime import (
-    ExecutionPlan,
-    LocalBinding,
     StageContext,
     StageRunner,
     WorkflowExecutionError,
-    compile_workflow,
+    WorkflowExecutor,
 )
 from dynamo.workflow.types import (
     StageContract,
@@ -22,6 +22,8 @@ from dynamo.workflow.types import (
 )
 
 __all__ = [
+    "DeploymentSpec",
+    "EdgePlan",
     "StageContract",
     "StageDefinition",
     "StageHandle",
@@ -36,6 +38,7 @@ __all__ = [
     "WorkflowHandler",
     "WorkflowIR",
     "WorkflowExecutionError",
+    "WorkflowExecutor",
     "WorkflowValidationError",
     "ExecutionPlan",
     "LocalBinding",
