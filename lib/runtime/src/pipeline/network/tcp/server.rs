@@ -22,7 +22,7 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
+use local_ip_address::Error;
 use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -47,43 +47,10 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
+use crate::utils::ip_resolver::{fallback_loopback, resolve_host_or_interface, resolve_local_ip};
 use anyhow::{Context, Result, anyhow as error};
 
-// Trait for IP address resolution - allows dependency injection for testing
-pub trait IpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
-}
-
-/// Resolve a routable local address, trying IPv6 after any IPv4 resolver error.
-///
-/// If both probes fail, preserve a non-`LocalIpAddressNotFound` error so callers
-/// can distinguish a resolver failure from a host with no routable address.
-pub(crate) fn resolve_local_ip<R: IpResolver>(resolver: &R) -> Result<IpAddr, Error> {
-    match resolver.local_ip() {
-        Ok(ip) => Ok(ip),
-        Err(ipv4_error) => match resolver.local_ipv6() {
-            Ok(ip) => Ok(ip),
-            Err(ipv6_error) => match ipv4_error {
-                Error::LocalIpAddressNotFound => Err(ipv6_error),
-                _ => Err(ipv4_error),
-            },
-        },
-    }
-}
-
-// Default implementation using the real local_ip_address crate
-pub struct DefaultIpResolver;
-
-impl IpResolver for DefaultIpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-        local_ip()
-    }
-
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-        local_ipv6()
-    }
-}
+pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
@@ -107,8 +74,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: IpAddr,
-    local_port: u16,
+    address: String,
     state: Arc<Mutex<State>>,
 }
 
@@ -202,37 +168,30 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
-
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))
-                    .copied()?
-            }
-            None => {
-                match resolve_local_ip(&resolver) {
-                    Ok(addr) => addr,
-                    // Only fall back to loopback when no routable IP exists at all;
-                    // propagate other resolver errors (I/O, platform) so
-                    // misconfigured hosts fail fast instead of silently binding
-                    // to 127.0.0.1.
-                    Err(Error::LocalIpAddressNotFound) => {
-                        tracing::warn!(
-                            "No routable local IP address found; falling back to 127.0.0.1"
-                        );
-                        IpAddr::from([127, 0, 0, 1])
-                    }
-                    Err(err) => {
-                        return Err(PipelineError::Generic(format!(
-                            "Failed to resolve local IP address: {err}"
-                        )));
-                    }
+        let local_ip = if let Some(host_or_interface) = options.interface.as_deref() {
+            resolve_host_or_interface(host_or_interface, &resolver).map_err(|error| {
+                PipelineError::Generic(format!(
+                    "Failed to resolve configured TCP host '{host_or_interface}': {error}"
+                ))
+            })?
+        } else {
+            match resolve_local_ip(&resolver) {
+                Ok(address) => address,
+                // Only fall back when both address-family probes report that no
+                // routable local address exists. Other resolver failures remain
+                // fatal for this server.
+                Err(Error::LocalIpAddressNotFound) => {
+                    let loopback = fallback_loopback(&resolver);
+                    tracing::warn!(
+                        %loopback,
+                        "No routable local IP address found; binding and advertising loopback"
+                    );
+                    loopback
+                }
+                Err(error) => {
+                    return Err(PipelineError::Generic(format!(
+                        "Failed to resolve local IP address: {error}"
+                    )));
                 }
             }
         };
@@ -244,22 +203,17 @@ impl TcpStreamServer {
             PipelineError::Generic(format!("Failed to build TCP TLS acceptor: {}", e))
         })?;
 
-        let local_port = Self::start(local_ip, options.port, state.clone(), tls_acceptor)
+        let bind_address = SocketAddr::new(local_ip, options.port);
+        let local_address = Self::start(bind_address, state.clone(), tls_acceptor)
             .await
-            .map_err(|e| {
-                PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
+            .map_err(|error| {
+                PipelineError::Generic(format!("Failed to start TcpStreamServer: {error}"))
             })?;
+        let address = local_address.to_string();
 
-        tracing::debug!(
-            "tcp transport service on {}",
-            SocketAddr::new(local_ip, local_port)
-        );
+        tracing::debug!("tcp transport service on {local_address}");
 
-        Ok(Arc::new(Self {
-            local_ip,
-            local_port,
-            state,
-        }))
+        Ok(Arc::new(Self { address, state }))
     }
 
     /// Associate one or both halves of a registration with a backend instance.
@@ -419,28 +373,25 @@ impl TcpStreamServer {
     }
 
     async fn start(
-        local_ip: IpAddr,
-        local_port: u16,
+        bind_address: SocketAddr,
         state: Arc<Mutex<State>>,
         tls_acceptor: Option<Arc<TlsAcceptor>>,
-    ) -> Result<u16> {
-        let addr = SocketAddr::new(local_ip, local_port);
+    ) -> Result<SocketAddr> {
         let state_clone = state.clone();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<SocketAddr>>();
         {
             let mut guard = state.lock();
             if guard.handle.is_some() {
                 panic!("TcpStreamServer already started");
             }
             guard.handle = Some(tokio::spawn(tcp_listener(
-                addr,
+                bind_address,
                 state_clone,
                 tls_acceptor,
                 ready_tx,
             )));
         }
-        let local_port = ready_rx.await??;
-        Ok(local_port)
+        ready_rx.await?
     }
 
     fn insert_request_stream(&self, subject: String, connection: RequestedSendConnection) {
@@ -509,7 +460,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
+        let address = self.address.clone();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -626,7 +577,7 @@ async fn tcp_listener(
     addr: SocketAddr,
     state: Arc<Mutex<State>>,
     tls_acceptor: Option<Arc<TlsAcceptor>>,
-    read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
+    read_tx: tokio::sync::oneshot::Sender<Result<SocketAddr>>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -639,9 +590,7 @@ async fn tcp_listener(
                 .map_err(|e| anyhow::anyhow!("Failed get SocketAddr: {:?}", e))
                 .unwrap();
 
-            read_tx
-                .send(Ok(addr.port()))
-                .expect("Failed to send ready signal");
+            read_tx.send(Ok(addr)).expect("Failed to send ready signal");
 
             listener
         }
@@ -1169,6 +1118,7 @@ mod tests {
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
+    use crate::utils::ip_resolver::test_support::{ErrorOutcome, ProbeOutcome, StubResolver};
     use std::io::Write;
     use tempfile::NamedTempFile;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
@@ -1231,46 +1181,7 @@ mod tests {
         );
     }
 
-    // Mock resolver that always fails to simulate the fallback scenario
-    struct FailingIpResolver;
-
-    impl IpResolver for FailingIpResolver {
-        fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-            Err(Error::LocalIpAddressNotFound)
-        }
-
-        fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-            Err(Error::LocalIpAddressNotFound)
-        }
-    }
-
-    struct Ipv6OnlyResolver;
-
-    impl IpResolver for Ipv6OnlyResolver {
-        fn local_ip(&self) -> Result<IpAddr, Error> {
-            Err(Error::StrategyError(
-                "ifa_prefixlen must be initialized".to_string(),
-            ))
-        }
-
-        fn local_ipv6(&self) -> Result<IpAddr, Error> {
-            Ok(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
-        }
-    }
-
-    struct BrokenIpv4WithoutIpv6Resolver;
-
-    impl IpResolver for BrokenIpv4WithoutIpv6Resolver {
-        fn local_ip(&self) -> Result<IpAddr, Error> {
-            Err(Error::StrategyError("IPv4 probe failed".to_string()))
-        }
-
-        fn local_ipv6(&self) -> Result<IpAddr, Error> {
-            Err(Error::LocalIpAddressNotFound)
-        }
-    }
-
-    async fn registered_socket_addr(server: &TcpStreamServer) -> SocketAddr {
+    async fn registered_tcp_info(server: &TcpStreamServer) -> TcpStreamConnectionInfo {
         let context = Context::new(());
         let stream_options = StreamOptions::builder()
             .context(context.context())
@@ -1286,32 +1197,66 @@ mod tests {
             .unwrap()
             .connection_info
             .clone();
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        connection_info.try_into().unwrap()
+    }
 
-        tcp_info.address.parse().unwrap()
+    fn ipv6_loopback_available() -> bool {
+        match TcpListener::bind(SocketAddr::new(
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            0,
+        )) {
+            Ok(listener) => {
+                drop(listener);
+                true
+            }
+            Err(error) => {
+                eprintln!("Skipping IPv6 loopback bind test: {error}");
+                false
+            }
+        }
     }
 
     #[tokio::test]
-    async fn strategy_error_falls_back_to_ipv6_tcp_server() {
-        let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, Ipv6OnlyResolver)
+    async fn explicit_ipv6_host_is_registered_with_brackets() {
+        if !ipv6_loopback_available() {
+            return;
+        }
+
+        let options = ServerOptions::builder()
+            .port(0)
+            .interface(Some("::1".to_string()))
+            .build()
+            .unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
             .await
             .unwrap();
 
-        let socket_addr = registered_socket_addr(&server).await;
+        let tcp_info = registered_tcp_info(&server).await;
+        let socket_addr: SocketAddr = tcp_info.address.parse().unwrap();
         assert_eq!(socket_addr.ip(), IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
         assert_ne!(socket_addr.port(), 0);
+        assert!(
+            tcp_info.address.starts_with("[::1]:"),
+            "{}",
+            tcp_info.address
+        );
     }
 
     #[tokio::test]
-    async fn tcp_server_preserves_ipv4_error_when_ipv6_is_missing() {
+    async fn tcp_server_combines_ipv4_and_ipv6_errors() {
+        let resolver = StubResolver::new(
+            ProbeOutcome::Error(ErrorOutcome::Strategy("IPv4 probe failed")),
+            ProbeOutcome::Error(ErrorOutcome::Platform("test-platform")),
+        );
         let options = ServerOptions::builder().port(0).build().unwrap();
-        let error = TcpStreamServer::new_with_resolver(options, BrokenIpv4WithoutIpv6Resolver)
+        let error = TcpStreamServer::new_with_resolver(options, resolver)
             .await
             .err()
             .expect("a resolver failure must not fall back to loopback");
 
-        assert!(error.to_string().contains("IPv4 probe failed"));
+        let error = error.to_string();
+        assert!(error.contains("IPv4 probe failed"), "{error}");
+        assert!(error.contains("test-platform"), "{error}");
     }
 
     #[tokio::test]
@@ -1328,26 +1273,7 @@ mod tests {
 
         let server = result.unwrap();
 
-        // Verify the server can be used by registering a stream
-        let context = Context::new(());
-        let stream_options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        let pending_connection = server.register(stream_options).await;
-
-        // Verify connection info is available and valid
-        let connection_info = pending_connection
-            .recv_stream
-            .as_ref()
-            .unwrap()
-            .connection_info
-            .clone();
-
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        let tcp_info = registered_tcp_info(&server).await;
         let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
 
         // Should have a valid port assigned
@@ -1421,7 +1347,7 @@ mod tests {
         let options = ServerOptions::builder().port(0).build().unwrap();
 
         // Use the failing resolver to force the fallback
-        let result = TcpStreamServer::new_with_resolver(options, FailingIpResolver).await;
+        let result = TcpStreamServer::new_with_resolver(options, StubResolver::not_found()).await;
         assert!(
             result.is_ok(),
             "Server creation should succeed with fallback even when IP detection fails"
@@ -1429,24 +1355,7 @@ mod tests {
 
         let server = result.unwrap();
 
-        // Get the actual bound address by registering a stream
-        let context = Context::new(());
-        let stream_options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        let pending_connection = server.register(stream_options).await;
-        let connection_info = pending_connection
-            .recv_stream
-            .as_ref()
-            .unwrap()
-            .connection_info
-            .clone();
-
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        let tcp_info = registered_tcp_info(&server).await;
         let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
 
         // With the failing resolver, fallback should ALWAYS be used
@@ -1470,11 +1379,34 @@ mod tests {
         assert!(socket_addr.port() > 0, "Server should have a valid port");
     }
 
+    #[tokio::test]
+    async fn ipv6_only_host_falls_back_to_ipv6_loopback() {
+        if !ipv6_loopback_available() {
+            return;
+        }
+
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![("lo", IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))];
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, resolver)
+            .await
+            .unwrap();
+
+        let tcp_info = registered_tcp_info(&server).await;
+        let socket_addr: SocketAddr = tcp_info.address.parse().unwrap();
+        assert_eq!(socket_addr.ip(), IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        assert!(
+            tcp_info.address.starts_with("[::1]:"),
+            "{}",
+            tcp_info.address
+        );
+    }
+
     /// Create a test server using the failing IP resolver (falls back to loopback).
     async fn test_server() -> Arc<TcpStreamServer> {
         TcpStreamServer::new_with_resolver(
             ServerOptions::builder().port(0).build().unwrap(),
-            FailingIpResolver,
+            StubResolver::not_found(),
         )
         .await
         .unwrap()
@@ -2032,7 +1964,7 @@ mod tests {
     /// framed reader/writer along with the receiver.
     async fn open_registered_response_stream() -> TestResponseStream {
         let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
             .await
             .unwrap();
         let context = Context::new(());
@@ -2167,7 +2099,7 @@ mod tests {
     #[tokio::test]
     async fn test_tcp_stream_server_returns_error_on_invalid_prologue() {
         let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
             .await
             .unwrap();
         let context = Context::new(());
