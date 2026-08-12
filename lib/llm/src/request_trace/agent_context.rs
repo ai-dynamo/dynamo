@@ -79,6 +79,10 @@ impl SharedFinishReasonMetadata {
             .record_tool_call_chunk(choice_index, tool_call_index, id, name);
     }
 
+    pub(super) fn infer_tool_call_finish_reason(&self, choice_index: u32) {
+        self.lock().infer_tool_call_finish_reason(choice_index);
+    }
+
     #[cfg(feature = "request-trace-bench")]
     #[doc(hidden)]
     pub fn record_tool_call_chunk_for_bench(
@@ -129,6 +133,14 @@ impl FinishReasonMetadataState {
         self.metadata.finish_reason = Some(finish_reason);
         self.metadata
             .record_choice_finish_reason(choice_index, finish_reason);
+    }
+
+    fn infer_tool_call_finish_reason(&mut self, choice_index: u32) {
+        use dynamo_protocols::types::FinishReason;
+
+        if matches!(self.metadata.finish_reason, None | Some(FinishReason::Stop)) {
+            self.record_choice_finish_reason(choice_index, FinishReason::ToolCalls);
+        }
     }
 
     fn record_tool_call_chunk(

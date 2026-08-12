@@ -25,6 +25,7 @@ use crate::protocols::common::timing::RequestTracker;
 use dynamo_runtime::pipeline::Context;
 
 const NATIVE_RESPONSE_KEY: &str = "sglang_response";
+const TOOL_OUTPUT_LIMIT: usize = 16 * 1024;
 
 pub(crate) struct SglangRequestTrace(SglangRequestTraceState);
 
@@ -188,6 +189,8 @@ impl SglangTraceStream {
         if let Some(tool_output) = self.tool_output.as_mut()
             && let Some(text) = native_response.get("text").and_then(Value::as_str)
         {
+            // Dynamo workers force SGLang's incremental streaming mode, so
+            // native response text is a delta rather than a cumulative prefix.
             tool_output.push(text);
         }
 
@@ -240,12 +243,9 @@ impl SglangTraceStream {
             emit_request_end_trace_state(request_end, request_id);
             return;
         };
-        let blocking_runtime = runtime.clone();
-        runtime.spawn_blocking(move || {
-            blocking_runtime.block_on(async move {
-                record_tool_calls(&metadata, &output, &parser).await;
-                emit_request_end_trace_state(request_end, request_id);
-            });
+        runtime.spawn(async move {
+            record_tool_calls(&metadata, &output, &parser).await;
+            emit_request_end_trace_state(request_end, request_id);
         });
     }
 
@@ -347,10 +347,11 @@ impl ToolOutputBuffer {
         if text.is_empty() {
             return;
         }
-        self.buffer.push_str(text);
         if self.capturing {
+            self.push_captured(text);
             return;
         }
+        self.buffer.push_str(text);
 
         if let Some(start) = self
             .start_tokens
@@ -362,6 +363,7 @@ impl ToolOutputBuffer {
                 self.buffer.drain(..start);
             }
             self.capturing = true;
+            self.truncate_to_limit();
             return;
         }
 
@@ -378,6 +380,26 @@ impl ToolOutputBuffer {
             discard -= 1;
         }
         self.buffer.drain(..discard);
+    }
+
+    fn push_captured(&mut self, text: &str) {
+        let available = TOOL_OUTPUT_LIMIT.saturating_sub(self.buffer.len());
+        let mut end = available.min(text.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.buffer.push_str(&text[..end]);
+    }
+
+    fn truncate_to_limit(&mut self) {
+        if self.buffer.len() <= TOOL_OUTPUT_LIMIT {
+            return;
+        }
+        let mut end = TOOL_OUTPUT_LIMIT;
+        while !self.buffer.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.buffer.truncate(end);
     }
 
     fn finish(self) -> Option<String> {
@@ -432,7 +454,7 @@ fn record_finish_reason(metadata: &SharedFinishReasonMetadata, finish_reason: &V
     metadata.record_backend_finish_reason(Some(0), Some(finish_type.to_string()), stop_reason);
 
     let normalized = match finish_type {
-        "stop" | "eos" | "cancelled" | "abort" => Some(dynamo_protocols::types::FinishReason::Stop),
+        "stop" | "eos" => Some(dynamo_protocols::types::FinishReason::Stop),
         "length" => Some(dynamo_protocols::types::FinishReason::Length),
         "content_filter" => Some(dynamo_protocols::types::FinishReason::ContentFilter),
         "tool_calls" => Some(dynamo_protocols::types::FinishReason::ToolCalls),
@@ -484,7 +506,7 @@ async fn record_tool_calls(
         );
     }
     if !tool_calls.is_empty() {
-        metadata.record_choice_finish_reason(0, dynamo_protocols::types::FinishReason::ToolCalls);
+        metadata.infer_tool_call_finish_reason(0);
     }
 }
 
@@ -578,6 +600,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cancellation_remains_raw_backend_metadata() {
+        for finish_type in ["cancelled", "abort"] {
+            let metadata = SharedFinishReasonMetadata::default();
+            record_finish_reason(&metadata, &serde_json::json!({"type": finish_type}));
+
+            let metadata = snapshot(metadata);
+            assert_eq!(metadata.backend_finish_reason.as_deref(), Some(finish_type));
+            assert_eq!(metadata.finish_reason, None);
+            assert_eq!(metadata.choices[0].finish_reason, None);
+        }
+    }
+
     #[tokio::test]
     async fn parses_tool_metadata_without_arguments() {
         let metadata = SharedFinishReasonMetadata::default();
@@ -601,6 +636,26 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tool_metadata_preserves_length_finish_reason() {
+        let metadata = SharedFinishReasonMetadata::default();
+        record_finish_reason(&metadata, &serde_json::json!({"type": "length"}));
+        record_tool_calls(
+            &metadata,
+            r#"<tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>"#,
+            "qwen25",
+        )
+        .await;
+
+        let metadata = snapshot(metadata);
+        assert_eq!(metadata.finish_reason, Some(FinishReason::Length));
+        assert_eq!(
+            metadata.choices[0].finish_reason,
+            Some(FinishReason::Length)
+        );
+        assert_eq!(metadata.tool_calls.len(), 1);
+    }
+
     #[test]
     fn marker_buffer_discards_normal_output_and_handles_split_marker() {
         let mut output = ToolOutputBuffer::for_parser("qwen25");
@@ -619,6 +674,17 @@ mod tests {
         let mut output = ToolOutputBuffer::for_parser("qwen25");
         output.push(&"plain response ".repeat(1_000));
         assert!(output.finish().is_none());
+    }
+
+    #[test]
+    fn tool_output_buffer_caps_captured_text_on_char_boundary() {
+        let mut output = ToolOutputBuffer::for_parser("qwen25");
+        output.push("<tool_call>");
+        output.push(&"🦀".repeat(TOOL_OUTPUT_LIMIT));
+
+        let output = output.finish().expect("tool marker should enable capture");
+        assert!(output.len() <= TOOL_OUTPUT_LIMIT);
+        assert!(output.starts_with("<tool_call>"));
     }
 
     #[tokio::test]
