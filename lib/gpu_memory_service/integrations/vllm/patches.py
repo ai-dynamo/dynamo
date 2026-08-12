@@ -132,25 +132,21 @@ def patch_register_kv_caches() -> None:
     # Keep this optional-backend import deferred. GMS is collected in images
     # that do not install vLLM, and the connector is only required when this
     # vLLM-specific patch is enabled.
-    legacy_module = "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector"
+    canonical_module = "vllm.distributed.kv_transfer.kv_connector.v1.nixl"
     try:
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-            NixlConnector,
-        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnector
     except ModuleNotFoundError as exc:
-        # vLLM 0.26 moved the connector into the ``v1.nixl`` package. Only
-        # fall back when the legacy module itself is absent; an import failure
-        # raised by one of its dependencies must remain visible.
-        if exc.name != legacy_module:
-            raise
-        try:
-            from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnector
-        except ModuleNotFoundError as canonical_exc:
-            canonical_module = "vllm.distributed.kv_transfer.kv_connector.v1.nixl"
-            if canonical_exc.name != canonical_module:
-                raise
+        # Treat a missing vLLM package (or missing connector package) as an
+        # unavailable optional backend. Missing dependencies imported from an
+        # installed connector must remain visible.
+        missing_module = exc.name
+        if missing_module and (
+            missing_module == canonical_module
+            or canonical_module.startswith(f"{missing_module}.")
+        ):
             logger.debug("[GMS Patch] NixlConnector not available")
             return
+        raise
 
     original_register = NixlConnector.register_kv_caches
 
