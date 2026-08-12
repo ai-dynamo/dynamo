@@ -31,6 +31,7 @@ use super::openai::{
     get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
+use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
@@ -284,7 +285,9 @@ async fn handler_generate(
     let model = match &request.model {
         Some(model) => model.clone(),
         None => {
-            let models = state.manager().list_generate_models();
+            let models = state
+                .manager()
+                .list_generate_models_for_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY);
             match models.len() {
                 1 => models.into_iter().next().unwrap(),
                 0 => {
@@ -310,7 +313,10 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let engine = match state.manager().get_generate_engine(&model) {
+    let engine = match state
+        .manager()
+        .get_generate_engine_for_capability(&model, VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+    {
         Ok(engine) => engine,
         Err(error) => {
             let (status, error_type) = match error {

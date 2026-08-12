@@ -134,16 +134,25 @@ dynamo-operator:
 #### Failure Policy
 
 ```yaml
-# Fail: Reject resources if webhook is unavailable (recommended for production)
+# Fail: Reject resources if webhook is unavailable (required for normal operation)
 webhook:
   failurePolicy: Fail
 
-# Ignore: Allow resources if webhook is unavailable (use with caution)
+# Ignore: Emergency-only bypass while the webhook is unavailable
 webhook:
   failurePolicy: Ignore
 ```
 
-**Recommendation:** Use `Fail` in production to ensure validation is always enforced. Only use `Ignore` if you need high availability and can tolerate occasional invalid resources.
+Use `Fail` in every environment. Fix webhook availability, certificate, or network failures instead
+of using `Ignore` for routine development or availability.
+
+> [!CAUTION]
+> `Ignore` bypasses the validating and mutating webhook handlers that use this policy. Kubernetes can
+> then persist resources without the defaulting or cross-field validation that Dynamo controllers
+> and clients rely on. Use `Ignore` only as a short-lived, stop-the-bleeding action during an active
+> incident. Pause creates and updates of Dynamo resources, restore `Fail` immediately after recovery,
+> and audit every resource changed while admission was bypassed. Kubernetes schema and CEL validation
+> still run, but they do not replace the skipped webhook handlers.
 
 #### Namespace Filtering
 
@@ -578,9 +587,14 @@ kubectl describe <resource-type> <name> -n <namespace>
 # Look for events mentioning webhook errors
 ```
 
-2. **Temporarily work around the webhook**:
+2. **If deletion must proceed during an active incident, temporarily bypass the webhook**:
+
+   Pause all other creates and updates of Dynamo resources before using either option. Both options
+   bypass admission guarantees and can persist state that Dynamo controllers and clients do not
+   support.
+
 ```bash
-# Option 1: Set failurePolicy to Ignore
+# Option 1: Temporarily set the affected webhook's failurePolicy to Ignore
 kubectl patch validatingwebhookconfiguration <name> \
   --type='json' \
   -p='[{"op": "replace", "path": "/webhooks/0/failurePolicy", "value": "Ignore"}]'
@@ -599,6 +613,11 @@ kubectl delete <resource-type> <name> -n <namespace>
 helm upgrade <release> dynamo-platform -n <namespace>
 ```
 
+5. **Audit the bypass window**:
+
+   Review every Dynamo resource created or updated while admission was bypassed. Correct invalid or
+   incomplete resources before resuming writers.
+
 ---
 
 ## Best Practices
@@ -612,8 +631,9 @@ helm upgrade <release> dynamo-platform -n <namespace>
 
 ### Development Deployments
 
-1. ✅ **Use `failurePolicy: Ignore`** if webhook availability is problematic during development
-2. ✅ **Keep automatic certificates** (zero configuration, built into the operator)
+1. ✅ **Use `failurePolicy: Fail`** so development catches the same invalid resources as production
+2. ✅ **Fix webhook availability failures** instead of bypassing admission
+3. ✅ **Keep automatic certificates** (zero configuration, built into the operator)
 
 ### Multi-Tenant Deployments
 

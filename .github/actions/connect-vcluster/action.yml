@@ -83,24 +83,28 @@ runs:
         if curl -sk --connect-timeout 1 --max-time 2 https://127.0.0.1:8443/healthz >/dev/null; then
           echo "Existing port-forward on 127.0.0.1:8443 detected; reusing"
         else
-          # The vCluster pod must be Ready before port-forwarding. A Pending pod
-          # causes `kubectl port-forward` to exit immediately ("unable to forward
-          # port because pod is not running. Current status=Pending"); because it's
-          # backgrounded, the script continues, and the connectivity check later
-          # fails with "connection refused" on 127.0.0.1:8443.
-          #
-          # Assumes the pod is already scheduled by the time we get here — true for
-          # all current callers (deploy-operator creates the StatefulSet upstream,
-          # and pods land near-instantly when CPU/GPU/memory requests fit a node).
-          # If a future caller hits "no matching resources found" exiting immediately,
-          # `kubectl wait --for=condition=ready` does not poll for resources to
-          # appear; remediate with one of:
-          #   - poll `kubectl get pod -l ... -o name` until non-empty, then wait
-          #   - `kubectl rollout status statefulset/${VCLUSTER_NAME}` first
-          #   - chain `kubectl wait --for=create pod ... ` then `--for=condition=ready` (kubectl >= 1.31)
+          # kubectl wait exits immediately when the StatefulSet is between pods, so
+          # wait for a matching pod to exist before waiting for it to become Ready.
+          POD_SELECTOR="app=vcluster,release=${VCLUSTER_NAME}"
+          echo "Waiting for vCluster pod (${POD_SELECTOR}) to appear (timeout 300s)..."
+          VCLUSTER_PODS=""
+          for attempt in $(seq 1 60); do
+            VCLUSTER_PODS="$(kubectl get pod -l "${POD_SELECTOR}" -n "${NAMESPACE}" -o name 2>/dev/null || true)"
+            if [ -n "${VCLUSTER_PODS}" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "${VCLUSTER_PODS}" ]; then
+            echo "::error::No vCluster pod (${POD_SELECTOR}) appeared within 300s"
+            kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" -o wide || true
+            kubectl get pods -n "${NAMESPACE}" -o wide || true
+            exit 1
+          fi
+
           echo "Waiting for vCluster pod (app=vcluster,release=${VCLUSTER_NAME}) to be Ready (timeout 300s)..."
           kubectl wait --for=condition=ready pod \
-            -l "app=vcluster,release=${VCLUSTER_NAME}" \
+            -l "${POD_SELECTOR}" \
             -n "${NAMESPACE}" \
             --timeout=300s
 

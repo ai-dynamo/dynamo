@@ -29,13 +29,19 @@ use crate::protocols::{
     common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
+use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
 use dynamo_runtime::error::ErrorType as DynamoErrorType;
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
-    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    // Both overload flavors are client-visible rejections (HTTP 529). They differ
+    // only in whether migration may retry elsewhere.
+    const REJECTION: &[DynamoErrorType] = &[
+        DynamoErrorType::ResourceExhausted,
+        DynamoErrorType::WorkerOverloaded,
+    ];
     const NON_REJECTION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
@@ -457,6 +463,12 @@ pub enum Endpoint {
 
     /// OAI Embeddings
     Embeddings,
+
+    /// Classification (sequence classification / cross-encoder pooling)
+    Classify,
+
+    /// Pooling (raw pooler output)
+    Pooling,
 
     /// OAI Images
     Images,
@@ -1498,6 +1510,8 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
+            Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
             Endpoint::Audios => write!(f, "audios"),
@@ -1515,6 +1529,8 @@ impl Endpoint {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
+            Endpoint::Classify => "classify",
+            Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
             Endpoint::Audios => "audios",
@@ -2115,6 +2131,7 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
+    reasoning_field: ReasoningField,
 ) -> Result<Option<Event>, axum::Error> {
     let mut annotated = annotated.0;
 
@@ -2142,6 +2159,10 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
         annotated.data = None;
     }
 
+    // Route reasoning at the SSE boundary. Internal representation stays
+    // `reasoning_content`.
+    let annotated =
+        annotated.map_data(|response| Ok(RoutedReasoning::new(response, reasoning_field)));
     annotated_to_sse_event(annotated)
 }
 
@@ -3116,6 +3137,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         );
 
         assert!(
@@ -3669,6 +3691,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
     }
 

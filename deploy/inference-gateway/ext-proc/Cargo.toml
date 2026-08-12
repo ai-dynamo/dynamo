@@ -13,7 +13,7 @@ description = "Envoy ext_proc gRPC server for Dynamo inference routing"
 
 [[bin]]
 name = "dynamo-ext-proc"
-path = "src/main.rs"
+path = "src/bin/dynamo-ext-proc.rs"
 
 [dependencies]
 dynamo-kv-router = { workspace = true, features = [

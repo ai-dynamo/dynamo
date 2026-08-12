@@ -5,6 +5,7 @@ use futures::Stream;
 
 use crate::protocols::openai::stream_aggregator::{StreamAggregable, aggregate_stream};
 use crate::types::Annotated;
+use dynamo_runtime::error::DynamoError;
 
 use super::NvAudioSpeechResponse;
 
@@ -22,7 +23,7 @@ impl NvAudioSpeechResponse {
     /// Aggregates an annotated stream of audio responses into a final response.
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvAudioSpeechResponse>>,
-    ) -> Result<NvAudioSpeechResponse, String> {
+    ) -> Result<NvAudioSpeechResponse, DynamoError> {
         aggregate_stream(stream).await
     }
 }

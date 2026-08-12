@@ -11,15 +11,12 @@ script reads the single source of truth ``components/releases.data.ts`` and
 emits equivalent markdown tables into each page between idempotent markers,
 wrapped in <llms-only> so only agent exports see them.
 
-A page may carry more than one generated span, each keyed by its own marker
-name. reference/compatibility.mdx also carries a human-facing
-``support-matrix`` span: a single collapsed <Accordion> holding the CUDA
-toolkit and minimum driver matrix for every released line (stable releases
-and their patches), split into one captioned table per minor line so a
-header stays in view while scrolling. The agent twin on the same page keeps
-the matrix as one flat table instead -- the human cut is optimized for
-scanning, the agent cut for parsing, so the two spans are deliberately
-different renderings of the same rows rather than a redundant pair.
+reference/compatibility.mdx's human-facing release support matrix is a
+React component (``ReleaseSupportMatrix``, in ``components/``); its data
+comes from the same ``releases.data.ts`` module this script parses, so the
+human and agent views cannot drift. This script therefore only emits the
+``llms-tables`` twin for that page — a single flat CUDA / feature / pins
+table optimized for parsing.
 
 reference/release-notes/README.mdx (Release History) carries a second
 human-facing span, ``release-stats``: the per-release PR, contributor,
@@ -110,6 +107,7 @@ REQUIRED_EXPORTS = [
     "CURRENT_WHEEL",
     "CUDA_HISTORY",
     "FEATURES",
+    "FEATURE_INTERACTIONS",
     "ARTIFACTS",
     "MODEL_EA_BUILDS",
     "PLATFORM",
@@ -443,6 +441,62 @@ def feature_table(data: dict) -> str:
     return md_table(["Feature", "SGLang", "TensorRT-LLM", "vLLM"], rows)
 
 
+INTERACTION_GLYPH = {"yes": "Yes", "wip": "Experimental", "no": "No", "na": "n/a"}
+
+
+def interaction_tables(data: dict) -> str:
+    """Pairwise feature-interaction matrices, one table per backend.
+
+    The human view renders through <FeatureInteractions />, whose cell states
+    live in the DOM as tinted divs with no text; Fern's agent-facing export
+    would carry no status at all. This twin restates every cell as words from
+    the same FEATURE_INTERACTIONS data, so the two cannot disagree.
+
+    Only the lower triangle is stored, so the upper triangle is filled in here
+    by mirroring -- an agent reading a row should not have to know the
+    convention to answer "does A work with B".
+    """
+    parts: list[str] = []
+    for matrix in data["FEATURE_INTERACTIONS"]:
+        features = matrix["features"]
+        rows_in = matrix["rows"]
+        grid: list[list] = [[None] * len(features) for _ in features]
+        for r, cells in enumerate(rows_in):
+            for c, cell in enumerate(cells):
+                grid[r][c] = cell
+                if r != c:
+                    grid[c][r] = cell  # mirror, so both directions read alike
+        body: list[list] = []
+        for r, feature in enumerate(features):
+            row = [feature]
+            for c in range(len(features)):
+                cell = grid[r][c]
+                if cell is None:
+                    row.append(None)
+                    continue
+                # Raised as TSParseError like every other parse failure in
+                # this module: a bare KeyError is caught by main() and shown
+                # as "KeyError('preview')", which names neither the map nor
+                # the fix. Matches feature_cell above.
+                status = cell["status"]
+                if status not in INTERACTION_GLYPH:
+                    raise TSParseError(
+                        f"unknown interaction status {status!r} for "
+                        f"{matrix['backend']}; add it to INTERACTION_GLYPH"
+                    )
+                text = INTERACTION_GLYPH[status]
+                note = cell.get("note")
+                if note:
+                    source = cell.get("source")
+                    suffix = f" ({PROD_HOST}{source})" if source else ""
+                    text = f"{text} — {note}{suffix}"
+                row.append(text)
+            body.append(row)
+        parts.append(f"*{matrix['backend']}*")
+        parts.append(md_table(["Feature", *features], body))
+    return "\n\n".join(parts)
+
+
 def artifact_table(data: dict) -> str:
     """Artifact-inventory table."""
     rows: list[list] = []
@@ -453,6 +507,15 @@ def artifact_table(data: dict) -> str:
         tags = "; ".join(f"`{t['clipboard']}`" for t in art.get("tags", []))
         rows.append([art["category"], name, art["description"], art.get("meta"), tags])
     return md_table(["Category", "Name", "Description", "Meta", "Tags / install"], rows)
+
+
+def nightlies_table(data: dict) -> str:
+    """Recent pinned nightly wheel builds."""
+    rows = [
+        [b["version"], b["date"], ", ".join(b["packages"]), b.get("note")]
+        for b in data.get("NIGHTLY_BUILDS", [])
+    ]
+    return md_table(["Version", "Date", "Packages", "Notes"], rows)
 
 
 def known_issues_table(data: dict) -> str:
@@ -473,16 +536,22 @@ def crates_table(data: dict) -> str:
 
 
 def platform_lines(data: dict) -> str:
-    """Platform-support bullet lines (GPUs / OS / CSP / CPU arch / wheels)."""
+    """Platform-support bullet lines (GPUs / OS / CPU arch / wheels).
+
+    OS rows carry a ``scope`` field distinguishing shipped container bases
+    ("Containers and wheels") from wheels-only hosts ("Wheels only"); csp rows
+    carry the same field — see
+    releases.data.ts for the reasoning.
+    """
     plat = data["PLATFORM"]
     lines = [f"- GPU architectures: {', '.join(plat['gpus'])}"]
     for os_row in plat["os"]:
         lines.append(
-            f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['status']}"
+            f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['scope']}"
         )
     for csp in plat.get("csp", []):
         lines.append(
-            f"- CSP: {csp['provider']} — {csp['os']} ({csp['arch']}) — {csp['status']}"
+            f"- CSP: {csp['provider']} — {csp['os']} ({csp['arch']}) — {csp['scope']}"
         )
     lines.append(f"- CPU architectures: {', '.join(plat['arch'])}")
     if plat.get("wheelsNote"):
@@ -576,12 +645,11 @@ def render_compatibility(data: dict) -> str:
         )
     )
 
-    # Deliberately restates the support-matrix accordion's table. The
-    # accordion covers the same rows, but it is <Accordion> markup and this
-    # twin exists precisely because component output may be dropped from the
-    # agent-facing exports. Losing the matrix for agents is a worse failure
-    # than repeating it, so keep both until the deployed .md export is
-    # confirmed to carry Accordion children.
+    # The human view of the CUDA history renders through the
+    # <ReleaseSupportMatrix /> React component (which reads the same
+    # releases.data.ts module) and Fern's agent-facing .md export may drop
+    # component output; this flat twin exists so the matrix survives an
+    # agent export whether or not the component's DOM is captured.
     parts.append("**CUDA toolkit and minimum driver per Dynamo release**")
     parts.append(cuda_table(data))
     cuda_notes = data.get("CUDA_NOTES") or []
@@ -590,6 +658,14 @@ def render_compatibility(data: dict) -> str:
 
     parts.append(f"**Feature support by backend ({data['CURRENT_VERSION']})**")
     parts.append(feature_table(data))
+
+    parts.append("**Feature interactions by backend**")
+    parts.append(
+        "Each cell states whether the row feature works together with the "
+        "column feature. The matrix is symmetric: a cell reads the same in "
+        "either direction."
+    )
+    parts.append(interaction_tables(data))
 
     # Platform support (GPUs / OS / arch) — rendered by CompatibilityHero.
     parts.append("**Platform support**")
@@ -621,65 +697,111 @@ def released_versions(data: dict) -> set[str]:
     }
 
 
-def minor_line(version: str) -> str:
-    """'1.2.1' -> '1.2.x' -- the caption a matrix table is grouped under."""
-    parts = version.split(".")
-    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
-        raise TSParseError(
-            f"CUDA_HISTORY version {version!r} is not MAJOR.MINOR... -- the "
-            "support matrix cannot group it by minor line"
-        )
-    return f"{parts[0]}.{parts[1]}.x"
+def parse_driver_floor(min_driver: str) -> int:
+    """'580.xx+' -> 580.
 
-
-def group_by_minor_line(data: dict, versions: set[str]) -> dict[str, set[str]]:
-    """Minor line -> its versions, keyed in CUDA_HISTORY order (newest first).
-
-    Insertion order carries the sort: CUDA_HISTORY is maintained newest-first,
-    so the first time a minor line is seen fixes its position, and dicts
-    preserve that. No separate version sort to drift out of step with it.
+    Numeric on purpose. These are compared, and comparing them as strings is
+    only accidentally right while every floor has the same digit count -- the
+    bug the retired RunsWhereWizard shipped with.
     """
-    groups: dict[str, set[str]] = {}
-    for row in data["CUDA_HISTORY"]:
-        if row["version"] in versions:
-            groups.setdefault(minor_line(row["version"]), set()).add(row["version"])
-    return groups
+    match = re.match(r"\s*(\d+)", min_driver)
+    if not match:
+        raise TSParseError(
+            f"minDriver {min_driver!r} does not start with a number -- the "
+            "driver-floor table cannot place it"
+        )
+    return int(match.group(1))
 
 
-def render_support_matrix(data: dict) -> str:
-    """Human-facing collapsed CUDA/driver matrix for the released lines.
+def post_train_base(version: str) -> str:
+    """'0.7.0.post1' -> '0.7.0'; every other version is returned unchanged.
 
-    One captioned table per minor line, all inside a single <Accordion>. A
-    flat 60-row run pushes its header off screen inside a collapsed panel;
-    per-line tables repeat the header every few rows. Separate tables rather
-    than a version column blanked after its first row -- blank leading cells
-    are ambiguous once the page is flattened into the agent markdown export.
+    Post trains republish images or wheels off an existing release and carry
+    no CUDA_HISTORY row of their own -- CUDA_NOTES states they have the same
+    CUDA support as their base version.
+    """
+    return version.split(".post", 1)[0]
+
+
+def newest_release_per_base(data: dict) -> dict[str, str]:
+    """Base CUDA_HISTORY version -> the newest released version it covers.
+
+    RELEASES is maintained newest-first, so the first released entry that
+    resolves to a base is the newest thing a reader can pull for that base's
+    CUDA profile. Without this, a table keyed on CUDA_HISTORY names v0.7.0
+    while v0.7.0.post1 is the newest release that actually runs there.
+    """
+    newest: dict[str, str] = {}
+    for rel in data["RELEASES"]:
+        if rel.get("kind") not in SUPPORT_MATRIX_KINDS:
+            continue
+        bare = rel["version"].removeprefix("v")
+        newest.setdefault(post_train_base(bare), bare)
+    return newest
+
+
+def driver_floor_table(data: dict) -> str:
+    """Driver floor -> the newest release each backend can run on that driver.
+
+    Read a row as "if my driver is at least this version": a 580 driver also
+    satisfies the 575 and 570 floors, so each cell is the newest release whose
+    requirement that driver meets, not the newest release that requires
+    exactly that floor.
+
+    Floors and backends both come from CUDA_HISTORY, so a fourth floor or a
+    fourth backend appears here the moment it is added to the data. Cells name
+    the newest release including post trains, which inherit their base row.
     """
     versions = released_versions(data)
-    groups = group_by_minor_line(data, versions)
-    if not groups:
+    newest_per_base = newest_release_per_base(data)
+    rows = [row for row in data["CUDA_HISTORY"] if row["version"] in versions]
+    if not rows:
         raise TSParseError(
             "no CUDA_HISTORY row matches a released RELEASES version -- the "
-            "support-matrix accordion would render an empty table"
+            "driver-floor table would render with no rows"
         )
 
-    parts = [
-        '<Accordion title="CUDA toolkit and minimum driver by release">',
-        "Every released line — stable releases and their patches, grouped by "
-        "minor line, newest first. Platform previews and model-specific "
-        "builds are not listed individually; those with a documented toolkit "
-        "requirement appear in the notes below, and "
-        "[Releases (machine-readable)](releases-machine-readable.mdx) "
-        "has the full release inventory.",
-    ]
-    for line, line_versions in groups.items():
-        parts.append(f"**{line}**")
-        parts.append(cuda_table(data, line_versions))
-    cuda_notes = data.get("CUDA_NOTES") or []
-    if cuda_notes:
-        parts.append("\n".join(f"- {note}" for note in cuda_notes))
-    parts.append("</Accordion>")
-    return "\n\n".join(parts)
+    floors = sorted({parse_driver_floor(row["minDriver"]) for row in rows})
+    backends = sorted({row["backend"] for row in rows})
+    # CUDA_HISTORY is maintained newest-first, so the first matching row for a
+    # backend is its newest release -- the same ordering the matrix relies on.
+    labels = {parse_driver_floor(row["minDriver"]): row["minDriver"] for row in rows}
+
+    table_rows = []
+    for floor in floors:
+        cells = [labels[floor]]
+        for backend in backends:
+            runnable = next(
+                (
+                    row["version"]
+                    for row in rows
+                    if row["backend"] == backend
+                    and parse_driver_floor(row["minDriver"]) <= floor
+                ),
+                None,
+            )
+            cells.append(
+                newest_per_base.get(runnable, runnable) if runnable else "None"
+            )
+        table_rows.append(cells)
+    return md_table(["Driver", *backends], table_rows)
+
+
+def render_driver_floors(data: dict) -> str:
+    """The driver-first view of the support matrix.
+
+    The matrix answers "what does this release need". A reader who already has
+    a driver installed is asking the inverse, and answering it from the matrix
+    means scanning every row for the floors their driver clears.
+    """
+    return "\n\n".join(
+        [
+            "Driver already installed? Read across from your version — each "
+            "cell is the newest release that backend can run on it. A driver "
+            "meeting a higher floor also runs everything below it.",
+            driver_floor_table(data),
+        ]
+    )
 
 
 def render_release_artifacts(data: dict) -> str:
@@ -694,6 +816,11 @@ def render_release_artifacts(data: dict) -> str:
 
     parts.append("**Known artifact issues**")
     parts.append(known_issues_table(data))
+
+    if data.get("NIGHTLY_BUILDS"):
+        parts.append("**Recent nightly wheel builds**")
+        parts.append(nightlies_table(data))
+        parts.append(data["NIGHTLIES_NOTE"])
 
     parts.append("**Crates: first published version on crates.io**")
     parts.append(crates_table(data))
@@ -787,6 +914,13 @@ def render_release_stats(data: dict) -> str:
             "## Release statistics",
             "Counts taken from each release's GitHub body. A dash means the "
             "count was not recorded for that release, not that it was zero.",
+            "The pre-v1.0.0 bodies predate the current release-note template "
+            "and state no PR or contributor totals, so those cells stay empty: "
+            "the figures were never published, and the counts recoverable from "
+            "the archive and from git disagree with each other and with the "
+            "totals the later bodies state. First-time contributors are "
+            "counted release-wide; a release whose body lists only its "
+            "external first-timers is left empty rather than undercounted.",
             release_stats_table(data),
         ]
     )
@@ -903,6 +1037,8 @@ def render_releases_data(data: dict) -> str:
     if data.get("NIGHTLIES_NOTE"):
         parts.append("## Nightlies")
         parts.append(data["NIGHTLIES_NOTE"])
+        if data.get("NIGHTLY_BUILDS"):
+            parts.append(nightlies_table(data))
 
     return "\n\n".join(parts)
 
@@ -910,6 +1046,34 @@ def render_releases_data(data: dict) -> str:
 # ---------------------------------------------------------------------------
 # JSON payload (assets/releases.json)
 # ---------------------------------------------------------------------------
+
+
+def platform_payload(data: dict) -> dict:
+    """PLATFORM with the retired ``status`` key restored for consumers.
+
+    releases.data.ts renamed ``status`` to ``scope`` because "Supported" read
+    the same on a shipped container base and on a wheels-only host. That rename
+    is right for the page, but releases.json is a published asset with a stable
+    schema: dropping a key breaks anything already reading
+    ``platform.os[].status``. So the JSON carries both — ``scope`` as the
+    precise field, ``status`` derived from it through SCOPE_STATUS. Deriving
+    rather than defaulting is deliberate: the rows have not all carried
+    "Supported" (the CentOS Stream row was "Experimental"), so an unmapped
+    scope fails closed instead of publishing a support claim. ``status`` is
+    deprecated; read ``scope``.
+    """
+    plat = {k: copy.deepcopy(v) for k, v in data["PLATFORM"].items()}
+    for key in ("os", "csp"):
+        for row in plat.get(key, []):
+            if "scope" in row and "status" not in row:
+                scope = row["scope"]
+                if scope not in SCOPE_STATUS:
+                    raise TSParseError(
+                        f"unknown platform scope {scope!r}; add it to "
+                        f"SCOPE_STATUS with the status it should publish"
+                    )
+                row["status"] = SCOPE_STATUS[scope]
+    return plat
 
 
 def build_json(data: dict) -> str:
@@ -929,6 +1093,12 @@ def build_json(data: dict) -> str:
         out = dict(b)
         out["shippedIso"] = iso_date(b["shipped"])
         ea_builds.append(out)
+
+    nightly_builds = []
+    for b in data.get("NIGHTLY_BUILDS", []):
+        out = dict(b)
+        out["dateIso"] = iso_date(b["date"])
+        nightly_builds.append(out)
 
     if not any("dateIso" in r for r in releases):
         raise TSParseError("no dated RELEASES entries — cannot build releases.json")
@@ -952,11 +1122,12 @@ def build_json(data: dict) -> str:
         "artifacts": data["ARTIFACTS"],
         "modelEaBuilds": ea_builds,
         "platformPreviewCoverage": data["PLATFORM_PREVIEW_COVERAGE"],
-        "platform": data["PLATFORM"],
+        "platform": platform_payload(data),
         "knownArtifactIssues": data["KNOWN_ARTIFACT_ISSUES"],
         "cratesFirstPublished": data["CRATES_FIRST_PUBLISHED"],
         "releaseStats": data["RELEASE_STATS"],
         "nightliesNote": data.get("NIGHTLIES_NOTE"),
+        "nightlyBuilds": nightly_builds,
     }
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
@@ -1048,11 +1219,14 @@ class Block(NamedTuple):
 
 # The three component-backed pages get <llms-only> twins (humans see the React
 # components); releases-machine-readable.mdx IS the page body, human-viewable
-# and machine-consumable alike. compatibility.mdx additionally carries the
-# human-facing support-matrix accordion at a fixed spot in the page.
+# and machine-consumable alike.
 PAGES: dict[str, tuple[Block, ...]] = {
     "compatibility.mdx": (
-        Block("support-matrix", render_support_matrix, False, False),
+        # The driver-floor table inverts the support matrix: read across from a
+        # driver you already have to the newest release each backend can run on
+        # it. <ReleaseSupportMatrix /> renders the forward view (release -> min
+        # driver) and has no inverse mode, so this stays a generated span.
+        Block("driver-floors", render_driver_floors, False, False),
         Block("llms-tables", render_compatibility, True, True),
     ),
     "release-artifacts.mdx": (
@@ -1067,6 +1241,16 @@ PAGES: dict[str, tuple[Block, ...]] = {
     "releases/release-history.mdx": (
         Block("release-stats", render_release_stats, False, False),
     ),
+}
+
+# Scope to the support claim published in releases.json. Explicit rather than
+# defaulting to "Supported": the rows have not always carried it -- the CentOS
+# Stream row this PR removes was "Experimental" -- so a blanket default would
+# publish a support claim for the next preview or restricted scope added here.
+# Unmapped fails closed, like feature_cell and the interaction glyphs.
+SCOPE_STATUS: dict[str, str] = {
+    "Containers and wheels": "Supported",
+    "Wheels only": "Supported",
 }
 
 # Standalone machine-readable outputs (path -> builder returning full text).

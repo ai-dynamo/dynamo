@@ -468,7 +468,8 @@ impl WorkloadDriver {
                     strict_priority: turn.strict_priority,
                     policy_class: turn.policy_class,
                     #[cfg(feature = "replay-bench")]
-                    deterministic_request_id: Some(Uuid::from_u128(session_index as u128 + 1)),
+                    deterministic_request_id: crate::replay::canonical_replay_active()
+                        .then(|| Uuid::from_u128(session_index as u128 + 1)),
                     #[cfg(all(test, not(feature = "replay-bench")))]
                     deterministic_request_id: None,
                 }],
@@ -524,7 +525,8 @@ impl WorkloadDriver {
         let is_concurrency = matches!(&policy, SchedulingPolicy::Concurrency(_));
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
         #[cfg(feature = "replay-bench")]
-        let mut next_deterministic_request_id = 1_u128;
+        let mut next_deterministic_request_id =
+            crate::replay::canonical_replay_active().then_some(1_u128);
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
@@ -555,11 +557,15 @@ impl WorkloadDriver {
                         ));
                         #[cfg(feature = "replay-bench")]
                         let deterministic_request_id = {
-                            let request_id = Uuid::from_u128(next_deterministic_request_id);
-                            next_deterministic_request_id = next_deterministic_request_id
-                                .checked_add(1)
-                                .expect("deterministic replay request UUID overflow");
-                            Some(request_id)
+                            next_deterministic_request_id.map(|next_id| {
+                                let request_id = Uuid::from_u128(next_id);
+                                next_deterministic_request_id = Some(
+                                    next_id
+                                        .checked_add(1)
+                                        .expect("deterministic replay request UUID overflow"),
+                                );
+                                request_id
+                            })
                         };
                         Ok(TurnRuntime {
                             request_id: None,

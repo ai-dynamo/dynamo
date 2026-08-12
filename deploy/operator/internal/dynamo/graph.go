@@ -303,6 +303,19 @@ func GenerateDynamoComponentsDeployments(
 	for i := range parentDGD.Spec.Components {
 		component := &parentDGD.Spec.Components[i]
 		componentName := component.ComponentName
+
+		// Reject invalid GMS client references before synchronizing any DCDs.
+		gmsSpec := GetGPUMemoryService(component)
+		if gmsSpec != nil && !component.IsInterPodGMSEnabled() {
+			var containers []corev1.Container
+			if component.PodTemplate != nil {
+				containers = component.PodTemplate.Spec.Containers
+			}
+			if err := gmsExtraClientContainersError(gmsSpec, containers); err != nil {
+				return nil, fmt.Errorf("component %q: %w", componentName, err)
+			}
+		}
+
 		dynamoNamespace := parentDGD.GetDynamoNamespaceForComponent(component)
 		dcd, err := generateSingleDCD(parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
 		if err != nil {
@@ -312,6 +325,49 @@ func GenerateDynamoComponentsDeployments(
 	}
 
 	return deployments, nil
+}
+
+// gmsExtraClientContainersError returns a deterministic error for invalid
+// intra-pod GMS client references.
+func gmsExtraClientContainersError(
+	gmsSpec *v1beta1.GPUMemoryServiceSpec,
+	containers []corev1.Container,
+) error {
+	// Index declared container names for constant-time client lookup.
+	containerNames := make(map[string]struct{}, len(containers))
+	for i := range containers {
+		containerNames[containers[i].Name] = struct{}{}
+	}
+
+	// Scan the requested clients for duplicate and unresolved references.
+	seenClients := make(map[string]struct{}, len(gmsSpec.ExtraClientContainers))
+	missingClients := make([]string, 0)
+	duplicateClients := make([]string, 0)
+	for _, name := range gmsSpec.ExtraClientContainers {
+		if _, duplicate := seenClients[name]; duplicate {
+			duplicateClients = append(duplicateClients, name)
+			continue
+		}
+		seenClients[name] = struct{}{}
+		if _, exists := containerNames[name]; !exists {
+			missingClients = append(missingClients, name)
+		}
+	}
+
+	// Return one stable error that names every invalid client reference.
+	if len(missingClients) == 0 && len(duplicateClients) == 0 {
+		return nil
+	}
+	sort.Strings(missingClients)
+	sort.Strings(duplicateClients)
+	problems := make([]string, 0, 2)
+	if len(duplicateClients) > 0 {
+		problems = append(problems, fmt.Sprintf("contains duplicate names %q", duplicateClients))
+	}
+	if len(missingClients) > 0 {
+		problems = append(problems, fmt.Sprintf("references missing pod containers %q", missingClients))
+	}
+	return fmt.Errorf("gpuMemoryService.extraClientContainers %s", strings.Join(problems, "; "))
 }
 
 func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
@@ -1105,6 +1161,8 @@ const (
 // multiple ServiceRoles depending on the deployment topology:
 //
 //   - single-node, no GMS: 1 role (RoleMain)
+//   - single-node, forceScalingGroup: 1 role (RoleMain with a single pod;
+//     the PCSG replica count carries the horizontal scale)
 //   - multinode, no GMS:    2 roles (RoleLeader + RoleWorker)
 //   - single-node, inter-pod GMS: 1 engine PCLQ (replicated) + 1 RoleGMS
 //     weight-server PCLQ
@@ -1162,6 +1220,8 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 		return expandMultinodeRoles(componentName, numberOfNodes)
 	case isInterPodGMS:
 		return expandSingleNodeGMSRoles(componentName, component.GetTotalEnginePods())
+	case component.IsGroveScalingGroupForced():
+		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
 		return expandSingleNodeRoles(componentName, componentReplicas)
 	}
@@ -1174,6 +1234,12 @@ func expandSingleNodeRoles(componentName string, componentReplicas *int32) []Ser
 	}
 	return []ServiceRole{
 		{Name: componentName, Role: RoleMain, Replicas: replicas},
+	}
+}
+
+func expandSingleNodeScalingGroupRoles(componentName string) []ServiceRole {
+	return []ServiceRole{
+		{Name: componentName, Role: RoleMain, Replicas: 1},
 	}
 }
 
@@ -1218,7 +1284,7 @@ func LongestPodCliqueNameForDGDComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 ) string {
 	lowerComponentName := strings.ToLower(componentName)
-	if component == nil || (component.GetNumberOfNodes() <= 1 && !component.IsInterPodGMSEnabled()) {
+	if component == nil || !component.UsesPCSG() {
 		return lowerComponentName
 	}
 
@@ -1245,7 +1311,7 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 		componentName := component.ComponentName
 		lowerName := strings.ToLower(componentName)
 		var budget int
-		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+		if component.UsesPCSG() {
 			// PCSG = lowerName, PCLQ = longest rendered role name.
 			budget = len(lowerName) + len(LongestPodCliqueNameForDGDComponent(componentName, component))
 		} else {
@@ -1606,13 +1672,19 @@ func GenerateBasePodSpec(
 	// generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying the
 	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
-	if GetGPUMemoryService(component) != nil && !component.IsInterPodGMSEnabled() {
+	gmsSpec := GetGPUMemoryService(component)
+	if gmsSpec != nil && !component.IsInterPodGMSEnabled() {
+		// Recheck rendered containers to protect direct or legacy DCDs that bypass admission.
+		if err := gmsExtraClientContainersError(gmsSpec, podSpec.Containers); err != nil {
+			return nil, err
+		}
+
 		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
-		for _, name := range GetGPUMemoryService(component).ExtraClientContainers {
+		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
 				if podSpec.Containers[i].Name == name {
@@ -1621,7 +1693,7 @@ func GenerateBasePodSpec(
 				}
 			}
 			if container == nil {
-				continue
+				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
 			gms.EnsureClient(&podSpec, container)
 		}
@@ -2475,7 +2547,7 @@ func GenerateGrovePodCliqueSet(
 		isMultinode := numberOfNodes > 1
 		isInterPodGMS := component.IsInterPodGMSEnabled()
 		isInterPodFailover := component.IsInterPodFailoverEnabled()
-		usesPCSG := isMultinode || isInterPodGMS
+		usesPCSG := component.UsesPCSG()
 		roles := expandRolesForComponent(componentName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
 
