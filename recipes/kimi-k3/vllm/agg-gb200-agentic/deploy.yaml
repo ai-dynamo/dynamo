@@ -82,7 +82,7 @@ spec:
 
   - multinode:
       nodeCount: 4
-    name: decode
+    name: worker
     podTemplate:
       metadata:
         annotations:

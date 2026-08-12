@@ -16,7 +16,7 @@ spec:
     type: frontend
   - modelRef:
       name: Qwen/Qwen3-0.6B
-    name: decode
+    name: worker
     podTemplate:
       spec:
         containers:
