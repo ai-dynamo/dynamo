@@ -687,7 +687,9 @@ impl<
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         let mut commands_since_cleanup = 0usize;
         while let Some(command) = rx.recv().await {
-            let drain_cleanup = self.queueing_enabled && {
+            // Cleanup wakes are best-effort because Drop cannot await channel capacity.
+            // Poll the shared queue in every mode so a full channel cannot strand cleanup.
+            let drain_cleanup = {
                 commands_since_cleanup += 1;
                 let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
                 if drain_cleanup {
@@ -695,6 +697,7 @@ impl<
                 }
                 drain_cleanup
             };
+            let cleanup_made_ready = drain_cleanup && self.drain_cleanup();
             match command {
                 AdmissionCommand::Enqueue {
                     request,
@@ -712,25 +715,29 @@ impl<
                     {
                         lease.request_id = request_id;
                     }
-                    let made_ready = enqueue_ready | (drain_cleanup && self.drain_cleanup());
+                    let made_ready = enqueue_ready | cleanup_made_ready;
                     if made_ready {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(lease);
                 }
                 AdmissionCommand::SelectWithoutAdmission { request, resp_tx } => {
+                    if cleanup_made_ready {
+                        self.handle_update(None).await;
+                    }
                     let result = self.select_without_admission_inner(request, Instant::now());
                     let _ = resp_tx.send(result);
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
-                    if drain_cleanup && self.drain_cleanup() {
+                    if cleanup_made_ready {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Cleanup => {
-                    if self.drain_cleanup() {
+                    let made_ready = cleanup_made_ready || (!drain_cleanup && self.drain_cleanup());
+                    if made_ready {
                         self.handle_update(None).await;
                     }
                 }
@@ -2116,6 +2123,62 @@ mod tests {
         })
         .await
         .expect("dropped immediate-admission lease did not release scheduler state");
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn default_mode_cleanup_survives_saturated_actor_channel() {
+        let block_size = 16;
+        let isl = 64;
+        let request_id = "saturated-default-path";
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) =
+            make_queue_with_blocking_refresher(1, block_size, isl, None, refresher, 1);
+
+        let (request, response_rx) = make_request(request_id, isl);
+        let lease = queue
+            .new_request_lifecycle_lease(Some(request_id))
+            .expect("tracked lifecycle requests need a lease");
+        let lease = queue
+            .enqueue_with_block_hashes_and_lease(request, None, Some(lease))
+            .await
+            .expect("queue actor must return the armed lease after immediate admission");
+        response_rx
+            .await
+            .expect("response sender dropped")
+            .expect("request should be admitted immediately");
+        assert!(slots.request_worker(&request_id.to_owned()).is_some());
+
+        let (advisory, advisory_rx) = make_request("advisory", isl);
+        drop(advisory_rx);
+        let (resp_tx, resp_rx) = oneshot::channel();
+        assert!(
+            queue
+                .admission_tx
+                .try_send(AdmissionCommand::SelectWithoutAdmission {
+                    request: advisory,
+                    resp_tx,
+                })
+                .is_ok(),
+            "advisory command must fill the actor channel"
+        );
+        assert_eq!(
+            queue.admission_tx.capacity(),
+            0,
+            "test must saturate the actor command channel"
+        );
+
+        // The cleanup wake cannot enter the full channel. The actor must still
+        // drain the pending cleanup while processing the accepted command.
+        drop(lease);
+        assert!(queue.cleanup.pending.load(AtomicOrdering::Acquire));
+        resp_rx
+            .await
+            .expect("advisory response sender dropped")
+            .expect("advisory selection failed");
+
+        assert!(!queue.cleanup.pending.load(AtomicOrdering::Acquire));
+        assert!(slots.request_worker(&request_id.to_owned()).is_none());
         slots.assert_completely_drained(decay_now());
     }
 
