@@ -246,6 +246,31 @@ async def test_cost_budget_caps_each_batch():
         b.shutdown()
 
 
+async def test_bucket_keys_partition_and_item_cap_round_robin():
+    g = _Gate()
+    b = ThreadedMicroBatcher(g.fn, max_batch_items=2)
+    b.start()
+    try:
+        gate = await g.park(b)
+        real = asyncio.ensure_future(
+            b.submit(
+                ["a1", "a2", "a3", "b1", "b2"],
+                bucket_keys=["a", "a", "a", "b", "b"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        g.release.set()
+        await asyncio.gather(gate, real)
+        assert g.batches == [["a1", "a2"], ["b1", "b2"], ["a3"]]
+    finally:
+        b.shutdown()
+
+
+def test_nonpositive_item_cap_rejected():
+    with pytest.raises(ValueError, match="max_batch_items"):
+        ThreadedMicroBatcher(_echo, max_batch_items=0)
+
+
 async def test_max_batch_cost_none_is_passthrough():
     """Default (max_batch_cost=None): no cap and no per-item ceiling — the whole
     drained set runs as ONE fn call regardless of summed cost."""
@@ -499,6 +524,18 @@ async def test_costs_length_mismatch_raises():
     try:
         with pytest.raises(ValueError, match="costs has"):
             await b.submit(["a", "b"], costs=[1])
+    finally:
+        b.shutdown()
+
+
+async def test_bucket_keys_length_and_hashability_are_validated():
+    b = ThreadedMicroBatcher(_echo)
+    b.start()
+    try:
+        with pytest.raises(ValueError, match="bucket_keys has"):
+            await b.submit(["a", "b"], bucket_keys=["a"])
+        with pytest.raises(ValueError, match="must be hashable"):
+            await b.submit(["a"], bucket_keys=[["not-hashable"]])
     finally:
         b.shutdown()
 
