@@ -13,6 +13,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
@@ -128,6 +129,48 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 				{Name: "main", Ready: ready, ContainerID: "containerd://" + testContainerID},
 			},
 		},
+	}
+}
+
+func TestRestorePodLabelSelector(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{
+			name: "restore target",
+			labels: map[string]string{
+				snapshotprotocol.RestoreTargetLabel: "true",
+				snapshotprotocol.CheckpointIDLabel:  "checkpoint-id",
+			},
+			want: true,
+		},
+		{
+			name: "checkpoint source",
+			labels: map[string]string{
+				snapshotprotocol.CheckpointSourceLabel: "true",
+				snapshotprotocol.CheckpointIDLabel:     "checkpoint-id",
+			},
+		},
+		{
+			name: "cleanup pod with checkpoint ID",
+			labels: map[string]string{
+				snapshotprotocol.CheckpointIDLabel: "checkpoint-id",
+			},
+		},
+	}
+
+	parsed, err := labels.Parse(restorePodLabelSelector())
+	if err != nil {
+		t.Fatalf("labels.Parse() error = %v", err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parsed.Matches(labels.Set(tc.labels)); got != tc.want {
+				t.Fatalf("selector match = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -484,11 +527,6 @@ func TestReconcileRestorePod(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Restore pods are identified by snapshot-agent as
-			// (CheckpointIDLabel present, CheckpointSourceLabel absent),
-			// so the restore informer's label selector does the filtering.
-			// The hash-missing case deliberately omits the label to exercise
-			// the early-return branch in reconcileRestorePod.
 			labels := map[string]string{}
 			if tc.hash != "" {
 				labels[snapshotprotocol.CheckpointIDLabel] = tc.hash

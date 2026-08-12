@@ -147,12 +147,9 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	var syncFuncs []cache.InformerSynced
 
-	// Restore pods carry a checkpoint ID but are not checkpoint sources.
-	restoreSel, err := labels.Parse(snapshotprotocol.CheckpointIDLabel + ",!" + snapshotprotocol.CheckpointSourceLabel)
-	if err != nil {
-		return fmt.Errorf("failed to build restore label selector: %w", err)
-	}
-	restoreSelector := restoreSel.String()
+	// Watch only pods explicitly shaped as restore targets. Other pod types,
+	// such as checkpoint cleanup jobs, can also carry a checkpoint ID.
+	restoreSelector := restorePodLabelSelector()
 
 	restoreFactoryOpts := append([]informers.SharedInformerOption{
 		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
@@ -274,6 +271,12 @@ func (w *NodeController) Run(ctx context.Context) error {
 	<-ctx.Done()
 	stopOnce.Do(func() { close(w.stopCh) })
 	return nil
+}
+
+func restorePodLabelSelector() string {
+	return labels.SelectorFromSet(labels.Set{
+		snapshotprotocol.RestoreTargetLabel: "true",
+	}).String()
 }
 
 func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) {
