@@ -216,28 +216,36 @@ def enable_kv_router(config_dict: dict) -> None:
     """Configure the generated frontend to use KV-cache-aware routing.
 
     DGD container args replace the operator's frontend defaults, so a generated
-    frontend without explicit args must include the complete Python module
-    invocation before adding ``--router-mode kv``.
+    frontend must include the complete Python module invocation before adding
+    ``--router-mode kv``. Frontends with an unexpected generated shape are left
+    unchanged so this final assembly step does not discard profiling results.
     """
     components = config_dict.get("spec", {}).get("components", [])
     if not isinstance(components, list):
         components = []
 
+    found_frontend = False
     for component in components:
         if not isinstance(component, dict) or component.get("type") != "frontend":
             continue
+        found_frontend = True
         container = get_main_container_dict(component)
         if container is None:
-            raise ValueError(
-                "KV router requires the frontend to define a main container"
+            logger.warning(
+                "Skipping KV router configuration for frontend %r because it has no main container",
+                component.get("name"),
             )
+            continue
         args = container.get("args")
-        if not args:
-            args = ["-m", "dynamo.frontend"]
+        args = list(args) if isinstance(args, list) else []
+        if args[:2] != ["-m", "dynamo.frontend"]:
+            args = ["-m", "dynamo.frontend", *args]
         container["args"] = set_unique_argument_value(list(args), "--router-mode", "kv")
-        return
 
-    raise ValueError("KV router requires a frontend component in the generated DGD")
+    if not found_frontend:
+        logger.warning(
+            "Skipping KV router configuration because the generated DGD has no frontend component"
+        )
 
 
 def _vllm_worker_roles() -> dict[str, str]:

@@ -641,6 +641,95 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_kv_router_preserves_partial_frontend_args(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "Frontend",
+                        "type": "frontend",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "main", "args": ["--http-port", "9000"]}
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+
+        result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        assert result["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
+            "args"
+        ] == [
+            "-m",
+            "dynamo.frontend",
+            "--http-port",
+            "9000",
+            "--router-mode",
+            "kv",
+        ]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_skips_missing_frontend(self, tmp_path, caplog):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        dgd_config = {"spec": {"components": [{"name": "decode", "type": "worker"}]}}
+
+        with caplog.at_level(logging.WARNING):
+            result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        assert result is dgd_config
+        assert "has no frontend component" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_skips_frontend_without_main_container(self, tmp_path, caplog):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        frontend = {
+            "name": "Frontend",
+            "type": "frontend",
+            "podTemplate": {"spec": {"containers": [{"name": "sidecar"}]}},
+        }
+        dgd_config = {"spec": {"components": [frontend]}}
+
+        with caplog.at_level(logging.WARNING):
+            result = assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        assert result is dgd_config
+        assert frontend["podTemplate"]["spec"]["containers"] == [{"name": "sidecar"}]
+        assert "has no main container" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_kv_router_configures_every_frontend(self, tmp_path):
+        dgdr = _make_dgdr(features=FeaturesSpec(kvRouter=KVRouterSpec(enabled=True)))
+        frontends = [
+            {
+                "name": name,
+                "type": "frontend",
+                "podTemplate": {"spec": {"containers": [{"name": "main"}]}},
+            }
+            for name in ("FrontendA", "FrontendB")
+        ]
+        dgd_config = {"spec": {"components": frontends}}
+
+        assemble_final_config(dgdr, _make_ops(tmp_path), dgd_config)
+
+        for frontend in frontends:
+            assert frontend["podTemplate"]["spec"]["containers"][0]["args"] == [
+                "-m",
+                "dynamo.frontend",
+                "--router-mode",
+                "kv",
+            ]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_planner_enables_scaling_adapter_on_worker_components(self, tmp_path):
         """Planner-generated workers should be scaled through DGDSA."""
         dgdr = _make_dgdr(features=FeaturesSpec(planner=_make_planner()))
