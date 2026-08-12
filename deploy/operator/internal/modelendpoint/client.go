@@ -66,6 +66,7 @@ func (c *Client) LoadLoRA(
 ) ([]v1alpha1.EndpointInfo, error) {
 	logs := log.FromContext(ctx)
 
+	// Skip lifecycle calls while preserving discovered endpoints for non-LoRA models.
 	if !model.IsLoRA() {
 		logs.V(1).Info("Skipping LoRA load for non-LoRA model", "modelType", model.Spec.ModelType)
 		endpoints := make([]v1alpha1.EndpointInfo, len(candidates))
@@ -79,6 +80,7 @@ func (c *Client) LoadLoRA(
 		return endpoints, nil
 	}
 
+	// Resolve the adapter source required by the load lifecycle API.
 	sourceURI := ""
 	if model.Spec.Source != nil {
 		sourceURI = model.Spec.Source.URI
@@ -88,6 +90,7 @@ func (c *Client) LoadLoRA(
 		return nil, fmt.Errorf("source URI is required for LoRA models")
 	}
 
+	// Pre-populate endpoint identities so partial results stay complete on failure.
 	endpoints := make([]v1alpha1.EndpointInfo, len(candidates))
 	for index, candidate := range candidates {
 		endpoints[index] = v1alpha1.EndpointInfo{
@@ -96,6 +99,7 @@ func (c *Client) LoadLoRA(
 		}
 	}
 
+	// Bound the complete load batch by the total operation timeout.
 	loadCtx, cancel := context.WithTimeout(ctx, TotalTimeout)
 	defer cancel()
 
@@ -104,6 +108,7 @@ func (c *Client) LoadLoRA(
 	capableVLLMPrefillGroups := make(map[string]struct{})
 	unavailableFallbackIndices := make(map[int]struct{})
 
+	// Load one candidate and record the state needed for final fallback resolution.
 	loadCandidate := func(index int) {
 		candidate := candidates[index]
 		// Always call the lifecycle API first so capable vLLM prefill workers
@@ -180,6 +185,7 @@ func (c *Client) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 
 	logs.Info("Starting parallel LoRA unload", "endpointCount", len(candidates), "modelName", modelName)
 
+	// Count endpoints eligible for legacy lifecycle compatibility.
 	fallbackEligibleCount := 0
 	for _, candidate := range candidates {
 		if candidate.AllowLoRAManagementUnavailable {
@@ -187,11 +193,13 @@ func (c *Client) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 		}
 	}
 
+	// Bound the complete unload batch by the total operation timeout.
 	unloadCtx, cancel := context.WithTimeout(ctx, TotalTimeout)
 	defer cancel()
 
 	var successCount atomic.Int64
 
+	// Unload one candidate and count successful or compatible outcomes.
 	unloadCandidate := func(index int) {
 		candidate := candidates[index]
 		err := c.unloadLoRA(unloadCtx, candidate.Address, modelName)
