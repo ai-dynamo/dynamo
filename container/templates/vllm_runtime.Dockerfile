@@ -98,8 +98,38 @@ RUN apt-get update && \
         keyboxd \
         libssl3t64 \
         openssl && \
+        libjemalloc2 \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
+
+{% if device == "cuda" %}
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl && \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
+
+# libjemalloc2 lets Dynamo processes (e.g. the frontend) opt into jemalloc via
+# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libjemalloc2 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
