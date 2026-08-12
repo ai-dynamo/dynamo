@@ -10,6 +10,7 @@ import importlib
 import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from dynamo.workflow.runtime import WorkflowExecutor
@@ -36,6 +37,7 @@ class WorkflowFrontendApplication:
     executor: WorkflowExecutor
     model_path: str
     model_name: Optional[str] = None
+    custom_template_path: Optional[Path] = None
     request_adapter: RequestAdapter = _default_request_adapter
     result_adapter: ResultAdapter = _default_result_adapter
 
@@ -48,6 +50,12 @@ class WorkflowFrontendApplication:
             not isinstance(self.model_name, str) or not self.model_name
         ):
             raise ValueError("workflow frontend model_name must be non-empty when set")
+        if self.custom_template_path is not None and not isinstance(
+            self.custom_template_path, Path
+        ):
+            raise TypeError(
+                "workflow frontend custom_template_path must be a pathlib.Path"
+            )
         if not callable(self.request_adapter) or not callable(self.result_adapter):
             raise TypeError("workflow frontend adapters must be callable")
 
@@ -72,9 +80,8 @@ class WorkflowTokenEngine:
             self._application.executor.run(inputs, attempt_id=attempt_id),
             name=f"workflow-frontend:{attempt_id}",
         )
-        cancellation = asyncio.create_task(
+        cancellation = asyncio.ensure_future(
             context.async_killed_or_stopped(),
-            name=f"workflow-frontend-cancellation:{attempt_id}",
         )
         try:
             done, _ = await asyncio.wait(
