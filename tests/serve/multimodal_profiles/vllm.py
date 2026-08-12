@@ -548,11 +548,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.nightly],
                 timeout_s=600,
                 gpu_marker="gpu_2",
+                # Genuinely 2-GPU: encode and PD each take their own card, so
+                # this deliberately carries no profiled_vram_gib and therefore
+                # runs in the sequential GPU stage (which selects
+                # `... and not profiled_vram_gib`) with both GPUs visible. The
+                # VRAM-parallel stage pins one GPU per test via
+                # CUDA_VISIBLE_DEVICES, which this topology cannot satisfy.
+                # Same reason `epd` below carries no profile.
+                #
                 # Profiled with `tests/utils/profile_pytest.py --gpus 0,1` on
                 # 2x RTX 6000 Ada (48 GB each). Encoder GPU peaked ~13.5 GB
                 # (static, full model fp16 load); PD GPU peaked ~19 GB
                 # (weights + KV @ 4 GB cap + activations). 2x safety on KV.
-                profiled_vram_gib=19.0,
                 requested_vllm_kv_cache_bytes=4_308_848_000,
                 tests=[
                     MmCase(
