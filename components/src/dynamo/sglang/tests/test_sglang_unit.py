@@ -98,13 +98,14 @@ def _cpu_engine_when_no_accelerator(monkeypatch):
     _sgl_common.get_device.cache_clear()
 
 
-def test_configured_engine_route_cannot_replace_built_in_route():
+@pytest.mark.parametrize(
+    "reserved_path", ["control/start_profile", "update/model_taints"]
+)
+def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
     handler = object.__new__(DecodeWorkerHandler)
     handler.engine = SimpleNamespace(custom_method=lambda: None)
     handler.config = SimpleNamespace(
-        dynamo_args=SimpleNamespace(
-            engine_routes=["control/start_profile=custom_method"]
-        )
+        dynamo_args=SimpleNamespace(engine_routes=[f"{reserved_path}=custom_method"])
     )
 
     registered_routes = []
@@ -116,13 +117,71 @@ def test_configured_engine_route_cannot_replace_built_in_route():
     with pytest.raises(
         ValueError,
         match=(
-            "Configured SGLang engine route /engine/control/start_profile "
-            "collides with a built-in route"
+            rf"Configured SGLang engine route /engine/{reserved_path} "
+            r"collides with a built-in route"
         ),
     ):
         handler.register_engine_routes(Runtime())
 
     assert registered_routes == []
+
+
+@pytest.mark.parametrize(
+    ("input_name", "output_name", "worker_name", "expected"),
+    [
+        ("Tokens", "Prefill", "Prefill", True),
+        ("Tokens", "Chat", "Decode", True),
+        ("Tokens", "Completions", "Aggregated", True),
+        ("Tokens", "Empty", "Prefill", False),
+        ("Tokens", "Empty", "Decode", False),
+        ("Text", "Chat", "Aggregated", False),
+        ("Tokens", "Embedding", "Aggregated", False),
+    ],
+)
+def test_engine_generate_capability_registration_gate(
+    input_name, output_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    assert (
+        sglang_register._supports_engine_generate(
+            getattr(sglang_register.ModelInput, input_name),
+            getattr(sglang_register.ModelType, output_name),
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
+def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.generate_endpoint = object()
+    handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
+
+    registered_routes = []
+    taint_route_endpoints = []
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered_routes.append((path, route_handler))
+
+    runtime = Runtime()
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.handler_base.register_model_taint_route",
+        lambda candidate_runtime, endpoint: taint_route_endpoints.append(
+            (candidate_runtime, endpoint)
+        ),
+    )
+
+    handler.register_engine_routes(runtime)
+
+    assert taint_route_endpoints == [(runtime, handler.generate_endpoint)]
+    assert {path for path, _ in registered_routes} >= {
+        "control/start_profile",
+        "control/stop_profile",
+    }
 
 
 def _make_sglang_config(**overrides):
@@ -1160,7 +1219,8 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
         model_path="Qwen/Qwen3-0.6B",
         served_model_name="Qwen/Qwen3-0.6B",
         context_length=4096,
-        page_size=1,
+        page_size=64,
+        dcp_size=8,
         load_format="remote_instance",
         remote_instance_weight_loader_backend="modelexpress",
     )
@@ -1180,6 +1240,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
 
     assert result is True
     assert captured["kwargs"]["ignore_weights"] is True
+    assert captured["kwargs"]["kv_cache_block_size"] == 512
 
 
 @pytest.mark.asyncio
@@ -1337,6 +1398,7 @@ async def test_lora_registration_model_type_gate(
     config.serving_mode = DisaggregationMode(serving_mode)
     config.server_args.model_path = "/models/base"
     config.server_args.page_size = 16
+    config.server_args.dcp_size = 2
     config.dynamo_args.endpoint_types = endpoint_types
     handler.config = config
 
@@ -1359,5 +1421,6 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data

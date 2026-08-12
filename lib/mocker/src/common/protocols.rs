@@ -299,6 +299,31 @@ impl DirectRequest {
     pub fn router_priorities(&self) -> (f64, u32) {
         (f64::from(self.priority.max(0)), self.strict_priority)
     }
+
+    #[inline]
+    pub(crate) fn effective_max_output_tokens(&self) -> usize {
+        self.output_token_ids
+            .as_ref()
+            .map_or(self.max_output_tokens, Vec::len)
+    }
+
+    pub(crate) fn clone_with_output_limit(&self, limit: usize) -> Self {
+        let max_output_tokens = self.effective_max_output_tokens().min(limit);
+        Self {
+            tokens: self.tokens.clone(),
+            max_output_tokens,
+            output_token_ids: self
+                .output_token_ids
+                .as_ref()
+                .map(|ids| ids[..max_output_tokens].to_vec()),
+            uuid: self.uuid,
+            dp_rank: self.dp_rank,
+            arrival_timestamp_ms: self.arrival_timestamp_ms,
+            priority: self.priority,
+            strict_priority: self.strict_priority,
+            policy_class: self.policy_class.clone(),
+        }
+    }
 }
 
 fn is_zero_i32(value: &i32) -> bool {
@@ -1571,6 +1596,39 @@ mod tests {
 
         assert_eq!(error.to_string(), "injected raw sink failure");
         assert_eq!(*sink.attempts.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn direct_request_output_plan_is_authoritative_when_limited() {
+        let request = DirectRequest {
+            tokens: vec![1, 2],
+            max_output_tokens: 0,
+            output_token_ids: Some(vec![7, 8]),
+            ..Default::default()
+        };
+
+        assert_eq!(request.effective_max_output_tokens(), 2);
+        let limited = request.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 1);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[7][..]));
+        assert_eq!(limited.output_token_ids.unwrap().capacity(), 1);
+        assert_eq!(request.output_token_ids.as_deref(), Some(&[7, 8][..]));
+
+        let empty_plan = DirectRequest {
+            max_output_tokens: 4,
+            output_token_ids: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(empty_plan.effective_max_output_tokens(), 0);
+        let limited = empty_plan.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[][..]));
+
+        let unplanned = DirectRequest::default();
+        assert_eq!(unplanned.effective_max_output_tokens(), 0);
+        let limited = unplanned.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert!(limited.output_token_ids.is_none());
     }
 
     #[test]

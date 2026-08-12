@@ -65,7 +65,7 @@ class Area(TypedDict, total=False):
 
 
 class SharedSpec(TypedDict):
-    """Multi-owner override (``shared:``/``advisory:`` entry)."""
+    """Multi-owner override (``shared:`` entry)."""
 
     glob: str
     owners: list[str]
@@ -75,13 +75,11 @@ class FiletypeRule(TypedDict, total=False):
     """Filetype-level rule (``classify.filetype_rules`` entry).
 
     ``pattern`` is the single source of truth for the glob; ``coowner`` is the
-    legacy key naming the file-type default owner. ``advisory: true`` routes
-    the rule to the non-blocking advisory file instead of CODEOWNERS.
+    legacy key naming the file-type default owner.
     """
 
     pattern: str
     coowner: str
-    advisory: bool
 
 
 @dataclass
@@ -113,9 +111,7 @@ class ResolvedModel:
     catch_all: str
     areas: list[ResolvedArea]
     shared: list[SharedSpec]
-    advisory: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
-    filetype_advisory: list[FiletypeRule]
     meta: dict = field(default_factory=dict)
 
     def label_to_team(self) -> dict[str, str]:
@@ -317,12 +313,14 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
     * ``shared``      -- passed through as declared.
-    * ``advisory``    -- passed through as declared.
-    * ``classify.filetype_rules`` -- each blocking rule becomes one stable
+    * ``advisory``    -- no longer supported. Every owner in CODEOWNERS blocks,
+      so a leftover ``advisory:`` block, an ``advisory`` key on a ``shared``
+      entry, or one on a filetype rule, is rejected rather than silently
+      ignored.
+    * ``classify.filetype_rules`` -- each rule becomes one stable
       row with the coowner as the sole owner (a single ``*Dockerfile*``
       line owns every Dockerfile at any depth unless a later explicit path
-      override or shared rule applies). Advisory rules go to the
-      advisory-reviewers file.
+      override or shared rule applies).
     * ``classify.keyword_rules`` -- no longer supported. Auto-promotion of
       unmatched dirs into an area, and keyword-level co-ownership, both
       required walking the live tree -- pure poison for a stable output.
@@ -346,7 +344,34 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         )
     filetype_rules: list[FiletypeRule] = classify.get("filetype_rules", []) or []
 
+    # Advisory routing is gone. Reject leftovers rather than dropping them: an
+    # ignored ``advisory:`` block would read as non-blocking routing that is
+    # actually doing nothing, and an ignored ``advisory`` key on a filetype
+    # rule is worse still -- the rule would silently become a *blocking*
+    # owner, the opposite of what its author asked for.
+    if "advisory" in spec:
+        raise SystemExit(
+            "areas.yaml: advisory is no longer supported; every owner in "
+            "CODEOWNERS blocks. Drop the block, or move each entry to "
+            "shared: -- but list ALL intended owners there, since shared "
+            "rules are emitted last and win by last-match (a single-owner "
+            "shared entry REPLACES the current owner, it does not add one)"
+        )
+    advisory_filetype = [r for r in filetype_rules if "advisory" in r]
+    if advisory_filetype:
+        raise SystemExit(
+            "areas.yaml: classify.filetype_rules no longer supports "
+            f"'advisory' ({len(advisory_filetype)} entry/entries carry it); "
+            "remove the key -- a filetype rule always blocks"
+        )
+
     spec_shared: list[SharedSpec] = spec.get("shared", []) or []
+    for s in spec_shared:
+        if "advisory" in s:
+            raise SystemExit(
+                f"areas.yaml: shared entry {s.get('glob')!r} carries a stale "
+                "'advisory' key; shared entries always block -- remove it"
+            )
 
     areas = [
         ResolvedArea(
@@ -357,15 +382,13 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         for a in raw_areas
     ]
 
-    # Blocking filetype rule -> one stable coowner-only row (bare pattern
+    # Filetype rule -> one stable coowner-only row (bare pattern
     # matches by basename at any depth per GitHub CODEOWNERS semantics).
     # The old "enclosing area + coowner" behavior required walking the
     # tree; if a specific subtree wants that co-ownership, declare it
     # explicitly in ``shared`` with a path glob.
     filetype_shared: list[FiletypeShared] = []
     for rule in filetype_rules:
-        if rule.get("advisory"):
-            continue
         pattern = rule.get("pattern")
         coowner = rule.get("coowner")
         if not pattern or not coowner:
@@ -375,15 +398,11 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
             )
         filetype_shared.append(FiletypeShared(glob=pattern, owners=[coowner]))
 
-    filetype_advisory = [r for r in filetype_rules if r.get("advisory")]
-
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
         shared=list(spec_shared),
-        advisory=spec.get("advisory", []) or [],
         filetype_shared=filetype_shared,
-        filetype_advisory=filetype_advisory,
         meta=dict(spec.get("meta", {})),
     )
 

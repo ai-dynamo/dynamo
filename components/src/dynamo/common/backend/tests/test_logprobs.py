@@ -285,28 +285,39 @@ def test_prompt_logprobs_sglang_returns_none_when_absent():
     )
 
 
-def test_prompt_logprobs_sglang_prepends_none_for_bos():
-    # SGLang's `input_token_logprobs` starts at prompt position 1; we
-    # add `None` at index 0 to align with the Rust PromptLogprobs
-    # invariant (BOS has no logprob).
+def test_prompt_logprobs_sglang_preserves_engine_bos_none():
+    # Current SGLang versions include the BOS position as a tuple with a null
+    # logprob, and align input_top_logprobs to that same position.
     meta = {
         "input_token_logprobs": [
+            (None, 6, None),
             (-0.5, 7, "a"),
-            (-0.6, 8, "b"),
-        ]
+        ],
+        "input_top_logprobs": [
+            None,
+            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+        ],
     }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload == [
         None,
-        {"7": {"logprob": -0.5, "decoded_token": "a"}},
-        {"8": {"logprob": -0.6, "decoded_token": "b"}},
+        {
+            "7": {"logprob": -0.5, "decoded_token": "a"},
+            "70": {"logprob": -1.5, "decoded_token": "A"},
+        },
     ]
 
 
 def test_prompt_logprobs_sglang_merges_input_top_logprobs():
     meta = {
-        "input_token_logprobs": [(-0.5, 7, "a")],
-        "input_top_logprobs": [[(-0.5, 7, "a"), (-1.5, 70, "A")]],
+        "input_token_logprobs": [
+            (None, 6, None),
+            (-0.5, 7, "a"),
+        ],
+        "input_top_logprobs": [
+            None,
+            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+        ],
     }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload[1] == {
@@ -316,7 +327,12 @@ def test_prompt_logprobs_sglang_merges_input_top_logprobs():
 
 
 def test_prompt_logprobs_sglang_handles_missing_decoded_token():
-    meta = {"input_token_logprobs": [(-0.7, 9, None)]}
+    meta = {
+        "input_token_logprobs": [
+            (None, 6, None),
+            (-0.7, 9, None),
+        ]
+    }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload[1] == {"9": {"logprob": -0.7}}
 
@@ -380,17 +396,25 @@ def test_sglang_gate_reads_env(monkeypatch):
 
 
 def test_sglang_extract_returns_none_when_meta_empty():
-    assert extract_from_sglang_meta({}, 0) == (None, None, 0)
+    assert extract_from_sglang_meta({}) == (None, None)
 
 
-def test_sglang_extract_slices_cumulative_array():
+def test_sglang_extract_supports_incremental_streaming_metadata():
+    # Current SGLang slices output logprobs to the same disjoint token chunk.
     meta = {
-        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b"), (-0.3, 3, "c")],
+        "output_token_logprobs": [(-0.2, 2, "b")],
+        "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
     }
-    log_probs, top_logprobs, new_total = extract_from_sglang_meta(meta, 1)
-    assert log_probs == [-0.2, -0.3]
-    assert top_logprobs is None
-    assert new_total == 3
+    log_probs, top_logprobs = extract_from_sglang_meta(
+        meta, num_output_tokens_in_chunk=1
+    )
+    assert log_probs == [-0.2]
+    assert top_logprobs == [
+        [
+            {"rank": 1, "token_id": 2, "token": "b", "logprob": -0.2},
+            {"rank": 2, "token_id": 20, "token": "B", "logprob": -1.2},
+        ]
+    ]
 
 
 def test_sglang_extract_with_top():
@@ -398,7 +422,7 @@ def test_sglang_extract_with_top():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
     }
-    log_probs, top_logprobs, _ = extract_from_sglang_meta(meta, 0)
+    log_probs, top_logprobs = extract_from_sglang_meta(meta)
     assert log_probs == [-0.1]
     assert top_logprobs == [
         [
@@ -413,9 +437,7 @@ def test_sglang_extract_return_tokens_as_token_ids():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a")]],
     }
-    _, top_logprobs, _ = extract_from_sglang_meta(
-        meta, 0, return_tokens_as_token_ids=True
-    )
+    _, top_logprobs = extract_from_sglang_meta(meta, return_tokens_as_token_ids=True)
     assert top_logprobs[0][0]["token"] == "token_id:101"
 
 
@@ -427,17 +449,19 @@ def test_sglang_extract_none_top_position_becomes_empty_list():
         "output_token_logprobs": [(-0.1, 101, "a"), (-0.2, 102, "b")],
         "output_top_logprobs": [None, [(-0.2, 102, "b")]],
     }
-    _, top_logprobs, _ = extract_from_sglang_meta(meta, 0)
+    _, top_logprobs = extract_from_sglang_meta(meta)
     assert top_logprobs == [
         [],
         [{"rank": 1, "token_id": 102, "token": "b", "logprob": -0.2}],
     ]
 
 
-def test_sglang_extract_returns_offset_unchanged_when_no_new_entries():
-    meta = {"output_token_logprobs": [(-0.1, 1, "a")]}
-    _, _, new_total = extract_from_sglang_meta(meta, 1)
-    assert new_total == 1
+def test_sglang_extract_clamps_metadata_to_output_chunk():
+    meta = {
+        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b")],
+    }
+    log_probs, _ = extract_from_sglang_meta(meta, num_output_tokens_in_chunk=1)
+    assert log_probs == [-0.1]
 
 
 # ---------------------------------------------------------------------------
@@ -511,8 +535,8 @@ def test_sglang_extract_handler_matches_shared():
         ],
     }
 
-    wrapper = DecodeWorkerHandler._extract_logprobs(meta, 0)
-    direct = extract_from_sglang_meta(meta, 0)
+    wrapper = DecodeWorkerHandler._extract_logprobs(meta)
+    direct = extract_from_sglang_meta(meta)
     assert wrapper == direct
 
 

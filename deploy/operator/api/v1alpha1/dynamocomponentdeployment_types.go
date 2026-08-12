@@ -153,8 +153,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
-	// the service using the Scale subresource. When disabled, replicas can be modified directly.
+	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
+	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
+	// `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled because
+	// `enabled` defaults to false.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
