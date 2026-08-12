@@ -58,14 +58,15 @@ var disaggregatedSetGVK = schema.GroupVersionKind{
 }
 
 const (
-	maxDisaggregatedSetRoles          = 10
-	disaggregatedSetRevisionLength    = 8
-	maxDisaggregatedSetNameLength     = 31
-	maxDisaggregatedSetRoleNameLength = 63 - maxDisaggregatedSetNameLength - disaggregatedSetRevisionLength - 2
-	disaggregatedSetNameHashLength    = 8
-	dynamoGraphDeploymentKind         = "DynamoGraphDeployment"
-	dynamoComponentDeploymentKind     = "DynamoComponentDeployment"
-	resourceNotFoundReason            = "resource not found"
+	maxDisaggregatedSetRoles            = 10
+	disaggregatedSetRevisionLength      = 8
+	maxDisaggregatedSetNameLength       = 31
+	disaggregatedSetServiceSuffixLength = len("-prv")
+	maxDisaggregatedSetRoleNameLength   = 63 - maxDisaggregatedSetNameLength - disaggregatedSetRevisionLength - 2 - disaggregatedSetServiceSuffixLength
+	disaggregatedSetNameHashLength      = 8
+	dynamoGraphDeploymentKind           = "DynamoGraphDeployment"
+	dynamoComponentDeploymentKind       = "DynamoComponentDeployment"
+	resourceNotFoundReason              = "resource not found"
 )
 
 type disaggregatedSetSelection struct {
