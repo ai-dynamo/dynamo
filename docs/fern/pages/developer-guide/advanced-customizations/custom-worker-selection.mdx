@@ -308,7 +308,7 @@ let policy = WorkerSelectionPolicy::new_with_filters(
 policy.with_admission_policy(Box::new(SessionAdmissionPolicy::default()))
 ```
 
-The compile-checked [session admission example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/simple-filter-score-pick/src/admission.rs) allows one active request per `session_id`, defers later requests from the same session, and wakes the next request after either `Completed` or `Aborted`. Requests without session metadata bypass that example policy. The host still applies worker eligibility, overload checks, built-in queue ordering, and reservation accounting after the policy wakes a request.
+The compile-checked [session admission example](../../../../../examples/router/custom-policy-example/simple-filter-score-pick/src/admission.rs) allows one active request per `session_id`, defers later requests from the same session, and wakes the next request after either `Completed` or `Aborted`. Requests without session metadata bypass that example policy. The host still applies worker eligibility, overload checks, built-in queue ordering, and reservation accounting after the policy wakes a request.
 
 Use `POST /select_and_reserve` for standalone selection with queue admission. The two-step `POST /select` then `POST /reservations` flow cannot preserve admission ownership and is rejected when an admission policy is installed. Report successful requests with `DELETE /reservations/{selection_id}` and failed requests with `POST /reservations/{selection_id}/abort`.
 
