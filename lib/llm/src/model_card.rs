@@ -1197,6 +1197,9 @@ impl ModelDeploymentCard {
     /// Tokenizer backend controls:
     /// - `runtime_config.tokenizer_backend` — select `default`, `fastokens`, or `basetenkenizer`
     /// - `DYN_TOKENIZER` — fallback backend for callers without explicit runtime config
+    /// - `runtime_config.tokenizer_fallback_enabled` — control whether an alternate backend load
+    ///   failure falls back to HuggingFace
+    /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
@@ -1207,6 +1210,7 @@ impl ModelDeploymentCard {
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
+        let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled()?;
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
@@ -1297,6 +1301,11 @@ impl ModelDeploymentCard {
                                     Arc::new(fast)
                                 }
                                 Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load fastokens tokenizer backend and fallback is disabled",
+                                        );
+                                    }
                                     tracing::warn!(
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
@@ -1305,6 +1314,12 @@ impl ModelDeploymentCard {
                                 }
                             }
                         } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load fastokens tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
+                                );
+                            }
                             tracing::warn!(
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
@@ -1320,6 +1335,11 @@ impl ModelDeploymentCard {
                                     Arc::new(baseten)
                                 }
                                 Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load basetenkenizer tokenizer backend and fallback is disabled",
+                                        );
+                                    }
                                     tracing::warn!(
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
@@ -1328,6 +1348,12 @@ impl ModelDeploymentCard {
                                 }
                             }
                         } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load basetenkenizer tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
+                                );
+                            }
                             tracing::warn!(
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"

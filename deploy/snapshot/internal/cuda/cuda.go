@@ -325,24 +325,29 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	return strings.Join(pairs, ","), nil
 }
 
-// LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
+// CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs,
+// then persists the launch-job state needed to restore them.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) (CheckpointPhaseTimings, error) {
+func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
 	var timings CheckpointPhaseTimings
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := lock(ctx, pid, log); err != nil {
+		if err := lockWithJobFile(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := checkpoint(ctx, pid, log); err != nil {
+		if err := checkpointWithJobFile(ctx, pid, jobFile, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
+	}
+	if err := refreshJobFileArtifact(jobFile, checkpointDir); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 	timings.TotalDuration = time.Since(start)
 

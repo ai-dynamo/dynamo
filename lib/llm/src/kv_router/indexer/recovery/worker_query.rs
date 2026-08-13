@@ -1089,6 +1089,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use dynamo_kv_router::{
+        identity::{
+            CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+            RoutingScopeId, StableDpSlotId,
+        },
         indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, WorkerKvQueryRequest},
         protocols::{
             DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
@@ -1368,6 +1372,19 @@ mod tests {
                 approx: None,
                 primary_records_routing_decisions: false,
             },
+        )
+    }
+
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
         )
     }
 
@@ -1759,7 +1776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_removal_resets_all_residency_domains() {
+    async fn discovery_removal_preserves_stable_cache_owner() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -1782,24 +1799,33 @@ mod tests {
 
         client.reconcile_view(initial).await;
         let domain_store = |event_id, domain| {
-            RouterEvent::with_residency_domain(
-                worker.worker_id,
-                KvCacheEvent {
-                    event_id,
-                    data: KvCacheEventData::Stored(KvCacheStoreData {
-                        parent_hash: None,
-                        start_position: None,
-                        blocks: vec![KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(event_id),
-                            tokens_hash: LocalBlockHash(event_id),
-                            mm_extra_info: None,
-                        }],
-                    }),
-                    dp_rank: worker.dp_rank,
-                },
-                StorageTier::HostPinned,
-                domain,
-            )
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(event_id),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            };
+            match domain {
+                ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::Worker,
+                ),
+                ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    cache_owner_id(),
+                ),
+            }
         };
         client
             .handle_live_batch(
@@ -1816,7 +1842,13 @@ mod tests {
         client
             .reconcile_view(membership_view(&serving, &kv_endpoint, std::iter::empty()))
             .await;
-        assert!(host_index.dump_events().await.unwrap().is_empty());
+        let retained = host_index.dump_events().await.unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].residency_domain,
+            dynamo_kv_router::protocols::WireResidencyDomain::explicit(ResidencyDomain::CacheOwner)
+        );
+        assert_eq!(retained[0].state_source, Some(cache_owner_id()));
     }
 
     #[tokio::test]
@@ -2847,7 +2879,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let mut configs = runtime_config_watch(&serving).await.unwrap();
+            let mut configs = runtime_config_watch(&serving, CancellationToken::new())
+                .await
+                .unwrap();
             configs
                 .wait_for(|configs| configs.contains_key(&logical_worker_id))
                 .await
