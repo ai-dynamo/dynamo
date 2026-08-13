@@ -30,7 +30,7 @@ pub fn convert_event(
         | RawKvEvent::BlockRemoved {
             medium, locality, ..
         } => (medium.as_deref(), *locality),
-        RawKvEvent::AllBlocksCleared => (None, None),
+        RawKvEvent::AllBlocksCleared { .. } => (None, None),
         RawKvEvent::Ignored => return None,
     };
 
@@ -80,6 +80,7 @@ pub fn convert_event(
             kv_cache_spec_kind: _,
             kv_cache_spec_sliding_window: _,
             locality: _,
+            source_kind: _,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -151,7 +152,7 @@ pub fn convert_event(
                 dp_rank,
             }
         }
-        RawKvEvent::AllBlocksCleared => KvCacheEvent {
+        RawKvEvent::AllBlocksCleared { .. } => KvCacheEvent {
             event_id,
             data: KvCacheEventData::Cleared,
             dp_rank,

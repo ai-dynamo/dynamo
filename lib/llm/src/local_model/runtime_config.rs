@@ -240,6 +240,14 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_publishing_enabled: Option<bool>,
 
+    /// Immutable KV event source mode for this worker lifecycle.
+    ///
+    /// Accepted values are `framework_v1` and `residency_v2`. Missing means the
+    /// legacy Worker-only source. Unknown explicit values must disable KV-aware
+    /// routing rather than falling back within the same worker lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_source_mode: Option<String>,
+
     /// Endpoint whose event sources describe this worker's KV state.
     ///
     /// When unset, consumers use the worker's serving endpoint. This keeps existing
@@ -348,6 +356,7 @@ impl Default for ModelRuntimeConfig {
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             kv_event_publishing_enabled: None,
+            kv_event_source_mode: None,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
