@@ -35,13 +35,17 @@ class WorkflowOrchestrator:
         workflow: Union[Workflow, WorkflowIR],
         *,
         bindings: Mapping[str, Binding],
+        runtime: Any = None,
     ) -> "WorkflowOrchestrator":
         """Bind every authored stage to an initialized invocation target."""
 
         workflow_ir = workflow.build() if isinstance(workflow, Workflow) else workflow
         if not isinstance(workflow_ir, WorkflowIR):
             raise TypeError("workflow must be a Workflow or WorkflowIR")
-        return cls(workflow_ir, StageDispatcher(workflow_ir, bindings))
+        dispatcher = await StageDispatcher.bind(
+            workflow_ir, bindings, runtime=runtime
+        )
+        return cls(workflow_ir, dispatcher)
 
     @property
     def workflow_ir(self) -> WorkflowIR:
