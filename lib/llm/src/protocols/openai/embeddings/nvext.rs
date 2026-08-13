@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
-use crate::protocols::common::extensions::CacheSaltNvExt;
-
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
 }
@@ -33,14 +31,6 @@ impl Default for NvExt {
 impl NvExt {
     pub fn builder() -> NvExtBuilder {
         NvExtBuilder::default()
-    }
-}
-
-impl CacheSaltNvExt for NvExt {
-    fn into_cache_salt_only(self) -> Option<Self> {
-        // This legacy envelope has annotations only. Cache salt is a top-level
-        // field on the pooling request types, so there is nothing to retain here.
-        None
     }
 }
 

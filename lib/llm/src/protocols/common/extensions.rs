@@ -272,9 +272,42 @@ impl NvExt {
 
     /// Return true when this envelope contains any field other than `cache_salt`.
     pub fn has_non_cache_salt_fields(&self) -> bool {
-        let mut non_salt = self.clone();
-        non_salt.cache_salt = None;
-        non_salt != Self::default()
+        let Self {
+            greed_sampling,
+            use_raw_prompt,
+            annotations,
+            backend_instance_id,
+            token_data,
+            max_thinking_tokens,
+            cache_salt: _,
+            extra_fields,
+            metadata_upload,
+            prefill_worker_id,
+            decode_worker_id,
+            dp_rank,
+            prefill_dp_rank,
+            agent_hints,
+            request_timestamp_ms,
+            routing_constraints,
+            router,
+        } = self;
+
+        greed_sampling.is_some()
+            || use_raw_prompt.is_some()
+            || annotations.is_some()
+            || backend_instance_id.is_some()
+            || token_data.is_some()
+            || max_thinking_tokens.is_some()
+            || extra_fields.is_some()
+            || metadata_upload.is_some()
+            || prefill_worker_id.is_some()
+            || decode_worker_id.is_some()
+            || dp_rank.is_some()
+            || prefill_dp_rank.is_some()
+            || agent_hints.is_some()
+            || request_timestamp_ms.is_some()
+            || routing_constraints.is_some()
+            || router.is_some()
     }
 }
 
@@ -310,6 +343,16 @@ pub const HEADER_DP_RANK_ALIAS: &str = "x-dp-rank";
 pub const HEADER_DATA_PARALLEL_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK_ALIAS: &str = "x-prefill-dp-rank";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
+
+/// Return the last non-empty value after trimming surrounding whitespace.
+pub fn last_non_empty_trimmed_value<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    values
+        .filter_map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then_some(value)
+        })
+        .last()
+}
 
 /// Return true when the request contains a routing header disabled by the NvExt switch.
 pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
@@ -460,18 +503,19 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
 
 /// Apply the `x-tenant-id` cache-salt override independently of other NvExt features.
 ///
-/// A non-empty header takes priority over a body salt. An empty or invalid header is
-/// treated as absent and leaves the body unchanged.
+/// The last non-empty, trimmed header takes priority over a body salt. Empty or
+/// invalid values are treated as absent and leave the body unchanged.
 pub fn apply_cache_salt_header_override(
     nvext: Option<NvExt>,
     headers: &HeaderMap,
 ) -> Option<NvExt> {
-    let Some(cache_salt) = headers
-        .get(HEADER_TENANT_ID)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-    else {
+    let Some(cache_salt) = last_non_empty_trimmed_value(
+        headers
+            .get_all(HEADER_TENANT_ID)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    )
+    .map(str::to_owned) else {
         return nvext;
     };
 
@@ -480,26 +524,17 @@ pub fn apply_cache_salt_header_override(
     Some(nvext)
 }
 
-/// Policy used by the disabled-NvExt filter across OpenAI request envelopes.
-pub trait CacheSaltNvExt: Sized {
-    /// Consume the envelope and return only a non-empty cache salt, if supported.
-    fn into_cache_salt_only(self) -> Option<Self>;
-}
-
-impl CacheSaltNvExt for NvExt {
-    fn into_cache_salt_only(self) -> Option<Self> {
-        self.cache_salt
+/// Remove all NvExt fields except a non-empty cache salt.
+pub fn retain_cache_salt(nvext: Option<NvExt>) -> Option<NvExt> {
+    nvext.and_then(|nvext| {
+        nvext
+            .cache_salt
             .filter(|cache_salt| !cache_salt.is_empty())
             .map(|cache_salt| NvExt {
                 cache_salt: Some(cache_salt),
                 ..Default::default()
             })
-    }
-}
-
-/// Remove all NvExt fields except a non-empty cache salt.
-pub fn retain_cache_salt<T: CacheSaltNvExt>(nvext: Option<T>) -> Option<T> {
-    nvext.and_then(CacheSaltNvExt::into_cache_salt_only)
+    })
 }
 
 /// Apply the frontend NvExt policy for endpoints that support routing headers.
@@ -1091,6 +1126,25 @@ mod tests {
 
         let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+
+        headers.append(HEADER_TENANT_ID, "   ".parse().unwrap());
+        headers.append(HEADER_TENANT_ID, " tenant-gateway ".parse().unwrap());
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-gateway"));
+    }
+
+    #[test]
+    fn cache_salt_header_override_ignores_only_empty_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(HEADER_TENANT_ID, "".parse().unwrap());
+        headers.append(HEADER_TENANT_ID, "   ".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
     }
 
     #[test]
@@ -1183,6 +1237,19 @@ mod tests {
                 .dp_rank,
             Some(4)
         );
+    }
+
+    #[test]
+    fn routing_overrides_do_not_apply_tenant_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
     }
 
     #[test]

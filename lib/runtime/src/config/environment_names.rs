@@ -339,10 +339,10 @@ pub mod llm {
     /// Master switch for the `nvext` extension protocol on the frontend.
     /// The protocol is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
-    /// the frontend to drop all request NvExt fields except `cache_salt`,
-    /// ignore non-salt routing-override headers, and silently ignore the
-    /// response-side `extra_fields` opt-in. Cache isolation is exempt:
-    /// `cache_salt` and supported `x-tenant-id` headers remain active.
+    /// the frontend to drop non-salt request NvExt fields, ignore supported
+    /// routing-override headers, and silently ignore the response-side
+    /// `extra_fields` opt-in. Cache isolation is exempt: supported
+    /// `cache_salt` and `x-tenant-id` inputs remain active.
     pub const DYN_DISABLE_FRONTEND_NVEXT: &str = "DYN_DISABLE_FRONTEND_NVEXT";
 
     /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,

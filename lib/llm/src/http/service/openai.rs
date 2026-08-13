@@ -54,8 +54,7 @@ use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
-    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, retain_cache_salt,
-    session_affinity_from_headers,
+    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
@@ -664,17 +663,8 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 
 /// Warn once when the disabled NvExt policy discards a field or routing header.
 /// Honored cache salts and `x-tenant-id` headers do not cause this warning.
-fn warn_nvext_disabled(
-    endpoint: &str,
-    discarded_nvext: bool,
-    headers: &HeaderMap,
-    tenant_header_supported: bool,
-) {
-    use crate::protocols::common::extensions::HEADER_TENANT_ID;
-    let header_present = has_non_cache_salt_routing_headers(headers)
-        || (!tenant_header_supported && headers.contains_key(HEADER_TENANT_ID));
-
-    if discarded_nvext || header_present {
+pub(super) fn warn_nvext_disabled(endpoint: &str, discarded: bool) {
+    if discarded {
         tracing::warn!(
             endpoint,
             "request carried disabled nvext fields or routing headers; dropping them"
@@ -711,9 +701,8 @@ async fn handler_completions(
             request
                 .nvext
                 .as_ref()
-                .is_some_and(CommonNvExt::has_non_cache_salt_fields),
-            &headers,
-            true,
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                || has_non_cache_salt_routing_headers(&headers),
         );
     }
     request.nvext =
@@ -1299,10 +1288,8 @@ async fn embeddings(
                 .nvext
                 .as_ref()
                 .is_some_and(|nvext| nvext.annotations.is_some()),
-            &headers,
-            false,
         );
-        request.nvext = retain_cache_salt(request.nvext.take());
+        request.nvext = None;
     }
 
     // Resolve alias → primary served name before wrapping the request, so
@@ -1479,10 +1466,8 @@ async fn classify(
                 .nvext
                 .as_ref()
                 .is_some_and(|nvext| nvext.annotations.is_some()),
-            &headers,
-            false,
         );
-        request.nvext = retain_cache_salt(request.nvext.take());
+        request.nvext = None;
     }
 
     // Resolve alias → primary served name before wrapping the request, so
@@ -1758,10 +1743,8 @@ async fn pooling(
                 .nvext
                 .as_ref()
                 .is_some_and(|nvext| nvext.annotations.is_some()),
-            &headers,
-            false,
         );
-        request.nvext = retain_cache_salt(request.nvext.take());
+        request.nvext = None;
     }
     let response_encoding = request.encoding_format;
     let response_dtype = request.embed_dtype.unwrap_or_default();
@@ -1910,9 +1893,8 @@ async fn handler_chat_completions(
             request
                 .nvext
                 .as_ref()
-                .is_some_and(CommonNvExt::has_non_cache_salt_fields),
-            &headers,
-            true,
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                || has_non_cache_salt_routing_headers(&headers),
         );
     }
     request.nvext =
@@ -3160,9 +3142,8 @@ async fn handler_responses(
             request
                 .nvext
                 .as_ref()
-                .is_some_and(CommonNvExt::has_non_cache_salt_fields),
-            &headers,
-            true,
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                || has_non_cache_salt_routing_headers(&headers),
         );
     }
     request.nvext =

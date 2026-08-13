@@ -28,12 +28,11 @@ const BASE_ENV: [(&str, Option<&str>); 3] = [
     (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
 ];
 
-const NVEXT_DISABLED_ENV: [(&str, Option<&str>); 4] = [
-    (DYN_ENABLE_ANTHROPIC_API, Some("1")),
-    (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
-    (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
-    (DYN_DISABLE_FRONTEND_NVEXT, Some("1")),
-];
+fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
+    let mut env = BASE_ENV.to_vec();
+    env.push((DYN_DISABLE_FRONTEND_NVEXT, Some("1")));
+    env
+}
 
 async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Response {
     svc.client
@@ -99,7 +98,7 @@ async fn assert_anthropic_error(
 #[tokio::test]
 #[serial]
 async fn invalid_anthropic_cache_salt_is_rejected_when_nvext_is_disabled() {
-    temp_env::async_with_vars(NVEXT_DISABLED_ENV, async {
+    temp_env::async_with_vars(nvext_disabled_env(), async {
         let svc = HarnessService::start(Vec::new()).await;
         let response = post_json(
             &svc,
