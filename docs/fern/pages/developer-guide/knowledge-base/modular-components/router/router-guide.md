@@ -161,11 +161,24 @@ Workers accept the same flags as the frontend, on vLLM, SGLang, TensorRT-LLM, an
 # Frontend default for the deployment
 python -m dynamo.frontend --router-mode round-robin --http-port 8000
 
-# This worker set overrides it for itself
+# Every replica of this worker set is launched with the same router flags
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
 ```
 
 A worker that omits `--router-mode` advertises nothing and inherits the frontend's configuration. That is the default, and it is what every deployment written before this option did.
+
+### The override is per worker set, not per worker
+
+Workers that share a namespace, component, endpoint, model type, and worker type form a single worker set, and a worker set has one routing configuration. Two replicas of the same model launched with different router flags are not two independently routed workers — they are one set whose members disagree.
+
+> [!WARNING]
+> Every worker in a set must be launched with identical router flags. The frontend fingerprints each worker's card together with its effective routing configuration, so mismatched flags split the set into two cohorts. A split set is treated as a conflict: **no instances are admitted and the set stops serving**. It does not fall back to one worker's configuration or to the frontend's.
+
+This is not specific to router flags — any card difference splits a set the same way — but router flags are easy to apply to one replica by mistake. Two practical consequences:
+
+- **Changing the routing of a running fleet is a card change.** Roll the whole set rather than mixing old and new replicas, the same as any other change that alters the card.
+- **Setting `DYN_ROUTER_MODE` on part of a deployment splits the sets it reaches.** Prefer the explicit flag on every member of the set.
 
 > [!IMPORTANT]
 > An advertised configuration **replaces** the frontend's for that worker set rather than merging with it. If you set `--router-mode kv` on a worker and the frontend was tuned with KV flags such as `--router-temperature`, restate those flags on the worker too, or that set falls back to KV defaults.
