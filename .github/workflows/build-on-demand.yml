@@ -143,59 +143,25 @@ jobs:
     if: inputs.build_operator
     name: Operator
     runs-on: prod-default-v2
-    env:
-      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-      ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+      - name: Build and push operator
+        uses: ./.github/actions/build-deploy-component
         with:
+          component: operator
+          image_tag: ${{ github.sha }}-operator
           builder_name: ${{ needs.init.outputs.builder_name }}
-          flavor: general
-          arch: 'linux/amd64,linux/arm64'
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Build and push Container
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${ACR_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
-          BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ECR_DEFAULT_IMAGE_BASE}:${BRANCH_TAG}"
-            "${ACR_IMAGE_BASE}:${BRANCH_TAG}"
-          )
-
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
-
-          docker buildx build --push \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/ \
-              --build-context snapshot=../snapshot \
-              ${TAGGING_FLAGS} -f Dockerfile .
-
-          echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-operator
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.init.outputs.sanitized_ref_name }}-operator
 
   # ============================================================================
   # SNAPSHOT PLACEHOLDER (build-only)
@@ -292,8 +258,10 @@ jobs:
           target: placeholder
           image_tag: ${{ steps.refs.outputs.image_tag }}
           builder_name: ${{ needs.init.outputs.builder_name }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
@@ -370,8 +338,10 @@ jobs:
           component: snapshot
           image_tag: ${{ steps.refs.outputs.image_tag }}
           builder_name: ${{ needs.init.outputs.builder_name }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
