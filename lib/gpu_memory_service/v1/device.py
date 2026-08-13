@@ -66,7 +66,7 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     path = os.path.join(
         socket_dir,
-        f"gms_{get_device_uuid(device)}_{tag}.sock",
+        f"gms_{device}_{tag}.sock",
     )
     path_bytes = len(os.fsencode(path))
     if path_bytes >= _AF_UNIX_PATH_LIMIT:
