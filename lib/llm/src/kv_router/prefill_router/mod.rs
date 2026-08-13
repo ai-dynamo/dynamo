@@ -193,7 +193,14 @@ where
     decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
-    router_mode: RouterMode,
+    /// Router mode of the decode worker set that owns this prefill router.
+    ///
+    /// This governs decode-side decisions only (conditional disagg peeks the
+    /// decode router, which exists only in KV mode). It is *not* the mode of
+    /// the prefill hop: that is resolved per activation from the prefill
+    /// worker's own card and lives on [`PrefillBinding::prefill_router_mode`].
+    /// It does serve as the fallback when the prefill card advertises none.
+    decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
@@ -220,6 +227,12 @@ where
 {
     endpoint_id: EndpointId,
     router: InnerPrefillRouter<Sel>,
+    /// Mode the prefill hop was actually built with, resolved at activation
+    /// from the prefill worker's advertised card (falling back to the decode
+    /// set's mode). Kept here rather than on `PrefillRouter` because it is only
+    /// knowable once a prefill target has been discovered, and it changes when
+    /// the binding is rebuilt against a new target.
+    prefill_router_mode: RouterMode,
 }
 
 struct PrefillBuildContext<Sel>
@@ -227,7 +240,8 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     model_manager: Arc<ModelManager>,
-    router_mode: RouterMode,
+    /// Fallback mode for the prefill hop when the prefill card advertises none.
+    decode_router_mode: RouterMode,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
@@ -381,13 +395,6 @@ where
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
-        if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
-            return Err(anyhow::anyhow!(
-                "Prefill worker ID required in Direct routing mode but none found in request. \
-                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
-            ));
-        }
-
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
@@ -400,6 +407,20 @@ where
         let Some(binding) = self.binding.load_full() else {
             return next.generate(context.map(|_| req)).await;
         };
+
+        // Direct routing on the prefill hop requires the caller to name the
+        // worker. This is keyed on the *prefill* mode, not the decode set's:
+        // the two are independently configurable, and an external router (EPP)
+        // may pin prefill while decode still routes normally. Checked after the
+        // binding loads because the prefill mode is only known once a prefill
+        // target has been discovered.
+        if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
+            return Err(anyhow::anyhow!(
+                "Prefill worker ID required in Direct routing mode but none found in request. \
+                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
+            ));
+        }
+
         let router = &binding.router;
         let endpoint_id = &binding.endpoint_id;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
