@@ -699,17 +699,7 @@ impl Model {
                 trace_config: include_trace_config.then(|| {
                     let card = worker_set.card();
                     GenerateTraceConfig {
-                        tool_call_parser: card.runtime_config.tool_call_parser.clone().or_else(
-                            || {
-                                card.runtime_config
-                                    .reasoning_parser
-                                    .as_ref()
-                                    .filter(|parser| {
-                                        matches!(parser.as_str(), "kimi_k3" | "kimi-k3")
-                                    })
-                                    .cloned()
-                            },
-                        ),
+                        tool_call_parser: card.runtime_config.tool_call_parser.clone(),
                         tokenizer: worker_set.generate_trace_tokenizer.clone(),
                         kv_cache_block_size: card.kv_cache_block_size,
                     }

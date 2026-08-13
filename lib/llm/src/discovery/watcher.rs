@@ -548,12 +548,7 @@ where
             // Tool traces need Dynamo to decode token-only SGLang output.
             let needs_generate_trace_tokenizer = needs_generate_pipeline
                 && crate::request_trace::policy().emit_request_end_records()
-                && (card.runtime_config.tool_call_parser.is_some()
-                    || card
-                        .runtime_config
-                        .reasoning_parser
-                        .as_deref()
-                        .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3")));
+                && card.runtime_config.tool_call_parser.is_some();
             let tokenizer = if (needs_local_chat_pipeline
                 || needs_local_completions_pipeline
                 || needs_generate_trace_tokenizer)
