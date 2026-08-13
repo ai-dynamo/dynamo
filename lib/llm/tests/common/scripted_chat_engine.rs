@@ -30,8 +30,12 @@ enum QueuedScript {
     /// Yields `chunk` forever without ever awaiting, so `next()` is *always*
     /// immediately ready. Models a backend fast enough to keep the frontend's
     /// select loop permanently fed.
+    ///
+    /// Boxed: the response type is far larger than the other variants' payloads,
+    /// and an inline copy would bloat every `QueuedScript` (clippy
+    /// `large_enum_variant`).
     Endless {
-        chunk: NvCreateChatCompletionStreamResponse,
+        chunk: Box<NvCreateChatCompletionStreamResponse>,
     },
 }
 
@@ -90,7 +94,9 @@ impl ScriptedChatEngine {
     #[allow(dead_code)]
     pub fn with_endless_repeat(chunk: NvCreateChatCompletionStreamResponse) -> Self {
         Self {
-            scripts: Mutex::new(VecDeque::from([QueuedScript::Endless { chunk }])),
+            scripts: Mutex::new(VecDeque::from([QueuedScript::Endless {
+                chunk: Box::new(chunk),
+            }])),
             requests: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
         }
@@ -176,7 +182,7 @@ impl
                     // first will never reach a later arm unless the consumer
                     // explicitly checks it.
                     loop {
-                        yield Annotated::from_data(chunk.clone());
+                        yield Annotated::from_data(chunk.as_ref().clone());
                     }
                 }
             }
