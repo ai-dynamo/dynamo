@@ -150,10 +150,9 @@ impl WorkerSelectionPolicyRegistry {
 
         Ok(Some(Arc::new(move |config, worker_type, partition| {
             let selected = match worker_type {
-                WorkerType::Aggregated => aggregated.as_ref(),
+                WorkerType::Aggregated | WorkerType::Encode => aggregated.as_ref(),
                 WorkerType::Prefill => prefill.as_ref(),
                 WorkerType::Decode => decode.as_ref(),
-                WorkerType::Encode => None,
             };
             match selected {
                 Some(factory) => factory(config, worker_type, partition),
@@ -356,7 +355,7 @@ worker_selection:
     }
 
     #[test]
-    fn resolved_factory_dispatches_aggregated_prefill_and_decode_instances() {
+    fn resolved_factory_dispatches_role_specific_instances() {
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let factory_calls = Arc::new(Mutex::new(Vec::new()));
         let mut registry = WorkerSelectionPolicyRegistry::default();
@@ -399,6 +398,7 @@ worker_selection:
                 (1, "prefill".to_string()),
                 (2, "decode".to_string()),
                 (1, "aggregated".to_string()),
+                (1, "encode".to_string()),
             ]
         );
     }

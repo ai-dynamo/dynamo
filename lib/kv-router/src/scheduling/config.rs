@@ -1108,10 +1108,9 @@ impl KvRouterConfig {
         };
         let selected = self.selected_worker_selection_policy_instances_from(selected)?;
         Ok(match worker_type {
-            WorkerType::Aggregated => selected.aggregated,
+            WorkerType::Aggregated | WorkerType::Encode => selected.aggregated,
             WorkerType::Prefill => selected.prefill,
             WorkerType::Decode => selected.decode,
-            WorkerType::Encode => None,
         })
     }
 
@@ -1131,9 +1130,7 @@ impl KvRouterConfig {
             .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
         Ok(is_configured(self.router_prefill_policy.as_deref())
             || is_configured(self.router_decode_policy.as_deref())
-            || policy_config.is_some_and(|config| {
-                config.prefill_instance().is_some() || config.decode_instance().is_some()
-            }))
+            || policy_config.is_some_and(|config| config.has_explicit_stage_selection()))
     }
 
     #[cfg(test)]
@@ -1867,12 +1864,47 @@ worker_selection:
 
         assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
 
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_for(WorkerType::Encode)
+                .unwrap(),
+            Some("yaml-aggregated".to_string())
+        );
+
         config.router_policy_config = None;
         assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
         assert!(
             !KvRouterConfig::default()
                 .has_explicit_stage_worker_selection_policy()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_default_is_not_reported_as_an_explicit_stage_selection() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  default: legacy
+  instances:
+    - name: legacy
+      type: acme
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        assert!(!config.has_explicit_stage_worker_selection_policy().unwrap());
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_for(WorkerType::Aggregated)
+                .unwrap(),
+            Some("legacy".to_string())
         );
     }
 

@@ -15,6 +15,7 @@ pub struct WorkerSelectionConfig {
     aggregated: Option<String>,
     prefill: Option<String>,
     decode: Option<String>,
+    has_explicit_stage_selection: bool,
     instances: HashMap<String, WorkerSelectionInstance>,
 }
 
@@ -30,6 +31,10 @@ impl WorkerSelectionConfig {
 
     pub(crate) fn decode_instance(&self) -> Option<&str> {
         self.decode.as_deref()
+    }
+
+    pub(crate) fn has_explicit_stage_selection(&self) -> bool {
+        self.has_explicit_stage_selection
     }
 
     /// Look up one named instance.
@@ -151,6 +156,7 @@ impl RawWorkerSelectionConfig {
             );
         }
 
+        let has_explicit_stage_selection = self.prefill.is_some() || self.decode.is_some();
         let aggregated = self.aggregated.or_else(|| self.legacy_default.clone());
         let prefill = self.prefill.or_else(|| self.legacy_default.clone());
         let decode = self.decode.or(self.legacy_default);
@@ -159,6 +165,7 @@ impl RawWorkerSelectionConfig {
             aggregated,
             prefill,
             decode,
+            has_explicit_stage_selection,
             instances,
         })
     }
