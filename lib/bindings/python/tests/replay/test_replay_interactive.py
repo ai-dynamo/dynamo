@@ -455,16 +455,37 @@ def test_interactive_event_and_pending_python_schema_is_exact():
 
 def _mutation_isolation_lifecycle(mutate_returned_event: bool) -> list[dict]:
     session = OfflineReplaySession(
-        engine_args=_engine_args(),
-        num_workers=1,
+        pools=[
+            PoolSpec(
+                pool_id="pool-a",
+                engine_args=_pool_engine_args(
+                    speedup_ratio=1000.0,
+                    num_gpu_blocks=64,
+                ),
+                workers=[
+                    WorkerSpec(
+                        worker_id=7,
+                        tags=("primary",),
+                        taints=("trusted",),
+                        capabilities=("chat",),
+                    )
+                ],
+            )
+        ],
         trace_block_size=4,
         router="external",
     )
     request = _request("mutation-isolation", 0).to_native()
     request["routing_constraints"] = ReplayRoutingConstraints(
+        required_taints=("trusted",),
         preferred_taints={"preferred": 1.5}
     ).to_native()
+    second_request = _request("mutation-isolation-second", 1).to_native()
+    second_request["routing_constraints"] = copy.deepcopy(
+        request["routing_constraints"]
+    )
     session.submit(request)
+    session.submit(second_request)
     session.settle_current_time()
     placement = session.drain_events()[0]
     retained_placement = copy.deepcopy(placement)
@@ -485,19 +506,139 @@ def _mutation_isolation_lifecycle(mutate_returned_event: bool) -> list[dict]:
         data["candidates"].append({"corrupted": True})
 
     pending = session.pending_placements()[0]
-    assert pending["logical_request_id"] == "mutation-isolation"
-    assert pending["routing_constraints"]["preferred_taints"] == {
+    retained_pending = copy.deepcopy(pending)
+    if mutate_returned_event:
+        pending["logical_request_id"] = "corrupted-pending"
+        pending["routing_constraints"]["required_taints"].clear()
+        pending_candidate = pending["candidates"][0]
+        pending_candidate["active"] = False
+        pending_candidate["in_flight_requests"] = 999
+        pending_candidate["queued_requests"] = 999
+        pending_candidate["running_requests"] = 999
+        pending_candidate["queued_tokens"] = 999
+        pending_candidate["running_tokens"] = 999
+        pending_candidate["kv_occupied_blocks"] = 999
+        pending_candidate["kv_free_blocks"] = 999
+        pending_candidate["target"]["worker_id"] = -1
+        pending_candidate["tags"].clear()
+        pending_candidate["taints"].clear()
+        pending_candidate["capabilities"].clear()
+        pending["candidates"].append({"corrupted": True})
+
+    fresh_pending = session.pending_placements()[0]
+    assert fresh_pending == retained_pending
+    assert fresh_pending["logical_request_id"] == "mutation-isolation"
+    assert fresh_pending["routing_constraints"]["required_taints"] == ["trusted"]
+    assert fresh_pending["routing_constraints"]["preferred_taints"] == {
         "preferred": 1.5
     }
-    assert pending["eligible_pool_ids"] == ["default"]
-    assert pending["candidates"][0]["target"]["pool_id"] == "default"
-    assert pending["candidates"][0]["tags"] == []
-    assert pending["candidates"][0]["taints"] == []
-    assert pending["candidates"][0]["capabilities"] == []
+    assert fresh_pending["eligible_pool_ids"] == ["pool-a"]
+    assert fresh_pending["candidates"][0]["target"] == {
+        "pool_id": "pool-a",
+        "worker_id": 7,
+        "dp_rank": 0,
+    }
+    assert fresh_pending["candidates"][0]["tags"] == ["primary"]
+    assert fresh_pending["candidates"][0]["taints"] == ["trusted"]
+    assert fresh_pending["candidates"][0]["capabilities"] == ["chat"]
+    pending_mutable_pairs = [
+        (pending, fresh_pending),
+        (pending["routing_constraints"], fresh_pending["routing_constraints"]),
+        (
+            pending["routing_constraints"]["required_taints"],
+            fresh_pending["routing_constraints"]["required_taints"],
+        ),
+        (
+            pending["routing_constraints"]["preferred_taints"],
+            fresh_pending["routing_constraints"]["preferred_taints"],
+        ),
+        (pending["eligible_pool_ids"], fresh_pending["eligible_pool_ids"]),
+        (pending["candidates"], fresh_pending["candidates"]),
+        (pending["candidates"][0], fresh_pending["candidates"][0]),
+        (
+            pending["candidates"][0]["target"],
+            fresh_pending["candidates"][0]["target"],
+        ),
+        (
+            pending["candidates"][0]["tags"],
+            fresh_pending["candidates"][0]["tags"],
+        ),
+        (
+            pending["candidates"][0]["taints"],
+            fresh_pending["candidates"][0]["taints"],
+        ),
+        (
+            pending["candidates"][0]["capabilities"],
+            fresh_pending["candidates"][0]["capabilities"],
+        ),
+    ]
+    assert all(left is not right for left, right in pending_mutable_pairs)
 
-    session.assign("mutation-isolation", WorkerTarget(worker_id=0))
-    downstream = _drive_external_to_terminals(session, {"mutation-isolation"})
-    routed = next(event for event in downstream if event["event_type"] == "routed")
+    session.assign(
+        "mutation-isolation", WorkerTarget(pool_id="pool-a", worker_id=7)
+    )
+    first_assignment_events = session.drain_events()
+    assert first_assignment_events
+    second_placement = first_assignment_events[-1]
+    assert second_placement["event_type"] == "placement_needed"
+    assert second_placement["event"]["logical_request_id"] == (
+        "mutation-isolation-second"
+    )
+    first_candidate_snapshot = placement["event"]["candidates"][0]
+    second_candidate_snapshot = second_placement["event"]["candidates"][0]
+    assert first_candidate_snapshot["in_flight_requests"] == 0
+    assert first_candidate_snapshot["queued_requests"] == 0
+    assert first_candidate_snapshot["running_requests"] == 0
+    assert first_candidate_snapshot["queued_tokens"] == 0
+    assert first_candidate_snapshot["running_tokens"] == 0
+    assert second_candidate_snapshot["in_flight_requests"] == 1
+    assert second_candidate_snapshot["eligible"] is True
+    assert second_candidate_snapshot["active"] is True
+    assert second_candidate_snapshot["draining"] is False
+    assert second_candidate_snapshot["queued_requests"] is not None
+    assert second_candidate_snapshot["running_requests"] is not None
+    assert second_candidate_snapshot["queued_tokens"] is not None
+    assert second_candidate_snapshot["running_tokens"] is not None
+    assert (
+        second_candidate_snapshot["queued_requests"]
+        + second_candidate_snapshot["running_requests"]
+        == 1
+    )
+    assert (
+        second_candidate_snapshot["queued_tokens"]
+        + second_candidate_snapshot["running_tokens"]
+        >= 4
+    )
+    assert second_candidate_snapshot["max_num_seqs"] == 4
+    assert second_candidate_snapshot["preemption_count"] == 0
+    assert second_candidate_snapshot["kv_capacity_blocks"] == 64
+    assert second_candidate_snapshot["kv_occupied_blocks"] is not None
+    assert second_candidate_snapshot["kv_free_blocks"] is not None
+    assert (
+        second_candidate_snapshot["kv_occupied_blocks"]
+        + second_candidate_snapshot["kv_free_blocks"]
+        == second_candidate_snapshot["kv_capacity_blocks"]
+    )
+    assert first_candidate_snapshot["target"] is not second_candidate_snapshot["target"]
+    assert first_candidate_snapshot["tags"] is not second_candidate_snapshot["tags"]
+    assert first_candidate_snapshot["taints"] is not second_candidate_snapshot["taints"]
+    assert (
+        first_candidate_snapshot["capabilities"]
+        is not second_candidate_snapshot["capabilities"]
+    )
+
+    session.assign(
+        "mutation-isolation-second", WorkerTarget(pool_id="pool-a", worker_id=7)
+    )
+    downstream = first_assignment_events + _drive_external_to_terminals(
+        session, {"mutation-isolation", "mutation-isolation-second"}
+    )
+    routed = next(
+        event
+        for event in downstream
+        if event["event_type"] == "routed"
+        and event["event"]["logical_request_id"] == "mutation-isolation"
+    )
     placement_data = placement["event"]
     routed_data = routed["event"]
     placement_candidate = placement_data["candidates"][0]
