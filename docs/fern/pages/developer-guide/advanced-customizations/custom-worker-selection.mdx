@@ -289,6 +289,10 @@ The `type` selects a registered provider. The `name` identifies one configured i
 
 The selection order for each stage is the stage CLI flag, the matching `DYN_ROUTER_PREFILL_POLICY` or `DYN_ROUTER_DECODE_POLICY` environment variable, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the YAML stage selection, the YAML default, and then Dynamo's built-in policy. Set any selection to `default` to use the built-in policy for that scope.
 
+<Note>
+  Stage selections are frontend startup settings. Configure them in the worker-selection YAML, with the CLI flags or environment variables above, or through the Python `KvRouterConfig` constructor. They are not part of serialized `KvRouterConfig` JSON, and `KvRouterConfig.from_json` rejects those keys.
+</Note>
+
 ### Check the Policy and Catalog
 
 ```bash
