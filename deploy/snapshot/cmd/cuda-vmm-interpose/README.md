@@ -42,9 +42,11 @@ During ordinary execution:
 - CUDA generic allocation handles are real driver handles.
 - POSIX exports return sealed capability FDs containing the job, creator,
   allocation, endpoint, and authorization identities.
-- A POSIX import resolves the capability through the creator's local Unix
+- A shim capability import resolves through the creator's local Unix
   endpoint. A transient raw CUDA FD is passed with `SCM_RIGHTS`, imported,
   closed immediately, and never returned to the application.
+- A raw external POSIX import is passed directly to CUDA and is not tracked by
+  the shim.
 
 `posix.c` owns the sealed capability format and remote creator exchange.
 `interpose.c` owns CUDA interception, allocation state, and local raw exports.
@@ -88,10 +90,11 @@ destination GPUs 4/5 with user-mode `libcuda` 615.65 and kernel RM 595.58.03.
 ## Limitations and future extensions
 
 > [!WARNING]
-> Raw CUDA/RM export FDs outside the capability path are not enumerated or
-> repaired. Checkpoint and restore can appear successful before a later
-> invisible FD import references old allocation state. The result can be split
-> allocation state, data divergence, or GPU memory leakage.
+> Raw external POSIX imports are passed through and are not tracked or
+> reconstructed. Every mapping and handle from such an import must be unmapped
+> and released before checkpoint prepare, as the GMS saver/sleep flow does. If
+> retained, native checkpoint may fail, or restore may later see stale or
+> incomplete sharing; the shim cannot validate this.
 
 ### Potentially silent gaps
 

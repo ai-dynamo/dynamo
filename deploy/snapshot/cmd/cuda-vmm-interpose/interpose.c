@@ -1335,7 +1335,7 @@ CUresult CUDAAPI
 cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_handle, CUmemAllocationHandleType type)
 {
   import_fn function = (import_fn)real_symbol("cuMemImportFromShareableHandle");
-  properties_fn get_properties = (properties_fn)real_symbol("cuMemGetAllocationPropertiesFromHandle");
+  properties_fn get_properties;
   struct snapshot_vmm_posix_capability capability;
   struct allocation* allocation;
   CUmemGenericAllocationHandle imported;
@@ -1345,11 +1345,15 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
 
   if (!enabled)
     return function != NULL ? function(output, os_handle, type) : unavailable();
+  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+    return CUDA_ERROR_INVALID_HANDLE;
+  if (snapshot_vmm_posix_read_capability(capability_fd, &capability) != 0)
+    return function != NULL ? function(output, os_handle, type) : unavailable();
+  get_properties = (properties_fn)real_symbol("cuMemGetAllocationPropertiesFromHandle");
+  if (function == NULL || get_properties == NULL || strcmp(capability.job_id, job_id) != 0)
+    return CUDA_ERROR_INVALID_HANDLE;
   if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
-  if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR || function == NULL || get_properties == NULL ||
-      snapshot_vmm_posix_read_capability(capability_fd, &capability) != 0 || strcmp(capability.job_id, job_id) != 0)
-    return CUDA_ERROR_INVALID_HANDLE;
   pthread_mutex_lock(&state_lock);
   if (current_phase != PHASE_ACTIVE) {
     pthread_mutex_unlock(&state_lock);
