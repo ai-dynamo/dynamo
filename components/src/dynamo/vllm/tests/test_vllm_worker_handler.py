@@ -80,16 +80,28 @@ def _make_handler(
     if config is None:
         config = _make_config()
     model_config = MagicMock(enable_prompt_embeds=True)
+    model_config.max_model_len = 2048
+    engine_client = MagicMock()
+    decoder_runtime = mod.VllmDecoderRuntime(
+        engine=engine_client,
+        vllm_config=SimpleNamespace(
+            model_config=model_config,
+            shutdown_timeout=1.0,
+        ),
+        default_sampling_params={},
+    )
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.DecodeWorkerHandler(
             runtime=MagicMock(),
             config=config,
-            engine=MagicMock(),
-            default_sampling_params={},
-            model_config=model_config,
+            decoder_runtime=decoder_runtime,
             encode_worker_client=encode_worker_client,
         )
     handler.model_config = model_config
+    handler.engine_client = decoder_runtime.engine
+    handler.default_sampling_params = {}
+    handler.model_max_len = model_config.max_model_len
+    handler.config = config
     handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
         model=config.model,
         enable_multimodal=config.enable_multimodal,
@@ -115,6 +127,37 @@ def _make_raw_frontend_request(image_urls: list[str] | None = None) -> dict:
         "stop_conditions": {},
         "output_options": {},
     }
+
+
+@pytest.mark.asyncio
+async def test_decode_handler_delegates_generation_to_runtime() -> None:
+    handler = _make_handler()
+    calls = []
+
+    async def decode(*args, **kwargs):
+        calls.append((args, kwargs))
+        yield {"index": 0, "token_ids": [7], "finish_reason": "length"}
+
+    handler.decoder_runtime.decode = decode  # type: ignore[method-assign]
+    sampling_params = MagicMock()
+
+    chunks = [
+        chunk
+        async for chunk in handler.generate_tokens(
+            {"prompt_token_ids": [1, 2]},
+            sampling_params,
+            "request-1",
+            priority=2,
+        )
+    ]
+
+    assert chunks == [{"index": 0, "token_ids": [7], "finish_reason": "length"}]
+    assert calls[0][0] == (
+        {"prompt_token_ids": [1, 2]},
+        sampling_params,
+        "request-1",
+    )
+    assert calls[0][1]["engine_options"]["priority"] == 2
 
 
 def _make_vllm_request(request_id: str = "req-1") -> vLLMMultimodalRequest:
@@ -259,7 +302,6 @@ class TestReasoningParserForwarding:
             if False:
                 yield None
 
-        handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
 
         chunks = []
@@ -303,7 +345,6 @@ class TestReasoningParserForwarding:
             if False:
                 yield None
 
-        handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
 
         chunks = []
@@ -361,7 +402,6 @@ class TestReasoningParserForwarding:
                 prompt_logprobs=None,
             )
 
-        handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
 
         chunks = []
@@ -426,7 +466,6 @@ class TestReasoningParserForwarding:
                 prompt_logprobs=None,
             )
 
-        handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
 
         chunks = []
@@ -470,7 +509,6 @@ class TestReasoningParserForwarding:
                 prompt_logprobs=None,
             )
 
-        handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
 
         chunks = []
@@ -626,18 +664,27 @@ def _make_decode_handler(
     """Construct a DecodeWorkerHandler with mocked internals."""
     config = _make_config(model=model, disaggregation_mode=disaggregation_mode)
     model_config = MagicMock(enable_prompt_embeds=True)
+    model_config.max_model_len = 4096
+    engine_client = MagicMock()
+    decoder_runtime = mod.VllmDecoderRuntime(
+        engine=engine_client,
+        vllm_config=SimpleNamespace(
+            model_config=model_config,
+            shutdown_timeout=1.0,
+        ),
+        default_sampling_params={},
+    )
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.DecodeWorkerHandler(
             runtime=MagicMock(),
             config=config,
-            engine=MagicMock(),
-            default_sampling_params={},
-            model_config=model_config,
+            decoder_runtime=decoder_runtime,
         )
     handler.config = config
     handler.model_config = model_config
     handler.model_max_len = 4096
     handler.default_sampling_params = {}
+    handler.engine_client = engine_client
     handler.kv_event_publisher = None
     handler.otel_tracing_enabled = False
     handler.input_param_manager = MagicMock()

@@ -68,11 +68,10 @@ def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
     shutdown_event = asyncio.Event()
     handler = Mock()
     handler.cleanup.side_effect = lambda: calls.append("handler")
-    engine_client = Mock()
-    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    decoder_runtime = Mock()
+    decoder_runtime.shutdown.side_effect = lambda: calls.append("engine")
     resources = _DecodeWorkerLifecycle(
-        engine_client=engine_client,
-        vllm_config=SimpleNamespace(shutdown_timeout=7.0),
+        decoder_runtime=decoder_runtime,
         handler=handler,
         shutdown_event=shutdown_event,
     )
@@ -81,23 +80,22 @@ def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
 
     assert calls == ["handler", "engine"]
     assert shutdown_event.is_set()
-    engine_client.shutdown.assert_called_once_with(timeout=7.0)
+    decoder_runtime.shutdown.assert_called_once_with()
 
 
 def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
-    engine_client = Mock()
+    decoder_runtime = Mock()
     resources = _DecodeWorkerLifecycle(
-        engine_client=engine_client,
-        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        decoder_runtime=decoder_runtime,
         handler=handler,
     )
 
     with pytest.raises(RuntimeError, match="handler cleanup failed"):
         resources.cleanup()
 
-    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    decoder_runtime.shutdown.assert_called_once_with()
 
 
 def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
@@ -105,11 +103,10 @@ def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
     engine_error = RuntimeError("engine shutdown failed")
     handler = Mock()
     handler.cleanup.side_effect = handler_error
-    engine_client = Mock()
-    engine_client.shutdown.side_effect = engine_error
+    decoder_runtime = Mock()
+    decoder_runtime.shutdown.side_effect = engine_error
     lifecycle = _DecodeWorkerLifecycle(
-        engine_client=engine_client,
-        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        decoder_runtime=decoder_runtime,
         handler=handler,
     )
 
@@ -118,20 +115,19 @@ def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
 
     assert exc_info.value is engine_error
     assert exc_info.value.__context__ is handler_error
-    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    decoder_runtime.shutdown.assert_called_once_with()
 
 
 @pytest.mark.asyncio
 async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog):
     factory = _make_factory()
-    engine_client = Mock()
+    decoder_runtime = Mock()
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
     startup_error = ValueError("decode worker startup failed")
 
     async def fail_after_resource_creation(*_args, lifecycle, **_kwargs):
-        lifecycle.engine_client = engine_client
-        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.decoder_runtime = decoder_runtime
         lifecycle.handler = handler
         raise startup_error
 
@@ -143,19 +139,18 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
         await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
 
     assert exc_info.value is startup_error
-    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    decoder_runtime.shutdown.assert_called_once_with()
     assert "Failed to clean up decode worker after an earlier failure" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_decode_worker_without_custom_encoder_uses_lifecycle():
     factory = _make_factory()
-    engine_client = Mock()
+    decoder_runtime = Mock()
     startup_error = ValueError("decode worker startup failed")
 
     async def fail_after_engine_creation(*_args, lifecycle, **_kwargs):
-        lifecycle.engine_client = engine_client
-        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.decoder_runtime = decoder_runtime
         raise startup_error
 
     factory._run_decode_worker = fail_after_engine_creation  # type: ignore[method-assign]
@@ -165,7 +160,7 @@ async def test_decode_worker_without_custom_encoder_uses_lifecycle():
         await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
 
     assert exc_info.value is startup_error
-    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    decoder_runtime.shutdown.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -183,7 +178,7 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
     engine_setup: EngineSetupResult = (
         engine_client,
         vllm_config,
-        Mock(),
+        {},
         str(tmp_path / "prometheus"),
         Mock(),
     )
