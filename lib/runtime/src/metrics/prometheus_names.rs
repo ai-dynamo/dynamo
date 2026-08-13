@@ -286,6 +286,10 @@ pub mod frontend_service {
     /// Total number of requests rejected due to resource exhaustion
     pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
 
+    /// Total number of streaming responses the frontend truncated because the
+    /// wall-clock deadline (`DYN_HTTP_STREAM_MAX_DURATION_MS`) expired
+    pub const STREAM_TRUNCATED_TOTAL: &str = "stream_truncated_total";
+
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";

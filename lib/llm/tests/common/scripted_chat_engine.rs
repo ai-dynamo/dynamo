@@ -13,7 +13,8 @@ use dynamo_llm::protocols::{
     },
 };
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
+    AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+    async_trait,
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -42,6 +43,7 @@ impl ScriptGate {
 pub struct ScriptedChatEngine {
     scripts: Mutex<VecDeque<QueuedScript>>,
     requests: Mutex<Vec<NvCreateChatCompletionRequest>>,
+    contexts: Mutex<Vec<std::sync::Arc<dyn AsyncEngineContext>>>,
 }
 
 impl ScriptedChatEngine {
@@ -49,6 +51,7 @@ impl ScriptedChatEngine {
         Self {
             scripts: Mutex::new(scripts.into_iter().map(QueuedScript::Immediate).collect()),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         }
     }
 
@@ -66,6 +69,7 @@ impl ScriptedChatEngine {
                     release: release.clone(),
                 }])),
                 requests: Mutex::new(Vec::new()),
+                contexts: Mutex::new(Vec::new()),
             },
             ScriptGate { release },
         )
@@ -78,6 +82,21 @@ impl ScriptedChatEngine {
 
     pub async fn remaining_scripts(&self) -> usize {
         self.scripts.lock().await.len()
+    }
+
+    /// Whether the most recent request's backend context has been stopped, i.e.
+    /// `stop_generating()` (or `kill()`/`stop()`) was called on it. Lets a test
+    /// confirm that a frontend-side truncation actually signals the backend to
+    /// stop producing tokens, not just that the client-visible SSE looks right.
+    // This module is shared by several test binaries; not all of them assert on
+    // backend cancellation.
+    #[allow(dead_code)]
+    pub async fn last_context_stopped(&self) -> bool {
+        self.contexts
+            .lock()
+            .await
+            .last()
+            .is_some_and(|ctx| ctx.is_stopped())
     }
 }
 
@@ -97,6 +116,7 @@ impl
         let ctx = context.context();
 
         self.requests.lock().await.push(request);
+        self.contexts.lock().await.push(ctx.clone());
         let script = self
             .scripts
             .lock()

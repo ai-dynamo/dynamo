@@ -527,6 +527,39 @@ impl AnthropicStreamConverter {
         }
     }
 
+    /// Force the terminal `stop_reason` when the frontend truncates a stream the
+    /// backend has not finished. `append_end_events` then closes any open blocks
+    /// and emits a spec-valid `message_delta` + `message_stop`, so the client sees a
+    /// short-but-complete turn rather than a severed stream.
+    pub fn force_stop_reason(&mut self, reason: AnthropicStopReason) {
+        self.stop_reason = Some(reason);
+    }
+
+    /// Output tokens observed so far (authoritative if the backend reported usage,
+    /// otherwise the per-delta fallback count). For truncation logging/metrics.
+    pub fn output_tokens(&self) -> u32 {
+        self.usage.output_tokens
+    }
+
+    /// Drop buffered tool-call blocks whose concatenated argument fragments are not
+    /// yet complete JSON. Only called on truncation: emitting a `tool_use` with a
+    /// half-streamed `input` object makes the client replay a malformed block
+    /// (HTTP 400 next turn). A tool call with no arguments streamed yet is still a
+    /// valid empty-input block, so only partial-but-non-empty JSON is dropped.
+    /// Returns the number of blocks dropped.
+    pub fn drop_incomplete_tool_blocks(&mut self) -> usize {
+        let before = self.tool_call_states.len();
+        self.tool_call_states.retain(|state| {
+            let args: String = state
+                .argument_fragments
+                .iter()
+                .map(|(frag, _)| frag.as_str())
+                .collect();
+            args.trim().is_empty() || serde_json::from_str::<serde_json::Value>(&args).is_ok()
+        });
+        before - self.tool_call_states.len()
+    }
+
     /// Emit the final events when the stream ends.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();

@@ -421,6 +421,7 @@ pub struct Metrics {
     model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
+    stream_truncated_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -999,6 +1000,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let stream_truncated_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::STREAM_TRUNCATED_TOTAL),
+                "Total number of streaming responses truncated by the wall-clock deadline",
+            ),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
         Metrics {
             request_started_counter,
             request_counter,
@@ -1029,6 +1039,7 @@ impl Metrics {
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
+            stream_truncated_total,
         }
     }
 
@@ -1191,6 +1202,7 @@ impl Metrics {
         ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
         registry.register(Box::new(self.model_rejection_total.clone()))?;
+        registry.register(Box::new(self.stream_truncated_total.clone()))?;
 
         Ok(())
     }
@@ -1312,6 +1324,23 @@ impl Metrics {
     /// Get the current rejection count for a model and endpoint
     pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
         self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .get()
+    }
+
+    /// Increment the stream-truncation counter for a model and endpoint. Emitted
+    /// when the wall-clock deadline (`DYN_HTTP_STREAM_MAX_DURATION_MS`) truncates a
+    /// streaming response, so a deadline truncation is distinguishable from a
+    /// genuine `max_tokens` turn.
+    pub fn inc_stream_truncated(&self, model: &str, endpoint: Endpoint) {
+        self.stream_truncated_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .inc();
+    }
+
+    /// Get the current stream-truncation count for a model and endpoint
+    pub fn get_stream_truncated_count(&self, model: &str, endpoint: Endpoint) -> u64 {
+        self.stream_truncated_total
             .with_label_values(&[model, &endpoint.to_string()])
             .get()
     }

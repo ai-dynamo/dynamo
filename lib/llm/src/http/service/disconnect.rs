@@ -39,6 +39,7 @@ use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
+use dynamo_runtime::config::environment_names::llm::DYN_HTTP_STREAM_MAX_DURATION_MS as STREAM_MAX_DURATION_ENV;
 
 /// Read the backend stream inactivity timeout from the environment.
 /// Returns `None` if unset or zero (timeout disabled).
@@ -53,6 +54,22 @@ pub fn backend_stream_timeout() -> Option<Duration> {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
         .map(|secs| Duration::from_secs(secs.saturating_mul(2)))
+}
+
+/// Read the hard wall-clock cap for a single streaming response.
+/// Returns `None` if unset or zero (disabled).
+///
+/// Unlike [`backend_stream_timeout`], this is **not** an inactivity timer: it does
+/// not reset when tokens arrive, and it applies **no** 2x multiplier. It exists for
+/// egress proxies that cap total request duration — those sever the connection long
+/// after the `200` has been committed, so the client cannot receive an HTTP status
+/// and simply hangs.
+pub fn stream_max_duration() -> Option<Duration> {
+    std::env::var(STREAM_MAX_DURATION_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
 }
 
 #[derive(Clone, Copy)]
@@ -499,6 +516,27 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stream_max_duration_parsing() {
+        // Unset -> disabled (opt-in default).
+        temp_env::with_var_unset(STREAM_MAX_DURATION_ENV, || {
+            assert_eq!(stream_max_duration(), None);
+        });
+        // Zero -> disabled.
+        temp_env::with_var(STREAM_MAX_DURATION_ENV, Some("0"), || {
+            assert_eq!(stream_max_duration(), None);
+        });
+        // Invalid -> disabled (no panic).
+        temp_env::with_var(STREAM_MAX_DURATION_ENV, Some("not-a-number"), || {
+            assert_eq!(stream_max_duration(), None);
+        });
+        // Valid -> parsed as milliseconds, with no 2x multiplier.
+        temp_env::with_var(STREAM_MAX_DURATION_ENV, Some("265000"), || {
+            assert_eq!(stream_max_duration(), Some(Duration::from_millis(265000)));
+        });
     }
 
     #[tokio::test]
