@@ -237,8 +237,8 @@ func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
 			}
 
 			t.Log("Read the namespace against a Grove worker at the committed target revision.")
-			reader := committedGroveWorkerReader(t, dgd, component)
-			got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component)
+			reader, pcs := committedGroveWorkerReader(t, dgd, component)
+			got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, pcs)
 			if err != nil {
 				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 			}
@@ -274,7 +274,8 @@ func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilTargetRevisi
 	g := gomega.NewWithT(t)
 	var reader client.Reader = newFakeGroveClient(g)
 	t.Log("Keep the active namespace while the target revision is pending.")
-	got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component)
+	var pcs *grovev1alpha1.PodCliqueSet
+	got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, pcs)
 	if err != nil {
 		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 	}
@@ -288,8 +289,8 @@ func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilTargetRevisi
 		t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
 	}
 	want := ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), hash)
-	reader = committedGroveWorkerReader(t, dgd, component)
-	got, err = GetGroveRuntimeNamespace(context.Background(), reader, dgd, component)
+	reader, pcs = committedGroveWorkerReader(t, dgd, component)
+	got, err = GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, pcs)
 	if err != nil {
 		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 	}
@@ -302,7 +303,7 @@ func committedGroveWorkerReader(
 	t *testing.T,
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-) client.Reader {
+) (client.Reader, *grovev1alpha1.PodCliqueSet) {
 	t.Helper()
 	g := gomega.NewWithT(t)
 	targetRevision := "target-revision"
@@ -333,7 +334,7 @@ func committedGroveWorkerReader(
 			UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
 		},
 	}
-	return newFakeGroveClient(g, pcs, podClique)
+	return newFakeGroveClient(g, pcs, podClique), pcs
 }
 
 func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testing.T) {

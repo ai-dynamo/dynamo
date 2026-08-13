@@ -157,6 +157,10 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 	aggregatedReason := ""
 
 	componentStatuses = make(map[string]v1beta1.ComponentReplicaStatus, len(dgd.Spec.Components))
+	pcs, err := getGrovePodCliqueSet(ctx, reader, dgd)
+	if err != nil {
+		return false, "", "", nil, err
+	}
 
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
@@ -183,7 +187,7 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 		if checkErr != nil {
 			return false, "", "", nil, fmt.Errorf("component %q: %w", componentName, checkErr)
 		}
-		runtimeNamespace, err := GetGroveRuntimeNamespace(ctx, reader, dgd, component)
+		runtimeNamespace, err := GetGroveRuntimeNamespace(ctx, reader, dgd, component, pcs)
 		if err != nil {
 			return false, "", "", nil, fmt.Errorf("component %q runtime namespace: %w", componentName, err)
 		}

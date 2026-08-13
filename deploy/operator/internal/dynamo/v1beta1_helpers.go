@@ -14,6 +14,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -311,6 +312,7 @@ func GetGroveRuntimeNamespace(
 	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	pcs *grovev1alpha1.PodCliqueSet,
 ) (string, error) {
 	if dgd == nil || component == nil {
 		return "", nil
@@ -327,11 +329,6 @@ func GetGroveRuntimeNamespace(
 		return "", fmt.Errorf("compute Grove worker hash suffix: %w", err)
 	}
 	desiredNamespace := ComponentRuntimeNamespace(namespace, string(component.ComponentType), workerHash)
-
-	pcs, err := getGrovePodCliqueSet(ctx, reader, dgd)
-	if err != nil {
-		return "", fmt.Errorf("failed to get Grove PodCliqueSet for component %q: %w", component.ComponentName, err)
-	}
 
 	committed, err := groveComponentTargetRevisionCommitted(ctx, reader, dgd, component, pcs)
 	if err != nil {
