@@ -5,7 +5,7 @@
 
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_runtime::config::environment_names::llm::{
-    DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    DYN_DISABLE_FRONTEND_NVEXT, DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
     DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
 };
 use serde_json::{Value, json};
@@ -26,6 +26,13 @@ const BASE_ENV: [(&str, Option<&str>); 3] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
     (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
+];
+
+const NVEXT_DISABLED_ENV: [(&str, Option<&str>); 4] = [
+    (DYN_ENABLE_ANTHROPIC_API, Some("1")),
+    (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
+    (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
+    (DYN_DISABLE_FRONTEND_NVEXT, Some("1")),
 ];
 
 async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Response {
@@ -87,6 +94,38 @@ async fn assert_anthropic_error(
             .is_some_and(|actual| actual.contains(message)),
         "unexpected Anthropic error body: {body}"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_anthropic_cache_salt_is_rejected_when_nvext_is_disabled() {
+    temp_env::async_with_vars(NVEXT_DISABLED_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        let response = post_json(
+            &svc,
+            "/v1/messages",
+            json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+                "nvext": {
+                    "cache_salt": 42,
+                    "agent_hints": {"priority": 5}
+                }
+            }),
+        )
+        .await;
+
+        assert_anthropic_error(
+            response,
+            ExpectedError::Validation,
+            "invalid nvext.cache_salt: expected a string or null",
+        )
+        .await;
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 fn assert_error_metrics(

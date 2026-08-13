@@ -686,12 +686,17 @@ Environment variables controlling frontend extensions. Extensions are enabled by
 truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corresponding surface.
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
-  When truthy, the frontend drops `request.nvext` on `/v1/chat/completions`, `/v1/completions`,
-  `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores the
+  When truthy, the frontend drops all request NvExt fields except a supported `cache_salt` on
+  `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/messages`,
+  `/v1/classify`, and `/v1/pooling`; ignores the
   `x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
   `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, and
   `x-dynamo-request-strict-priority` routing headers and their compatibility aliases; and ignores
-  the response-side `nvext.extra_fields` opt-in.
+  the response-side `nvext.extra_fields` opt-in. Cache isolation remains active. The frontend
+  continues to use non-empty `nvext.cache_salt` values where accepted. Top-level compatibility
+  fields on chat and completion requests are unaffected. The frontend also continues to use
+  non-empty `x-tenant-id` values on chat completions, completions, Responses, and Anthropic
+  Messages. The switch does not add `x-tenant-id` support to embeddings, classify, or pooling.
 </ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">

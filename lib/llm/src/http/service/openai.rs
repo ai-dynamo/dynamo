@@ -52,8 +52,9 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, SESSION_AFFINITY_CONTEXT_KEY,
-    SessionAffinityId, agent_context_from_headers, apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
+    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
+    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, retain_cache_salt,
     session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::{
@@ -661,35 +662,22 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
-/// Warn (once per request) when nvext data is dropped because the extension is
-/// disabled. Only called from the disabled branch, so the default path is free.
-fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
-    use crate::protocols::common::extensions::{
-        HEADER_DATA_PARALLEL_RANK_ALIAS, HEADER_DP_RANK, HEADER_DP_RANK_ALIAS,
-        HEADER_PREFILL_DP_RANK, HEADER_PREFILL_DP_RANK_ALIAS, HEADER_PREFILL_INSTANCE_ID,
-        HEADER_PREFILL_INSTANCE_ID_ALIAS, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY,
-        HEADER_WORKER_INSTANCE_ID, HEADER_WORKER_INSTANCE_ID_ALIAS,
-    };
-    let header_present = [
-        HEADER_WORKER_INSTANCE_ID,
-        HEADER_WORKER_INSTANCE_ID_ALIAS,
-        HEADER_PREFILL_INSTANCE_ID,
-        HEADER_PREFILL_INSTANCE_ID_ALIAS,
-        HEADER_DP_RANK,
-        HEADER_DP_RANK_ALIAS,
-        HEADER_DATA_PARALLEL_RANK_ALIAS,
-        HEADER_PREFILL_DP_RANK,
-        HEADER_PREFILL_DP_RANK_ALIAS,
-        HEADER_REQUEST_PRIORITY,
-        HEADER_REQUEST_STRICT_PRIORITY,
-    ]
-    .iter()
-    .any(|h| headers.contains_key(*h));
+/// Warn once when the disabled NvExt policy discards a field or routing header.
+/// Honored cache salts and `x-tenant-id` headers do not cause this warning.
+fn warn_nvext_disabled(
+    endpoint: &str,
+    discarded_nvext: bool,
+    headers: &HeaderMap,
+    tenant_header_supported: bool,
+) {
+    use crate::protocols::common::extensions::HEADER_TENANT_ID;
+    let header_present = has_non_cache_salt_routing_headers(headers)
+        || (!tenant_header_supported && headers.contains_key(HEADER_TENANT_ID));
 
-    if nvext_present || header_present {
+    if discarded_nvext || header_present {
         tracing::warn!(
             endpoint,
-            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
+            "request carried disabled nvext fields or routing headers; dropping them"
         );
     }
 }
@@ -717,12 +705,19 @@ async fn handler_completions(
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
-    request.nvext = if state.nvext_enabled() {
-        apply_header_routing_overrides(request.nvext.take(), &headers)
-    } else {
-        warn_nvext_disabled("completions", request.nvext.is_some(), &headers);
-        None
-    };
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "completions",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields),
+            &headers,
+            true,
+        );
+    }
+    request.nvext =
+        apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1298,8 +1293,16 @@ async fn embeddings(
     check_model_serving_ready(&state, &request.inner.model)?;
 
     if !state.nvext_enabled() {
-        warn_nvext_disabled("embeddings", request.nvext.is_some(), &headers);
-        request.nvext = None;
+        warn_nvext_disabled(
+            "embeddings",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+            &headers,
+            false,
+        );
+        request.nvext = retain_cache_salt(request.nvext.take());
     }
 
     // Resolve alias → primary served name before wrapping the request, so
@@ -1470,8 +1473,16 @@ async fn classify(
     check_model_serving_ready(&state, &request.model)?;
 
     if !state.nvext_enabled() {
-        warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
-        request.nvext = None;
+        warn_nvext_disabled(
+            "classify",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+            &headers,
+            false,
+        );
+        request.nvext = retain_cache_salt(request.nvext.take());
     }
 
     // Resolve alias → primary served name before wrapping the request, so
@@ -1741,8 +1752,16 @@ async fn pooling(
     check_model_serving_ready(&state, &request.model)?;
 
     if !state.nvext_enabled() {
-        warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
-        request.nvext = None;
+        warn_nvext_disabled(
+            "pooling",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+            &headers,
+            false,
+        );
+        request.nvext = retain_cache_salt(request.nvext.take());
     }
     let response_encoding = request.encoding_format;
     let response_dtype = request.embed_dtype.unwrap_or_default();
@@ -1885,12 +1904,19 @@ async fn handler_chat_completions(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = if state.nvext_enabled() {
-        apply_header_routing_overrides(request.nvext.take(), &headers)
-    } else {
-        warn_nvext_disabled("chat_completions", request.nvext.is_some(), &headers);
-        None
-    };
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "chat_completions",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields),
+            &headers,
+            true,
+        );
+    }
+    request.nvext =
+        apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -3128,12 +3154,19 @@ async fn handler_responses(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = if state.nvext_enabled() {
-        apply_header_routing_overrides(request.nvext.take(), &headers)
-    } else {
-        warn_nvext_disabled("responses", request.nvext.is_some(), &headers);
-        None
-    };
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "responses",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields),
+            &headers,
+            true,
+        );
+    }
+    request.nvext =
+        apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
