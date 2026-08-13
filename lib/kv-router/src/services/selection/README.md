@@ -7,8 +7,6 @@ This module composes the existing worker catalog, KV indexer, scheduler queue,
 and active-sequence accounting. Keep these implementation invariants explicit:
 
 - `/select` is query-only; `/select_and_reserve` books before returning.
-- `DELETE /reservations/{selection_id}` completes a reservation; `POST
-  /reservations/{selection_id}/abort` releases a failed reservation as aborted.
 - `/reservations` accepts `effective_prefill_tokens` as a direct
   `PrefillLoadHint` and rejects a value greater than normalized ISL.
 - Mooncake overlap fields are raw matched-token observability. Effective
