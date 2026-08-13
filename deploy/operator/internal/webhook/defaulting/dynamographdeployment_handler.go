@@ -157,15 +157,14 @@ func defaultGroveWorkerHashSuffix(
 		return nil
 	}
 
-	oldWorkerHash, oldErr := dynamo.ComputeDGDWorkersSpecHash(oldDGD)
-	newWorkerHash, newErr := dynamo.ComputeDGDWorkersSpecHash(dgd)
-	if oldErr != nil || newErr != nil {
-		// Default conservatively when a legacy or invalid graph cannot be hashed.
-		log.FromContext(ctx).V(1).Info("enable Grove worker hash suffix after hash calculation failure",
-			"oldError", oldErr,
-			"newError", newErr)
-		setGroveWorkerHashSuffixEnabled(dgd)
-		return nil
+	oldWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(oldDGD)
+	if err != nil {
+		return fmt.Errorf("failed to compute previous Grove worker hash suffix: %w", err)
+	}
+
+	newWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return fmt.Errorf("failed to compute Grove worker hash suffix: %w", err)
 	}
 
 	// Enable suffixes only after an actual worker-spec change.

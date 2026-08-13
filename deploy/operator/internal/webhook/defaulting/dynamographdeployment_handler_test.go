@@ -20,6 +20,7 @@ package defaulting
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -653,6 +654,76 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 			gotSuffix := dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] == consts.KubeLabelValueTrue
 			if gotSuffix != tt.wantSuffix {
 				t.Errorf("worker hash suffix enabled = %t, want %t", gotSuffix, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUnhashableUpdate(t *testing.T) {
+	tests := []struct {
+		name      string
+		old       func() *nvidiacomv1beta1.DynamoGraphDeployment
+		mutate    func(*nvidiacomv1beta1.DynamoGraphDeployment)
+		wantError string
+	}{
+		{
+			name: "rejects an unhashable previous worker spec",
+			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
+				prefill := dgd.GetComponentByName("prefill")
+				prefill.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+						Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
+						ExtraClientContainers: []string{"missing-client"},
+					},
+				}
+				return dgd
+			},
+			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.GetComponentByName("prefill").Experimental = nil
+			},
+			wantError: "failed to compute previous Grove worker hash suffix",
+		},
+		{
+			name: "rejects an unhashable current worker spec",
+			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				return groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
+			},
+			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				prefill := dgd.GetComponentByName("prefill")
+				prefill.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+						Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
+						ExtraClientContainers: []string{"missing-client"},
+					},
+				}
+			},
+			wantError: "failed to compute Grove worker hash suffix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build an immutable Grove update with an invalid worker spec")
+			old := tt.old()
+			dgd := old.DeepCopy()
+			dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
+			tt.mutate(dgd)
+
+			t.Log("Default the update admission")
+			ctx := admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK, old)
+			ctx = features.WithGate(ctx, features.Gates{Grove: false})
+			err := NewDGDDefaulter("0.9.0").Default(ctx, dgd)
+
+			t.Log("Reject the update without emitting a worker hash suffix marker")
+			if err == nil {
+				t.Fatal("Default() error = nil, want hash computation error")
+			}
+			if !strings.HasPrefix(err.Error(), tt.wantError) {
+				t.Errorf("Default() error = %q, want prefix %q", err, tt.wantError)
+			}
+			if got := dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled]; got != "" {
+				t.Errorf("worker hash suffix marker = %q, want unset", got)
 			}
 		})
 	}
