@@ -322,12 +322,11 @@ class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     enforce_disagg: bool = False
 
 
-def add_worker_router_arguments(parser) -> None:
-    """Register the worker-side router flags on ``parser``.
+def add_worker_router_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the worker-side router flags.
 
-    ``--router-mode`` defaults to ``None`` so that a worker which does not pass
-    it advertises nothing and inherits the frontend's mode. Defaulting to a
-    concrete mode would make every worker override the frontend on upgrade.
+    ``--router-mode`` defaults to ``None``: a worker that omits it advertises
+    nothing and inherits the frontend's configuration.
     """
     RouterArgGroup(default_router_mode=None, include_frontend_only=False).add_arguments(
         parser
@@ -349,16 +348,15 @@ def parse_worker_router_config(
     return WorkerRouterConfig.from_cli_args(namespace), remainder
 
 
-def register_worker_router_help(parser, source_parser=None) -> None:
-    """Surface the worker router flags in ``parser``'s ``--help``.
+def register_worker_router_help(parser: argparse.ArgumentParser) -> None:
+    """Surface the worker router flags in ``--help``.
 
-    The flags are parsed by a separate parser, so they would otherwise be
-    invisible to ``--help``. Mirrors how the backends already display their
-    engine's arguments.
+    They are parsed by a separate parser, so they would otherwise be invisible.
+    Same display-only trick the backends use for their engine arguments;
+    ``_group_actions`` is private argparse API, as it is at those call sites.
     """
-    if source_parser is None:
-        source_parser = argparse.ArgumentParser(add_help=False)
-        add_worker_router_arguments(source_parser)
+    source_parser = argparse.ArgumentParser(add_help=False)
+    add_worker_router_arguments(source_parser)
     group = parser.add_argument_group(
         "Router Advertisement Options. Declared in this worker's model card to "
         "override the frontend's routing for this worker set only."
@@ -368,15 +366,12 @@ def register_worker_router_help(parser, source_parser=None) -> None:
             group._group_actions.append(action)
 
 
-def build_router_config(config) -> Optional["RouterConfig"]:
+def build_router_config(config: WorkerRouterConfig) -> Optional["RouterConfig"]:
     """Build the ``RouterConfig`` a worker set advertises in its model card.
 
-    Returns ``None`` when no mode was requested, which leaves ``router_config``
-    off the card so the worker inherits the frontend's global configuration.
-    That is the behavior of every deployment that does not set ``--router-mode``.
-
-    Accepts anything carrying `RouterConfigBase` and `KvRouterConfigBase`
-    fields, so the frontend can share it.
+    ``None`` means no mode was requested, leaving ``router_config`` off the card
+    so the worker inherits the frontend's configuration. The frontend passes its
+    own config here too; it always has a mode, so it never gets ``None``.
     """
     router_mode = getattr(config, "router_mode", None)
     if router_mode is None:

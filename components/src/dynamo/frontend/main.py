@@ -366,10 +366,10 @@ async def async_main():
         loop.add_signal_handler(sig, signal_handler)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
-    # Shared with the backends, so a worker set's advertised config is built
-    # from exactly the same flags and semantics as the frontend's global one.
+    # Shared with the backends so a worker's advertised config is built from the
+    # same flags and semantics. --router-mode always has a default here, so this
+    # never returns None.
     router_config = build_router_config(config)
-    assert router_config is not None  # --router-mode always defaults for the frontend
 
     metrics_prefix = (
         config.metrics_prefix

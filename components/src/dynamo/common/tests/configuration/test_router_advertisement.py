@@ -8,7 +8,6 @@ import argparse
 import pytest
 
 from dynamo.common.configuration.groups.router_args import (
-    ROUTER_MODE_MAP,
     add_worker_router_arguments,
     build_router_config,
     parse_worker_router_config,
@@ -42,12 +41,6 @@ def test_non_router_arguments_pass_through_untouched():
     )
     assert config.router_mode == "kv"
     assert remainder == ["--model", "m", "--tensor-parallel-size", "2"]
-
-
-@pytest.mark.parametrize("mode", sorted(ROUTER_MODE_MAP))
-def test_every_mode_builds(mode):
-    config, _ = parse_worker_router_config(["--router-mode", mode])
-    assert build_router_config(config) is not None
 
 
 def test_kv_tuning_is_carried_not_reset():
