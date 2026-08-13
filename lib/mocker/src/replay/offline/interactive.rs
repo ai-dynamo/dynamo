@@ -827,13 +827,6 @@ impl InteractiveCapture {
         Ok(())
     }
 
-    pub(crate) fn drain_events(&mut self) -> Vec<ReplayEvent> {
-        self.drain_captured_events()
-            .into_iter()
-            .map(CapturedReplayEvent::into_owned)
-            .collect()
-    }
-
     pub(crate) fn drain_captured_events(&mut self) -> Vec<CapturedReplayEvent> {
         self.events.drain(..).collect()
     }
