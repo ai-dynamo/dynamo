@@ -40,17 +40,18 @@ class VllmDecoderStage:
 
     def __init__(self, runtime: VllmDecoderRuntime) -> None:
         self._runtime = runtime
-        self._active_requests: dict[str, str] = {}
+        self._active_requests: dict[str, set[str]] = {}
 
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
         native_request_id = self._native_request_id(context)
-        if context.attempt_id in self._active_requests:
+        active = self._active_requests.setdefault(context.attempt_id, set())
+        if native_request_id in active:
             raise RuntimeError(
-                f"decoder attempt {context.attempt_id!r} is already active"
+                f"decoder invocation {native_request_id!r} is already active"
             )
-        self._active_requests[context.attempt_id] = native_request_id
+        active.add(native_request_id)
         try:
             chunk = await self._generate_final(
                 cast(GenerateRequest, inputs["request"]),
@@ -59,7 +60,9 @@ class VllmDecoderStage:
             )
             return {"chunk": chunk}
         finally:
-            self._active_requests.pop(context.attempt_id, None)
+            active.discard(native_request_id)
+            if not active:
+                self._active_requests.pop(context.attempt_id, None)
 
     @property
     def model_config(self) -> ModelConfig:
@@ -70,9 +73,10 @@ class VllmDecoderStage:
     async def abort_attempt(self, attempt_id: str) -> None:
         """Abort this stage's active native request for a workflow attempt."""
 
-        request_id = self._active_requests.get(attempt_id)
-        if request_id is not None:
-            await self._runtime.abort(request_id)
+        request_ids = tuple(self._active_requests.get(attempt_id, ()))
+        await asyncio.gather(
+            *(self._runtime.abort(request_id) for request_id in request_ids)
+        )
 
     async def _generate_final(
         self,
@@ -144,4 +148,4 @@ class VllmDecoderStage:
 
     @staticmethod
     def _native_request_id(context: StageContext) -> str:
-        return f"{context.attempt_id}:{context.stage_id}"
+        return context.invocation_id

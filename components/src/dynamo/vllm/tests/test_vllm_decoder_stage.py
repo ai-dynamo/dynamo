@@ -110,11 +110,16 @@ def _request(*, max_tokens: int | None = 8, n: int | None = 1) -> dict[str, Any]
     }
 
 
-def _context(attempt_id: str = "request-1", stage_id: str = "decoder") -> StageContext:
+def _context(
+    attempt_id: str = "request-1",
+    stage_id: str = "decoder",
+    invocation_id: str | None = None,
+) -> StageContext:
     return StageContext(
         workflow_name="test-workflow",
         stage_id=stage_id,
         attempt_id=attempt_id,
+        invocation_id=invocation_id or f"{attempt_id}:{stage_id}",
         deadline=None,
         _cancelled=asyncio.Event(),
     )
@@ -238,3 +243,30 @@ async def test_external_abort_uses_active_stage_request_id() -> None:
     await task
 
     assert engine.abort_ids == ["attempt-7:generator"]
+
+
+async def test_repeated_attempt_can_run_concurrent_decoder_invocations() -> None:
+    runtime, engine = _runtime()
+    engine.started = asyncio.Event()
+    engine.release = asyncio.Event()
+    stage = VllmDecoderStage(runtime)
+    inputs = {
+        "request": _request(),
+        "prompt": {"prompt_token_ids": [1]},
+    }
+    first = asyncio.create_task(
+        stage.run(inputs, _context("attempt-8", invocation_id="attempt-8:1"))
+    )
+    second = asyncio.create_task(
+        stage.run(inputs, _context("attempt-8", invocation_id="attempt-8:2"))
+    )
+    await engine.started.wait()
+    while len(engine.request_ids) < 2:
+        await asyncio.sleep(0)
+
+    await stage.abort_attempt("attempt-8")
+    engine.release.set()
+    await asyncio.gather(first, second)
+
+    assert set(engine.request_ids) == {"attempt-8:1", "attempt-8:2"}
+    assert set(engine.abort_ids) == {"attempt-8:1", "attempt-8:2"}
