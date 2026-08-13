@@ -343,6 +343,24 @@ def test_template_only_and_undefined_values_fail_clearly(tmp_path):
         kustomize_matrix.render_template_component(selection, {}, {})
 
 
+def test_template_rejects_plain_kustomization_asset(tmp_path):
+    kustomize_matrix = load_matrix_module()
+    template = tmp_path / "template"
+    write_template(
+        template,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+    )
+    (template / "kustomization.yaml").write_text("resources: []\n", encoding="utf-8")
+    selection = kustomize_matrix.TemplateSelection(
+        source=template, output_path=Path("components/provider")
+    )
+
+    with pytest.raises(ValueError, match="must not contain a plain kustomization.yaml"):
+        kustomize_matrix.render_template_assets(
+            selection, tmp_path / "component", {}, {}
+        )
+
+
 def test_template_path_is_a_nested_overlay_component_path(tmp_path):
     kustomize_matrix = load_matrix_module()
     template = tmp_path / "template"

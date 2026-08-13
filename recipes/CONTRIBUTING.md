@@ -161,7 +161,8 @@ file except `values.yaml`; files ending in `*.j2` are rendered without that
 suffix. A template can select shared Components; when it does, `unfold` rebases
 those external Component paths for its generated location. Jinja rendering uses
 strict, immutable sandboxed values: undefined names and attempts to mutate data
-are errors.
+are errors. Rendering a matrix that selects templates requires `jinja2==3.1.6`,
+which is installed in the development and test dependency sets.
 
 Regenerate derived artifacts in order: `unfold` writes every checked-in Level-2
 public overlay `kustomization.yaml` file for the matrix; `render` invokes

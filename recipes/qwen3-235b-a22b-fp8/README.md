@@ -95,12 +95,12 @@ scripts/kustomize-matrix.py compose \
 ```
 
 Only recipe contributors update checked-in derived artifacts. After editing the
-matrix, base, or Components, regenerate the public overlays and apply-able
-manifests from the repository root:
+matrix, base, Components, or templates, regenerate the public overlays and
+apply-able manifests from the repository root:
 
 ```bash
-scripts/kustomize-matrix.py unfold trtllm/disagg/blackwell/.kustomize-matrix.yaml
-scripts/kustomize-matrix.py render trtllm/disagg/blackwell/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py unfold recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/.kustomize-matrix.yaml
 ```
 
 ## Test the Deployment

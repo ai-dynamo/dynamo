@@ -16,11 +16,12 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import yaml
-from jinja2 import StrictUndefined
-from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+if TYPE_CHECKING:
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 SPDX_HEADER = (
     "# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
@@ -477,6 +478,14 @@ def only(resources: ResourceCollection) -> dict[str, Any]:
 
 
 def template_environment() -> ImmutableSandboxedEnvironment:
+    try:
+        from jinja2 import StrictUndefined
+        from jinja2.sandbox import ImmutableSandboxedEnvironment
+    except ImportError as exc:
+        raise RuntimeError(
+            "Jinja2 is required to render Kustomize templates; install jinja2==3.1.6"
+        ) from exc
+
     environment = ImmutableSandboxedEnvironment(
         undefined=StrictUndefined,
         trim_blocks=True,
@@ -518,6 +527,12 @@ def render_template_assets(
         relative_source = source_path.relative_to(template.source)
         if relative_source == Path(TEMPLATE_VALUES_FILE):
             continue
+        if relative_source == Path(KUSTOMIZATION_FILE):
+            raise ValueError(
+                f"template {display_path(template.source)} must not contain a plain "
+                f"{KUSTOMIZATION_FILE}; the Component renders from "
+                f"{TEMPLATE_KUSTOMIZATION_FILE}"
+            )
         relative_output = (
             relative_source.with_suffix("")
             if source_path.suffix == ".j2"

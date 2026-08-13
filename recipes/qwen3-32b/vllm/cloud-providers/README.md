@@ -74,6 +74,6 @@ generated Components under their local `components/` directories, and
 hand-edited. Regenerate them with:
 
 ```bash
-scripts/kustomize-matrix.py unfold .kustomize-matrix.yaml
-scripts/kustomize-matrix.py render .kustomize-matrix.yaml
+scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
 ```
