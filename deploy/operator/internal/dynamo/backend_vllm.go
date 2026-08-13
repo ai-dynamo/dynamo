@@ -108,6 +108,18 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
 			)
 		}
+	} else if role == RoleFollower && IsElasticEPRayLaunch(container) {
+		// The follower joins the leader's Ray cluster (injectElasticEPRayLaunchFlags's
+		// RoleFollower arm). It needs POD_IP for the --node-ip-address it interpolates,
+		// but not VLLM_DP_MASTER_IP: the follower is a plain Ray node, not the DP master.
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer) {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name: commonconsts.PodIPEnvVar,
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+				},
+			})
+		}
 	}
 
 	// Set compilation cache environment variables for VLLM
@@ -540,6 +552,28 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		container.Args = []string{fmt.Sprintf(
 			"%s && ray start --address=%s:%s --block",
 			healthGate, leaderHostname, VLLMPort,
+		)}
+	case RoleFollower:
+		// The follower is a standalone clique, not a worker in the leader's gang, so
+		// it reaches the leader through the headless elastic-EP Service (Phase 3)
+		// rather than the deployment framework's leader hostname. Same /live gate as
+		// the worker so the join lands after the leader has placed its data-parallel
+		// group. Its container carries the leader's vLLM serve command, but the
+		// follower never serves -- the leader spawns the real DP-rank worker on this
+		// pod's GPU as a Ray actor -- so that command is dropped and replaced with a
+		// bare Ray join. --node-ip-address pins the node to the pod IP so the leader's
+		// engine finds this rank's GPU under the address Ray registers.
+		leaderHostname := ElasticEPLeaderServiceName(serviceName)
+		healthGate := fmt.Sprintf(
+			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
+				`2>/dev/null; do `+
+				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
+				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,
+			leaderHostname, commonconsts.DynamoSystemPort,
+		)
+		container.Args = []string{fmt.Sprintf(
+			`%s && ray start --address=%s:%s --node-ip-address="$%s" --block`,
+			healthGate, leaderHostname, VLLMPort, commonconsts.PodIPEnvVar,
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}

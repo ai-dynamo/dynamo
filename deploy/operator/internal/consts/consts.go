@@ -217,6 +217,9 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 	GroveRoleSuffixGMS    = "gms"
+	// GroveRoleSuffixFollower names the on-demand elastic-EP follower clique.
+	// Kept to three characters to preserve the combined Grove name budget.
+	GroveRoleSuffixFollower = "flw"
 
 	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove
 	// resource names (PCS name + PCSG config name + PCLQ template name).

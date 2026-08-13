@@ -1221,6 +1221,10 @@ const (
 	RoleMain       Role = "main"
 	RoleCheckpoint Role = "checkpoint"
 	RoleGMS        Role = "gms"
+	// RoleFollower is an on-demand elastic-EP follower: a single-pod clique that
+	// joins the leader's Ray cluster and lends its GPU as an extra data-parallel
+	// rank. It rests at zero replicas and is scaled on demand.
+	RoleFollower Role = "follower"
 )
 
 // ServiceRole describes one PodClique (PCLQ) to be materialised for a
@@ -1290,7 +1294,19 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 	case component.IsGroveScalingGroupForced():
 		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
-		return expandSingleNodeRoles(componentName, componentReplicas)
+		roles := expandSingleNodeRoles(componentName, componentReplicas)
+		// An elastic-EP single-pod leader gets an on-demand follower clique: a
+		// standalone PodClique that rests at zero replicas and is scaled up to add
+		// data-parallel ranks. Gate on the same Ray-launch predicate as the leader's
+		// Ray head so only real elastic-EP components grow a follower.
+		if c := GetMainContainer(component); c != nil && IsElasticEPRayLaunch(c) {
+			roles = append(roles, ServiceRole{
+				Name:     componentName + "-" + commonconsts.GroveRoleSuffixFollower,
+				Role:     RoleFollower,
+				Replicas: 0,
+			})
+		}
+		return roles
 	}
 }
 
@@ -1351,10 +1367,12 @@ func LongestPodCliqueNameForDGDComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 ) string {
 	lowerComponentName := strings.ToLower(componentName)
-	if component == nil || !component.UsesPCSG() {
+	if component == nil {
 		return lowerComponentName
 	}
 
+	// Iterate the concrete roles (not just PCSG components) so the elastic-EP
+	// follower's "-flw" clique is counted toward the Grove name-length budget.
 	longestName := lowerComponentName
 	for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
 		roleName := strings.ToLower(role.Name)
@@ -2282,7 +2300,33 @@ type cliqueParams struct {
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
 //
+// injectElasticEPFollowerAntiAffinity adds a required one-pod-per-node anti-affinity so
+// each elastic-EP follower (and the leader it selects) lands on its own node -- packing
+// several data-parallel ranks onto a node would starve them of the cross-node NVLink the
+// EP collective needs. The term selects this component's pods by their identity labels.
+//
 //nolint:gocyclo
+func injectElasticEPFollowerAntiAffinity(podSpec *corev1.PodSpec, componentName, dynamoNamespace string) {
+	if podSpec.Affinity == nil {
+		podSpec.Affinity = &corev1.Affinity{}
+	}
+	if podSpec.Affinity.PodAntiAffinity == nil {
+		podSpec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
+	}
+	podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+		podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		corev1.PodAffinityTerm{
+			TopologyKey: "kubernetes.io/hostname",
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent: componentName,
+					commonconsts.KubeLabelDynamoNamespace: dynamoNamespace,
+				},
+			},
+		},
+	)
+}
+
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
@@ -2341,6 +2385,20 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
+	}
+
+	// The elastic-EP follower is a standalone, on-demand clique. It rests at zero
+	// replicas, so MinAvailable must be 0 -- a non-zero floor would gang-terminate the
+	// leader's PodGang whenever no follower is running. It also gets a required
+	// one-pod-per-node anti-affinity so each rank lands on its own node's NVLink;
+	// packing several onto a node would starve the cross-node EP collective.
+	if p.r.Role == RoleFollower {
+		minAvailable = 0
+		injectElasticEPFollowerAntiAffinity(
+			podSpec,
+			p.componentName,
+			p.dynamoDeployment.GetDynamoNamespaceForComponent(p.component),
+		)
 	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
