@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --output PREFIX   Output file prefix (default: dynamo_frontend_<timestamp>)"
             echo ""
             echo "Environment:"
-            echo "  DYN_ENABLE_NVTX=1 is set automatically"
+            echo "  DYN_ENABLE_RUST_NVTX=1 is set automatically"
             echo ""
             echo "Build the binary first:"
             echo "  cargo build --profile profiling --features dynamo-runtime/nvtx"
@@ -68,7 +68,9 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-export DYN_ENABLE_NVTX=1
+# The Rust runtime gates on DYN_ENABLE_RUST_NVTX (lib/runtime/src/nvtx.rs);
+# DYN_NVTX is the separate switch for the Python components.
+export DYN_ENABLE_RUST_NVTX=1
 
 echo "Profiling: $BINARY $*"
 echo "Duration: ${DURATION}s"

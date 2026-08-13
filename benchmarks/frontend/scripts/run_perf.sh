@@ -426,7 +426,6 @@ FRONTEND_ENV=(
     HF_HUB_OFFLINE=1
     DYN_HTTP_PORT="$FRONTEND_PORT"
     DYN_PERF_DIAG=1
-    DYN_ENABLE_NVTX=1
     DYN_REQUEST_PLANE="$REQUEST_PLANE"
     DYN_EVENT_PLANE="$EVENT_PLANE"
 )
@@ -445,12 +444,18 @@ fi
 
 # Enable Rust NVTX annotations when nsys profiling is active.
 # The Rust NVTX subsystem (lib/runtime/src/nvtx.rs) requires both the
-# compile-time "nvtx" feature AND this runtime env var. We only set it
-# when nsys is active to avoid the ~50ns/annotation overhead during
-# clean throughput runs.
+# compile-time "nvtx" feature AND this runtime env var. We only set it when
+# nsys is active so clean throughput runs pay nothing for the annotations.
+#
+# The env var alone is not enough: a frontend built without the feature emits
+# nothing and says nothing, so report the switch rather than the outcome.
+# Confirm the capture by looking for "NVTX annotations enabled" in the
+# frontend log, which the runtime logs only when both gates are open.
 if [[ "$HAS_NSYS" == true ]]; then
     FRONTEND_ENV+=(DYN_ENABLE_RUST_NVTX=1)
-    echo "  Rust NVTX annotations: enabled"
+    echo "  Rust NVTX annotations: DYN_ENABLE_RUST_NVTX=1 set"
+    echo "    (requires a build with --features dynamo-runtime/nvtx;"
+    echo "     check the frontend log for 'NVTX annotations enabled')"
 fi
 
 if [[ "$HAS_NSYS" == true ]]; then
