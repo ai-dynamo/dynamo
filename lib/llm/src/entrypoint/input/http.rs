@@ -221,6 +221,7 @@ where
                 prefill_load_estimator.clone(),
                 local_model_path,
                 model.runtime_config().tokenizer_backend,
+                model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
                 worker_selector_factory.clone(),
             )
@@ -307,6 +308,7 @@ async fn run_watcher<Sel>(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
+    tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
 ) -> anyhow::Result<()>
@@ -334,6 +336,7 @@ where
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
+    watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
     watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();

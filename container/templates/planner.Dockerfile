@@ -69,9 +69,11 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 # aiperf is required by the thorough profiler path (profiler/utils/aiperf.py).
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
+    --mount=type=bind,source=./container/deps/overrides.planner.txt,target=/tmp/overrides.planner.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
+        --overrides /tmp/overrides.planner.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
