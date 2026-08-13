@@ -4634,6 +4634,16 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
         .collect()
 }
 
+fn streams_audio_response(request: &NvCreateAudioSpeechRequest) -> bool {
+    let returns_audio_bytes = request.data_source.as_deref() != Some("url");
+    let response_format = request.response_format.as_deref().unwrap_or("wav");
+    let supports_chunk_encoding =
+        response_format.eq_ignore_ascii_case("pcm") || response_format.eq_ignore_ascii_case("wav");
+    let uses_default_speed = request.speed.is_none_or(|speed| speed == 1.0);
+
+    returns_audio_bytes && supports_chunk_encoding && uses_default_speed
+}
+
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -4644,9 +4654,11 @@ async fn handler_audio_speech(
     // Option<String> model field; see below)
     check_ready(&state)?;
 
+    // PCM and WAV can be emitted as raw sample chunks. Formats that require a
+    // complete file, speed adjustment, and URL uploads are finalized worker-side.
+    let streaming = streams_audio_response(&request);
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
-    let streaming = request.data_source.as_deref() != Some("url");
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -4699,6 +4711,7 @@ async fn audio_speech(
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
+    let returns_url = request.data_source.as_deref() == Some("url");
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -4888,10 +4901,47 @@ async fn audio_speech(
         return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
     }
 
+    if returns_url {
+        inflight.mark_ok();
+        return Ok(Json(response).into_response());
+    }
+
+    let content_type = response
+        .data
+        .first()
+        .map(|audio| audio_content_type(&audio.output_format))
+        .unwrap_or("audio/wav");
+    let audio = decode_audio_chunks(&response)
+        .map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio response",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
     inflight.mark_ok();
 
-    // URL responses remain JSON because they contain metadata rather than audio bytes.
-    Ok(Json(response).into_response())
+    Response::builder()
+        .header("content-type", content_type)
+        .body(Body::from(audio))
+        .map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to build audio response",
+                e.to_string(),
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })
 }
 
 /// Create an Axum [`Router`] for the Audio Speech endpoint

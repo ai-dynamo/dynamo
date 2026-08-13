@@ -117,6 +117,50 @@ impl
     }
 }
 
+struct CompleteAudioEngine;
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for CompleteAudioEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let model = request.model.unwrap_or_default();
+        let stream = stream! {
+            yield Annotated::from_data(NvAudioSpeechResponse::empty());
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            yield Annotated::from_data(NvAudioSpeechResponse {
+                id: ctx.id().to_string(),
+                object: "audio.speech".to_string(),
+                model,
+                status: "completed".to_string(),
+                progress: 100,
+                created: 0,
+                data: vec![AudioData {
+                    output_format: "mp3".to_string(),
+                    url: None,
+                    b64_json: Some(
+                        base64::engine::general_purpose::STANDARD.encode(b"complete-audio")
+                    ),
+                }],
+                error: None,
+                inference_time_s: None,
+            });
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
 #[derive(Default)]
 struct FirstAudioGateEngine {
     started: Arc<tokio::sync::Notify>,
@@ -1785,6 +1829,59 @@ async fn test_audio_speech_streams_worker_chunks() {
         .unwrap();
     assert_eq!(second, "second");
     assert!(chunks.next().await.is_none());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_speech_buffers_formats_that_require_complete_files() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let card = ModelDeploymentCard::with_name_only("audio-model");
+    manager
+        .add_audios_model("audio-model", card.mdcsum(), Arc::new(CompleteAudioEngine))
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::new();
+    let mut request = Box::pin(
+        client
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": "audio-model",
+                "input": "hello",
+                "response_format": "mp3"
+            }))
+            .send(),
+    );
+    assert!(
+        timeout(std::time::Duration::from_millis(100), &mut request)
+            .await
+            .is_err(),
+        "MP3 response headers must wait for complete-file encoding"
+    );
+
+    let response = timeout(std::time::Duration::from_secs(1), request)
+        .await
+        .expect("complete MP3 should arrive after the worker delay")
+        .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "audio/mpeg"
+    );
+    assert_eq!(response.bytes().await.unwrap(), "complete-audio");
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
