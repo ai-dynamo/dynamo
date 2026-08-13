@@ -659,6 +659,16 @@ async fn anthropic_messages(
             tokio::pin!(budget);
 
             loop {
+                // Enforce the wall-clock budget before draining another chunk.
+                // The select below is `biased`, so a backend whose `next()` is
+                // always immediately ready wins every poll and the `budget` arm
+                // would never be reached — the cap would silently never fire
+                // under exactly the fast-backend load it exists to bound.
+                if stream_deadline.is_some_and(|at| Instant::now() >= at) {
+                    truncated = true;
+                    break;
+                }
+
                 tokio::select! {
                     // Prefer draining a ready backend chunk before honoring a
                     // cancel so no already-generated token is dropped.
@@ -695,21 +705,25 @@ async fn anthropic_messages(
                         break;
                     }
                     _ = &mut budget => {
-                        // Wall-clock deadline reached. Stop the GPU: tokens produced
-                        // after this point can never reach the client. stop_generating
-                        // (not kill) so usage accounting and disagg RDMA teardown still
-                        // run — see ai-dynamo/dynamo#12292 and #10923.
-                        tracing::warn!(
-                            env = DYN_HTTP_STREAM_MAX_DURATION_MS,
-                            budget_ms = stream_budget.map(|d| d.as_millis() as u64).unwrap_or_default(),
-                            output_tokens = converter.output_tokens(),
-                            "stream deadline reached; truncating with a spec-valid terminal event"
-                        );
-                        cancel_ctx.stop_generating();
+                        // Wall-clock deadline reached while the backend was idle.
                         truncated = true;
                         break;
                     }
                 }
+            }
+
+            if truncated {
+                // Stop the GPU: tokens produced after this point can never reach
+                // the client. stop_generating (not kill) so usage accounting and
+                // disagg RDMA teardown still run — see ai-dynamo/dynamo#12292
+                // and #10923. Shared by both truncation exits above.
+                tracing::warn!(
+                    env = DYN_HTTP_STREAM_MAX_DURATION_MS,
+                    budget_ms = stream_budget.map(|d| d.as_millis() as u64).unwrap_or_default(),
+                    output_tokens = converter.output_tokens(),
+                    "stream deadline reached; truncating with a spec-valid terminal event"
+                );
+                cancel_ctx.stop_generating();
             }
 
             if saw_error {
@@ -722,7 +736,9 @@ async fn anthropic_messages(
                     // MaxTokens is the only stop reason the client already knows how
                     // to continue from. Stop would assert the turn finished; an error
                     // event after visible output is not retried by Claude Code at all.
-                    converter.force_stop_reason(AnthropicStopReason::MaxTokens);
+                    // Only applied if the backend has not already reported a real
+                    // finish reason — see set_stop_reason_if_unset.
+                    converter.set_stop_reason_if_unset(AnthropicStopReason::MaxTokens);
                     if let Some((metrics, model)) = &truncation_ctx {
                         metrics.inc_stream_truncated(model, Endpoint::AnthropicMessages);
                     }

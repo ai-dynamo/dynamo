@@ -162,6 +162,9 @@ class frontend_service:
     MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
     # Total number of requests rejected due to resource exhaustion
     MODEL_REJECTION_TOTAL = "model_rejection_total"
+    # Total number of streaming responses the frontend truncated because the
+    # wall-clock deadline (`DYN_HTTP_STREAM_MAX_DURATION_MS`) expired
+    STREAM_TRUNCATED_TOTAL = "stream_truncated_total"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"

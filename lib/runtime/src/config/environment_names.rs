@@ -316,11 +316,14 @@ pub mod llm {
     /// disabled.
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
-    /// Hard wall-clock cap, in milliseconds, on a single streaming response. On
-    /// expiry the frontend stops generation and closes the stream with a spec-valid
-    /// terminal event rather than severing it. Unlike
-    /// `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` this is not an inactivity timer and does
-    /// not reset when tokens arrive. Unset, `0`, or invalid values disable it.
+    /// Hard wall-clock cap, in milliseconds, on a single streaming response.
+    ///
+    /// Currently honored only by the Anthropic Messages endpoint (`/v1/messages`);
+    /// `/v1/chat/completions` and `/v1/responses` ignore it. On expiry the frontend
+    /// stops generation and closes the stream with a spec-valid terminal event
+    /// rather than severing it. Unlike `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` this
+    /// is not an inactivity timer and does not reset when tokens arrive. Unset,
+    /// `0`, or invalid values disable it.
     pub const DYN_HTTP_STREAM_MAX_DURATION_MS: &str = "DYN_HTTP_STREAM_MAX_DURATION_MS";
 
     /// Enable LoRA adapter support (set to "true" to enable)

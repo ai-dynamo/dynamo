@@ -674,6 +674,116 @@ async fn client_disconnect_is_not_misclassified_as_truncation_when_deadline_conf
     .await;
 }
 
+/// Regression: the deadline must not relabel a turn the backend already finished.
+///
+/// `text.sse` chunk 2 carries `finish_reason:"stop"`, so by the time the gated
+/// usage-only tail (chunk 3) is still in flight the converter already holds a real
+/// terminal reason (`end_turn`). If the deadline fires in that window the handler
+/// still takes the truncation path — but overwriting the recorded reason with
+/// `max_tokens` tells the client a complete answer was cut short, and a client such
+/// as Claude Code will continue a turn that already ended. Truncation bookkeeping
+/// (metric, warn) is still correct here; only the client-visible label must be
+/// preserved.
+#[tokio::test]
+#[serial]
+async fn stream_deadline_preserves_finish_reason_already_reported_by_backend() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        // Head = role + content + finish_reason chunks; only the usage-only chunk
+        // is gated, so the deadline fires *after* a genuine finish was recorded.
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, 3).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("stream did not terminate at the wall-clock deadline")
+            .expect("failed to read SSE body");
+
+        let events = parse_json_sse(&raw).await.unwrap();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "message_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "expected one message_delta: {raw}");
+        assert_eq!(
+            deltas[0].data["delta"]["stop_reason"], "end_turn",
+            "a turn the backend already finished must not be relabelled max_tokens: {raw}"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Regression: a backend that is always ready must not starve the deadline.
+///
+/// The select loop is `biased`, so the backend-chunk arm is polled first by design
+/// (an already-generated token must never be dropped in favour of a cancel). With a
+/// backend whose `next()` is *always* immediately ready, that ordering means the
+/// budget arm is never reached and `DYN_HTTP_STREAM_MAX_DURATION_MS` is never
+/// enforced — exactly the fast-backend load the cap exists to bound. Multi-threaded
+/// so the client side can still make progress while the server task spins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_deadline_fires_against_a_continuously_ready_backend() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        // Reuse the fixture's first chunk (a role-only delta) as filler: it keeps
+        // the select loop permanently fed without accumulating output, so this test
+        // isolates scheduling starvation.
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let filler = script
+            .into_iter()
+            .next()
+            .expect("text.sse must contain at least one chunk");
+        let svc = HarnessService::start_endless(filler).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // The deadline is 300ms. Without enforcement ahead of chunk processing the
+        // backend arm wins every poll and this never returns.
+        let raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("deadline was starved by a continuously-ready backend")
+            .expect("failed to read truncated SSE body");
+
+        let events = parse_json_sse(&raw).await.unwrap();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "message_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "expected one message_delta: {raw}");
+        assert_eq!(deltas[0].data["delta"]["stop_reason"], "max_tokens");
+        assert_eq!(
+            svc.metrics
+                .get_stream_truncated_count(MODEL, Endpoint::AnthropicMessages),
+            1,
+            "deadline truncation must be recorded"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn parallel_tools_preserve_identity_and_arguments() {

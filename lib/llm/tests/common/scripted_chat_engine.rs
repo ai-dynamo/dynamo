@@ -27,6 +27,12 @@ enum QueuedScript {
         split_at: usize,
         release: std::sync::Arc<Semaphore>,
     },
+    /// Yields `chunk` forever without ever awaiting, so `next()` is *always*
+    /// immediately ready. Models a backend fast enough to keep the frontend's
+    /// select loop permanently fed.
+    Endless {
+        chunk: NvCreateChatCompletionStreamResponse,
+    },
 }
 
 pub struct ScriptGate {
@@ -73,6 +79,21 @@ impl ScriptedChatEngine {
             },
             ScriptGate { release },
         )
+    }
+
+    /// An engine whose stream is *always* immediately ready: it repeats `chunk`
+    /// forever and never awaits. Used to prove the frontend cannot be starved out
+    /// of enforcing its wall-clock deadline by a backend that never stops
+    /// producing.
+    // This module is shared by several test binaries; only the Anthropic one
+    // exercises deadline starvation.
+    #[allow(dead_code)]
+    pub fn with_endless_repeat(chunk: NvCreateChatCompletionStreamResponse) -> Self {
+        Self {
+            scripts: Mutex::new(VecDeque::from([QueuedScript::Endless { chunk }])),
+            requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
+        }
     }
 
     /// Remove and return all requests observed so far, in arrival order.
@@ -147,6 +168,15 @@ impl
                     permit.forget();
                     for chunk in chunks {
                         yield Annotated::from_data(chunk);
+                    }
+                }
+                QueuedScript::Endless { chunk } => {
+                    // No `.await` anywhere in this arm: every poll resolves
+                    // immediately, so a `biased` select that polls this stream
+                    // first will never reach a later arm unless the consumer
+                    // explicitly checks it.
+                    loop {
+                        yield Annotated::from_data(chunk.clone());
                     }
                 }
             }
