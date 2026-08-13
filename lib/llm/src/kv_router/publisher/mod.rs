@@ -36,8 +36,6 @@ mod worker_metrics;
 mod zmq_listener;
 
 #[cfg(test)]
-use batching::BatchingState;
-#[cfg(test)]
 use dedup::EventDedupFilter;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
