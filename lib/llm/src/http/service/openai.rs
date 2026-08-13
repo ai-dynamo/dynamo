@@ -4634,7 +4634,7 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
         .collect()
 }
 
-async fn audio_speech(
+async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
     Json(request): Json<NvCreateAudioSpeechRequest>,
@@ -4646,8 +4646,6 @@ async fn audio_speech(
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
-    let request_id = request.id().to_string();
-
     let streaming = request.data_source.as_deref() != Some("url");
 
     // model is optional in the request; fall back to a model that can actually
@@ -4662,11 +4660,46 @@ async fn audio_speech(
             .next()
             .unwrap_or_default()
     });
-    let metric_model = state.manager().metric_model_for(&model).to_string();
-
     // Per-model serving readiness gate (now that we have a resolved model
     // name string).
     check_model_serving_ready(&state, &model)?;
+
+    let context = request.context();
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context,
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Audios.to_string(),
+            request_type: if streaming { "stream" } else { "unary" }.to_string(),
+        },
+    )
+    .await;
+
+    let response = tokio::spawn(
+        audio_speech(state, request, model, streaming, stream_handle).in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await audio speech task",
+            format!("{e:?}"),
+        )
+    })?;
+
+    connection_handle.disarm();
+    response
+}
+
+async fn audio_speech(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateAudioSpeechRequest>,
+    model: String,
+    streaming: bool,
+    mut stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
+    let request_id = request.id().to_string();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -4685,24 +4718,8 @@ async fn audio_speech(
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let ctx = request.context();
-    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
-        ctx.clone(),
-        Some(state.metrics_clone()),
-        CancellationLabels {
-            model: model.clone(),
-            endpoint: Endpoint::Audios.to_string(),
-            request_type: if streaming { "stream" } else { "unary" }.to_string(),
-        },
-    )
-    .await;
-
-    // Arm the request handle only while awaiting backend work. Disarming it
-    // before handling a result keeps ordinary errors out of disconnect metrics.
     inflight.mark_error(ErrorType::Cancelled);
-    connection_handle.arm();
-    let stream_result = engine.generate(request).await;
-    connection_handle.disarm();
-    let stream = stream_result.map_err(|e| {
+    let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
@@ -4713,18 +4730,17 @@ async fn audio_speech(
         err_response
     })?;
 
-    connection_handle.arm();
-    let stream_result = check_for_backend_error(stream, None).await;
-    connection_handle.disarm();
-    let stream = stream_result.inspect_err(|error_response| {
-        let error_type = match error_response.0 {
-            // Worker-side InvalidArgument messages are not guaranteed to use
-            // the "Validation:" prefix expected by the shared classifier.
-            StatusCode::BAD_REQUEST => ErrorType::Validation,
-            _ => extract_error_type_from_response(error_response),
-        };
-        inflight.mark_error(error_type);
-    })?;
+    let stream = check_for_backend_error(stream, None)
+        .await
+        .inspect_err(|error_response| {
+            let error_type = match error_response.0 {
+                // Worker-side InvalidArgument messages are not guaranteed to use
+                // the "Validation:" prefix expected by the shared classifier.
+                StatusCode::BAD_REQUEST => ErrorType::Validation,
+                _ => extract_error_type_from_response(error_response),
+            };
+            inflight.mark_error(error_type);
+        })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -4738,10 +4754,7 @@ async fn audio_speech(
     if streaming {
         let mut stream = Box::pin(stream);
         let first_response = loop {
-            connection_handle.arm();
-            let next = stream.next().await;
-            connection_handle.disarm();
-            let Some(annotated) = next else {
+            let Some(annotated) = stream.next().await else {
                 let err_response = ErrorMessage::internal_server_error(
                     "Audio stream ended without producing data",
                 );
@@ -4858,15 +4871,14 @@ async fn audio_speech(
             });
     }
 
-    connection_handle.arm();
-    let response_result = NvAudioSpeechResponse::from_annotated_stream(stream).await;
-    connection_handle.disarm();
-    let response = response_result.map_err(|e| {
-        let err_response =
-            ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
-        err_response
-    })?;
+    let response = NvAudioSpeechResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // Check for failure before marking success
     if response.status == "failed" {
@@ -4891,7 +4903,7 @@ pub fn audios_router(
     let path = path.unwrap_or("/v1/audio/speech".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(audio_speech))
+        .route(&path, post(handler_audio_speech))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
