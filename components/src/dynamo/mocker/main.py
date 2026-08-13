@@ -15,20 +15,12 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
+from dynamo.common.configuration.worker_router_config import build_worker_router_config
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import (
-    EngineType,
-    EntrypointArgs,
-    KvRouterConfig,
-    RouterConfig,
-    RouterMode,
-    fetch_model,
-    make_engine,
-    run_input,
-)
+from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import ROUTER_MODE_MAP, parse_args, resolve_planner_profile_data
+from .args import parse_args, resolve_planner_profile_data
 from .config import (
     apply_worker_engine_args_overrides,
     build_runtime_config,
@@ -38,21 +30,6 @@ from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def build_advertised_router_config(router_mode: str | None) -> RouterConfig | None:
-    """Build the ``RouterConfig`` this worker set advertises in its model card.
-
-    Returns ``None`` when no mode was requested, which leaves ``router_config``
-    off the card entirely so the worker inherits the frontend's global mode.
-    """
-    if router_mode is None:
-        return None
-
-    mode = getattr(RouterMode, ROUTER_MODE_MAP[router_mode])
-    kv_router_config = KvRouterConfig() if mode == RouterMode.KV else None
-    logger.info(f"Advertising router mode '{router_mode}' in the model card")
-    return RouterConfig(mode, kv_router_config)
 
 
 async def graceful_shutdown(runtimes: list):
@@ -184,7 +161,9 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     # An advertised router config rides in this worker set's model deployment
     # card and overrides the frontend's global mode for this set only. Left as
     # None, the card carries nothing and the worker inherits the frontend's mode.
-    advertised_router_config = build_advertised_router_config(args.router_mode)
+    advertised_router_config = build_worker_router_config(args.router_mode)
+    if advertised_router_config is not None:
+        logger.info(f"Advertising router mode '{args.router_mode}' in the model card")
 
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")

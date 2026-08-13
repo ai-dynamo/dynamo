@@ -15,6 +15,10 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.worker_router_config import (
+    ROUTER_MODE_CHOICES,
+    WORKER_ROUTER_MODE_HELP,
+)
 
 from . import __version__
 from .benchmark_points import (
@@ -88,6 +92,15 @@ class DynamoVllmArgGroup(ArgGroup):
             "or 'encode' (multimodal encode worker).",
             choices=[PREFILL_DECODE_DISAGGREGATION_MODE]
             + [m.value for m in DisaggregationMode],
+        )
+
+        add_argument(
+            g,
+            flag_name="--router-mode",
+            env_var="DYN_VLLM_ROUTER_MODE",
+            default=None,
+            help=WORKER_ROUTER_MODE_HELP,
+            choices=ROUTER_MODE_CHOICES,
         )
 
         add_negatable_bool_argument(
@@ -456,6 +469,10 @@ class DynamoVllmConfig(ConfigBase):
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
+
+    # Router mode this worker set advertises in its model deployment card.
+    # None leaves router_config off the card, inheriting the frontend's mode.
+    router_mode: Optional[str] = None
 
     # Headless mode for multi-node TP/PP
     headless: bool = False

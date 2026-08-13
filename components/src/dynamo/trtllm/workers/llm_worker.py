@@ -38,6 +38,7 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.worker_router_config import build_worker_router_config
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
@@ -875,6 +876,11 @@ async def init_llm_worker(
             media_fetcher=media_fetcher,
             worker_type=worker_type,
             needs=needs,
+            # Advertise this worker set's own routing strategy when --router-mode
+            # is set; None inherits the frontend's global mode. Combined with
+            # worker_type, this is what lets a disaggregated deployment route to
+            # its prefill and decode tiers differently.
+            router_config=build_worker_router_config(config.router_mode),
         )
         register_model_taint_route(runtime, endpoint)
 
