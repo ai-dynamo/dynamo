@@ -23,6 +23,8 @@ const (
 	SnapshotBinSrc = "/snapshot-binaries"
 	// SnapshotBinDst is the mount destination inside the placeholder namespace.
 	SnapshotBinDst = "/tmp/snapshot-binaries"
+	// PageBrokerDst is the PageBroker staging mount destination inside the placeholder namespace.
+	PageBrokerDst = "/tmp/pagebroker"
 )
 
 // MountPoint represents an active bind-mount of a directory inside a foreign

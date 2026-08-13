@@ -6,7 +6,7 @@
  *
  * Mount:      ns-bind-mount <pid> <src> <dst> [ro]
  * Mount-fd:   ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]
- * Unmount:    ns-bind-mount umount <pid> <dst>
+ * Unmount:    ns-bind-mount umount <pid> <dst> [created]
  * Unmount-fd: ns-bind-mount umount-fd <ns_fd> <dst> [created]
  *
  * mount-fd is the preferred form: the caller (Go) opens /proc/<pid>/ns/mnt
@@ -61,42 +61,75 @@ struct mount_attr {
 };
 #endif
 
-/* Paths the caller is allowed to pass as src and dst.  Both the Go layer and
- * this binary enforce these prefixes so that a bug in the controller cannot
- * cause arbitrary host paths to be mounted into (or unmounted from) a foreign
- * namespace.
- *
- * These values mirror the Go constants in internal/nsmount/injector.go:
- *   SnapshotBinSrc = "/snapshot-binaries"       → ALLOWED_SRC_PREFIX
- *   SnapshotBinDst = "/tmp/snapshot-binaries"   → ALLOWED_DST_PREFIX
- * Keep them in sync when either changes. */
-#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = nsmount.SnapshotBinSrc */
-#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = nsmount.SnapshotBinDst */
+#define SNAPSHOT_BINARIES_SRC "/snapshot-binaries"
+#define SNAPSHOT_BINARIES_DST "/tmp/snapshot-binaries"
+#define PAGEBROKER_RESTORE_SRC "/pagebroker/staging/restore"
+#define PAGEBROKER_DST "/tmp/pagebroker"
 
-/* Returns 0 if path is absolute and begins with allowed_prefix, -1 otherwise. */
 static int
-check_path_prefix(const char* path, const char* allowed_prefix, const char* label)
+has_path_prefix(const char* path, const char* prefix)
 {
-  if (path[0] != '/') {
-    fprintf(stderr, "%s must be an absolute path: %s\n", label, path);
-    return -1;
-  }
-  size_t plen = strlen(allowed_prefix);
-  if (strncmp(path, allowed_prefix, plen) != 0 || (path[plen] != '\0' && path[plen] != '/')) {
-    fprintf(stderr, "%s must start with %s: %s\n", label, allowed_prefix, path);
-    return -1;
-  }
-  return 0;
+  size_t length = strlen(prefix);
+  return strncmp(path, prefix, length) == 0 && (path[length] == '\0' || path[length] == '/');
 }
 
-/* Returns 1 if path contains a ".." path component, 0 otherwise. */
 static int
-has_dotdot_component(const char* path)
+is_descendant_path(const char* path, const char* directory)
+{
+  size_t length = strlen(directory);
+  if (!has_path_prefix(path, directory))
+    return 0;
+  return path[length] == '/' && path[length + 1] != '\0' && path[length + 1] != '/';
+}
+
+static int has_dot_component(const char* path);
+
+static int
+check_mount_paths(const char* src, const char* dst)
+{
+  if (has_dot_component(src) || has_dot_component(dst)) {
+    fprintf(stderr, "mount paths must not contain '.' or '..' components\n");
+    return -1;
+  }
+  if (src[0] != '/' || dst[0] != '/') {
+    fprintf(stderr, "mount paths must be absolute\n");
+    return -1;
+  }
+  if (has_path_prefix(src, SNAPSHOT_BINARIES_SRC) && has_path_prefix(dst, SNAPSHOT_BINARIES_DST))
+    return 0;
+  if (is_descendant_path(src, PAGEBROKER_RESTORE_SRC) && strcmp(dst, PAGEBROKER_DST) == 0)
+    return 0;
+  fprintf(stderr, "invalid mount paths: %s -> %s\n", src, dst);
+  return -1;
+}
+
+static int
+check_umount_path(const char* dst)
+{
+  if (has_dot_component(dst)) {
+    fprintf(stderr, "dst must not contain '.' or '..' components: %s\n", dst);
+    return -1;
+  }
+  if (dst[0] != '/') {
+    fprintf(stderr, "dst must be an absolute path: %s\n", dst);
+    return -1;
+  }
+  if (has_path_prefix(dst, SNAPSHOT_BINARIES_DST) || strcmp(dst, PAGEBROKER_DST) == 0)
+    return 0;
+  fprintf(stderr, "invalid unmount path: %s\n", dst);
+  return -1;
+}
+
+/* Returns 1 if path contains a dot or dot-dot path component, 0 otherwise. */
+static int
+has_dot_component(const char* path)
 {
   for (const char* p = path; *p;) {
     const char* seg = p;
     while (*p && *p != '/') p++;
     size_t len = (size_t)(p - seg);
+    if (len == 1 && seg[0] == '.')
+      return 1;
     if (len == 2 && seg[0] == '.' && seg[1] == '.')
       return 1;
     while (*p == '/') p++;
@@ -116,9 +149,9 @@ sys_move_mount(int from_dfd, const char* from_path, int to_dfd, const char* to_p
   return (int)syscall(__NR_move_mount, from_dfd, from_path, to_dfd, to_path, flags);
 }
 
-/* Enter the mount namespace of the given pid.  Returns 0 on success. */
+/* Open the mount namespace of the given pid. */
 static int
-enter_mnt_ns(int pid)
+open_mnt_ns(int pid)
 {
   char ns_path[256];
   snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/mnt", pid);
@@ -127,8 +160,18 @@ enter_mnt_ns(int pid)
     fprintf(stderr, "open %s: %s\n", ns_path, strerror(errno));
     return -1;
   }
+  return ns_fd;
+}
+
+/* Enter the mount namespace of the given pid.  Returns 0 on success. */
+static int
+enter_mnt_ns(int pid)
+{
+  int ns_fd = open_mnt_ns(pid);
+  if (ns_fd < 0)
+    return -1;
   if (setns(ns_fd, CLONE_NEWNS) < 0) {
-    fprintf(stderr, "setns %s: %s\n", ns_path, strerror(errno));
+    fprintf(stderr, "setns fd %d: %s\n", ns_fd, strerror(errno));
     close(ns_fd);
     return -1;
   }
@@ -193,19 +236,16 @@ static int
 do_umount(int argc, char* argv[])
 {
   if (argc < 4) {
-    fprintf(stderr, "usage: ns-bind-mount umount <pid> <dst>\n");
+    fprintf(stderr, "usage: ns-bind-mount umount <pid> <dst> [created]\n");
     return 1;
   }
   int pid = parse_pid(argv[2]);
   if (pid < 0)
     return 1;
   const char* dst = argv[3];
+  int created_dst = (argc >= 5 && strcmp(argv[4], "created") == 0);
 
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+  if (check_umount_path(dst) < 0)
     return 1;
 
   if (enter_mnt_ns(pid) < 0)
@@ -217,13 +257,11 @@ do_umount(int argc, char* argv[])
       fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
       return 1;
     }
-    /* Already gone (CRIU removed it during namespace restore).
-     * Fall through to rmdir so we don't leave the directory behind. */
+    /* Already gone (CRIU removed it during namespace restore). */
   }
 
-  /* Remove the directory we created at mount time. Ignore errors — the
-   * directory may be non-empty or already gone, neither is fatal. */
-  rmdir(dst);
+  if (created_dst)
+    rmdir(dst);
   return 0;
 }
 
@@ -249,11 +287,7 @@ do_umount_fd(int argc, char* argv[])
   const char* dst = argv[3];
   int created_dst = (argc >= 5 && strcmp(argv[4], "created") == 0);
 
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+  if (check_umount_path(dst) < 0)
     return 1;
 
   if (setns(ns_fd, CLONE_NEWNS) < 0) {
@@ -273,6 +307,44 @@ do_umount_fd(int argc, char* argv[])
   /* Only remove the directory if the mount subcommand created it. */
   if (created_dst)
     rmdir(dst);
+  return 0;
+}
+
+static int
+mount_directory(int ns_fd, const char* src, const char* dst, int readonly)
+{
+  if (check_mount_paths(src, dst) < 0)
+    return 1;
+
+  int tree_fd = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | O_CLOEXEC);
+  if (tree_fd < 0) {
+    fprintf(stderr, "open_tree %s: %s\n", src, strerror(errno));
+    return 1;
+  }
+  if (readonly && apply_rdonly_attrs(tree_fd) < 0) {
+    close(tree_fd);
+    return 1;
+  }
+  if (setns(ns_fd, CLONE_NEWNS) < 0) {
+    fprintf(stderr, "setns fd %d: %s\n", ns_fd, strerror(errno));
+    close(tree_fd);
+    return 1;
+  }
+
+  int created_dst = ensure_dst_dir(dst);
+  if (created_dst < 0) {
+    close(tree_fd);
+    return 1;
+  }
+  if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+    fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
+    close(tree_fd);
+    if (created_dst)
+      rmdir(dst);
+    return 1;
+  }
+  close(tree_fd);
+  printf("created_dst=%d\n", created_dst);
   return 0;
 }
 
@@ -298,60 +370,7 @@ do_mount_fd(int argc, char* argv[])
   const char* dst = argv[4];
   int readonly = (argc >= 6 && strcmp(argv[5], "ro") == 0);
 
-  if (has_dotdot_component(src)) {
-    fprintf(stderr, "src must not contain '..' components: %s\n", src);
-    return 1;
-  }
-  if (check_path_prefix(src, ALLOWED_SRC_PREFIX, "src") < 0)
-    return 1;
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
-    return 1;
-
-  /* Clone the source mount tree before entering the target namespace. */
-  int tree_fd = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | O_CLOEXEC);
-  if (tree_fd < 0) {
-    fprintf(stderr, "open_tree %s: %s\n", src, strerror(errno));
-    return 1;
-  }
-
-  /* Apply read-only attributes before attaching so the mount is never
-   * visible as writable inside the target namespace. */
-  if (readonly) {
-    if (apply_rdonly_attrs(tree_fd) < 0) {
-      close(tree_fd);
-      return 1;
-    }
-  }
-
-  /* Enter the target namespace via the inherited fd. */
-  if (setns(ns_fd, CLONE_NEWNS) < 0) {
-    fprintf(stderr, "setns fd %d: %s\n", ns_fd, strerror(errno));
-    close(tree_fd);
-    return 1;
-  }
-
-  int created_dst = ensure_dst_dir(dst);
-  if (created_dst < 0) {
-    close(tree_fd);
-    return 1;
-  }
-
-  /* Move the cloned mount into the target namespace at dst. */
-  if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-    fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
-    close(tree_fd);
-    if (created_dst)
-      rmdir(dst);
-    return 1;
-  }
-  close(tree_fd);
-
-  printf("created_dst=%d\n", created_dst);
-  return 0;
+  return mount_directory(ns_fd, src, dst, readonly);
 }
 
 int
@@ -369,7 +388,7 @@ main(int argc, char* argv[])
         stderr,
         "usage: ns-bind-mount <pid> <src> <dst> [ro]\n"
         "       ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]\n"
-        "       ns-bind-mount umount <pid> <dst>\n"
+        "       ns-bind-mount umount <pid> <dst> [created]\n"
         "       ns-bind-mount umount-fd <ns_fd> <dst> [created]\n");
     return 1;
   }
@@ -381,57 +400,10 @@ main(int argc, char* argv[])
   const char* dst = argv[3];
   int readonly = (argc >= 5 && strcmp(argv[4], "ro") == 0);
 
-  if (has_dotdot_component(src)) {
-    fprintf(stderr, "src must not contain '..' components: %s\n", src);
+  int ns_fd = open_mnt_ns(pid);
+  if (ns_fd < 0)
     return 1;
-  }
-  if (check_path_prefix(src, ALLOWED_SRC_PREFIX, "src") < 0)
-    return 1;
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
-    return 1;
-
-  /* Clone the source mount tree before entering the target namespace. */
-  int tree_fd = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | O_CLOEXEC);
-  if (tree_fd < 0) {
-    fprintf(stderr, "open_tree %s: %s\n", src, strerror(errno));
-    return 1;
-  }
-
-  /* Apply read-only attributes before attaching so the mount is never
-   * visible as writable inside the target namespace. */
-  if (readonly) {
-    if (apply_rdonly_attrs(tree_fd) < 0) {
-      close(tree_fd);
-      return 1;
-    }
-  }
-
-  /* Enter the target process's mount namespace. */
-  if (enter_mnt_ns(pid) < 0) {
-    close(tree_fd);
-    return 1;
-  }
-
-  int created_dst = ensure_dst_dir(dst);
-  if (created_dst < 0) {
-    close(tree_fd);
-    return 1;
-  }
-
-  /* Move the cloned mount into the target namespace at dst. */
-  if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-    fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
-    close(tree_fd);
-    if (created_dst)
-      rmdir(dst);
-    return 1;
-  }
-  close(tree_fd);
-
-  printf("created_dst=%d\n", created_dst);
-  return 0;
+  int result = mount_directory(ns_fd, src, dst, readonly);
+  close(ns_fd);
+  return result;
 }
