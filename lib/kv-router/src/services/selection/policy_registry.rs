@@ -158,7 +158,8 @@ impl WorkerSelectionPolicyRegistry {
                 Some(factory) => factory(config, worker_type, partition),
                 None => WorkerSelectionPolicy::default(
                     config.clone(),
-                    worker_type.default_selector_label(),
+                    worker_type
+                        .default_selector_label_with_tracking(config.router_track_active_blocks),
                 ),
             }
         })))

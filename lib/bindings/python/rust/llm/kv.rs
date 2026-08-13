@@ -1624,6 +1624,21 @@ impl Drop for RadixTree {
 /// Helper function to create a KV router from an endpoint using the ModelManager
 /// to ensure proper etcd registration.
 /// Uses the discovered model card's typed worker role for policy selection.
+fn policy_role_and_metric_label(
+    worker_role: Option<WorkerType>,
+    track_active_blocks: bool,
+) -> (WorkerType, &'static str) {
+    let fallback_role = if track_active_blocks {
+        WorkerType::Aggregated
+    } else {
+        WorkerType::Prefill
+    };
+    let effective_worker_role = worker_role.unwrap_or(fallback_role);
+    let metric_worker_type =
+        effective_worker_role.default_selector_label_with_tracking(track_active_blocks);
+    (effective_worker_role, metric_worker_type)
+}
+
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
@@ -1635,36 +1650,53 @@ async fn create_kv_router_from_endpoint(
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let endpoint_id = endpoint.inner.id();
 
-    // Wait for the worker's model card so the router derives its role from typed
-    // discovery metadata instead of endpoint naming. The same card supplies the
-    // model name when remote/served indexing needs it and Eagle routing semantics.
-    // Bounded by `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
+    // A linked policy requires the worker's typed role, and remote/served indexing
+    // requires the model name. Wait for a model card only for those cases. Stock
+    // routers retain the non-blocking discovery snapshot used for Eagle semantics.
+    // The blocking path is bounded by `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
     let needs_model_name = kv_router_config
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let needs_policy_role = worker_selection_policy_factory.is_some();
     let (model_name, policy_model_name, enable_eagle, worker_role) = {
-        let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(600);
-        tracing::info!(
-            namespace = %endpoint_id.namespace,
-            component = %endpoint_id.component,
-            endpoint = %endpoint_id.name,
-            wait_secs,
-            needs_model_name,
-            needs_policy_role,
-            "Waiting for worker model card in discovery"
-        );
-        let maybe_card = llm_rs::discovery::wait_for_endpoint_model_card(
-            &endpoint.inner,
-            std::time::Duration::from_secs(wait_secs),
-            None,
-        )
-        .await
-        .map_err(to_pyerr)?;
+        let maybe_card = if needs_model_name || needs_policy_role {
+            let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600);
+            tracing::info!(
+                namespace = %endpoint_id.namespace,
+                component = %endpoint_id.component,
+                endpoint = %endpoint_id.name,
+                wait_secs,
+                needs_model_name,
+                needs_policy_role,
+                "Waiting for worker model card in discovery"
+            );
+            llm_rs::discovery::wait_for_endpoint_model_card(
+                &endpoint.inner,
+                std::time::Duration::from_secs(wait_secs),
+                None,
+            )
+            .await
+            .map_err(to_pyerr)?
+        } else {
+            let discovery = endpoint.inner.component().drt().discovery();
+            let instances = discovery
+                .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace.clone(),
+                    component: endpoint_id.component.clone(),
+                    endpoint: endpoint_id.name.clone(),
+                })
+                .await
+                .map_err(to_pyerr)?;
+            instances.into_iter().find_map(|instance| {
+                instance
+                    .deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                    .ok()
+            })
+        };
 
         match maybe_card {
             Some(card) => {
@@ -1695,16 +1727,14 @@ async fn create_kv_router_from_endpoint(
     #[cfg(not(feature = "custom-policy"))]
     let _ = policy_model_name;
 
-    let fallback_role = if kv_router_config
+    let track_active_blocks = kv_router_config
         .as_ref()
-        .is_some_and(|config| !config.router_track_active_blocks)
-    {
-        WorkerType::Prefill
-    } else {
-        WorkerType::Aggregated
-    };
-    let effective_worker_role = worker_role.unwrap_or(fallback_role);
-    let metric_worker_type = effective_worker_role.default_selector_label();
+        .map(|config| config.router_track_active_blocks)
+        .unwrap_or(true);
+    let (effective_worker_role, metric_worker_type) =
+        policy_role_and_metric_label(worker_role, track_active_blocks);
+    #[cfg(not(feature = "custom-policy"))]
+    let _ = effective_worker_role;
 
     #[cfg(not(feature = "custom-policy"))]
     let kv_router = model_manager
