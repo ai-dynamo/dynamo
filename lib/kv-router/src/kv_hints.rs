@@ -4,30 +4,19 @@
 //! Typed KV-cache hints attached to selected backend requests.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
 pub const KV_HINT_TRANSFER_CAPABILITY_KEY: &str = "kv_hint.transfer.v1";
 
-/// Current version of the Dynamo-to-engine KV hint envelope.
-pub const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
-
-/// Action discriminator for a point-to-point KV source location.
-pub const KV_SOURCE_LOCATIONS_ACTION_TYPE: &str = "kv.source_locations";
-
-/// Current payload version for [`KvSourceLocationsPayload`].
-pub const KV_SOURCE_LOCATIONS_ACTION_VERSION: &str = "1.0";
-
 /// Worker runtime-data keys used to build transfer hints.
 pub const KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str = "kv_hint_transfer_worker_type";
 pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "kv_hint_transfer_source_control_endpoints";
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KvHintProtocolVersion {
-    #[default]
     #[serde(rename = "0.1")]
     V0_1,
 }
@@ -60,11 +49,7 @@ pub enum KvHintAction {
 }
 
 impl KvHintAction {
-    pub fn source_locations(payload: KvSourceLocationsPayload) -> Self {
-        Self::source_locations_with_id(format!("a-{}", Uuid::new_v4().simple()), payload)
-    }
-
-    pub fn source_locations_with_id(
+    pub fn source_locations(
         action_id: impl Into<String>,
         payload: KvSourceLocationsPayload,
     ) -> Self {
@@ -85,11 +70,7 @@ pub struct KvHints {
 }
 
 impl KvHints {
-    pub fn new(actions: Vec<KvHintAction>) -> Self {
-        Self::with_message_id(format!("msg-{}", Uuid::new_v4().simple()), actions)
-    }
-
-    pub fn with_message_id(message_id: impl Into<String>, actions: Vec<KvHintAction>) -> Self {
+    pub fn new(message_id: impl Into<String>, actions: Vec<KvHintAction>) -> Self {
         Self {
             protocol_version: KvHintProtocolVersion::V0_1,
             message_id: message_id.into(),
@@ -140,9 +121,9 @@ mod tests {
 
     #[test]
     fn serializes_versioned_source_locations_action() {
-        let hints = KvHints::with_message_id(
+        let hints = KvHints::new(
             "msg-123",
-            vec![KvHintAction::source_locations_with_id(
+            vec![KvHintAction::source_locations(
                 "a1",
                 KvSourceLocationsPayload {
                     source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
@@ -157,12 +138,12 @@ mod tests {
         assert_eq!(
             serde_json::to_value(hints).unwrap(),
             serde_json::json!({
-                "protocol_version": KV_HINT_PROTOCOL_VERSION,
+                "protocol_version": "0.1",
                 "message_id": "msg-123",
                 "actions": [{
                     "action_id": "a1",
-                    "action_type": KV_SOURCE_LOCATIONS_ACTION_TYPE,
-                    "action_version": KV_SOURCE_LOCATIONS_ACTION_VERSION,
+                    "action_type": "kv.source_locations",
+                    "action_version": "1.0",
                     "payload": {
                         "source_control_endpoint": "tcp://127.0.0.1:23280",
                         "block_hashes": [11, 22],
