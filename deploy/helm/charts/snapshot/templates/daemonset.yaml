@@ -101,9 +101,11 @@ spec:
         - name: pagebroker
           image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag }}"
           imagePullPolicy: {{ .Values.pageBroker.image.pullPolicy }}
-          {{- with .Values.pageBroker.command }}
           command:
+          {{- with .Values.pageBroker.command }}
             {{- toYaml . | nindent 12 }}
+          {{- else }}
+            - /usr/local/bin/pagebroker
           {{- end }}
           args:
             {{- with .Values.pageBroker.args }}
@@ -115,8 +117,10 @@ spec:
           volumeMounts:
             - name: pagebroker
               mountPath: /pagebroker
+            {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
         {{- end }}
         - name: agent
           image: "{{ .Values.daemonset.image.repository }}:{{ .Values.daemonset.image.tag }}"
