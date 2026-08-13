@@ -17,8 +17,7 @@ int
 main(int argc, char** argv)
 {
   size_t max_concurrency;
-  if (argc != 5 || std::string_view(argv[3]) != "--max-concurrency" ||
-      !ParseMaxConcurrency(argv[4], max_concurrency)) {
+  if (argc != 5 || std::string_view(argv[3]) != "--max-concurrency" || !ParseMaxConcurrency(argv[4], max_concurrency)) {
     std::cerr << "usage: pagebroker socket_path staging_directory --max-concurrency max_concurrency\n";
     return static_cast<int>(ExitCode::INVALID_ARGUMENTS);
   }

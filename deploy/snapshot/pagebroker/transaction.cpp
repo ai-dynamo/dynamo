@@ -39,4 +39,13 @@ Transaction::clear_descriptor()
   descriptor_ = std::monostate();
 }
 
+bool
+Transaction::retain_terminal()
+{
+  if (terminal_retained_ || (state_ != State::COMMITTED && state_ != State::ABORTED))
+    return false;
+  terminal_retained_ = true;
+  return true;
+}
+
 }  // namespace snapshot::pagebroker

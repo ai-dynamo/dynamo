@@ -20,6 +20,7 @@ const (
 	// PageBroker control requests and responses are limited to 64 KiB.
 	maxMessageSize   = 64 << 10
 	commitRetryDelay = 100 * time.Millisecond
+	commitRetryLimit = 30 * time.Second
 )
 
 var errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
@@ -56,6 +57,7 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 }
 
 func (c Client) Commit(ctx context.Context, transactionID string) error {
+	var retryDeadline time.Time
 	for {
 		response, err := c.request(ctx, transactionID, &Request_Commit{Commit: &CommitRequest{}})
 		if err == nil {
@@ -68,10 +70,17 @@ func (c Client) Commit(ctx context.Context, transactionID string) error {
 		if !errors.As(err, &transport) {
 			return err
 		}
+		if retryDeadline.IsZero() {
+			retryDeadline = time.Now().Add(commitRetryLimit)
+		}
+		delay := min(commitRetryDelay, time.Until(retryDeadline))
+		if delay <= 0 {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(commitRetryDelay):
+		case <-time.After(delay):
 		}
 	}
 }

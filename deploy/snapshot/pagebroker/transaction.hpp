@@ -18,10 +18,12 @@ class Transaction {
   const Descriptor& descriptor() const;
   void set_descriptor(Descriptor descriptor);
   void clear_descriptor();
+  bool retain_terminal();
 
  private:
   std::mutex mutex_;
   State state_ = State::NEW;
   Descriptor descriptor_;
+  bool terminal_retained_ = false;
 };
 }  // namespace snapshot::pagebroker

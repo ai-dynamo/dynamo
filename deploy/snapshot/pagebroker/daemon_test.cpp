@@ -145,6 +145,21 @@ TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
   EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
 }
 
+TEST_F(BrokerTest, InvalidRestoreDoesNotReserveTransaction)
+{
+  auto invalid = RequestFor("restore");
+  Configure(
+      invalid.mutable_staged_restore()->mutable_source(), invalid.mutable_staged_restore()->mutable_io_engine(),
+      "relative");
+  EXPECT_EQ(broker().HandleRequest(invalid).failure().code(), Failure::INVALID_REQUEST);
+
+  auto restore = RequestFor("restore");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
+      source_);
+  EXPECT_TRUE(broker().HandleRequest(restore).has_staged_restore_directory());
+}
+
 TEST_F(BrokerTest, RejectsInvalidStagedRestore)
 {
   auto restore = RequestFor("restore");
@@ -152,6 +167,62 @@ TEST_F(BrokerTest, RejectsInvalidStagedRestore)
   const auto response = broker().HandleRequest(restore);
   ASSERT_TRUE(response.has_failure());
   EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+}
+
+TEST_F(BrokerTest, UnknownCommitAndAbortDoNotReserveTransactions)
+{
+  auto commit = RequestFor("unknown-commit");
+  commit.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+
+  auto restore = RequestFor("unknown-commit");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
+      source_);
+  EXPECT_TRUE(broker().HandleRequest(restore).has_staged_restore_directory());
+
+  auto abort = RequestFor("unknown-abort");
+  abort.mutable_abort();
+  EXPECT_EQ(broker().HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+
+  auto prepare = RequestFor("unknown-abort");
+  Configure(
+      prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "published");
+  EXPECT_TRUE(broker().HandleRequest(prepare).has_staged_checkpoint_directory());
+}
+
+TEST_F(BrokerTest, EvictsOldTerminalTransactionsButRetainsRecentCompletions)
+{
+  auto oldest = RequestFor("oldest");
+  Configure(
+      oldest.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      oldest.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "oldest");
+  ASSERT_TRUE(broker().HandleRequest(oldest).has_staged_checkpoint_directory());
+  auto oldest_commit = RequestFor("oldest");
+  oldest_commit.mutable_commit();
+  ASSERT_TRUE(broker().HandleRequest(oldest_commit).has_commit_complete());
+
+  for (size_t index = 0; index < 1024; ++index) {
+    const auto id = "terminal-" + std::to_string(index);
+    auto prepare = RequestFor(id);
+    Configure(
+        prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+        prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / id);
+    ASSERT_TRUE(broker().HandleRequest(prepare).has_staged_checkpoint_directory());
+    auto commit = RequestFor(id);
+    commit.mutable_commit();
+    ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  }
+
+  auto recent_commit = RequestFor("terminal-1023");
+  recent_commit.mutable_commit();
+  EXPECT_TRUE(broker().HandleRequest(recent_commit).has_commit_complete());
+
+  auto reuse = RequestFor("oldest");
+  Configure(
+      reuse.mutable_staged_restore()->mutable_source(), reuse.mutable_staged_restore()->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(reuse).has_staged_restore_directory());
 }
 
 TEST_F(BrokerTest, AbortsFailedCheckpointStaging)
