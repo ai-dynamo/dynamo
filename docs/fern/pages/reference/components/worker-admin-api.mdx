@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Worker Admin API
-subtitle: Worker-local lifecycle endpoints for draining, resuming, and checking deletion safety
+subtitle: Worker-local lifecycle endpoints for draining, resuming, and checking worker state
 ---
 
 **Experimental.** Unified-backend workers expose lifecycle controls through the worker system-status
@@ -19,7 +19,7 @@ operator network.
 | --- | --- | --- |
 | `POST` | `/engine/drain` | Unregister the worker, wait for discovery convergence, then stop new request admission and drain admitted work |
 | `POST` | `/engine/resume` | Resume request admission, then re-register the worker in discovery |
-| `GET` | `/engine/status` | Return the worker lifecycle and deletion-safety status |
+| `GET` | `/engine/status` | Return the worker lifecycle status |
 
 Send an empty body or an empty JSON object. Each endpoint returns the same status shape:
 
@@ -27,17 +27,14 @@ Send an empty body or an empty JSON object. Each endpoint returns the same statu
 {
   "state": "draining",
   "inflight_requests": 2,
-  "kv_transfers": "not_applicable",
-  "safe_to_delete": false,
   "discovery_registered": false
 }
 ```
 
-`state` is one of `serving`, `draining`, `drained`, or `stopping`. Delete a worker only when
-`safe_to_delete` is `true`. For a disaggregated prefill worker, the worker reports `drained` only when
-the backend confirms that both admitted requests and pending KV transfers are complete. If the
-backend cannot confirm KV-transfer completion, `kv_transfers` remains `unknown` and
-`safe_to_delete` remains `false`.
+`state` is one of `serving`, `draining`, `drained`, or `stopping`. Delete a worker only when its state
+is `drained`. An aggregated worker reaches `drained` after all admitted requests finish. A
+disaggregated prefill worker also requires backend quiescence support. Until its backend can confirm
+quiescence, it remains `draining`.
 
 While discovery converges, a draining worker continues to accept requests that a frontend already
 selected. After the configured graceful-shutdown grace period, the worker rejects late admissions

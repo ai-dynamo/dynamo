@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
+use thiserror::Error;
 
 /// Callback type for engine routes (async)
 /// Takes JSON body, returns JSON response (or error) wrapped in a Future
@@ -69,6 +70,13 @@ pub struct EngineRouteRegistration {
     registration_id: u64,
 }
 
+/// Returned when a set of scoped routes cannot be registered atomically.
+#[derive(Debug, Error)]
+#[error("engine route is already registered: /engine/{route}")]
+pub struct EngineRouteConflict {
+    route: String,
+}
+
 impl Drop for EngineRouteRegistration {
     fn drop(&mut self) {
         self.registry
@@ -119,6 +127,45 @@ impl EngineRouteRegistry {
             route: route.to_string(),
             registration_id,
         }
+    }
+
+    /// Register method-restricted routes as one all-or-nothing operation.
+    ///
+    /// This is intended for route groups owned by one component. If any name
+    /// is already registered, no route in the group is changed.
+    pub fn try_register_scoped_methods(
+        &self,
+        registrations: Vec<(&str, EngineRouteMethod, EngineRouteCallback)>,
+    ) -> Result<Vec<EngineRouteRegistration>, EngineRouteConflict> {
+        let mut routes = self.routes.write();
+        let mut names = HashSet::with_capacity(registrations.len());
+        for (route, _, _) in &registrations {
+            if routes.contains_key(*route) || !names.insert((*route).to_string()) {
+                return Err(EngineRouteConflict {
+                    route: (*route).to_string(),
+                });
+            }
+        }
+
+        let mut guards = Vec::with_capacity(registrations.len());
+        for (route, method, callback) in registrations {
+            let registration_id = self.next_registration_id.fetch_add(1, Ordering::Relaxed);
+            routes.insert(
+                route.to_string(),
+                EngineRoute {
+                    callback,
+                    method: Some(method),
+                    registration_id,
+                },
+            );
+            tracing::debug!("Registered engine route: /engine/{route}");
+            guards.push(EngineRouteRegistration {
+                registry: self.clone(),
+                route: route.to_string(),
+                registration_id,
+            });
+        }
+        Ok(guards)
     }
 
     fn register_inner(
@@ -284,5 +331,25 @@ mod tests {
         assert!(registry.get("status").is_some());
         drop(current);
         assert!(registry.get("status").is_none());
+    }
+
+    #[test]
+    fn scoped_method_group_rejects_conflicts_without_partial_registration() {
+        let registry = EngineRouteRegistry::new();
+        let existing: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"owner": "first"})) }));
+        let _existing =
+            registry.register_scoped_method("status", EngineRouteMethod::Get, existing);
+
+        let callback: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"owner": "second"})) }));
+        let result = registry.try_register_scoped_methods(vec![
+            ("drain", EngineRouteMethod::Post, callback.clone()),
+            ("status", EngineRouteMethod::Get, callback),
+        ]);
+
+        assert!(result.is_err());
+        assert!(registry.get("drain").is_none());
+        assert!(registry.get("status").is_some());
     }
 }

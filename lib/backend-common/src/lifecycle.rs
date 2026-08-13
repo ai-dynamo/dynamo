@@ -47,34 +47,10 @@ impl WorkerLifecycleState {
     }
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum KvTransferState {
-    NotApplicable = 0,
-    Unknown = 1,
-    Pending = 2,
-    Complete = 3,
-}
-
-impl KvTransferState {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => Self::NotApplicable,
-            1 => Self::Unknown,
-            2 => Self::Pending,
-            3 => Self::Complete,
-            _ => unreachable!("invalid KV transfer state {value}"),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct WorkerLifecycleStatus {
     state: WorkerLifecycleState,
     inflight_requests: u64,
-    kv_transfers: KvTransferState,
-    safe_to_delete: bool,
     discovery_registered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
@@ -111,38 +87,46 @@ impl QuiescenceCheck for EngineKind {
 
 /// Shared request-admission and in-flight tracker.
 ///
-/// The double-check around `fetch_add` closes the drain/admission race: a
-/// request is either rejected after draining starts or counted so the drain
-/// monitor waits for its response stream to be dropped.
+/// Admission and the in-flight count share one atomic word, so closing
+/// admission is linearizable with request acquisition.
 #[derive(Debug)]
 pub(crate) struct RequestTracker {
-    accepting: AtomicBool,
-    inflight: AtomicU64,
+    state: AtomicU64,
     changed: Notify,
 }
+
+const ACCEPTING_BIT: u64 = 1 << 63;
+const INFLIGHT_MASK: u64 = !ACCEPTING_BIT;
 
 impl RequestTracker {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            accepting: AtomicBool::new(true),
-            inflight: AtomicU64::new(0),
+            state: AtomicU64::new(ACCEPTING_BIT),
             changed: Notify::new(),
         })
     }
 
     pub(crate) fn try_acquire(self: &Arc<Self>) -> Result<RequestGuard> {
-        if !self.accepting.load(Ordering::Acquire) {
-            return Err(worker_draining_error(
-                "worker is not accepting new requests",
-            ));
-        }
-
-        self.inflight.fetch_add(1, Ordering::AcqRel);
-        if !self.accepting.load(Ordering::Acquire) {
-            self.release();
-            return Err(worker_draining_error(
-                "worker started draining before request admission completed",
-            ));
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            if current & ACCEPTING_BIT == 0 {
+                return Err(worker_draining_error(
+                    "worker is not accepting new requests",
+                ));
+            }
+            assert!(
+                current & INFLIGHT_MASK < INFLIGHT_MASK,
+                "request tracker overflow"
+            );
+            match self.state.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
         }
 
         Ok(RequestGuard {
@@ -151,27 +135,28 @@ impl RequestTracker {
     }
 
     pub(crate) fn stop_accepting(&self) {
-        self.accepting.store(false, Ordering::Release);
+        self.state.fetch_and(INFLIGHT_MASK, Ordering::AcqRel);
         self.changed.notify_waiters();
     }
 
     fn start_accepting(&self) {
-        self.accepting.store(true, Ordering::Release);
+        self.state.fetch_or(ACCEPTING_BIT, Ordering::AcqRel);
         self.changed.notify_waiters();
     }
 
     fn is_accepting(&self) -> bool {
-        self.accepting.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) & ACCEPTING_BIT != 0
     }
 
     pub(crate) fn inflight(&self) -> u64 {
-        self.inflight.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) & INFLIGHT_MASK
     }
 
     fn release(&self) {
-        let previous = self.inflight.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "request tracker underflow");
-        if previous == 1 {
+        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
+        let previous_inflight = previous & INFLIGHT_MASK;
+        debug_assert!(previous_inflight > 0, "request tracker underflow");
+        if previous_inflight == 1 {
             self.changed.notify_waiters();
         }
     }
@@ -207,7 +192,6 @@ impl Drop for RequestGuard {
 /// Coordinates the Admin API, request admission, discovery, and SIGTERM.
 pub(crate) struct WorkerLifecycleController {
     state: AtomicU8,
-    kv_transfers: AtomicU8,
     discovery_registered: AtomicBool,
     last_error: RwLock<Option<String>>,
     operation_lock: Mutex<()>,
@@ -246,7 +230,6 @@ impl WorkerLifecycleController {
     ) -> Arc<Self> {
         Arc::new(Self {
             state: AtomicU8::new(WorkerLifecycleState::Serving as u8),
-            kv_transfers: AtomicU8::new(Self::initial_kv_state(mode) as u8),
             discovery_registered: AtomicBool::new(true),
             last_error: RwLock::new(None),
             operation_lock: Mutex::new(()),
@@ -260,14 +243,6 @@ impl WorkerLifecycleController {
         })
     }
 
-    fn initial_kv_state(mode: DisaggregationMode) -> KvTransferState {
-        if mode.is_prefill() {
-            KvTransferState::Unknown
-        } else {
-            KvTransferState::NotApplicable
-        }
-    }
-
     fn state(&self) -> WorkerLifecycleState {
         WorkerLifecycleState::from_u8(self.state.load(Ordering::Acquire))
     }
@@ -277,8 +252,6 @@ impl WorkerLifecycleController {
         WorkerLifecycleStatus {
             state,
             inflight_requests: self.tracker.inflight(),
-            kv_transfers: KvTransferState::from_u8(self.kv_transfers.load(Ordering::Acquire)),
-            safe_to_delete: state == WorkerLifecycleState::Drained,
             discovery_registered: self.discovery_registered.load(Ordering::Acquire),
             last_error: self.last_error.read().clone(),
         }
@@ -287,26 +260,26 @@ impl WorkerLifecycleController {
     pub(crate) fn register_admin_routes(
         self: &Arc<Self>,
         registry: &EngineRouteRegistry,
-    ) -> AdminRouteRegistration {
-        let routes = vec![
-            registry.register_scoped_method(
+    ) -> Result<AdminRouteRegistration> {
+        let routes = registry.try_register_scoped_methods(vec![
+            (
                 "drain",
                 EngineRouteMethod::Post,
                 lifecycle_callback(Arc::clone(self), LifecycleAction::Drain),
             ),
-            registry.register_scoped_method(
+            (
                 "resume",
                 EngineRouteMethod::Post,
                 lifecycle_callback(Arc::clone(self), LifecycleAction::Resume),
             ),
-            registry.register_scoped_method(
+            (
                 "status",
                 EngineRouteMethod::Get,
                 lifecycle_callback(Arc::clone(self), LifecycleAction::Status),
             ),
-        ];
+        ])?;
         tracing::info!("registered worker Admin API routes under /engine");
-        AdminRouteRegistration { _routes: routes }
+        Ok(AdminRouteRegistration { _routes: routes })
     }
 
     pub(crate) async fn drain(self: &Arc<Self>) -> Result<WorkerLifecycleStatus> {
@@ -314,8 +287,6 @@ impl WorkerLifecycleController {
         let started = match self.state() {
             WorkerLifecycleState::Serving => {
                 self.last_error.write().take();
-                self.kv_transfers
-                    .store(Self::initial_kv_state(self.mode) as u8, Ordering::Release);
                 self.state
                     .store(WorkerLifecycleState::Draining as u8, Ordering::Release);
                 let generation = self.drain_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -470,8 +441,6 @@ impl WorkerLifecycleController {
         }
 
         self.last_error.write().take();
-        self.kv_transfers
-            .store(Self::initial_kv_state(self.mode) as u8, Ordering::Release);
         self.state
             .store(WorkerLifecycleState::Serving as u8, Ordering::Release);
         Ok(self.status())
@@ -552,8 +521,8 @@ impl WorkerLifecycleController {
                     Ok(Some(true))
                 };
 
-                // Publish both KV state and Drained under the same operation
-                // fence used by resume. A stale monitor may finish an engine
+                // Publish Drained under the same operation fence used by
+                // resume. A stale monitor may finish an engine
                 // check, but it can never publish after its generation ends.
                 let _operation = tokio::select! {
                     _ = cancel.cancelled() => return,
@@ -567,24 +536,13 @@ impl WorkerLifecycleController {
 
                 match quiescence {
                     Ok(Some(true)) => {
-                        if self.mode.is_prefill() {
-                            self.kv_transfers
-                                .store(KvTransferState::Complete as u8, Ordering::Release);
-                        }
                         self.state
                             .store(WorkerLifecycleState::Drained as u8, Ordering::Release);
                         tracing::info!("worker drained and is safe to delete");
                         return;
                     }
-                    Ok(Some(false)) => self
-                        .kv_transfers
-                        .store(KvTransferState::Pending as u8, Ordering::Release),
-                    Ok(None) => self
-                        .kv_transfers
-                        .store(KvTransferState::Unknown as u8, Ordering::Release),
+                    Ok(Some(false)) | Ok(None) => {}
                     Err(error) => {
-                        self.kv_transfers
-                            .store(KvTransferState::Unknown as u8, Ordering::Release);
                         *self.last_error.write() = Some(error.to_string());
                     }
                 }
@@ -788,6 +746,70 @@ mod tests {
         assert_eq!(error.error_type(), ErrorType::WorkerDraining);
     }
 
+    #[test]
+    fn concurrent_admission_is_counted_or_rejected_when_drain_closes() {
+        const CONTENDERS: usize = 16;
+
+        let tracker = RequestTracker::new();
+        let start = Arc::new(std::sync::Barrier::new(CONTENDERS + 1));
+        let admitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        std::thread::scope(|scope| {
+            for _ in 0..CONTENDERS {
+                let tracker = Arc::clone(&tracker);
+                let start = Arc::clone(&start);
+                let admitted = Arc::clone(&admitted);
+                scope.spawn(move || {
+                    start.wait();
+                    if let Ok(guard) = tracker.try_acquire() {
+                        admitted.lock().unwrap().push(guard);
+                    }
+                });
+            }
+
+            start.wait();
+            tracker.stop_accepting();
+        });
+
+        let guards = admitted.lock().unwrap();
+        assert_eq!(tracker.inflight(), guards.len() as u64);
+        assert!(tracker.try_acquire().is_err());
+        drop(guards);
+        admitted.lock().unwrap().clear();
+        assert_eq!(tracker.inflight(), 0);
+    }
+
+    #[test]
+    fn second_lifecycle_controller_cannot_replace_admin_routes() {
+        let registry = EngineRouteRegistry::new();
+        let (first, _) = test_controller(
+            MockDiscovery::new(1),
+            MockQuiescence::new(Some(true), 1),
+            DisaggregationMode::Aggregated,
+            Duration::ZERO,
+        );
+        let (second, _) = test_controller(
+            MockDiscovery::new(1),
+            MockQuiescence::new(Some(true), 1),
+            DisaggregationMode::Aggregated,
+            Duration::ZERO,
+        );
+
+        let first_routes = first.register_admin_routes(&registry).unwrap();
+        let error = match second.register_admin_routes(&registry) {
+            Ok(_) => panic!("a second lifecycle controller must not replace Admin API routes"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("already registered"));
+        assert!(registry.get("drain").is_some());
+        assert!(registry.get("resume").is_some());
+        assert!(registry.get("status").is_some());
+
+        drop(first_routes);
+        assert!(registry.routes().is_empty());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn drain_keeps_admission_open_during_discovery_grace_period() {
         let discovery = MockDiscovery::new(1);
@@ -871,8 +893,6 @@ mod tests {
 
         let status = controller.status();
         assert_eq!(status.state, WorkerLifecycleState::Serving);
-        assert_eq!(status.kv_transfers, KvTransferState::Unknown);
-        assert!(!status.safe_to_delete);
     }
 
     #[tokio::test(start_paused = true)]

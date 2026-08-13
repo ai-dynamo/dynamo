@@ -504,6 +504,19 @@ async fn generate_dispatch(
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
             }
+            if super::metrics::request_was_unavailable(error.as_ref()) {
+                inflight_guard.mark_error(ErrorType::Unavailable);
+                tracing::warn!(
+                    %request_id,
+                    error = %format!("{error:#}"),
+                    "no backend worker is available while folding generate stream"
+                );
+                return generate_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service_unavailable",
+                    "no backend worker is available".to_string(),
+                );
+            }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
             generate_internal_error_response()
@@ -529,7 +542,9 @@ mod tests {
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
     use dynamo_runtime::{
         engine::{AsyncEngine, ResponseStream},
+        error::{DynamoError, ErrorType as DynamoErrorType},
         pipeline::{Error, ManyOut, SingleIn},
+        protocols::maybe_error::MaybeError,
     };
     use futures::Stream;
     use tokio::sync::Notify;
@@ -602,6 +617,8 @@ mod tests {
 
     struct CancelledEngine;
 
+    struct WorkerDrainingStreamEngine;
+
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
         for CancelledEngine
@@ -615,6 +632,23 @@ mod tests {
                 .message("backend cancelled before opening a stream")
                 .build()
                 .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for WorkerDrainingStreamEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let error = DynamoError::builder()
+                .error_type(DynamoErrorType::WorkerDraining)
+                .message("worker started draining")
+                .build();
+            let stream = futures::stream::iter([Annotated::from_err(error)]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
         }
     }
 
@@ -1142,6 +1176,37 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn worker_draining_stream_error_returns_503() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(WorkerDrainingStreamEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-worker-draining-stream".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
     }
 
     #[test]

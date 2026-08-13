@@ -1034,7 +1034,14 @@ impl Worker {
                 format!("serve registration: {e}"),
             )
         })?;
-        let admin_routes = lifecycle.register_admin_routes(endpoint.drt().engine_routes());
+        let admin_routes = lifecycle
+            .register_admin_routes(endpoint.drt().engine_routes())
+            .map_err(|error| {
+                err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    format!("register worker Admin API routes: {error}"),
+                )
+            })?;
 
         let serve_fut = started_endpoint.wait();
         tokio::pin!(serve_fut);
