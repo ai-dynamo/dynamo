@@ -395,11 +395,14 @@ class AudioFormatter:
             return self._error_response(request_id, "No audio generated")
 
         audio_np = np.concatenate(aggregate_state.chunks, axis=-1)
-        return await self.format(
+        response = await self.format(
             {"audio": audio_np, "sr": aggregate_state.sample_rate},
             request_id,
             **ctx,
         )
+        if response is None:
+            return self._error_response(request_id, "No audio generated")
+        return response
 
     def _append_audio_chunk(
         self,
