@@ -338,8 +338,7 @@ mod tests {
         let registry = EngineRouteRegistry::new();
         let existing: EngineRouteCallback =
             Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"owner": "first"})) }));
-        let _existing =
-            registry.register_scoped_method("status", EngineRouteMethod::Get, existing);
+        let _existing = registry.register_scoped_method("status", EngineRouteMethod::Get, existing);
 
         let callback: EngineRouteCallback =
             Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"owner": "second"})) }));
