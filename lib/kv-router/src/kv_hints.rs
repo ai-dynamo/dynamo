@@ -77,10 +77,6 @@ impl KvHints {
             actions,
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.actions.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

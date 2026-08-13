@@ -4801,7 +4801,6 @@ mod tests {
                     trigger: Some("automatic".to_string()),
                     ..Default::default()
                 }),
-                kv_hints: None,
                 input_trigger: None,
             },
         );

@@ -303,7 +303,7 @@ impl PendingRequest {
             session_context: self
                 .session_id
                 .clone()
-                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
+                .map(|session_id| SessionContext::new(session_id, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,

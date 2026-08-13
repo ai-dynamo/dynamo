@@ -83,8 +83,8 @@ pub(crate) type WorkerSelectorFactory<Sel> = Arc<
 pub(crate) fn to_worker_selection_session_context(
     context: &crate::protocols::common::extensions::AgentContext,
 ) -> dynamo_kv_router::SessionContext {
-    use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
-    use dynamo_kv_router::{SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints};
+    use crate::protocols::common::extensions::{AgentContext, InputTrigger};
+    use dynamo_kv_router::{SessionContext, WorkerSelectionInputTrigger};
 
     // Keep this exhaustive so a new wire-level field must be handled here.
     let AgentContext {
@@ -92,7 +92,6 @@ pub(crate) fn to_worker_selection_session_context(
         parent_session_id,
         session_final,
         compaction: _,
-        kv_hints,
         input_trigger,
     } = context;
     let input_trigger = input_trigger.map(|trigger| match trigger {
@@ -104,10 +103,6 @@ pub(crate) fn to_worker_selection_session_context(
         session_id.clone(),
         parent_session_id.clone(),
         *session_final,
-        kv_hints.as_ref().map(|hints| {
-            let KvHints { evict_session } = hints;
-            WorkerSelectionKvHints::new(*evict_session)
-        }),
         input_trigger,
     )
 }
@@ -1730,7 +1725,7 @@ mod tests {
 
     #[test]
     fn worker_selection_receives_complete_session_context() {
-        use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
+        use crate::protocols::common::extensions::{AgentContext, InputTrigger};
         use dynamo_kv_router::WorkerSelectionInputTrigger;
 
         let context = AgentContext {
@@ -1738,9 +1733,6 @@ mod tests {
             parent_session_id: Some("root-session".into()),
             session_final: Some(true),
             compaction: None,
-            kv_hints: Some(KvHints {
-                evict_session: true,
-            }),
             input_trigger: Some(InputTrigger::ToolResult),
         };
 
@@ -1749,12 +1741,6 @@ mod tests {
         assert_eq!(selection_context.session_id(), "child-session");
         assert_eq!(selection_context.parent_session_id(), Some("root-session"));
         assert_eq!(selection_context.session_final(), Some(true));
-        assert!(
-            selection_context
-                .kv_hints()
-                .expect("KV hints")
-                .evict_session()
-        );
         assert_eq!(
             selection_context.input_trigger(),
             Some(WorkerSelectionInputTrigger::ToolResult)
