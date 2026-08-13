@@ -3,16 +3,16 @@
 """
 Lightweight NVTX wrappers for Dynamo profiling.
 
-Set DYN_NVTX to 1/true/on/yes to enable markers; default is disabled (zero
-overhead). Values are trimmed and case-insensitive, matching the Rust switch
-DYN_ENABLE_RUST_NVTX; an unrecognized value raises rather than silently
-disabling.
+Set DYN_NVTX to 1/true/on/yes to enable markers; default is disabled
+(zero overhead). Values are trimmed and case-insensitive. The same variable
+switches on the Rust runtime's markers, so one setting covers a whole capture.
+An unrecognized value raises rather than silently disabling.
 
 The `nvtx` package is an optional dependency (`pip install ai-dynamo[profiling]`,
-already present in the container images). It is imported only when DYN_NVTX=1,
-so call sites below cost nothing and require nothing when profiling is off.
-Setting DYN_NVTX=1 without the package installed raises at import rather than
-silently recording nothing.
+already present in the container images). It is imported only when
+DYN_NVTX is on, so call sites below cost nothing and require nothing when
+profiling is off. Enabling it without the package installed raises at import
+rather than silently recording nothing.
 
 Usage — same syntax as the bare nvtx module:
 
@@ -44,16 +44,15 @@ import functools
 import inspect
 import os
 
-# Parsed to match DYN_NVTX's Rust-side twin DYN_ENABLE_RUST_NVTX exactly, which
-# goes through dynamo_truthy::is_truthy (lib/truthy/src/lib.rs): 1/true/on/yes
-# to enable, 0/false/off/no to disable, case-insensitive and whitespace-trimmed.
+ENV_VAR = "DYN_NVTX"
+
+# Parsed to match the Rust half of the same switch, which goes through
+# dynamo_truthy::is_truthy (lib/truthy/src/lib.rs): 1/true/on/yes to enable,
+# 0/false/off/no to disable, case-insensitive and whitespace-trimmed.
 #
-# Deliberately not the shared env_bool helper: it treats "on" as false by
-# design (asserted in utils/tests/test_env.py), so DYN_NVTX=on would silently
-# record nothing while DYN_ENABLE_RUST_NVTX=on enabled the Rust half of the
-# same capture. An unrecognized value raises rather than defaulting to off, for
-# the same reason the ImportError below exists: a profiling switch that quietly
-# does nothing costs a whole run to discover.
+# Deliberately not the shared env_bool helper: it treats "on" as false by design
+# (asserted in utils/tests/test_env.py), so DYN_NVTX=on would enable the Rust
+# markers and silently disable these.
 _TRUTHY = frozenset({"1", "true", "on", "yes"})
 _FALSEY = frozenset({"0", "false", "off", "no"})
 
@@ -73,21 +72,21 @@ def _parse_enabled(name: str) -> bool:
 
 # `nvtx` is not a dependency of ai-dynamo — it ships in the optional
 # `ai-dynamo[profiling]` extra and in the container images. It is imported only
-# when DYN_NVTX is enabled, so the marker call sites carry no dependency on it.
-ENABLED: bool = _parse_enabled("DYN_NVTX")
+# when markers are enabled, so the call sites carry no dependency on it.
+ENABLED: bool = _parse_enabled(ENV_VAR)
 
 if ENABLED:
     # Fail fast and loud. Silently degrading to no-ops would mean discovering at
     # the end of a profiling run that nothing was recorded; raising at import
-    # tells the user immediately that either DYN_NVTX is set by mistake or the
+    # tells the user immediately that either the switch is set by mistake or the
     # profiling extra is missing.
     try:
         import nvtx as _nvtx_lib
     except ImportError as exc:
         raise ImportError(
-            f"DYN_NVTX={os.getenv('DYN_NVTX')!r} requires the `nvtx` package, "
+            f"{ENV_VAR}={os.getenv(ENV_VAR)!r} requires the `nvtx` package, "
             "which is not installed. Install it with "
-            "`pip install ai-dynamo[profiling]`, or unset DYN_NVTX to run "
+            f"`pip install ai-dynamo[profiling]`, or unset {ENV_VAR} to run "
             "without NVTX markers."
         ) from exc
 

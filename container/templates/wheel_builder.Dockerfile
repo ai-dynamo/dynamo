@@ -591,7 +591,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # NVTX timeline annotations for Nsight Systems. Off by default, matching
     # TRT-LLM's own NVTX_DISABLE=ON default: with the feature absent the macros
     # expand to nothing. Compiled in, the markers stay dormant until
-    # DYN_ENABLE_RUST_NVTX is set at runtime, costing one relaxed atomic load
+    # DYN_NVTX is set at runtime, costing one relaxed atomic load
     # and a predictable branch per site. Needs no extra runtime library — NVTX
     # v3 is header-only and statically linked.
     NVTX_FEATURE="" && \

@@ -23,7 +23,7 @@ testing = []
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
-# NVTX v3 timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_ENABLE_RUST_NVTX).
+# NVTX v3 timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_NVTX).
 # Overhead: feature off = zero. Feature on, env off = an inlined relaxed atomic load plus a
 # predictable branch. Feature on, env on = two heap allocations (the crate renders the name with
 # to_string() then copies it into a CString) plus the injection-library call. See lib/runtime/src/nvtx.rs.

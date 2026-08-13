@@ -223,7 +223,7 @@ class TestEnabledWithoutPackage:
 
 
 class TestEnvParsing:
-    """DYN_NVTX parses exactly like its Rust twin, DYN_ENABLE_RUST_NVTX.
+    """DYN_NVTX parses the same way in Python and in the Rust runtime.
 
     Both accept 1/true/on/yes and 0/false/off/no, trimmed and case-insensitive
     (``dynamo_truthy::is_truthy``). Two regressions are guarded here: the

@@ -356,14 +356,10 @@ See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sin
 
 ## NVTX profiling
 
-These two switches control the NVTX annotations that appear on an Nsight Systems timeline. Both are off by default, and each covers a different layer.
-
-<ParamField path="DYN_ENABLE_RUST_NVTX" type="boolean" default="false">
-  Enables the Rust runtime's NVTX annotations — frontend HTTP handling, worker ingress and egress, transport, and routing. Accepts `1`, `true`, `on`, or `yes`. Has no effect unless the runtime was built with the `nvtx` Cargo feature, which released builds are not.
-</ParamField>
+One switch controls the NVTX annotations that appear on an Nsight Systems timeline, across both the Rust runtime and the Python components. It is off by default.
 
 <ParamField path="DYN_NVTX" type="boolean" default="false">
-  Enables the Python components' NVTX annotations. Accepts `1`, `true`, `on`, or `yes` to enable and `0`, `false`, `off`, or `no` to disable, trimmed and case-insensitive, matching `DYN_ENABLE_RUST_NVTX`; any other value raises. Requires the `nvtx` package from the `ai-dynamo[profiling]` extra, and raises `ImportError` at startup if it is missing rather than recording nothing.
+  Enables NVTX annotations in the Rust runtime — frontend HTTP handling, worker ingress and egress, transport, and routing — and in the Python components. Accepts `1`, `true`, `on`, or `yes` to enable and `0`, `false`, `off`, or `no` to disable, trimmed and case-insensitive; any other value raises. The Rust half additionally requires a build with the `nvtx` Cargo feature, which released builds do not have. The Python half requires the `nvtx` package from the `ai-dynamo[profiling]` extra, and raises `ImportError` at startup if it is missing rather than recording nothing.
 </ParamField>
 
 See [NVTX Profiling](nvtx-profiling.mdx) for the build steps, the full list of ranges, and how to read the resulting timeline.

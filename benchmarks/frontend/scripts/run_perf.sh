@@ -452,8 +452,8 @@ fi
 # Confirm the capture by looking for "NVTX annotations enabled" in the
 # frontend log, which the runtime logs only when both gates are open.
 if [[ "$HAS_NSYS" == true ]]; then
-    FRONTEND_ENV+=(DYN_ENABLE_RUST_NVTX=1)
-    echo "  Rust NVTX annotations: DYN_ENABLE_RUST_NVTX=1 set"
+    FRONTEND_ENV+=(DYN_NVTX=1)
+    echo "  Rust NVTX annotations: DYN_NVTX=1 set"
     echo "    (requires a build with --features dynamo-runtime/nvtx;"
     echo "     check the frontend log for 'NVTX annotations enabled')"
 fi

@@ -7,24 +7,30 @@ subtitle: Annotate the Dynamo frontend and workers on an Nsight Systems timeline
 
 Dynamo emits NVIDIA Tools Extension (NVTX) ranges and markers so an Nsight Systems (`nsys`) capture
 shows where time goes inside Dynamo, not just inside the inference engine. The Rust runtime and the
-Python components are annotated separately and switch on independently.
+Python components are annotated separately but share one runtime switch, `DYN_NVTX`.
 
 Both layers are **off by default**, and the Rust layer is not compiled into released builds at all.
 A Rust build that *does* include the feature still pays a small gate check at each annotation site
-while `DYN_ENABLE_RUST_NVTX` is unset — an inlined atomic load and a branch, with the marker name
+while `DYN_NVTX` is unset — an inlined atomic load and a branch, with the marker name
 never constructed.
 
 ## How the two layers are gated
 
-| Layer | Compiled in by default | Switch | Extra dependency |
+One runtime switch, `DYN_NVTX`, turns on both layers, so a single setting covers a whole capture.
+What differs is the build-time prerequisite. `DYN_NVTX` already gated the Python markers in earlier
+releases and its meaning there is unchanged — on a build that also carries the Rust markers, the
+same setting now lights up both.
+
+| Layer | Compiled in by default | Runtime switch | Extra dependency |
 |---|---|---|---|
-| Rust (frontend HTTP, worker ingress/egress, transport, routing) | No — requires the `nvtx` Cargo feature | `DYN_ENABLE_RUST_NVTX` | None |
+| Rust (frontend HTTP, worker ingress/egress, transport, routing) | No — requires the `nvtx` Cargo feature | `DYN_NVTX` | None |
 | Python (backend request handlers, multimodal paths) | Yes | `DYN_NVTX` | `ai-dynamo[profiling]` |
 
-The Rust layer uses a two-level gate on purpose. With the Cargo feature off, the annotation macros
-expand to nothing and the binary is byte-for-byte what it would be without them. With the feature on
-but `DYN_ENABLE_RUST_NVTX` unset, each site costs one relaxed atomic load and a predictable branch.
-This mirrors how TensorRT-LLM gates its own C++ markers, which default to `NVTX_DISABLE=ON`.
+The Rust layer keeps a second, compile-time gate on purpose. With the Cargo feature off, the
+annotation macros expand to nothing and the binary is byte-for-byte what it would be without them.
+With the feature on but `DYN_NVTX` unset, each site costs one relaxed atomic load and a
+predictable branch. This mirrors how TensorRT-LLM gates its own C++ markers, which default to
+`NVTX_DISABLE=ON`.
 
 <Info>
   NVTX v3 is header-only. Dynamo compiles it in statically, so no `libnvToolsExt.so` is needed at
@@ -37,7 +43,7 @@ This mirrors how TensorRT-LLM gates its own C++ markers, which default to `NVTX_
 ## Enable the Rust markers
 
 Released wheels and container images are built without the `nvtx` Cargo feature, so
-`DYN_ENABLE_RUST_NVTX` has no effect on them. Rebuild with the feature to get a runtime that can
+`DYN_NVTX` has no effect on them. Rebuild with the feature to get a runtime that can
 emit the markers.
 
 ### From source
@@ -74,7 +80,7 @@ The argument appends `nvtx` to the bindings wheel's feature list and defaults to
 changes nothing unless you pass it. `dev` and `local-dev` targets build from source rather than from
 the wheel, so use the `maturin develop` command above inside those images instead.
 
-Markers compiled in this way are still dormant until `DYN_ENABLE_RUST_NVTX` is set, so an
+Markers compiled in this way are still dormant until `DYN_NVTX` is set, so an
 NVTX-enabled image behaves identically to a stock one in production.
 
 ### Run under nsys
@@ -82,11 +88,11 @@ NVTX-enabled image behaves identically to a stock one in production.
 However you built it, set the environment variable on every process you want annotated:
 
 ```bash
-DYN_ENABLE_RUST_NVTX=1 nsys profile --trace=cuda,nvtx -o dynamo.nsys-rep \
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o dynamo.nsys-rep \
   python -m dynamo.frontend
 ```
 
-The runtime logs `NVTX annotations enabled (DYN_ENABLE_RUST_NVTX)` at startup when the switch takes
+The runtime logs `NVTX annotations enabled (DYN_NVTX)` at startup when the switch takes
 effect. No such line means the feature was not compiled in.
 
 ## Enable the Python markers
@@ -97,7 +103,8 @@ The Python markers ship in every image but need the `nvtx` package, which is an 
 pip install ai-dynamo[profiling]
 ```
 
-Container images already include it. Then set `DYN_NVTX`:
+Container images already include it. Then set the same `DYN_NVTX` switch used for the Rust
+markers — on a worker process it turns on whichever of the two layers that process has available:
 
 ```bash
 DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o worker.nsys-rep \
@@ -112,16 +119,13 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o worker.nsys-rep \
 
 ## Environment variables
 
-<ParamField path="DYN_ENABLE_RUST_NVTX" type="boolean" default="false">
-  Enables the Rust runtime's NVTX annotations. Accepts `1`, `true`, `on`, or `yes`. Has no effect
-  unless the runtime was built with the `nvtx` Cargo feature.
-</ParamField>
-
 <ParamField path="DYN_NVTX" type="boolean" default="false">
-  Enables the Python components' NVTX annotations. Accepts `1`, `true`, `on`, or `yes` to enable
-  and `0`, `false`, `off`, or `no` to disable, trimmed and case-insensitive, matching
-  `DYN_ENABLE_RUST_NVTX`. Any other value raises rather than silently disabling. Requires the
-  `nvtx` package from the `ai-dynamo[profiling]` extra; raises at import if it is missing.
+  Enables NVTX annotations in both the Rust runtime and the Python components. Accepts `1`, `true`,
+  `on`, or `yes` to enable and `0`, `false`, `off`, or `no` to disable, trimmed and
+  case-insensitive; any other value raises rather than silently disabling. The Rust half also
+  requires a build with the `nvtx` Cargo feature, which released builds do not have. The Python half
+  requires the `nvtx` package from the `ai-dynamo[profiling]` extra, and raises at import if it is
+  missing.
 </ParamField>
 
 ## Ranges emitted by the Rust runtime

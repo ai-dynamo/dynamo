@@ -46,7 +46,7 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 # Build configuration
 ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
 # Compile the Rust NVTX markers into the bindings wheel. Off by default; the
-# markers still need DYN_ENABLE_RUST_NVTX=1 at runtime once compiled in.
+# markers still need DYN_NVTX=1 at runtime once compiled in.
 ARG ENABLE_NVTX=false
 ARG CARGO_BUILD_JOBS
 

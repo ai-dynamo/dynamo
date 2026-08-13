@@ -17,7 +17,7 @@
 //!
 //! # Gating (two-level)
 //!
-//! | Cargo feature `nvtx` | `DYN_ENABLE_RUST_NVTX` env | Effect                                        |
+//! | Cargo feature `nvtx` | `DYN_NVTX` env | Effect                                        |
 //! |----------------------|----------------------------|-----------------------------------------------|
 //! | off (default)        | any                        | macros compile to nothing; zero overhead      |
 //! | on                   | unset                      | inlined `Relaxed` load + branch per site      |
@@ -89,7 +89,7 @@
 //!
 //! Prefer `dynamo-runtime/nvtx` over a bare `--features nvtx` at the workspace root:
 //! the latter also selects the `nvtx` feature of `kvbm-engine`, whose markers have no
-//! `DYN_ENABLE_RUST_NVTX` runtime switch and would fire unconditionally.
+//! `DYN_NVTX` runtime switch and would fire unconditionally.
 
 #[cfg(feature = "nvtx")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,21 +99,21 @@ static NVTX_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/// Initialise the NVTX subsystem from the `DYN_ENABLE_RUST_NVTX` environment variable.
+/// Initialise the NVTX subsystem from the `DYN_NVTX` environment variable.
 /// Must be called once at runtime startup before any annotation macros fire.
 /// No-op when the `nvtx` Cargo feature is off.
 pub fn init() {
     #[cfg(feature = "nvtx")]
     {
-        let enabled = crate::config::env_is_truthy("DYN_ENABLE_RUST_NVTX");
+        let enabled = crate::config::env_is_truthy("DYN_NVTX");
         NVTX_ENABLED.store(enabled, Ordering::Relaxed);
         if enabled {
-            tracing::info!("NVTX annotations enabled (DYN_ENABLE_RUST_NVTX)");
+            tracing::info!("NVTX annotations enabled (DYN_NVTX)");
         }
     }
 }
 
-/// Returns `true` when the `nvtx` feature is compiled in **and** `DYN_ENABLE_RUST_NVTX` is set.
+/// Returns `true` when the `nvtx` feature is compiled in **and** `DYN_NVTX` is set.
 #[inline(always)]
 pub fn enabled() -> bool {
     #[cfg(feature = "nvtx")]
@@ -433,7 +433,7 @@ mod tests {
     /// rather than that anything is recorded — the regression it guards is the v2
     /// failure mode, where a missing `libnvToolsExt.so` aborted the process.
     ///
-    /// `NVTX_ENABLED` is set directly rather than through `DYN_ENABLE_RUST_NVTX` +
+    /// `NVTX_ENABLED` is set directly rather than through `DYN_NVTX` +
     /// [`super::init`]: this binary runs its tests in parallel threads, where mutating
     /// the process environment is unsound.
     #[test]
@@ -457,7 +457,7 @@ mod tests {
     fn init_defaults_to_disabled() {
         #[cfg(feature = "nvtx")]
         let _flag = EnabledFlag::set(false);
-        if std::env::var("DYN_ENABLE_RUST_NVTX").is_err() {
+        if std::env::var("DYN_NVTX").is_err() {
             super::init();
             assert!(!super::enabled());
         }
