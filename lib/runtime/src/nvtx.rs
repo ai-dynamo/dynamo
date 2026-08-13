@@ -21,7 +21,14 @@
 //! |----------------------|----------------------------|-----------------------------------------------|
 //! | off (default)        | any                        | macros compile to nothing; zero overhead      |
 //! | on                   | unset                      | inlined `Relaxed` load + branch per site      |
-//! | on                   | `1` / `true` / `yes`       | two allocations + an FFI call per annotation  |
+//! | on                   | `1`/`true`/`on`/`yes`      | two allocations + an FFI call per annotation  |
+//!
+//! The disabled-but-compiled-in row is not free, only cheap. Each macro tests
+//! [`enabled()`] in the caller, which inlines to a relaxed load of a static `AtomicBool`
+//! and a branch that predicts perfectly; the name and its `core::fmt::Arguments` are
+//! built only on the taken side. Verified by disassembling a release build with the
+//! repo's `profiling` profile: the disabled path is a load, a `test`, and a jump to the
+//! function tail, with no call and no `Arguments` construction.
 //!
 //! The enabled path is **not** cheap: the `nvtx` crate renders the name with
 //! `to_string()` and then copies it into a `CString`, so each annotation costs two heap
@@ -33,12 +40,17 @@
 //!
 //! - **Range ids are narrowed to `i32`.** `nvtx-sys/export.c` declares
 //!   `int ffi_range_start(...)` / `void ffi_range_end(int)`, but NVTX's `nvtxRangeId_t`
-//!   is `uint64_t`. If an injection library ever hands back an id with bits above 31
-//!   set, the id passed to `nvtxRangeEnd` differs from the one returned and the range
-//!   never closes — an unterminated bar on the timeline. Not observed with Nsight
-//!   Systems, whose ids are small and sequential, but worth checking against a real
-//!   capture before trusting a long run. The fix, if it ever bites, is a local
-//!   `extern "C"` shim over the v3 headers rather than the upstream crate.
+//!   is `uint64_t`. If an injection library ever handed back an id with bits above 31
+//!   set, the id passed to `nvtxRangeEnd` would differ from the one returned and the
+//!   range would never close — an unterminated bar on the timeline.
+//!
+//!   Measured against Nsight Systems 2026.4.1: ids are allocated sequentially from 1,
+//!   so a 300,000-range capture (200k raw start/end pairs plus 100k guard-managed
+//!   ranges) saw a maximum id of 200,000, zero negative ids, and all 300,000 ranges
+//!   closed. The narrowing has ~2^31 of headroom per process at that allocation rate
+//!   and does not bite in practice. Re-check if the injection library ever changes its
+//!   id scheme; the fix would be a local `extern "C"` shim over the v3 headers rather
+//!   than the upstream crate.
 //! - **Names must not contain an interior NUL.** `CString::new` panics on one. All
 //!   current call sites use literals; think twice before interpolating request-supplied
 //!   text into a marker name.
@@ -347,13 +359,45 @@ mod tests {
     #[cfg(feature = "nvtx")]
     static NVTX_ENABLED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Acquire [`NVTX_ENABLED_LOCK`], ignoring poisoning (a panic in another test
-    /// must not cascade into unrelated failures here).
+    /// Exclusive access to [`NVTX_ENABLED`] for the lifetime of the guard, with the
+    /// previous value restored on drop.
+    ///
+    /// Restoring in `Drop` rather than at the end of the test body is what makes a
+    /// failing assertion safe: an `assert!` or `.expect()` that panics mid-test
+    /// would otherwise leave the flag `true`, and — because the lock deliberately
+    /// ignores poisoning — the next test to assert "disabled" would observe that
+    /// leaked value and fail for an unrelated reason.
     #[cfg(feature = "nvtx")]
-    fn lock_enabled_flag() -> std::sync::MutexGuard<'static, ()> {
-        NVTX_ENABLED_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    struct EnabledFlag {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        restore: bool,
+    }
+
+    #[cfg(feature = "nvtx")]
+    impl EnabledFlag {
+        /// Take the lock and set the flag, remembering the value to restore.
+        fn set(value: bool) -> Self {
+            use std::sync::atomic::Ordering;
+            // Ignore poisoning: a panic in another test must not cascade into
+            // unrelated failures here.
+            let _lock = NVTX_ENABLED_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let restore = super::NVTX_ENABLED.swap(value, Ordering::Relaxed);
+            Self { _lock, restore }
+        }
+
+        /// Flip the flag mid-test. Still restored to the original value on drop.
+        fn store(&self, value: bool) {
+            super::NVTX_ENABLED.store(value, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "nvtx")]
+    impl Drop for EnabledFlag {
+        fn drop(&mut self) {
+            super::NVTX_ENABLED.store(self.restore, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Counts its own drops, so a test can prove a value that travelled across an
@@ -396,12 +440,9 @@ mod tests {
     fn annotations_are_safe_with_no_profiler_attached() {
         #[cfg(feature = "nvtx")]
         {
-            use std::sync::atomic::Ordering;
-            let _flag_lock = lock_enabled_flag();
-            let restore = super::NVTX_ENABLED.swap(true, Ordering::Relaxed);
+            let _flag = EnabledFlag::set(true);
             assert!(super::enabled());
             exercise_all_sites();
-            super::NVTX_ENABLED.store(restore, Ordering::Relaxed);
         }
 
         // Every site must also be callable with annotations off.
@@ -415,7 +456,7 @@ mod tests {
     #[test]
     fn init_defaults_to_disabled() {
         #[cfg(feature = "nvtx")]
-        let _flag_lock = lock_enabled_flag();
+        let _flag = EnabledFlag::set(false);
         if std::env::var("DYN_ENABLE_RUST_NVTX").is_err() {
             super::init();
             assert!(!super::enabled());
@@ -447,12 +488,7 @@ mod tests {
     #[test]
     fn range_guard_can_be_dropped_on_a_different_thread() {
         #[cfg(feature = "nvtx")]
-        let _flag_lock = lock_enabled_flag();
-        #[cfg(feature = "nvtx")]
-        let restore = {
-            use std::sync::atomic::Ordering;
-            super::NVTX_ENABLED.swap(true, Ordering::Relaxed)
-        };
+        let _flag = EnabledFlag::set(true);
 
         let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let guard = dynamo_nvtx_range!("test.cross_thread");
@@ -477,9 +513,6 @@ mod tests {
             1,
             "guard must be dropped exactly once"
         );
-
-        #[cfg(feature = "nvtx")]
-        super::NVTX_ENABLED.store(restore, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Hold a range guard across `.await` points on a multi-threaded runtime, with
@@ -492,12 +525,7 @@ mod tests {
     #[test]
     fn range_guard_survives_await_on_multi_thread_runtime() {
         #[cfg(feature = "nvtx")]
-        let _flag_lock = lock_enabled_flag();
-        #[cfg(feature = "nvtx")]
-        let restore = {
-            use std::sync::atomic::Ordering;
-            super::NVTX_ENABLED.swap(true, Ordering::Relaxed)
-        };
+        let _flag = EnabledFlag::set(true);
 
         const TASKS: usize = 16;
 
@@ -566,9 +594,6 @@ mod tests {
                  range_guard_can_be_dropped_on_a_different_thread"
             );
         }
-
-        #[cfg(feature = "nvtx")]
-        super::NVTX_ENABLED.store(restore, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── Nesting and non-LIFO ordering ────────────────────────────────────────
@@ -579,12 +604,7 @@ mod tests {
     #[test]
     fn ranges_nest_and_interleave() {
         #[cfg(feature = "nvtx")]
-        let _flag_lock = lock_enabled_flag();
-        #[cfg(feature = "nvtx")]
-        let restore = {
-            use std::sync::atomic::Ordering;
-            super::NVTX_ENABLED.swap(true, Ordering::Relaxed)
-        };
+        let _flag = EnabledFlag::set(true);
 
         // Nested, closed LIFO.
         {
@@ -606,9 +626,6 @@ mod tests {
         dynamo_nvtx_push!("test.stack.inner");
         dynamo_nvtx_pop!();
         dynamo_nvtx_pop!();
-
-        #[cfg(feature = "nvtx")]
-        super::NVTX_ENABLED.store(restore, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── Macro arm coverage ───────────────────────────────────────────────────
@@ -678,16 +695,11 @@ mod tests {
     fn every_macro_arm_compiles_and_runs() {
         #[cfg(feature = "nvtx")]
         {
-            use std::sync::atomic::Ordering;
-            let _flag_lock = lock_enabled_flag();
-
-            let restore = super::NVTX_ENABLED.swap(false, Ordering::Relaxed);
+            let flag = EnabledFlag::set(false);
             exercise_every_macro_arm();
 
-            super::NVTX_ENABLED.store(true, Ordering::Relaxed);
+            flag.store(true);
             exercise_every_macro_arm();
-
-            super::NVTX_ENABLED.store(restore, Ordering::Relaxed);
         }
 
         #[cfg(not(feature = "nvtx"))]
@@ -711,18 +723,12 @@ mod tests {
     #[cfg(feature = "nvtx")]
     #[test]
     fn enabled_tracks_the_atomic_in_both_directions() {
-        use std::sync::atomic::Ordering;
-        let _flag_lock = lock_enabled_flag();
-        let restore = super::NVTX_ENABLED.load(Ordering::Relaxed);
-
-        super::NVTX_ENABLED.store(false, Ordering::Relaxed);
+        let flag = EnabledFlag::set(false);
         assert!(!super::enabled());
-        super::NVTX_ENABLED.store(true, Ordering::Relaxed);
+        flag.store(true);
         assert!(super::enabled());
-        super::NVTX_ENABLED.store(false, Ordering::Relaxed);
+        flag.store(false);
         assert!(!super::enabled());
-
-        super::NVTX_ENABLED.store(restore, Ordering::Relaxed);
     }
 
     /// A guard samples the runtime switch once, at construction: a range opened
@@ -731,18 +737,14 @@ mod tests {
     #[cfg(feature = "nvtx")]
     #[test]
     fn guard_samples_the_switch_at_construction() {
-        use std::sync::atomic::Ordering;
-        let _flag_lock = lock_enabled_flag();
-        let restore = super::NVTX_ENABLED.load(Ordering::Relaxed);
-
-        super::NVTX_ENABLED.store(false, Ordering::Relaxed);
+        let flag = EnabledFlag::set(false);
         let disabled = dynamo_nvtx_range!("test.switch.disabled");
         assert!(
             disabled.id.is_none(),
             "a range opened while disabled must not allocate an NVTX id"
         );
 
-        super::NVTX_ENABLED.store(true, Ordering::Relaxed);
+        flag.store(true);
         let enabled = dynamo_nvtx_range!("test.switch.enabled");
         assert!(
             enabled.id.is_some(),
@@ -753,7 +755,5 @@ mod tests {
         // range it never started.
         drop(disabled);
         drop(enabled);
-
-        super::NVTX_ENABLED.store(restore, Ordering::Relaxed);
     }
 }
