@@ -460,6 +460,8 @@ pub struct OpenAIPreprocessor {
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
 
+pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
         prompt_len: usize,
@@ -1055,7 +1057,12 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let (request, annotations, prompt_injected_reasoning, _image_tokens) = self
-            .preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .preprocess_request_with_options(
+                request,
+                tracker,
+                PreprocessRequestOptions::default(),
+                None,
+            )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
     }
@@ -1073,6 +1080,7 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
+        lora_name: Option<String>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -1081,7 +1089,7 @@ impl OpenAIPreprocessor {
     )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
-        let mut builder = self.builder(request)?;
+        let mut builder = self.builder_with_lora(request, lora_name)?;
 
         let template_start = Instant::now();
         let formatted_prompt = {
@@ -1200,6 +1208,21 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<PreprocessedRequestBuilder> {
+        self.builder_with_lora(request, None)
+    }
+
+    fn builder_with_lora<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        lora_name_override: Option<String>,
+    ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
 
@@ -1284,7 +1307,7 @@ impl OpenAIPreprocessor {
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        let lora_name = self.lora_name.clone();
+        let lora_name = self.lora_name.clone().or(lora_name_override);
         let cache_namespace = request_cache_salt(request).map(str::to_owned);
 
         // Extract routing hints from nvext if present
@@ -3713,7 +3736,16 @@ impl
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
-            .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
+            .preprocess_request_with_options(
+                &request,
+                tracker.as_deref(),
+                preprocess_options,
+                context
+                    .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|name| name.as_ref().clone()),
+            )
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
 
@@ -3877,7 +3909,14 @@ impl
         let mut response_generator = Box::new(response_generator);
         let tracker = Some(response_generator.tracker());
         // convert the chat completion request to a common completion request
-        let mut builder = self.builder(&request)?;
+        let mut builder = self.builder_with_lora(
+            &request,
+            context
+                .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+                .ok()
+                .flatten()
+                .map(|name| name.as_ref().clone()),
+        )?;
 
         // Check if embeddings are provided - skip tokenization path
         let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
