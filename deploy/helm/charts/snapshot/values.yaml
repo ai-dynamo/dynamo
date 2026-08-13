@@ -22,6 +22,9 @@
 runtime:
   type: containerd  # containerd | crio
   socketPath: ""
+  # Host directory containing container runtime snapshots and overlay upperdirs.
+  # Leave empty to use /var/lib/containerd (or /var/lib/containers for CRI-O).
+  storageDir: ""
 
 # Gates the OCP RBAC template and the DS required-scc annotation. Keep false
 # on vanilla Kubernetes (it references an OCP-only built-in SCC).
