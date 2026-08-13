@@ -23,20 +23,35 @@ const DEFAULT_LEGACY_AUDIT_NATS_SUBJECT: &str = "dynamo.audit.v1";
 const DEFAULT_OTEL_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_S3_ROLL_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_S3_FLUSH_INTERVAL_MS: u64 = 10_000;
+#[cfg(feature = "request-trace-s3")]
 const DEFAULT_S3_ATTEMPT_TIMEOUT_MS: u64 = 30_000;
+#[cfg(feature = "request-trace-s3")]
 const DEFAULT_S3_OPERATION_TIMEOUT_MS: u64 = 90_000;
+#[cfg(feature = "request-trace-s3")]
 const DEFAULT_S3_MAX_RETRIES: usize = 2;
+#[cfg(feature = "request-trace-s3")]
 const DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
+#[cfg(feature = "request-trace-s3")]
 const DEFAULT_S3_RETRY_MAX_BACKOFF_MS: u64 = 15_000;
+#[cfg(feature = "request-trace-s3")]
 const DEFAULT_S3_RETRY_BACKOFF_BASE: f64 = 2.0;
+#[cfg(feature = "request-trace-s3")]
 const MIN_S3_TIMEOUT_MS: u64 = 1_000;
+#[cfg(feature = "request-trace-s3")]
 const MAX_S3_ATTEMPT_TIMEOUT_MS: u64 = 90_000;
+#[cfg(feature = "request-trace-s3")]
 const MAX_S3_OPERATION_TIMEOUT_MS: u64 = 300_000;
+#[cfg(feature = "request-trace-s3")]
 const MAX_S3_RETRIES: usize = 10;
+#[cfg(feature = "request-trace-s3")]
 const MIN_S3_RETRY_BACKOFF_MS: u64 = 10;
+#[cfg(feature = "request-trace-s3")]
 const MAX_S3_RETRY_INITIAL_BACKOFF_MS: u64 = 10_000;
+#[cfg(feature = "request-trace-s3")]
 const MAX_S3_RETRY_MAX_BACKOFF_MS: u64 = 60_000;
+#[cfg(feature = "request-trace-s3")]
 const MIN_S3_RETRY_BACKOFF_BASE: f64 = 1.1;
+#[cfg(feature = "request-trace-s3")]
 const MAX_S3_RETRY_BACKOFF_BASE: f64 = 10.0;
 
 const CAPTURE_UNINITIALIZED: u8 = 0;
@@ -143,6 +158,7 @@ impl RequestTracePolicy {
     }
 }
 
+#[cfg(feature = "request-trace-s3")]
 #[derive(Clone, Debug)]
 pub(super) struct S3UploadPolicy {
     pub(super) attempt_timeout_ms: u64,
@@ -156,6 +172,7 @@ pub(super) struct S3UploadPolicy {
 #[derive(Clone, Debug)]
 struct RequestTraceRuntimePolicy {
     policy: RequestTracePolicy,
+    #[cfg(feature = "request-trace-s3")]
     s3_upload: S3UploadPolicy,
 }
 
@@ -265,18 +282,21 @@ fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
         env_u64(&[env_request_trace::DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS])
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_S3_FLUSH_INTERVAL_MS);
+    #[cfg(feature = "request-trace-s3")]
     let s3_attempt_timeout_ms = env_bounded_u64(
         env_request_trace::DYN_REQUEST_TRACE_S3_ATTEMPT_TIMEOUT_MS,
         DEFAULT_S3_ATTEMPT_TIMEOUT_MS,
         MIN_S3_TIMEOUT_MS,
         MAX_S3_ATTEMPT_TIMEOUT_MS,
     );
+    #[cfg(feature = "request-trace-s3")]
     let configured_s3_operation_timeout_ms = env_bounded_u64(
         env_request_trace::DYN_REQUEST_TRACE_S3_OPERATION_TIMEOUT_MS,
         DEFAULT_S3_OPERATION_TIMEOUT_MS,
         MIN_S3_TIMEOUT_MS,
         MAX_S3_OPERATION_TIMEOUT_MS,
     );
+    #[cfg(feature = "request-trace-s3")]
     let s3_operation_timeout_ms = if configured_s3_operation_timeout_ms < s3_attempt_timeout_ms {
         tracing::warn!(
             attempt_timeout_ms = s3_attempt_timeout_ms,
@@ -288,24 +308,28 @@ fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
     } else {
         configured_s3_operation_timeout_ms
     };
+    #[cfg(feature = "request-trace-s3")]
     let s3_max_retries = env_bounded_usize(
         env_request_trace::DYN_REQUEST_TRACE_S3_MAX_RETRIES,
         DEFAULT_S3_MAX_RETRIES,
         0,
         MAX_S3_RETRIES,
     );
+    #[cfg(feature = "request-trace-s3")]
     let s3_retry_initial_backoff_ms = env_bounded_u64(
         env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_INITIAL_BACKOFF_MS,
         DEFAULT_S3_RETRY_INITIAL_BACKOFF_MS,
         MIN_S3_RETRY_BACKOFF_MS,
         MAX_S3_RETRY_INITIAL_BACKOFF_MS,
     );
+    #[cfg(feature = "request-trace-s3")]
     let configured_s3_retry_max_backoff_ms = env_bounded_u64(
         env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_MAX_BACKOFF_MS,
         DEFAULT_S3_RETRY_MAX_BACKOFF_MS,
         MIN_S3_RETRY_BACKOFF_MS,
         MAX_S3_RETRY_MAX_BACKOFF_MS,
     );
+    #[cfg(feature = "request-trace-s3")]
     let s3_retry_max_backoff_ms = if configured_s3_retry_max_backoff_ms
         < s3_retry_initial_backoff_ms
     {
@@ -319,6 +343,7 @@ fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
     } else {
         configured_s3_retry_max_backoff_ms
     };
+    #[cfg(feature = "request-trace-s3")]
     let s3_retry_backoff_base = env_bounded_f64(
         env_request_trace::DYN_REQUEST_TRACE_S3_RETRY_BACKOFF_BASE,
         DEFAULT_S3_RETRY_BACKOFF_BASE,
@@ -349,6 +374,7 @@ fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
             s3_roll_uncompressed_bytes,
             s3_flush_interval_ms,
         },
+        #[cfg(feature = "request-trace-s3")]
         s3_upload: S3UploadPolicy {
             attempt_timeout_ms: s3_attempt_timeout_ms,
             operation_timeout_ms: s3_operation_timeout_ms,
@@ -493,6 +519,7 @@ fn env_u64(names: &[&str]) -> Option<u64> {
     })
 }
 
+#[cfg(feature = "request-trace-s3")]
 fn env_bounded_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
     let Some(raw) = env_trimmed(name) else {
         return default;
@@ -512,6 +539,7 @@ fn env_bounded_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
     }
 }
 
+#[cfg(feature = "request-trace-s3")]
 fn env_bounded_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
     let Some(raw) = env_trimmed(name) else {
         return default;
@@ -531,6 +559,7 @@ fn env_bounded_usize(name: &str, default: usize, min: usize, max: usize) -> usiz
     }
 }
 
+#[cfg(feature = "request-trace-s3")]
 fn env_bounded_f64(name: &str, default: f64, min: f64, max: f64) -> f64 {
     let Some(raw) = env_trimmed(name) else {
         return default;
@@ -573,6 +602,7 @@ pub fn policy() -> &'static RequestTracePolicy {
     &POLICY.get_or_init(load_runtime_policy_from_env).policy
 }
 
+#[cfg(feature = "request-trace-s3")]
 pub(super) fn s3_upload_policy() -> S3UploadPolicy {
     POLICY
         .get_or_init(load_runtime_policy_from_env)
@@ -690,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "request-trace-s3")]
     #[serial_test::serial]
     fn s3_upload_policy_defaults_preserve_existing_behavior() {
         with_request_trace_env(&[], || {
@@ -713,6 +744,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "request-trace-s3")]
     #[serial_test::serial]
     fn s3_upload_policy_accepts_bounded_overrides() {
         with_request_trace_env(
@@ -752,6 +784,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "request-trace-s3")]
     #[serial_test::serial]
     fn s3_upload_policy_rejects_out_of_range_or_incompatible_values() {
         with_request_trace_env(
