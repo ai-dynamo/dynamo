@@ -357,8 +357,8 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
-    pub(crate) fn supports_kv_hint_transfer(&self) -> bool {
-        match self.runtime_data.get(KV_HINT_TRANSFER_CAPABILITY_KEY) {
+    pub(crate) fn supports_kv_hint(&self, capability_key: &str) -> bool {
+        match self.runtime_data.get(capability_key) {
             Some(serde_json::Value::Bool(true)) => true,
             // Python ModelRuntimeConfig.set_engine_specific currently stores
             // engine-specific values as strings.
@@ -400,7 +400,7 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         &self,
         dp_rank: u32,
     ) -> Option<KvHintTransferWorkerMetadata<'_>> {
-        if !self.supports_kv_hint_transfer() {
+        if !self.supports_kv_hint(KV_HINT_TRANSFER_CAPABILITY_KEY) {
             return None;
         }
 

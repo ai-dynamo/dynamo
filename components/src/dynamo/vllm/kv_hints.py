@@ -121,13 +121,13 @@ def _transfer_hint_worker_type(worker_type: WorkerType) -> str | None:
     return role
 
 
-def enable_kv_transfer_hint_support(
+def _publish_kv_transfer_hint_capability(
     runtime_config: ModelRuntimeConfig,
     engine_args: AsyncEngineArgs,
     worker_type: WorkerType,
     dp_range: tuple[int, int] = (0, 1),
 ) -> None:
-    """Publish TRANSFER runtime metadata when vLLM config supports it."""
+    """Publish vLLM's TRANSFER capability and runtime metadata."""
     transfer_hint_worker_type = _transfer_hint_worker_type(worker_type)
     if transfer_hint_worker_type is None:
         return
@@ -164,4 +164,16 @@ def enable_kv_transfer_hint_support(
     )
     runtime_config.set_engine_specific(
         KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
+    )
+
+
+def publish_kv_hint_capabilities(
+    runtime_config: ModelRuntimeConfig,
+    engine_args: AsyncEngineArgs,
+    worker_type: WorkerType,
+    dp_range: tuple[int, int] = (0, 1),
+) -> None:
+    """Publish each versioned KV hint capability that vLLM supports."""
+    _publish_kv_transfer_hint_capability(
+        runtime_config, engine_args, worker_type, dp_range
     )

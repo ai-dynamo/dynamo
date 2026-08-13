@@ -25,8 +25,10 @@ pub struct TransferHint {
 
 /// Typed hints for the selected backend request.
 ///
-/// Each hint has its own capability and payload version. New hints extend
-/// this envelope without changing worker selection contracts.
+/// Engines advertise support with one versioned capability key per hint.
+/// Dynamo materializes only fields that the selected engine supports. The
+/// fields are independent, so one engine can consume multiple hints from the
+/// same request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
