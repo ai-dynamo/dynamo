@@ -226,7 +226,7 @@ def _tensor_workflow() -> Workflow:
 class _RemoteTensorInvoker:
     def __init__(self, role: str) -> None:
         self.role = role
-        self.calls = []
+        self.calls: list[tuple[dict, dict]] = []
 
     async def run(self, stage_id, contract, inputs, context, output_transfers):
         self.calls.append((dict(inputs), dict(output_transfers)))
