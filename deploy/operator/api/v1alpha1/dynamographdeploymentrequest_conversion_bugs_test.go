@@ -337,48 +337,67 @@ func TestBugDGDRProfilingJobResourcesFollowContainerName(t *testing.T) {
 	}
 }
 
-func TestBugDGDRProfilerFirstHubRoundTripPreservesOrder(t *testing.T) {
+func TestBugDGDRHubRoundTripPreservesContainerOrder(t *testing.T) {
 	profilerResources := corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 	}
 	sidecarResources := corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
 	}
-	wantContainers := []corev1.Container{
-		{Name: dgdrProfilerContainerName, Resources: profilerResources},
-		{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
-	}
-
-	t.Log("Start from a profiler-first v1beta1 override list")
-	hub := &v1beta1.DynamoGraphDeploymentRequest{
-		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-			Overrides: &v1beta1.OverridesSpec{
-				ProfilingJob: &batchv1.JobSpec{
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: wantContainers},
-					},
-				},
+	tests := []struct {
+		name       string
+		containers []corev1.Container
+	}{
+		{
+			name: "profiler first",
+			containers: []corev1.Container{
+				{Name: dgdrProfilerContainerName, Resources: profilerResources},
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+			},
+		},
+		{
+			name: "sidecar first",
+			containers: []corev1.Container{
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+				{Name: dgdrProfilerContainerName, Resources: profilerResources},
 			},
 		},
 	}
 
-	t.Log("Convert hub → spoke → hub without changing alpha fields")
-	spoke := &DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertFrom(hub); err != nil {
-		t.Fatalf("ConvertFrom() error = %v", err)
-	}
-	restored := &v1beta1.DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertTo(restored); err != nil {
-		t.Fatalf("ConvertTo() error = %v", err)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Start from a named v1beta1 override list")
+			hub := &v1beta1.DynamoGraphDeploymentRequest{
+				Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+					Overrides: &v1beta1.OverridesSpec{
+						ProfilingJob: &batchv1.JobSpec{
+							Template: corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{Containers: test.containers},
+							},
+						},
+					},
+				},
+			}
 
-	t.Log("Verify profiler-first ordering and resources survive the round trip")
-	if restored.Spec.Overrides == nil || restored.Spec.Overrides.ProfilingJob == nil {
-		t.Fatal("profilingJob override = nil, want profiler-first containers")
-	}
-	got := restored.Spec.Overrides.ProfilingJob.Template.Spec.Containers
-	if diff := cmp.Diff(wantContainers, got); diff != "" {
-		t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
+			t.Log("Convert hub → spoke → hub without changing alpha fields")
+			spoke := &DynamoGraphDeploymentRequest{}
+			if err := spoke.ConvertFrom(hub); err != nil {
+				t.Fatalf("ConvertFrom() error = %v", err)
+			}
+			restored := &v1beta1.DynamoGraphDeploymentRequest{}
+			if err := spoke.ConvertTo(restored); err != nil {
+				t.Fatalf("ConvertTo() error = %v", err)
+			}
+
+			t.Log("Verify container ordering and resources survive the round trip")
+			if restored.Spec.Overrides == nil || restored.Spec.Overrides.ProfilingJob == nil {
+				t.Fatal("profilingJob override = nil, want restored named containers")
+			}
+			got := restored.Spec.Overrides.ProfilingJob.Template.Spec.Containers
+			if diff := cmp.Diff(test.containers, got); diff != "" {
+				t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -430,48 +449,10 @@ func TestBugDGDRAlphaResourcesRoundTripOmitsPrivateAnnotation(t *testing.T) {
 	}
 }
 
-func TestBugDGDRSidecarFirstHubRoundTripPreservesOrder(t *testing.T) {
-	profilerResources := corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
-	}
-	sidecarResources := corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
-	}
-	wantContainers := []corev1.Container{
-		{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
-		{Name: dgdrProfilerContainerName, Resources: profilerResources},
-	}
-
-	hub := &v1beta1.DynamoGraphDeploymentRequest{
-		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-			Overrides: &v1beta1.OverridesSpec{
-				ProfilingJob: &batchv1.JobSpec{
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: wantContainers},
-					},
-				},
-			},
-		},
-	}
-
-	spoke := &DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertFrom(hub); err != nil {
-		t.Fatalf("ConvertFrom() error = %v", err)
-	}
-	restored := &v1beta1.DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertTo(restored); err != nil {
-		t.Fatalf("ConvertTo() error = %v", err)
-	}
-
-	got := restored.Spec.Overrides.ProfilingJob.Template.Spec.Containers
-	if diff := cmp.Diff(wantContainers, got); diff != "" {
-		t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
-	}
-}
-
 func TestBugDGDRNameOnlyProfilerPreserved(t *testing.T) {
 	wantContainers := []corev1.Container{{Name: dgdrProfilerContainerName}}
 
+	t.Log("Start from a name-only v1beta1 profiler override")
 	hub := &v1beta1.DynamoGraphDeploymentRequest{
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
 			Overrides: &v1beta1.OverridesSpec{
@@ -484,6 +465,7 @@ func TestBugDGDRNameOnlyProfilerPreserved(t *testing.T) {
 		},
 	}
 
+	t.Log("Convert hub → spoke and verify resources are not projected")
 	spoke := &DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom() error = %v", err)
@@ -491,6 +473,8 @@ func TestBugDGDRNameOnlyProfilerPreserved(t *testing.T) {
 	if spoke.Spec.ProfilingConfig.Resources != nil {
 		t.Fatalf("profilingConfig.resources = %#v, want nil for name-only profiler", spoke.Spec.ProfilingConfig.Resources)
 	}
+
+	t.Log("Convert spoke → hub and verify the name-only profiler is preserved")
 	restored := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertTo(restored); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
@@ -622,6 +606,7 @@ func TestBugDGDRLiveHubUnnamedProfilerMigratesOnRoundTrip(t *testing.T) {
 }
 
 func TestBugDGDRLegacyUnnamedKeptDistinctWhenProfilerExists(t *testing.T) {
+	t.Log("Seed a spoke object with both a named profiler and a leftover unnamed annotation entry")
 	spoke := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -644,11 +629,13 @@ func TestBugDGDRLegacyUnnamedKeptDistinctWhenProfilerExists(t *testing.T) {
 		},
 	}
 
+	t.Log("Convert spoke → hub")
 	hub := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
 	}
 
+	t.Log("Verify the unnamed entry stays distinct from the named profiler")
 	want := []corev1.Container{
 		{Name: dgdrProfilerContainerName, Image: "named-profiler:1"},
 		{Name: "", Image: "unnamed-extra:1"},
