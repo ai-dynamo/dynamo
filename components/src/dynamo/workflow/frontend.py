@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from dynamo.workflow.runtime import WorkflowExecutor
+from dynamo.workflow.executor import WorkflowExecutor
 
 RequestAdapter = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 ResultAdapter = Callable[[Mapping[str, Any]], Mapping[str, Any]]
@@ -77,7 +77,11 @@ class WorkflowTokenEngine:
 
         attempt_id = context.id()
         execution = asyncio.create_task(
-            self._application.executor.run(inputs, attempt_id=attempt_id),
+            self._application.executor.run(
+                inputs,
+                attempt_id=attempt_id,
+                request_context=context,
+            ),
             name=f"workflow-frontend:{attempt_id}",
         )
         cancellation = asyncio.ensure_future(
