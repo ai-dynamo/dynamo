@@ -14,6 +14,7 @@
 # beautifulsoup4 -> soupsieve) at older releases than PyPI currently publishes.
 # Floor them so the --no-deps install refreshes the bundled copies in place to
 # the current patch releases (see also mistune/soupsieve/tornado below).
+aiohttp>=3.14.3
 gitpython>=3.1.58
 
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
