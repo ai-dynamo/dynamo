@@ -253,3 +253,30 @@ def test_clamp_single_ceiling_below_min_endpoint_zeros():
     # min_endpoint*4=4 — even one replica overshoots the hard cap, so the
     # deployment is infeasible and must be zeroed.
     assert proportional_clamp_single(2, 4, 3, 3, 1) == 0
+
+
+def test_clamp_single_floor_push_never_exceeds_ceiling():
+    # min=max=5 pins the budget at 5 GPUs, but the engine takes 2 GPUs per
+    # replica. The floor push rounds up to ceil(5/2)=3 replicas = 6 GPUs,
+    # which breaches the hard cap. max_gpus is never relaxed, so the inputs
+    # must be preserved for the caller to surface instead.
+    assert proportional_clamp_single(1, 2, 5, 5, 1) == 1
+
+
+def test_clamp_single_never_exceeds_ceiling_across_bands():
+    # The hard ceiling holds for every sane band, including the indivisible
+    # min_gpus / engine_gpu combinations the floor push rounds up from.
+    for desired in range(0, 6):
+        for engine_gpu in (1, 2, 3, 4):
+            for min_gpus in range(0, 14):
+                for max_gpus in range(min_gpus, 14):
+                    out = proportional_clamp_single(
+                        desired, engine_gpu, min_gpus, max_gpus, 1
+                    )
+                    assert out * engine_gpu <= max_gpus, (
+                        desired,
+                        engine_gpu,
+                        min_gpus,
+                        max_gpus,
+                        out,
+                    )
