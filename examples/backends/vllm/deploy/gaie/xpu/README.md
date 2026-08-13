@@ -24,8 +24,9 @@ GAIE deployment templates for Intel XPU using Kubernetes Dynamic Resource Alloca
    docker build -t nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag \
      -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
    ```
-4. **GAIE** installed in-cluster -- see [Gateway API docs](../../../../../../docs/kubernetes/gateway-api/README.mdx).
-5. **HuggingFace token secret** (`hf-token-secret`).
+4. **GAIE** installed in-cluster -- see the
+   [Gateway API routing installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/gateway-api-routing.mdx).
+5. **Hugging Face token secret** (`hf-token-secret`).
 
 ## Deploy
 
