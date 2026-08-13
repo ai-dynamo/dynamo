@@ -965,6 +965,73 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 	return service, nil
 }
 
+// ElasticEPLeaderServiceName returns the stable headless-Service name a single-pod
+// elastic-EP leader is reachable at (its component service name plus a "-ray" suffix).
+func ElasticEPLeaderServiceName(componentServiceName string) string {
+	return NormalizeKubeResourceName(componentServiceName + "-ray")
+}
+
+// GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
+// elastic-EP leader a stable address its followers can join.
+//
+// Elastic EP runs the leader as a Ray head (see injectElasticEPRayLaunchFlags); a
+// separately-scheduled follower reaches it with `ray start --address=<service>:6379`.
+// A normal ClusterIP Service cannot carry Ray's multi-port head<->worker traffic, so
+// this is headless (clusterIP: None). PublishNotReadyAddresses is true because the
+// follower must connect to the Ray head *before* the leader's engine reports Ready --
+// the engine only starts once its data-parallel ranks (the followers) have joined, so
+// gating the address on readiness would deadlock.
+//
+// The selector matches the elastic-EP component. Today that is a single-pod leader, so
+// it resolves to exactly the leader pod. When the follower clique (Phase 4) lands it
+// shares this component label, so that change must narrow this selector to the leader
+// role to keep the Service leader-only.
+func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
+	labels := make(map[string]string)
+	for k, v := range params.Labels {
+		labels[k] = v
+	}
+	annotations := make(map[string]string)
+	for k, v := range params.Annotations {
+		annotations[k] = v
+	}
+	selector := map[string]string{
+		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
+		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
+		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
+	}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        ElasticEPLeaderServiceName(params.ServiceName),
+			Namespace:   params.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:                corev1.ClusterIPNone,
+			PublishNotReadyAddresses: true,
+			Selector:                 selector,
+			Ports: []corev1.ServicePort{
+				{
+					// Ray GCS head port (VLLMPort). Followers connect their raylet
+					// here via `ray start --address=<svc>:6379`.
+					Name:       "ray-gcs",
+					Port:       6379,
+					TargetPort: intstr.FromInt(6379),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					// Leader system/health port; the follower's /live gate polls it.
+					Name:       commonconsts.DynamoSystemPortName,
+					Port:       commonconsts.DynamoSystemPort,
+					TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+}
+
 func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1.Ingress {
 	resourceName := NormalizeKubeResourceName(componentName)
 	ingress := &networkingv1.Ingress{

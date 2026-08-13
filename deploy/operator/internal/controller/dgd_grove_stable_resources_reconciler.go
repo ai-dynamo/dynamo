@@ -92,6 +92,18 @@ func (r *groveStableResourcesReconciler) Reconcile(
 			}
 		}
 
+		// Elastic-EP single-pod leaders run a Ray head; emit a headless Service so a
+		// separately-scheduled follower can reach it at a stable address (Phase 3).
+		if c := dynamo.GetMainContainer(component); c != nil && dynamo.IsElasticEPRayLaunch(c) {
+			epService, err := r.reconcileElasticEPLeaderService(ctx, dgd, renderDeployment, component)
+			if err != nil {
+				return nil, err
+			}
+			if epService != nil {
+				resources = append(resources, epService)
+			}
+		}
+
 		if string(component.ComponentType) != commonconsts.ComponentTypeFrontend {
 			continue
 		}
@@ -188,6 +200,52 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync the main component service: %w", err)
+	}
+	return resource, nil
+}
+
+// reconcileElasticEPLeaderService creates the headless Service that a single-pod
+// elastic-EP leader is reachable at, so a separately-scheduled follower can join its
+// Ray head. See dynamo.GenerateElasticEPHeadlessService.
+func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (Resource, error) {
+	logger := log.FromContext(ctx)
+	componentName := component.ComponentName
+	service := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
+		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
+		Namespace:       dgd.Namespace,
+		ComponentType:   string(component.ComponentType),
+		DynamoNamespace: renderDeployment.GetDynamoNamespaceForComponent(component),
+		ComponentName:   componentName,
+		Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
+		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
+	})
+
+	_, syncedService, err := commoncontroller.SyncResource(
+		ctx,
+		r,
+		dgd,
+		func(context.Context) (*corev1.Service, bool, error) {
+			return service, false, nil
+		},
+	)
+	if err != nil {
+		logger.Error(err, "failed to sync the elastic-EP leader service")
+		return nil, fmt.Errorf("failed to sync the elastic-EP leader service: %w", err)
+	}
+	if syncedService == nil {
+		return nil, nil
+	}
+
+	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) {
+		return true, ""
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to wrap the elastic-EP leader service: %w", err)
 	}
 	return resource, nil
 }
