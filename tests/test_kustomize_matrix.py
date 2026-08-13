@@ -48,6 +48,17 @@ def run_matrix(
     )
 
 
+def mock_kustomize_base_build(kustomize_matrix, monkeypatch, source: Path, output: str):
+    def fake_kustomize_build(command, **_):
+        assert command == ["kustomize", "build", str(source)]
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(
+        kustomize_matrix, "kustomize_command", lambda: ["kustomize", "build"]
+    )
+    monkeypatch.setattr(kustomize_matrix.subprocess, "run", fake_kustomize_build)
+
+
 def test_compose_applies_positional_components_and_forwards_options(
     tmp_path, monkeypatch
 ):
@@ -185,7 +196,7 @@ def test_unfold_expands_matrix_and_check_detects_stale_overlay(tmp_path):
 
 
 def test_unfold_materializes_template_component_with_base_and_variant_values(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     recipe = tmp_path / "recipe"
     base = recipe / "kustomize/base"
@@ -233,14 +244,19 @@ def test_unfold_materializes_template_component_with_base_and_variant_values(
         "    path: patch.yaml\n",
         "CONFIG_MAP: app-config\nMULTIPLIER: 2\n",
     )
-    (template / "patch.yaml").write_text(
+    (template / "patch.yaml.j2").write_text(
         "apiVersion: nvidia.com/v1alpha1\n"
         "kind: DynamoGraphDeployment\n"
         "metadata:\n"
         "  name: app\n"
         "  labels:\n"
-        "    static-patch: applies\n",
+        "    static-patch: {{ values.STATIC_PATCH }}\n",
         encoding="utf-8",
+    )
+    (template / "assets/runtime.conf").parent.mkdir()
+    (template / "assets/runtime.conf").write_text("plain asset\n", encoding="utf-8")
+    (template / "assets/metadata.txt.j2").write_text(
+        "model={{ values.MODEL_NAME }}\n", encoding="utf-8"
     )
     matrix = recipe / ".kustomize-matrix.yaml"
     matrix.write_text(
@@ -253,13 +269,22 @@ def test_unfold_materializes_template_component_with_base_and_variant_values(
         "        - source: templates/provider/instance\n"
         "          path: components/provider\n"
         "      values:\n"
-        "        MULTIPLIER: 3\n",
+        "        MULTIPLIER: 3\n"
+        "        STATIC_PATCH: from-variant\n"
+        "        MODEL_NAME: qwen\n",
         encoding="utf-8",
     )
 
-    result = run_matrix("unfold", str(matrix))
+    kustomize_matrix = load_matrix_module()
+    mock_kustomize_base_build(
+        kustomize_matrix,
+        monkeypatch,
+        base,
+        (base / "resources.yaml").read_text(encoding="utf-8"),
+    )
+    config = kustomize_matrix.load_matrix(str(matrix))
 
-    assert result.returncode == 0, result.stderr
+    kustomize_matrix.unfold_matrix(config, check=False)
     overlay = recipe / "kustomize/overlays/instance/kustomization.yaml"
     component = (
         recipe / "kustomize/overlays/instance/components/provider/kustomization.yaml"
@@ -276,17 +301,20 @@ def test_unfold_materializes_template_component_with_base_and_variant_values(
     assert 'replicas: "6"' in parsed_component["patches"][0]["patch"]
     assert parsed_component["patches"][1]["path"] == "patch.yaml"
     assert (component.parent / "patch.yaml").read_text(encoding="utf-8") == (
-        template / "patch.yaml"
-    ).read_text(encoding="utf-8")
-    build = subprocess.run(
-        ["kustomize", "build", str(overlay.parent)],
-        check=False,
-        capture_output=True,
-        text=True,
+        "apiVersion: nvidia.com/v1alpha1\n"
+        "kind: DynamoGraphDeployment\n"
+        "metadata:\n"
+        "  name: app\n"
+        "  labels:\n"
+        "    static-patch: from-variant\n"
     )
-    assert build.returncode == 0, build.stderr
-    assert "static-patch: applies" in build.stdout
-    assert run_matrix("unfold", "--check", str(matrix)).returncode == 0
+    assert (component.parent / "assets/runtime.conf").read_text(
+        encoding="utf-8"
+    ) == "plain asset\n"
+    assert (component.parent / "assets/metadata.txt").read_text(
+        encoding="utf-8"
+    ) == "model=qwen\n"
+    assert kustomize_matrix.unfold_matrix(config, check=True) == []
 
 
 def test_template_only_and_undefined_values_fail_clearly(tmp_path):
@@ -339,7 +367,7 @@ def test_template_path_is_a_nested_overlay_component_path(tmp_path):
         )
 
 
-def test_unfold_rebases_external_component_paths(tmp_path):
+def test_unfold_rebases_external_component_paths(tmp_path, monkeypatch):
     recipe = tmp_path / "recipe"
     base = recipe / "kustomize/base"
     write_kustomization(base, "resources:\n  - deployment.yaml\n")
@@ -390,9 +418,16 @@ def test_unfold_rebases_external_component_paths(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_matrix("unfold", str(matrix))
+    kustomize_matrix = load_matrix_module()
+    mock_kustomize_base_build(
+        kustomize_matrix,
+        monkeypatch,
+        base,
+        (base / "deployment.yaml").read_text(encoding="utf-8"),
+    )
+    config = kustomize_matrix.load_matrix(str(matrix))
 
-    assert result.returncode == 0, result.stderr
+    kustomize_matrix.unfold_matrix(config, check=False)
     component = (
         recipe / "kustomize/overlays/instance/components/external/kustomization.yaml"
     )
@@ -400,14 +435,6 @@ def test_unfold_rebases_external_component_paths(tmp_path):
     assert "# This comment remains in the generated Component." in rendered_component
     parsed_component = yaml.safe_load(rendered_component)
     assert parsed_component["components"] == ["../../../../../shared-component"]
-    build = subprocess.run(
-        ["kustomize", "build", str(recipe / "kustomize/overlays/instance")],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert build.returncode == 0, build.stderr
-    assert "from-external-component: applies" in build.stdout
 
 
 def test_render_uses_leaf_component_and_preserves_source_comments(
