@@ -120,7 +120,7 @@ opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [patch.crates-io]
-aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "c80c1875e1e623dc89bbe150d9d763a3a8d232df" }
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "614b9c8c8725332533616786e2eb049df48935f0" }
 
 [profile.profiling]
 inherits = "release"
