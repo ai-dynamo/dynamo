@@ -23,6 +23,7 @@ import pytest
 from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
+    _test_disagg_per_role_router_modes,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
@@ -1423,6 +1424,48 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
         enable_disagg_bootstrap=enable_disagg_bootstrap,
     ) as (prefill_workers, decode_workers):
         run_case(prefill_workers, decode_workers)
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_router_modes(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """KV-routed prefill in front of round-robin decode, via per-role MDC config.
+
+    The prefill mockers advertise RouterConfig(RouterMode.KV) in their cards; the
+    decode mockers advertise nothing and inherit the frontend's round-robin. Both
+    hops must then route on their own terms rather than sharing one mode.
+    """
+    logger.info("Starting per-role router mode disagg test (KV prefill, RR decode)")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Only the prefill tier advertises a mode; decode inherits the frontend's.
+        prefill_mocker_args={**base_mocker_args, "router_mode": "kv"},
+        decode_mocker_args=base_mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_router_modes(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
 
 
 @pytest.mark.timeout(180)

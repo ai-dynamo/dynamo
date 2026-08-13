@@ -119,6 +119,8 @@ def _build_mocker_command(
                 str(mocker_args["response_replay_trace_path"]),
             ]
         )
+    if "router_mode" in mocker_args:
+        command.extend(["--router-mode", str(mocker_args["router_mode"])])
 
     return command
 
