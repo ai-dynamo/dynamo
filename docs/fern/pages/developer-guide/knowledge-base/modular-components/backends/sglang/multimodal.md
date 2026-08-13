@@ -567,6 +567,11 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
 |---|---|---|
 | `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling |
 
+The markers need the `nvtx` package, which ships in the container images and is otherwise available
+as `pip install ai-dynamo[profiling]`. Setting `DYN_NVTX` without it raises `ImportError` at startup
+rather than producing an empty timeline. To annotate the Rust frontend and worker paths in the same
+capture, see [NVTX Profiling](../../../../../reference/observability/nvtx-profiling.mdx).
+
 Key NVTX ranges emitted:
 
 | Range | Worker | Description |
