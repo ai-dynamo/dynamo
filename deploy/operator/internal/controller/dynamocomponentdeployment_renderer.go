@@ -131,6 +131,7 @@ func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
 	leaderPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+	scopeWorkerTopologySpreadConstraints(leaderPodTemplateSpec)
 
 	if err := checkMainContainer(&leaderPodTemplateSpec.Spec); err != nil {
 		return nil, errors.Wrap(err, "generateLeaderPodTemplateSpec: failed to check main container")
@@ -153,6 +154,7 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
 	workerPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleWorker)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+	scopeWorkerTopologySpreadConstraints(workerPodTemplateSpec)
 
 	if err := checkMainContainer(&workerPodTemplateSpec.Spec); err != nil {
 		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
@@ -305,22 +307,35 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		},
 		Spec: *podSpec,
 	}
-	scopeWorkerTopologySpreadConstraints(podTemplate)
+
+	// Finalize standalone templates here; multinode roles add their final labels in their role-specific renderers.
+	if role == dynamo.RoleMain {
+		scopeWorkerTopologySpreadConstraints(podTemplate)
+	}
 	return podTemplate, nil
 }
 
 func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
 	podLabels := podTemplate.Labels
+	workerHash := podLabels[commonconsts.KubeLabelDynamoWorkerHash]
+
+	// Skip templates that are not hash-versioned worker components.
 	if !dynamo.IsWorkerComponent(podLabels[commonconsts.KubeLabelDynamoComponentType]) ||
-		podLabels[commonconsts.KubeLabelDynamoWorkerHash] == "" {
+		workerHash == "" {
 		return
 	}
 
+	// Scope only constraints whose explicit selectors match the finalized pod labels.
 	for i := range podTemplate.Spec.TopologySpreadConstraints {
 		constraint := &podTemplate.Spec.TopologySpreadConstraints[i]
-		if constraint.LabelSelector == nil {
+
+		// Preserve nil and namespace-wide selectors because they do not identify this workload specifically.
+		if constraint.LabelSelector == nil ||
+			(len(constraint.LabelSelector.MatchLabels) == 0 && len(constraint.LabelSelector.MatchExpressions) == 0) {
 			continue
 		}
+
+		// Leave invalid, unrelated, and user-scoped generation selectors unchanged.
 		selector, err := metav1.LabelSelectorAsSelector(constraint.LabelSelector)
 		if err != nil || !selector.Matches(k8slabels.Set(podLabels)) ||
 			labelSelectorReferencesKey(constraint.LabelSelector, commonconsts.KubeLabelDynamoWorkerHash) ||
@@ -328,16 +343,21 @@ func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
 			continue
 		}
 
-		// Old and new DCDs coexist during a rollout. Scope spread calculations
-		// to the incoming pod's generation so old pods cannot mask final skew.
-		constraint.MatchLabelKeys = append(constraint.MatchLabelKeys, commonconsts.KubeLabelDynamoWorkerHash)
+		// Add the exact incoming generation so old pods cannot mask final skew during a rollout.
+		if constraint.LabelSelector.MatchLabels == nil {
+			constraint.LabelSelector.MatchLabels = map[string]string{}
+		}
+		constraint.LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 }
 
 func labelSelectorReferencesKey(selector *metav1.LabelSelector, key string) bool {
+	// Check direct label matches before scanning expression requirements.
 	if _, exists := selector.MatchLabels[key]; exists {
 		return true
 	}
+
+	// Treat every expression on the key as user-owned selector behavior.
 	for _, expression := range selector.MatchExpressions {
 		if expression.Key == key {
 			return true

@@ -910,39 +910,164 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 	require.Equal(t, commonconsts.ComponentTypeWorker, service.Spec.Selector[commonconsts.KubeLabelDynamoComponentType])
 }
 
-func TestScopeWorkerTopologySpreadConstraints(t *testing.T) {
-	podTemplate := &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-			commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
-			commonconsts.KubeLabelDynamoWorkerHash:    "db6b6891",
-		}},
-		Spec: corev1.PodSpec{TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-			{
-				MaxSkew:           1,
-				TopologyKey:       corev1.LabelHostname,
-				WhenUnsatisfiable: corev1.DoNotSchedule,
-				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-					commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+func TestGenerateDeploymentScopesTopologySpreadToWorkerGeneration(t *testing.T) {
+	t.Log("Create a standalone worker with matching, unrelated, and namespace-wide spread selectors")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-db6b6891",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoWorkerHash: "db6b6891",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+						{
+							MaxSkew:           1,
+							TopologyKey:       corev1.LabelHostname,
+							WhenUnsatisfiable: corev1.DoNotSchedule,
+							LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+								commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+							}},
+						},
+						{
+							MaxSkew:           1,
+							TopologyKey:       corev1.LabelTopologyZone,
+							WhenUnsatisfiable: corev1.DoNotSchedule,
+							LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+								"app.kubernetes.io/name": "another-workload",
+							}},
+						},
+						{
+							MaxSkew:           1,
+							TopologyKey:       "topology.kubernetes.io/region",
+							WhenUnsatisfiable: corev1.DoNotSchedule,
+							LabelSelector:     &metav1.LabelSelector{},
+						},
+					},
+					Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "test-image:latest",
+					}},
 				}},
 			},
-			{
-				MaxSkew:           1,
-				TopologyKey:       corev1.LabelTopologyZone,
-				WhenUnsatisfiable: corev1.DoNotSchedule,
-				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-					"app.kubernetes.io/name": "another-workload",
-				}},
-			},
+		},
+	}
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+			return nil, nil
 		}},
 	}
 
-	scopeWorkerTopologySpreadConstraints(podTemplate)
+	t.Log("Render the Kubernetes Deployment")
+	deployment, toDelete, err := reconciler.generateDeployment(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
 
+	t.Log("Verify only the explicit matching selector gains the worker hash")
 	require.Equal(t,
-		[]string{commonconsts.KubeLabelDynamoWorkerHash},
-		podTemplate.Spec.TopologySpreadConstraints[0].MatchLabelKeys,
+		"db6b6891",
+		deployment.Spec.Template.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash],
 	)
-	require.Empty(t, podTemplate.Spec.TopologySpreadConstraints[1].MatchLabelKeys)
+	require.NotContains(t,
+		deployment.Spec.Template.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels,
+		commonconsts.KubeLabelDynamoWorkerHash,
+	)
+	require.Empty(t, deployment.Spec.Template.Spec.TopologySpreadConstraints[2].LabelSelector.MatchLabels)
+}
+
+func TestRenderMultinodeTopologySpreadConstraintsUsesFinalRoleLabels(t *testing.T) {
+	t.Log("Create a legacy-compatible decode worker with role-specific topology selectors")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "decode-db6b6891",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+							{
+								MaxSkew:           1,
+								TopologyKey:       corev1.LabelHostname,
+								WhenUnsatisfiable: corev1.DoNotSchedule,
+								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+									commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypeDecode,
+									dcdWorkloadRoleLabel:                         string(dynamo.RoleWorker),
+								}},
+							},
+							{
+								MaxSkew:           1,
+								TopologyKey:       corev1.LabelTopologyZone,
+								WhenUnsatisfiable: corev1.DoNotSchedule,
+								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+									commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypeDecode,
+									dcdWorkloadRoleLabel:                         string(dynamo.RoleLeader),
+								}},
+							},
+						},
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Image:   "test-image:latest",
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm"},
+						}},
+					},
+				},
+			},
+		},
+	}
+	renderer := newDCDWorkloadRenderer(
+		fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		&mockDockerSecretRetriever{GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+			return nil, nil
+		}},
+	)
+
+	t.Log("Render the final leader and worker templates")
+	leaderTemplate, workerTemplate, err := renderer.renderMultinodePodTemplateSpecs(t.Context(), dcd)
+	require.NoError(t, err)
+
+	t.Log("Verify each role scopes only the selector that matches its final labels")
+	require.Equal(t, commonconsts.ComponentTypeDecode, leaderTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType])
+	require.Equal(t, commonconsts.ComponentTypeDecode, workerTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType])
+	require.NotContains(t,
+		leaderTemplate.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels,
+		commonconsts.KubeLabelDynamoWorkerHash,
+	)
+	require.Equal(t,
+		"db6b6891",
+		leaderTemplate.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash],
+	)
+	require.Equal(t,
+		"db6b6891",
+		workerTemplate.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash],
+	)
+	require.NotContains(t,
+		workerTemplate.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels,
+		commonconsts.KubeLabelDynamoWorkerHash,
+	)
 }
 
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWithoutWorkerHash(t *testing.T) {
