@@ -108,12 +108,14 @@ fn base_runtime_config_watch(
 /// Spawns a background task that recomputes the joined state whenever either source changes.
 /// The returned `watch::Receiver` always contains the latest joined snapshot.
 ///
-/// `lifecycle` bounds every task and subscription this function creates, directly —
-/// the outer join task below, `Source 1`'s `Client` (and the `monitor_instance_source`
-/// task it owns), and `Source 2`'s `base_runtime_config_watch` task. A caller scoped to
-/// something narrower than the process, such as a monitor bound to one `WorkerSet`'s
-/// lifecycle, must pass that scope's own token, or these background tasks outlive every
-/// dropped reference the caller holds and leak until process shutdown.
+/// `lifecycle` bounds `Source 2`'s `base_runtime_config_watch` task directly, and this
+/// function's own join task below. `Source 1`'s `Client` already scopes its own
+/// `monitor_instance_source` task to the lifetime of its last `instance_avail_watcher`
+/// receiver, so it needs no token here — dropping this function's receivers already
+/// stops it. A caller scoped to something narrower than the process, such as a monitor
+/// bound to one `WorkerSet`'s lifecycle, must still pass that scope's own token, or
+/// `base_runtime_config_watch`'s task outlives every dropped reference the caller holds
+/// and leaks until process shutdown.
 pub async fn runtime_config_watch(
     endpoint: &Endpoint,
     lifecycle: CancellationToken,
@@ -122,7 +124,7 @@ pub async fn runtime_config_watch(
     let cancel_token = component.drt().primary_token();
 
     // Source 1: instance availability (watches DiscoveryQuery::Endpoint)
-    let client = endpoint.client_with_cancellation(lifecycle.clone()).await?;
+    let client = endpoint.client().await?;
     let mut instance_ids_rx = client.instance_avail_watcher();
 
     // Source 2: runtime configs from discovery (watches DiscoveryQuery::EndpointModels)

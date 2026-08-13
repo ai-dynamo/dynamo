@@ -273,6 +273,8 @@ def test_disaggregated_scaling_preserves_both_engine_gpu_counts() -> None:
             "scaling_policy": ["load_180_5"],
             "fpm_sampling": ["default"],
             "load_sensitivity": ["default"],
+            "prefill_min_endpoint": 2,
+            "decode_min_endpoint": 3,
         },
         SweepContext(
             core_search_space={
@@ -313,6 +315,8 @@ def test_disaggregated_scaling_preserves_both_engine_gpu_counts() -> None:
     assert replay_spec.config["mode"] == "disagg"
     assert replay_spec.config["prefill_engine_num_gpu"] == 4
     assert replay_spec.config["decode_engine_num_gpu"] == 8
+    assert replay_spec.config["prefill_min_endpoint"] == 2
+    assert replay_spec.config["decode_min_endpoint"] == 3
 
 
 def test_load_predictor_diagnostics_are_strict_json() -> None:

@@ -1932,8 +1932,8 @@ impl ModelManager {
         let lora_domain = self.lora_domain(&endpoint.id());
 
         // Register router via discovery mechanism.
-        let discovery = endpoint.component().drt().discovery();
-        let instance_id = discovery.instance_id();
+        let drt = endpoint.component().drt();
+        let instance_id = drt.discovery().instance_id();
 
         // Build transport for router endpoint based on request plane mode
         // Use the worker's component name so each target pool gets its own router discovery group
@@ -1950,7 +1950,7 @@ impl ModelManager {
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        discovery.register(discovery_spec).await?;
+        let registration = drt.register_endpoint_lease(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
@@ -1987,7 +1987,7 @@ impl ModelManager {
                 None
             };
 
-        let chooser = KvRouter::new_with_worker_role(
+        let mut chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2004,6 +2004,7 @@ impl ModelManager {
             self.lora_enabled.then(|| lora_domain.filter.clone()),
         )
         .await?;
+        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -2449,7 +2450,7 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
         pipeline::RouterMode,
         transports::event_plane::EventScope,

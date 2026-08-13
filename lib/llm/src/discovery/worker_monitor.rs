@@ -568,12 +568,19 @@ pub struct KvWorkerMonitor {
     thresholds: Arc<RwLock<LoadThresholdConfig>>,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
-    /// Lifecycle of the owning WorkerSet. Cancelled by `WorkerSet::drop`, which is what
-    /// bounds the monitoring task to the WorkerSet that spawned it instead of to the
-    /// process. Without this the task — and the KV metrics `EventSubscriber`, the decode
-    /// and prefill `RuntimeConfigWatch`es and the instance watcher it holds — survives
-    /// every WorkerSet rebuild and accumulates for the life of the frontend (#10729).
-    lifecycle: CancellationToken,
+    start_lock: Arc<tokio::sync::Mutex<()>>,
+    lifecycle: Arc<MonitorLifecycle>,
+}
+
+struct MonitorLifecycle {
+    cancellation_token: CancellationToken,
+    task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+}
+
+impl Drop for MonitorLifecycle {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
 }
 
 impl KvWorkerMonitor {
@@ -591,13 +598,24 @@ impl KvWorkerMonitor {
     /// For disaggregated mode, call `attach_prefill_client` after creation to enable
     /// prefill-pool overload publishing and TTFT metric cleanup when prefill workers
     /// are removed.
-    ///
-    /// `lifecycle` is the owning WorkerSet's cancellation token (the one handed to
-    /// [`WorkerSet::set_lifecycle_cancellation`](crate::discovery::WorkerSet)). It is
-    /// required rather than optional on purpose: a monitor whose lifetime is not bound
-    /// to its WorkerSet leaks its background task and every subscription that task
-    /// holds, so every construction site has to state its scope.
-    pub fn new(client: Client, config: LoadThresholdConfig, lifecycle: CancellationToken) -> Self {
+    pub fn new(client: Client, config: LoadThresholdConfig) -> Self {
+        Self::new_inner(client, config, None)
+    }
+
+    pub(crate) fn new_with_task_guard(
+        client: Client,
+        config: LoadThresholdConfig,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) -> Self {
+        Self::new_inner(client, config, Some(task_guard))
+    }
+
+    fn new_inner(
+        client: Client,
+        config: LoadThresholdConfig,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    ) -> Self {
+        let cancellation_token = client.endpoint.drt().child_token();
         Self {
             client,
             prefill_client: Arc::new(RwLock::new(None)),
@@ -605,7 +623,11 @@ impl KvWorkerMonitor {
             worker_load_states: Arc::new(DashMap::new()),
             thresholds: Arc::new(RwLock::new(config)),
             started: Arc::new(AtomicBool::new(false)),
-            lifecycle,
+            start_lock: Arc::new(tokio::sync::Mutex::new(())),
+            lifecycle: Arc::new(MonitorLifecycle {
+                cancellation_token,
+                task_guard,
+            }),
         }
     }
 
@@ -724,25 +746,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
     /// This is safe to call multiple times (e.g., from cloned monitors shared across
     /// pipelines) - only the first call spawns the background task.
     async fn start_monitoring(&self) -> anyhow::Result<()> {
-        // Guard: only start once across all clones
-        if self.started.swap(true, Ordering::SeqCst) {
+        let _start_guard = self.start_lock.lock().await;
+        if self.started.load(Ordering::Acquire) {
             tracing::debug!("Worker monitoring already started, skipping");
             return Ok(());
         }
 
         let endpoint = &self.client.endpoint;
-        let component = endpoint.component();
+        let cancellation_token = self.lifecycle.cancellation_token.child_token();
 
-        // Two independent scopes, both of which must be able to stop this task:
-        //   - the distributed runtime, i.e. process shutdown (unchanged behaviour);
-        //   - the owning WorkerSet, cancelled by `WorkerSet::drop`.
-        // The lifecycle token is minted by the controller with a bare
-        // `CancellationToken::new()` and is therefore *not* a child of the DRT token, so
-        // it has to be selected on separately rather than replacing the DRT token.
-        let cancellation_token = component.drt().child_token();
-        let lifecycle_token = self.lifecycle.child_token();
-
-        let decode_configs_rx = match runtime_config_watch(endpoint, lifecycle_token.clone()).await {
+        let decode_configs_rx = match runtime_config_watch(endpoint, cancellation_token.clone()).await {
             Ok(rx) => rx,
             Err(error) => {
                 tracing::error!(
@@ -750,7 +763,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     %error,
                     "KvWorkerMonitor: failed to watch endpoint runtime configs"
                 );
-                self.started.store(false, Ordering::SeqCst);
                 return Err(error);
             }
         };
@@ -777,9 +789,22 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let prefill_client_holder = self.prefill_client.clone();
         let prefill_client_notify = self.prefill_client_notify.clone();
         let thresholds = self.thresholds.clone();
+        let started = self.started.clone();
+        let task_guard = self.lifecycle.task_guard.clone();
 
         // Spawn background monitoring task
+        self.started.store(true, Ordering::Release);
         tokio::spawn(async move {
+            let _task_guard = task_guard;
+            struct StartedGuard(Arc<AtomicBool>);
+
+            impl Drop for StartedGuard {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+
+            let _started_guard = StartedGuard(started);
             let mut kv_metrics_rx = kv_metrics_rx;
             let mut prefill_metrics_rx: Option<TypedEventSubscriber<ActiveLoad>> = None;
             let mut prefill_configs_rx: Option<RuntimeConfigWatch> = None;
@@ -836,19 +861,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
                         tracing::debug!("Worker monitoring cancelled");
-                        break;
-                    }
-
-                    // WorkerSet teardown. Breaking here drops the KV metrics subscriber
-                    // and the instance watchers this task owns; `runtime_config_watch`
-                    // now takes `lifecycle_token` directly, so its own tasks (the join
-                    // task and, beneath it, `base_runtime_config_watch`) exit on this
-                    // same cancellation rather than waiting to notice their receivers
-                    // are gone.
-                    _ = lifecycle_token.cancelled() => {
-                        tracing::debug!("Worker monitoring cancelled by WorkerSet teardown");
                         // `select!` gives no ordering guarantee between this branch and
-                        // `config_change_future` above: a worker removal that discovery
+                        // `config_change_future` below: a worker removal that discovery
                         // already reported may still be sitting unprocessed in
                         // `decode_configs_rx`/`prefill_configs_rx` if this branch wins
                         // the race. Reconcile once more against the latest borrowed
@@ -1197,12 +1211,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             known_prefill_workers = rx.borrow().iter().copied().collect();
                             prefill_instances_rx = Some(rx);
 
-                            prefill_metrics_rx = match EventSubscriber::for_endpoint(
-                                &prefill_endpoint,
-                                KV_METRICS_SUBJECT,
-                            )
-                            .await
-                            {
+                            let metrics_result = tokio::select! {
+                                _ = cancellation_token.cancelled() => break,
+                                result = EventSubscriber::for_endpoint(
+                                    &prefill_endpoint,
+                                    KV_METRICS_SUBJECT,
+                                ) => result,
+                            };
+                            prefill_metrics_rx = match metrics_result {
                                 Ok(subscriber) => Some(subscriber.typed::<ActiveLoad>()),
                                 Err(error) => {
                                     tracing::warn!(
@@ -1213,7 +1229,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     None
                                 }
                             };
-                            prefill_configs_rx = match runtime_config_watch(&prefill_endpoint, lifecycle_token.clone()).await {
+                            let config_result = tokio::select! {
+                                _ = cancellation_token.cancelled() => break,
+                                result = runtime_config_watch(&prefill_endpoint, cancellation_token.clone()) => result,
+                            };
+                            prefill_configs_rx = match config_result {
                                 Ok(rx) => Some(rx),
                                 Err(error) => {
                                     tracing::warn!(
@@ -1254,10 +1274,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        CancellationToken, LoadMembership, LoadThresholdConfig, OverloadedWorkerTracker,
-        WorkerLoadState, classify_load_membership, compute_overloaded_instances,
-        overload_reconciliation_needed, publish_overloaded_instances,
-        publish_overloaded_instances_if_needed,
+        LoadMembership, LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
+        classify_load_membership, compute_overloaded_instances, overload_reconciliation_needed,
+        publish_overloaded_instances, publish_overloaded_instances_if_needed,
     };
     use dynamo_kv_router::protocols::ActiveLoad;
     use std::collections::HashSet;
@@ -1825,7 +1844,6 @@ mod tests {
                 active_prefill_tokens_threshold: Some(5_000),
                 ..Default::default()
             },
-            CancellationToken::new(),
         );
 
         // A prefill worker already over the token threshold, recorded before any
@@ -1847,69 +1865,49 @@ mod tests {
         rt.shutdown();
     }
 
-    /// Regression test for #10729: the monitoring task must be bound to the lifetime of
-    /// the WorkerSet that owns the monitor, not to the process.
-    ///
-    /// The observable is the strong count of `worker_load_states`: the spawned task
-    /// captures a clone of that `Arc` alongside the KV metrics `EventSubscriber`, the
-    /// runtime-config watch and the instance watcher. The count returning to 1 therefore
-    /// proves the task actually exited and dropped those captures — it is a statement
-    /// about released resources, not about a flag the test itself set.
-    ///
-    /// Before the fix the loop's only cancellation arm was `drt().child_token()`, so
-    /// cancelling a WorkerSet-scoped token did nothing and the poll below ran to its
-    /// timeout; every WorkerSet rebuild (LoRA churn drives many) left one task, one
-    /// subscription and one watch tree behind for the life of the frontend.
     #[tokio::test]
-    async fn monitoring_task_exits_when_worker_set_lifecycle_is_cancelled() {
+    async fn dropping_last_monitor_releases_task_state() {
         use super::KvWorkerMonitor;
         use dynamo_runtime::pipeline::WorkerLoadMonitor;
         use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
         use std::sync::Arc;
-        use std::time::Duration;
 
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        let component = drt
+        let client = drt
             .namespace("test_monitor_lifecycle".to_string())
             .unwrap()
             .component("test_component".to_string())
-            .unwrap();
-        let decode_client = component
+            .unwrap()
             .endpoint("decode".to_string())
             .client()
             .await
             .unwrap();
+        let monitor = KvWorkerMonitor::new(client, LoadThresholdConfig::default());
+        let monitor_clone = monitor.clone();
+        let worker_load_states = Arc::downgrade(&monitor.worker_load_states);
 
-        // The token a WorkerSet owns and cancels from its `Drop`.
-        let lifecycle = CancellationToken::new();
-        let monitor = KvWorkerMonitor::new(
-            decode_client,
-            LoadThresholdConfig::default(),
-            lifecycle.clone(),
-        );
-        monitor.start_monitoring().await.unwrap();
-
-        // Negative control, first: while the WorkerSet is alive the task must still be
-        // running and still holding its captures. Without this a task that died on
-        // startup for an unrelated reason would satisfy the assertion below too.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (first_start, second_start) =
+            tokio::join!(monitor.start_monitoring(), monitor_clone.start_monitoring());
+        first_start.unwrap();
+        second_start.unwrap();
+        drop(monitor);
         assert!(
-            Arc::strong_count(&monitor.worker_load_states) > 1,
-            "monitoring task must stay alive (and keep its subscriptions) while the WorkerSet lives"
+            !monitor_clone.lifecycle.cancellation_token.is_cancelled()
+                && worker_load_states.upgrade().is_some(),
+            "dropping one clone must not stop a shared monitor"
         );
+        drop(monitor_clone);
 
-        // The assertion under test: WorkerSet teardown ends the task.
-        lifecycle.cancel();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while Arc::strong_count(&monitor.worker_load_states) > 1 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while worker_load_states.strong_count() != 0 {
+                tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("monitor task must release its captured state when the WorkerSet lifecycle ends");
+        .expect("monitor task retained state after its last owner was dropped");
 
         rt.shutdown();
     }
