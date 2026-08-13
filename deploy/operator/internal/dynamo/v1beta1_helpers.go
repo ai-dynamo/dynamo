@@ -301,13 +301,34 @@ func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 	)
 }
 
+// groveComponentCutover records the live Grove state relevant to publishing a
+// worker runtime namespace.
+type groveComponentCutover struct {
+	// TargetCutOver is true when the target worker revision is committed and ready.
+	TargetCutOver bool
+	// CurrentRevisionCommitted is true when Grove has completed the target
+	// revision, even if that revision later becomes unhealthy.
+	CurrentRevisionCommitted bool
+}
+
 // GetGroveRuntimeNamespace returns the runtime namespace published for a Grove
-// component. A worker keeps its previously published namespace until Grove has
-// reported the current generation ready.
+// component. A worker keeps its previous namespace only while the target
+// revision has neither cut over nor committed.
 func GetGroveRuntimeNamespace(
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	currentGenerationReady bool,
+) (string, error) {
+	return getGroveRuntimeNamespace(dgd, component, groveComponentCutover{
+		TargetCutOver:            currentGenerationReady,
+		CurrentRevisionCommitted: currentGenerationReady,
+	})
+}
+
+func getGroveRuntimeNamespace(
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	cutover groveComponentCutover,
 ) (string, error) {
 	if dgd == nil || component == nil {
 		return "", nil
@@ -318,8 +339,8 @@ func GetGroveRuntimeNamespace(
 		return "", err
 	}
 
-	// Keep routing consumers on the active worker namespace during a rollout.
-	if !currentGenerationReady && IsWorkerComponent(string(component.ComponentType)) {
+	// Keep routing consumers on the active worker namespace until Grove commits the target revision.
+	if !cutover.TargetCutOver && !cutover.CurrentRevisionCommitted && IsWorkerComponent(string(component.ComponentType)) {
 		if previousNamespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace; previousNamespace != "" {
 			return previousNamespace, nil
 		}

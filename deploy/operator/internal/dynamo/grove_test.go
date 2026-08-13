@@ -1325,40 +1325,79 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 	}
 }
 
-func TestEvaluateGroveReadinessRetainsPreviousWorkerRuntimeNamespaceUntilReady(t *testing.T) {
+func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		hasPrevious    bool
-		previousSuffix string
-		ready          bool
+		name                string
+		hasPrevious         bool
+		previousSuffix      string
+		parentAccepted      bool
+		childAtTarget       bool
+		childUpdateFinished bool
+		ready               bool
+		wantDesired         bool
 	}{
 		{
-			name:  "new worker reports desired namespace while initial rollout is pending",
-			ready: false,
-		},
-		{
-			name:        "legacy base namespace remains active while suffix migration is pending",
-			hasPrevious: true,
+			name:        "new worker uses the desired namespace before the first cutover",
 			ready:       false,
+			wantDesired: true,
 		},
 		{
-			name:        "legacy base namespace switches after suffix migration completes",
-			hasPrevious: true,
-			ready:       true,
+			name:           "legacy base namespace stays active until the parent accepts the target",
+			hasPrevious:    true,
+			previousSuffix: "",
+			ready:          true,
+		},
+		{
+			name:           "legacy base namespace stays active while the child reports the old revision",
+			hasPrevious:    true,
+			parentAccepted: true,
+			ready:          true,
+		},
+		{
+			name:                "legacy base namespace stays active while the child update is unfinished",
+			hasPrevious:         true,
+			parentAccepted:      true,
+			childAtTarget:       true,
+			childUpdateFinished: false,
+			ready:               true,
+		},
+		{
+			name:                "legacy base namespace switches after target cutover",
+			hasPrevious:         true,
+			parentAccepted:      true,
+			childAtTarget:       true,
+			childUpdateFinished: true,
+			ready:               true,
+			wantDesired:         true,
+		},
+		{
+			name:                "completed target namespace survives later worker health loss",
+			hasPrevious:         true,
+			previousSuffix:      "oldhash",
+			parentAccepted:      true,
+			childAtTarget:       true,
+			childUpdateFinished: true,
+			ready:               false,
+			wantDesired:         true,
 		},
 		{
 			name:           "previous suffix remains active while the next suffix rollout is pending",
 			hasPrevious:    true,
 			previousSuffix: "oldhash",
-			ready:          false,
+			parentAccepted: true,
+			ready:          true,
 		},
 		{
-			name:           "next suffix is published after the later rollout completes",
-			hasPrevious:    true,
-			previousSuffix: "oldhash",
-			ready:          true,
+			name:                "next suffix is published after the later rollout completes",
+			hasPrevious:         true,
+			previousSuffix:      "oldhash",
+			parentAccepted:      true,
+			childAtTarget:       true,
+			childUpdateFinished: true,
+			ready:               true,
+			wantDesired:         true,
 		},
 	}
 
@@ -1399,10 +1438,32 @@ func TestEvaluateGroveReadinessRetainsPreviousWorkerRuntimeNamespaceUntilReady(t
 				}
 			}
 
-			t.Log("Seed the Grove worker at the requested rollout state.")
+			t.Log("Seed the parent and child Grove revision state.")
+			targetRevision := "target-revision"
+			completedAt := metav1.Now()
+			parentObservedGeneration := int64(0)
+			if tt.parentAccepted {
+				parentObservedGeneration = 1
+			}
+			podCliqueSet := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+				},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					ObservedGeneration:    &parentObservedGeneration,
+					CurrentGenerationHash: &targetRevision,
+					UpdateProgress:        &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateEndedAt: &completedAt},
+				},
+			}
 			updatedReplicas := int32(0)
-			if tt.ready {
+			if tt.ready || tt.childAtTarget {
 				updatedReplicas = 1
+			}
+			readyReplicas := int32(0)
+			if tt.ready {
+				readyReplicas = 1
 			}
 			podClique := &grovev1alpha1.PodClique{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1413,23 +1474,29 @@ func TestEvaluateGroveReadinessRetainsPreviousWorkerRuntimeNamespaceUntilReady(t
 				Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status: grovev1alpha1.PodCliqueStatus{
 					Replicas:           1,
-					ReadyReplicas:      1,
+					ReadyReplicas:      readyReplicas,
 					UpdatedReplicas:    updatedReplicas,
 					ScheduledReplicas:  1,
 					ObservedGeneration: ptr.To(int64(1)),
 				},
 			}
-			reader := newFakeGroveClient(g, podClique)
+			if tt.childAtTarget {
+				podClique.Status.CurrentPodCliqueSetGenerationHash = &targetRevision
+			}
+			if tt.childUpdateFinished {
+				podClique.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}
+			}
+			reader := newFakeGroveClient(g, podCliqueSet, podClique)
 
 			t.Log("Evaluate the current Grove status.")
 			readiness, err := EvaluateGroveReadiness(ctx, reader, dgd)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(readiness.Ready).To(gomega.Equal(tt.ready))
 
-			t.Log("Keep the old namespace until the new worker generation is ready.")
-			wantNamespace := desiredNamespace
-			if !tt.ready && previousNamespace != "" {
-				wantNamespace = previousNamespace
+			t.Log("Publish the previous namespace only until the target revision commits.")
+			wantNamespace := previousNamespace
+			if tt.wantDesired || previousNamespace == "" {
+				wantNamespace = desiredNamespace
 			}
 			g.Expect(readiness.ComponentStatuses[component.ComponentName].RuntimeNamespace).To(gomega.Equal(wantNamespace))
 		})
@@ -1437,6 +1504,73 @@ func TestEvaluateGroveReadinessRetainsPreviousWorkerRuntimeNamespaceUntilReady(t
 }
 
 // ---------------------------------------------------------------------------
+func TestGroveComponentTargetRevisionCommittedForPCSG(t *testing.T) {
+	ctx := context.Background()
+	targetRevision := "target-revision"
+	completedAt := metav1.Now()
+
+	tests := []struct {
+		name            string
+		finished        bool
+		updatedReplicas int32
+		want            bool
+	}{
+		{name: "completed scaling group commits target revision", finished: true, updatedReplicas: 1, want: true},
+		{name: "unfinished scaling group keeps target pending", finished: false, updatedReplicas: 1, want: false},
+		{name: "scaling group with stale update count keeps target pending", finished: true, updatedReplicas: 0, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			t.Log("Build a multinode worker and accepted Grove parent revision.")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "prefill",
+						ComponentType: v1beta1.ComponentTypePrefill,
+						Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+					}},
+				},
+			}
+			component := dgd.GetComponentByName("prefill")
+			pcs := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Generation: 1},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					ObservedGeneration:    ptr.To(int64(1)),
+					CurrentGenerationHash: &targetRevision,
+					UpdateProgress:        &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateEndedAt: &completedAt},
+				},
+			}
+
+			t.Log("Seed the scaling group at the requested revision-completion state.")
+			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      GroveComponentResourceName(dgd, component.ComponentName),
+					Namespace: dgd.Namespace,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:                          1,
+					UpdatedReplicas:                   tt.updatedReplicas,
+					CurrentPodCliqueSetGenerationHash: &targetRevision,
+				},
+			}
+			if tt.finished {
+				pcsg.Status.UpdateProgress = &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &completedAt}
+			}
+
+			t.Log("Evaluate whether the scaling group commits the target revision.")
+			reader := newFakeGroveClient(g, pcsg)
+			committed, err := groveComponentTargetRevisionCommitted(ctx, reader, dgd, component, pcs)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(committed).To(gomega.Equal(tt.want))
+		})
+	}
+}
+
 // Ready-reason classification tests (merged from classification_test.go).
 // These exercise the DGD-level Ready reason returned as the 4th value of
 // CheckPodCliqueReady / CheckPCSGReady, focusing on the capacity-before-
