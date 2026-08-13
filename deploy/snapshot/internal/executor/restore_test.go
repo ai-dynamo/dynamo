@@ -101,3 +101,22 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 		t.Fatal("ResolveContainerByPod should not be used when ContainerID is provided")
 	}
 }
+
+func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
+	checkpointDir := t.TempDir()
+	manifest := types.NewCheckpointManifest(
+		"checkpoint-123",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{},
+	)
+	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	_, err := RestoreInNamespace(context.Background(), RestoreOptions{CheckpointPath: checkpointDir}, testr.New(t))
+	if err == nil || !strings.Contains(err.Error(), "missing CUDA launch-job state") {
+		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
+	}
+}

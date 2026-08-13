@@ -7,6 +7,33 @@ import (
 	"testing"
 )
 
+func TestReadProcessFilesystemIDs(t *testing.T) {
+	procRoot := t.TempDir()
+	pidDir := filepath.Join(procRoot, "42")
+	if err := os.Mkdir(pidDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	status := "Uid:\t1000\t1001\t1002\t1003\nGid:\t2000\t2001\t2002\t2003\n"
+	if err := os.WriteFile(filepath.Join(pidDir, "status"), []byte(status), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	uid, gid, err := ReadProcessFilesystemIDs(procRoot, 42)
+	if err != nil {
+		t.Fatalf("ReadProcessFilesystemIDs() error = %v", err)
+	}
+	if uid != 1003 || gid != 2003 {
+		t.Fatalf("ReadProcessFilesystemIDs() = %d:%d, want 1003:2003", uid, gid)
+	}
+
+	if err := os.WriteFile(filepath.Join(pidDir, "status"), []byte("Uid:\t1000\t1001\t1002\t1003\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadProcessFilesystemIDs(procRoot, 42); err == nil {
+		t.Fatal("ReadProcessFilesystemIDs() accepted a status without Gid")
+	}
+}
+
 func TestParseProcExitCode(t *testing.T) {
 	tests := []struct {
 		name     string
