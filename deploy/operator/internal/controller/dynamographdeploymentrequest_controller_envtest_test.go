@@ -21,7 +21,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -2301,6 +2304,102 @@ spec:
 	})
 
 	Context("GPU Discovery Integration Tests", func() {
+		It("Should pass the discovered total GPU budget to the profiler", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-discovered-total-gpus"
+			namespace := envtestNamespace
+			request := reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			}
+
+			By("creating a DGDR without a total GPU budget")
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "Qwen/Qwen3-32B",
+					Backend: nvidiacomv1beta1.BackendTypeAuto,
+					Image:   "test-profiler:1.1.0",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH200SXM,
+						VRAMMB:         ptr.To(141312.0),
+						NumGPUsPerNode: ptr.To[int32](8),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(2000.0),
+						ITL:  ptr.To(30.0),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			By("creating two eight-GPU nodes for node-label discovery")
+			gpuNodes := make([]*corev1.Node, 0, 2)
+			for _, nodeName := range []string{"gpu-worker-budget-1", "gpu-worker-budget-2"} {
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: nodeName,
+						Labels: map[string]string{
+							gpu.LabelGPUCount:   "8",
+							gpu.LabelGPUProduct: "H200-SXM5-141GB",
+							gpu.LabelGPUMemory:  "141312",
+						},
+					},
+				}
+				Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+				gpuNodes = append(gpuNodes, node)
+			}
+			defer func() {
+				for _, node := range gpuNodes {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			}()
+
+			reconciler.RuntimeConfig.Gate = features.Defaults()
+			reconciler.GPUDiscovery = nil
+			reconciler.APIReader = k8sClient
+
+			By("validating the request and persisting discovered hardware")
+			_, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+
+			var persisted nvidiacomv1beta1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, request.NamespacedName, &persisted)).Should(Succeed())
+			Expect(persisted.Spec.Hardware).NotTo(BeNil())
+			Expect(persisted.Spec.Hardware.TotalGPUs).NotTo(BeNil())
+			Expect(*persisted.Spec.Hardware.TotalGPUs).To(Equal(int32(16)))
+
+			By("creating the profiling Job from the persisted DGDR")
+			_, err = reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: getProfilingJobName(&persisted), Namespace: namespace,
+			}, job)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
+
+			By("verifying the profiler receives the discovered budget in its inline config")
+			profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+			Expect(profiler).NotTo(BeNil())
+
+			configFlagIndex := slices.Index(profiler.Args, "--config")
+			Expect(configFlagIndex).To(BeNumerically(">=", 0))
+			configArgIndex := configFlagIndex + 1
+			Expect(configArgIndex).To(BeNumerically("<", len(profiler.Args)))
+
+			var profilerConfig nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec
+			Expect(json.Unmarshal([]byte(profiler.Args[configArgIndex]), &profilerConfig)).To(Succeed())
+			Expect(profilerConfig.Hardware).NotTo(BeNil())
+			Expect(profilerConfig.Hardware.TotalGPUs).NotTo(BeNil())
+			Expect(*profilerConfig.Hardware.TotalGPUs).To(Equal(*persisted.Spec.Hardware.TotalGPUs))
+		})
+
 		It("Should use GPU discovery when nodes have GPU labels", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-gpu-discovery"
