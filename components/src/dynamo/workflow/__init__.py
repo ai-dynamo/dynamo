@@ -3,12 +3,8 @@
 
 """Authoring and canonical IR for Dynamo inference workflows."""
 
-from dynamo.workflow.builder import (
-    StageDefinition,
-    StageHandle,
-    Workflow,
-    WorkflowBuilder,
-)
+from dynamo.workflow.builder import StageDefinition, StageHandle, Workflow
+from dynamo.workflow.definition import StageRef, WorkflowDefinition, WorkflowHandler
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.types import (
     StageContract,
@@ -22,10 +18,12 @@ __all__ = [
     "StageDefinition",
     "StageHandle",
     "StageIR",
+    "StageRef",
     "ValueRef",
     "ValueSpec",
     "Workflow",
-    "WorkflowBuilder",
+    "WorkflowDefinition",
+    "WorkflowHandler",
     "WorkflowIR",
     "WorkflowValidationError",
 ]

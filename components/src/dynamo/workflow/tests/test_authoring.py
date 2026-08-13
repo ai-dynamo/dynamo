@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from typing import Any
 
@@ -9,10 +10,11 @@ import pytest
 from dynamo.workflow import (
     StageContract,
     StageIR,
+    StageRef,
     ValueRef,
     ValueSpec,
     Workflow,
-    WorkflowBuilder,
+    WorkflowHandler,
     WorkflowIR,
     WorkflowValidationError,
 )
@@ -126,7 +128,7 @@ def test_output_method_handles_attribute_collisions_and_invalid_names():
             "text": ValueSpec(type="text"),
         },
     )
-    workflow = WorkflowBuilder("fallback")
+    workflow = Workflow("fallback")
     seed = workflow.add_input("seed", ValueSpec(type="text"))
     passthrough = StageContract(
         id="passthrough",
@@ -180,11 +182,11 @@ def test_rejects_incompatible_edge_and_foreign_reference():
         inputs={"value": ValueSpec(type="tensor", dtype="float32", shape=(4,))},
         outputs={"text": ValueSpec(type="text")},
     )
-    workflow = WorkflowBuilder("incompatible")
+    workflow = Workflow("incompatible")
     value = workflow.add_input(
         "value", ValueSpec(type="tensor", dtype="float16", shape=(4,))
     )
-    other = WorkflowBuilder("other")
+    other = Workflow("other")
     foreign = other.add_input("value", ValueSpec(type="tensor"))
 
     with pytest.raises(WorkflowValidationError, match="incompatible"):
@@ -204,7 +206,7 @@ def test_rejects_missing_inputs_and_conflicting_contract_ids():
         inputs={"value": ValueSpec(type="text")},
         outputs={"json": ValueSpec(type="json")},
     )
-    workflow = WorkflowBuilder("contracts")
+    workflow = Workflow("contracts")
     value = workflow.add_input("value", ValueSpec(type="text"))
     first_stage = workflow.add_stage("first", first, inputs={"value": value})
 
@@ -291,4 +293,106 @@ def test_ir_rejects_unknown_references():
             inputs=workflow.inputs,
             stages=workflow.stages,
             outputs=outputs,
+        )
+
+
+def test_builds_imperative_handler_with_fixed_stage_catalog() -> None:
+    contract = StageContract(
+        id="echo",
+        inputs={"text": ValueSpec(type="text")},
+        outputs={"text": ValueSpec(type="text")},
+    )
+    workflow = Workflow("imperative")
+    echo = workflow.use("echo", contract)
+
+    @workflow.handler(
+        inputs={"request": ValueSpec(type="json")},
+        outputs={"result": ValueSpec(type="text")},
+    )
+    async def run(inputs: Mapping[str, Any], context: Any) -> Mapping[str, Any]:
+        return {"result": inputs["request"]["text"]}
+
+    definition = workflow.build()
+
+    assert isinstance(definition, WorkflowHandler)
+    assert isinstance(echo, StageRef)
+    assert echo.id == "echo"
+    assert definition.inputs == {"request": ValueSpec(type="json")}
+    assert definition.outputs == {"result": ValueSpec(type="text")}
+    assert definition.stages == {"echo": contract}
+    assert definition.callback is run
+
+
+def test_handler_catalog_accepts_use_after_decorator() -> None:
+    contract = StageContract(id="source", outputs={"text": ValueSpec(type="text")})
+    workflow = Workflow("handler-first")
+
+    @workflow.handler(inputs={}, outputs={"text": ValueSpec(type="text")})
+    async def run(inputs: Mapping[str, Any], context: Any) -> Mapping[str, Any]:
+        return {"text": "ready"}
+
+    source = workflow.use("source", contract)
+    definition = workflow.build()
+
+    assert isinstance(definition, WorkflowHandler)
+    assert source.contract is contract
+    assert definition.stages == {"source": contract}
+
+
+def test_rejects_mixed_graph_and_handler_authoring() -> None:
+    contract = StageContract(id="source", outputs={"text": ValueSpec(type="text")})
+
+    graph = Workflow("graph")
+    graph.input("request", type="json")
+    with pytest.raises(WorkflowValidationError, match="cannot mix"):
+        graph.use("source", contract)
+
+    handler = Workflow("handler")
+    handler.use("source", contract)
+    with pytest.raises(WorkflowValidationError, match="cannot mix"):
+        handler.input("request", type="json")
+
+
+def test_rejects_missing_duplicate_and_synchronous_handlers() -> None:
+    workflow = Workflow("missing")
+    workflow.use(
+        "source",
+        StageContract(id="source", outputs={"text": ValueSpec(type="text")}),
+    )
+    with pytest.raises(WorkflowValidationError, match="requires a handler"):
+        workflow.build()
+
+    duplicate = Workflow("duplicate")
+
+    @duplicate.handler(inputs={}, outputs={"text": ValueSpec(type="text")})
+    async def first(inputs: Mapping[str, Any], context: Any) -> Mapping[str, Any]:
+        return {"text": "first"}
+
+    with pytest.raises(WorkflowValidationError, match="already has a handler"):
+        duplicate.handler(inputs={}, outputs={"text": ValueSpec(type="text")})
+
+    synchronous = Workflow("synchronous")
+
+    @synchronous.handler(inputs={}, outputs={"text": ValueSpec(type="text")})
+    def sync_handler(inputs: Mapping[str, Any], context: Any) -> Mapping[str, Any]:
+        return {"text": "invalid"}
+
+    with pytest.raises(WorkflowValidationError, match="async function"):
+        synchronous.build()
+
+
+def test_handler_definition_is_deeply_immutable() -> None:
+    workflow = Workflow("immutable-handler")
+
+    @workflow.handler(inputs={}, outputs={"text": ValueSpec(type="text")})
+    async def run(inputs: Mapping[str, Any], context: Any) -> Mapping[str, Any]:
+        return {"text": "ready"}
+
+    definition = workflow.build()
+    assert isinstance(definition, WorkflowHandler)
+    with pytest.raises(TypeError):
+        definition.outputs["other"] = ValueSpec(type="text")
+    with pytest.raises(TypeError):
+        definition.stages["other"] = StageContract(
+            id="other", outputs={"text": ValueSpec(type="text")}
         )

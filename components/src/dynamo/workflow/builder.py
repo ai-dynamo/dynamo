@@ -1,13 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Readable Python authoring helpers for canonical workflow IR."""
+"""Readable Python authoring for declarative and imperative workflows."""
 
 from __future__ import annotations
 
 import keyword
+from collections.abc import Callable
 from typing import Mapping, Optional, Protocol, Tuple, Union, cast, runtime_checkable
 
+from dynamo.workflow.definition import (
+    StageRef,
+    WorkflowDefinition,
+    WorkflowHandler,
+    WorkflowHandlerCallback,
+    _freeze_specs,
+)
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.types import (
     StageContract,
@@ -70,8 +78,8 @@ class StageHandle:
         )
 
 
-class WorkflowBuilder:
-    """Build a validated static workflow using declared stage contracts."""
+class Workflow:
+    """Author either a declarative graph or an imperative workflow handler."""
 
     def __init__(self, name: str) -> None:
         validate_name(name, "workflow name")
@@ -81,10 +89,16 @@ class WorkflowBuilder:
         self._stages: dict[str, StageIR] = {}
         self._contracts: dict[str, StageContract] = {}
         self._outputs: dict[str, ValueRef] = {}
+        self._mode: Optional[str] = None
+        self._handler_inputs: Mapping[str, ValueSpec] = {}
+        self._handler_outputs: Mapping[str, ValueSpec] = {}
+        self._handler_stages: dict[str, StageContract] = {}
+        self._handler_callback: Optional[WorkflowHandlerCallback] = None
 
     def add_input(self, name: str, spec: ValueSpec) -> ValueRef:
         """Declare and reference a workflow input."""
 
+        self._select_mode("graph")
         validate_name(name, "workflow input")
         if name in self._inputs:
             raise WorkflowValidationError(f"duplicate workflow input {name!r}")
@@ -125,6 +139,7 @@ class WorkflowBuilder:
     ) -> StageHandle:
         """Add a stage whose named inputs exactly match its contract."""
 
+        self._select_mode("graph")
         validate_name(stage_id, "stage id")
         if stage_id in self._stages:
             raise WorkflowValidationError(f"duplicate stage id {stage_id!r}")
@@ -165,19 +180,62 @@ class WorkflowBuilder:
     ) -> StageHandle:
         """Add a contracted worker or contract using keyword input ports."""
 
-        if isinstance(stage, StageContract):
-            contract = stage
-        elif isinstance(stage, StageDefinition):
-            contract = stage.contract
-        else:
-            raise WorkflowValidationError(
-                "stage must be a StageContract or carry a StageContract"
-            )
+        contract = self._resolve_contract(stage)
         return self.add_stage(stage_id, contract, inputs=inputs)
+
+    def use(
+        self,
+        stage_id: str,
+        stage: Union[StageContract, StageDefinition],
+    ) -> StageRef:
+        """Declare one stage available to an imperative workflow handler."""
+
+        self._select_mode("handler")
+        validate_name(stage_id, "stage id")
+        if stage_id in self._handler_stages:
+            raise WorkflowValidationError(f"duplicate stage id {stage_id!r}")
+        contract = self._resolve_contract(stage)
+        prior = self._contracts.get(contract.id)
+        if prior is not None and prior != contract:
+            raise WorkflowValidationError(
+                f"contract id {contract.id!r} has conflicting schemas"
+            )
+        self._contracts[contract.id] = contract
+        self._handler_stages[stage_id] = contract
+        return StageRef(stage_id, contract, self._owner)
+
+    def handler(
+        self,
+        *,
+        inputs: Mapping[str, ValueSpec],
+        outputs: Mapping[str, ValueSpec],
+    ) -> Callable[[WorkflowHandlerCallback], WorkflowHandlerCallback]:
+        """Register the single async callback for an imperative workflow."""
+
+        self._select_mode("handler")
+        if self._handler_callback is not None:
+            raise WorkflowValidationError("workflow already has a handler")
+        normalized_inputs = _freeze_specs(inputs, "workflow input")
+        normalized_outputs = _freeze_specs(outputs, "workflow output")
+        if not normalized_outputs:
+            raise WorkflowValidationError(
+                "workflow handlers require at least one output"
+            )
+
+        def register(callback: WorkflowHandlerCallback) -> WorkflowHandlerCallback:
+            if self._handler_callback is not None:
+                raise WorkflowValidationError("workflow already has a handler")
+            self._handler_inputs = normalized_inputs
+            self._handler_outputs = normalized_outputs
+            self._handler_callback = callback
+            return callback
+
+        return register
 
     def add_output(self, name: str, reference: ValueRef) -> None:
         """Expose a workflow input or stage output as a workflow output."""
 
+        self._select_mode("graph")
         validate_name(name, "workflow output")
         if name in self._outputs:
             raise WorkflowValidationError(f"duplicate workflow output {name!r}")
@@ -189,8 +247,22 @@ class WorkflowBuilder:
 
         self.add_output(name, reference)
 
-    def build(self) -> WorkflowIR:
-        """Return canonical, fully validated workflow IR."""
+    def build(self) -> WorkflowDefinition:
+        """Return the selected immutable workflow definition."""
+
+        if self._mode == "handler":
+            if self._handler_callback is None:
+                raise WorkflowValidationError("imperative workflow requires a handler")
+            return WorkflowHandler(
+                name=self._name,
+                inputs=self._handler_inputs,
+                outputs=self._handler_outputs,
+                stages=self._handler_stages,
+                callback=self._handler_callback,
+                _owner=self._owner,
+            )
+        if self._mode is None:
+            raise WorkflowValidationError("workflow has no graph or handler definition")
 
         return WorkflowIR(
             name=self._name,
@@ -199,10 +271,29 @@ class WorkflowBuilder:
             outputs=self._outputs,
         )
 
+    def _select_mode(self, mode: str) -> None:
+        if self._mode is not None and self._mode != mode:
+            raise WorkflowValidationError(
+                "workflow cannot mix declarative graph and imperative handler authoring"
+            )
+        self._mode = mode
+
+    @staticmethod
+    def _resolve_contract(
+        stage: Union[StageContract, StageDefinition],
+    ) -> StageContract:
+        if isinstance(stage, StageContract):
+            return stage
+        if isinstance(stage, StageDefinition):
+            return stage.contract
+        raise WorkflowValidationError(
+            "stage must be a StageContract or carry a StageContract"
+        )
+
     def _resolve_owned_reference(self, reference: ValueRef) -> ValueSpec:
         if not isinstance(reference, ValueRef) or reference._owner is not self._owner:
             raise WorkflowValidationError(
-                "value reference belongs to a different workflow builder"
+                "value reference belongs to a different workflow"
             )
         if reference.input_name is not None:
             if reference.input_name not in self._inputs:
@@ -220,7 +311,3 @@ class WorkflowBuilder:
                 f"unknown output {output_name!r} on stage {stage_id!r}"
             )
         return stage.contract.outputs[output_name]
-
-
-class Workflow(WorkflowBuilder):
-    """The user-facing workflow authoring surface."""
