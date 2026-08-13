@@ -639,7 +639,7 @@ where
         })
     }
 
-    fn source_locations_payload_for_selection(
+    fn transfer_hint_for_selection(
         &self,
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
@@ -692,7 +692,7 @@ where
         target_cached_prefix_blocks: u32,
         transfer_candidates: Option<&KvTransferCandidates>,
     ) -> Option<KvHints> {
-        let payload = self.source_locations_payload_for_selection(
+        let payload = self.transfer_hint_for_selection(
             target,
             target_cached_prefix_blocks,
             transfer_candidates,
@@ -2212,7 +2212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_locations_payload_skips_sources_without_usable_endpoint() {
+    async fn transfer_hint_skips_sources_without_usable_endpoint() {
         for source_endpoint in [None, Some("")] {
             let mut workers = HashMap::new();
             workers.insert(
@@ -2237,7 +2237,7 @@ mod tests {
                 owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
             };
 
-            let hint = router.source_locations_payload_for_selection(
+            let hint = router.transfer_hint_for_selection(
                 WorkerWithDpRank::new(7, 0),
                 0,
                 Some(&candidates),
@@ -2248,7 +2248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_locations_payload_skips_sources_with_different_worker_type() {
+    async fn transfer_hint_skips_sources_with_different_worker_type() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
@@ -2275,17 +2275,14 @@ mod tests {
             owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
         };
 
-        let hint = router.source_locations_payload_for_selection(
-            WorkerWithDpRank::new(7, 0),
-            0,
-            Some(&candidates),
-        );
+        let hint =
+            router.transfer_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
 
         assert_eq!(hint, None);
     }
 
     #[tokio::test]
-    async fn source_locations_payload_selects_source_with_matching_worker_type() {
+    async fn transfer_hint_selects_source_with_matching_worker_type() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
@@ -2324,11 +2321,8 @@ mod tests {
             ],
         };
 
-        let prefill_hint = router.source_locations_payload_for_selection(
-            WorkerWithDpRank::new(7, 0),
-            0,
-            Some(&candidates),
-        );
+        let prefill_hint =
+            router.transfer_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
         assert_eq!(
             prefill_hint,
             Some(KvSourceLocationsPayload {
@@ -2340,11 +2334,8 @@ mod tests {
             })
         );
 
-        let decode_hint = router.source_locations_payload_for_selection(
-            WorkerWithDpRank::new(10, 0),
-            0,
-            Some(&candidates),
-        );
+        let decode_hint =
+            router.transfer_hint_for_selection(WorkerWithDpRank::new(10, 0), 0, Some(&candidates));
         assert_eq!(
             decode_hint,
             Some(KvSourceLocationsPayload {
