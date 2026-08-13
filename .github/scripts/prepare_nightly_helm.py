@@ -31,13 +31,13 @@ import sys
 from pathlib import Path
 
 # token -> Chart.yaml files; the operator subchart rides the platform token.
+# Snapshot is no longer a Dynamo-owned chart -- it's consumed as an external
+# OCI dependency of the platform chart (github.com/ai-dynamo/snapshot),
+# pinned in deploy/helm/charts/platform/Chart.yaml, not rewritten here.
 CHART_TARGETS: dict[str, list[str]] = {
     "platform": [
         "deploy/helm/charts/platform/Chart.yaml",
         "deploy/helm/charts/platform/components/operator/Chart.yaml",
-    ],
-    "snapshot": [
-        "deploy/helm/charts/snapshot/Chart.yaml",
     ],
 }
 
@@ -46,7 +46,6 @@ CHART_TARGETS: dict[str, list[str]] = {
 # operator subchart keeps its name (values keys reference it).
 NIGHTLY_CHART_NAMES: dict[str, tuple[str, str]] = {
     "platform": ("deploy/helm/charts/platform/Chart.yaml", "dynamo-platform-nightly"),
-    "snapshot": ("deploy/helm/charts/snapshot/Chart.yaml", "snapshot-nightly"),
 }
 
 # token -> (values.yaml path, repository in the file, nightly repository).
@@ -61,13 +60,6 @@ IMAGE_SITES: dict[str, list[tuple[str, str, str]]] = {
             "deploy/helm/charts/platform/components/operator/values.yaml",
             "nvcr.io/nvidia/ai-dynamo/kubernetes-operator",
             "nvcr.io/nvidia/ai-dynamo/kubernetes-operator-nightly",
-        ),
-    ],
-    "snapshot": [
-        (
-            "deploy/helm/charts/snapshot/values.yaml",
-            "nvcr.io/nvidia/ai-dynamo/snapshot-agent",
-            "nvcr.io/nvidia/ai-dynamo/snapshot-agent-nightly",
         ),
     ],
 }
@@ -181,7 +173,7 @@ def main() -> int:
     parser.add_argument(
         "--charts",
         required=True,
-        help="Comma-separated chart tokens to rewrite (subset of: platform,snapshot).",
+        help="Comma-separated chart tokens to rewrite (subset of: platform).",
     )
     parser.add_argument("--root", default=".", help="Repository root (default: cwd).")
     args = parser.parse_args()

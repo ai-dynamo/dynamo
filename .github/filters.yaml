@@ -198,8 +198,6 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  # Operator imports the local snapshot module.
-  - 'deploy/snapshot/**'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
@@ -207,11 +205,14 @@ operator:
   - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
+# github.com/ai-dynamo/snapshot is external now; these paths are Dynamo's own
+# integration surface (checkpoint-placeholder image, DynamoCheckpoint glue,
+# Python lifecycle helpers, deploy tests), not deploy/snapshot/ (deleted).
 snapshot:
-  - 'deploy/snapshot/**'
-  - 'deploy/snapshot/.*'
+  - 'deploy/checkpoint-placeholder/**'
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
+  - 'deploy/operator/internal/checkpointjob/**'
   - 'tests/deploy/test_dynamocheckpoint.py'
 
 # Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate

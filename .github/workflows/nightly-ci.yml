@@ -437,36 +437,8 @@ jobs:
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
-  snapshot-build:
-    name: snapshot-agent
-    needs: [create-fresh-builder, resolve-source-sha]
-    runs-on: prod-default-v2
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
-      - name: Build and push snapshot agent (nightly tag)
-        id: build
-        uses: ./.github/actions/build-deploy-component
-        with:
-          component: snapshot
-          image_tag: ${{ github.sha }}-snapshot-agent-nightly
-          # Canonical compliance artifact name — OSRB attach tokens and the
-          # nightly diff-baseline lookup key on compliance-<sha>-snapshot-agent,
-          # independent of the -nightly image-tag suffix.
-          artifact_tag: ${{ github.sha }}-snapshot-agent
-          builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          # OSRB CSV diff baseline: previous successful scheduled nightly run
-          # (first nightly soft-degrades to baseline_unavailable).
-          diff_event_context: nightly
-          gh_token: ${{ secrets.GITHUB_TOKEN }}
+  # Dynamo no longer builds a snapshot-agent image -- the operator and agent
+  # come from github.com/ai-dynamo/snapshot's published images.
 
   vllm-efa-build:
     name: vllm-runtime-efa
@@ -1042,7 +1014,6 @@ jobs:
       - operator-build
       - planner-build
       - frontend-build
-      - snapshot-build
       - vllm-efa-build
       - sglang-efa-build
       - trtllm-efa-build
@@ -1079,7 +1050,6 @@ jobs:
       operator_build_result: ${{ needs.operator-build.result }}
       planner_build_result: ${{ needs.planner-build.result }}
       frontend_build_result: ${{ needs.frontend-build.result }}
-      snapshot_build_result: ${{ needs.snapshot-build.result }}
       vllm_efa_build_result: ${{ needs.vllm-efa-build.result }}
       sglang_efa_build_result: ${{ needs.sglang-efa-build.result }}
       trtllm_efa_build_result: ${{ needs.trtllm-efa-build.result }}
@@ -1296,7 +1266,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, snapshot-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
