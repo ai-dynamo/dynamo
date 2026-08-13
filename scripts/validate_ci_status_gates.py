@@ -21,8 +21,10 @@ allowlist is exactly the results that really mean nothing broke: `success`
 and `skipped` (jobs gated off by the changed-files filters). Both directions
 matter. Accepting more lets a broken job through; accepting less fails a job
 the filters legitimately skipped. The allowlist is read only from an active
-`jq -e` call, so a gate that has been commented out or reduced to an `echo`
-is reported as missing rather than trusted.
+`jq -e` call that the `needs` context is actually piped into, so a gate that
+has been commented out, quoted inside an `echo`, split from its input or given
+`-n` (which makes jq ignore that input) is reported as missing rather than
+trusted.
 
 Usage:
     python3 validate_ci_status_gates.py [repo_root]
@@ -49,25 +51,100 @@ COMMENT_LINE = re.compile(r"(?m)^[ \t]*#.*$")
 JQ_CALL = re.compile(r"\bjq\b(?P<flags>(?:\s+-[^\s']+)*)\s+'(?P<program>[^']*)'")
 SHORT_FLAGS = re.compile(r"^-[A-Za-z]+$")
 NEEDS_CONTEXT = re.compile(r"toJson\(\s*needs\s*\)")
+# `jq -n` builds its input from the program instead of reading stdin, so a
+# gate spelled that way never sees the job results piped into it.
+NULL_INPUT = "--null-input"
+# What can carry the piped context into jq: a pipeline, or an input redirect
+# (`< file`, `<<<"$results"`). Anything else between the two is not a feed.
+FEEDS_JQ = ("|", "<")
+
+
+def _commands(text):
+    """Split a `run:` block into shell commands, honouring quotes.
+
+    Newlines, `;`, `&&` and `||` separate commands, but only outside quotes: a
+    jq program is single-quoted and routinely contains all of them. Yields
+    `(offset, command)` so callers can tell where each one started.
+    """
+    commands, start, quote, i = [], 0, None, 0
+    while i < len(text):
+        char = text[i]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif quote == '"':
+            if char == "\\":
+                i += 1
+            elif char == '"':
+                quote = None
+        elif char == "\\":
+            i += 1
+        elif char in "'\"":
+            quote = char
+        elif char in "\n;":
+            commands.append((start, text[start:i]))
+            start = i + 1
+        elif text[i : i + 2] in ("&&", "||"):
+            commands.append((start, text[start:i]))
+            i += 1
+            start = i + 1
+        i += 1
+    commands.append((start, text[start:]))
+    return commands
+
+
+def _quoted(text, index):
+    """Whether `index` in `text` sits inside a shell quote."""
+    quote, i = None, 0
+    while i < index:
+        char = text[i]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif quote == '"':
+            if char == "\\":
+                i += 1
+            elif char == '"':
+                quote = None
+        elif char == "\\":
+            i += 1
+        elif char in "'\"":
+            quote = char
+        i += 1
+    return quote is not None
 
 
 def gate_allowlists(run):
     """Allowlists belonging to real gates in one `run:` block.
 
     An allowlist counts only where it can actually decide the job's exit
-    status: inside the program of a `jq -e` call, in a block that feeds it the
-    `needs` context. The same text sitting in a comment or echoed to stdout
-    gates nothing, and must not be mistaken for a gate that is missing.
+    status: inside the program of a `jq -e` call that the `needs` context is
+    piped into, in that same command. The same text sitting in a comment, or
+    echoed to stdout, or in a `jq` invocation that never receives the results,
+    gates nothing and must not be mistaken for a gate that is missing.
     """
-    text = COMMENT_LINE.sub("", run)
-    if not NEEDS_CONTEXT.search(text):
-        return []
     allowlists = []
-    for call in JQ_CALL.finditer(text):
-        flags = call.group("flags").split()
-        if not any(SHORT_FLAGS.match(f) and "e" in f[1:] for f in flags):
+    for _, command in _commands(COMMENT_LINE.sub("", run)):
+        context = NEEDS_CONTEXT.search(command)
+        if not context:
             continue
-        allowlists.extend(ALLOWLIST.findall(call.group("program")))
+        for call in JQ_CALL.finditer(command):
+            if _quoted(command, call.start()):
+                continue  # printed, not run
+            flags = call.group("flags").split()
+            if not any(SHORT_FLAGS.match(f) and "e" in f[1:] for f in flags):
+                continue
+            if any(
+                f == NULL_INPUT or (SHORT_FLAGS.match(f) and "n" in f[1:])
+                for f in flags
+            ):
+                continue  # jq builds its own input and ignores the results
+            if call.start() < context.end():
+                continue  # jq runs before the results are produced
+            feed = command[context.end() : call.start()]
+            if not any(op in feed for op in FEEDS_JQ):
+                continue  # the results go somewhere else, not into this jq
+            allowlists.extend(ALLOWLIST.findall(call.group("program")))
     return allowlists
 
 
@@ -198,6 +275,34 @@ jobs:
         (
             "jq without -e always exits 0",
             good.replace("jq -e", "jq"),
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "jq -n ignores the results piped at it",
+            good.replace("jq -e", "jq -ne"),
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "the gate reads the results but jq is fed nothing",
+            """
+jobs:
+  deploy-status-check:
+    steps:
+      - run: |
+          echo '${{ toJson(needs) }}' >/dev/null
+          jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+""",
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "a jq call quoted inside an echo runs nothing",
+            """
+jobs:
+  deploy-status-check:
+    steps:
+      - run: |
+          echo "${{ toJson(needs) }} would be checked by jq -e 'all(. as $result | [\\"success\\", \\"skipped\\"] | any($result == .))'"
+""",
             ["no parseable jq result allowlist"],
         ),
         (
