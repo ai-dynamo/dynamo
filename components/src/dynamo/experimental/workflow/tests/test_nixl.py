@@ -216,9 +216,7 @@ def _tensor_workflow() -> Workflow:
     workflow = Workflow("nixl-fanout")
     request = workflow.input("request", type="json")
     encoder = workflow.stage("encoder", ENCODER, request=request)
-    classifier = workflow.stage(
-        "classifier", CLASSIFIER, embedding=encoder.embedding
-    )
+    classifier = workflow.stage("classifier", CLASSIFIER, embedding=encoder.embedding)
     generator = workflow.stage("generator", GENERATOR, embedding=encoder.embedding)
     workflow.output("scores", classifier.scores)
     workflow.output("text", generator.text)
@@ -266,8 +264,7 @@ async def test_graph_dispatches_one_remote_nixl_reference_per_consumer() -> None
         DeploymentSpec.remote(tensor_carrier="nixl", **endpoints),
     )
     invokers = {
-        endpoints[stage_id]: _RemoteTensorInvoker(stage_id)
-        for stage_id in endpoints
+        endpoints[stage_id]: _RemoteTensorInvoker(stage_id) for stage_id in endpoints
     }
     dispatcher = StageDispatcher(plan, {}, invokers)
     executor = WorkflowOrchestrator(plan, dispatcher)
@@ -279,4 +276,3 @@ async def test_graph_dispatches_one_remote_nixl_reference_per_consumer() -> None
     assert invokers[endpoints["encoder"]].calls[0][1] == {
         "embedding": ("classifier.embedding", "generator.embedding")
     }
-
