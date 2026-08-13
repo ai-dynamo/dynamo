@@ -86,7 +86,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         /usr/local/bin/etcd \
         /usr/local/bin/etcdctl \
         /usr/local/bin/etcdutl && \
-    (pip3 uninstall -y wandb || true) && \
+    /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
+    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ] && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
@@ -348,6 +350,9 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
     /usr/local/bin/etcdutl \
+    /usr/local/bin/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb-* \
     /usr/local/lib/python3.12/dist-packages/cv2 \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
@@ -369,7 +374,8 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
     /usr/local/lib/python3.12/dist-packages/attrs-* && \
-    ! /usr/bin/python3 -c "import cv2" 2>/dev/null
+    ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
 
 # Post-overlay guard for the DALI whiteout above. This is the only stage where
