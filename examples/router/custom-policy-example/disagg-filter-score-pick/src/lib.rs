@@ -21,9 +21,6 @@ use filter::MinimumDeviceOverlapFilter;
 use picker::{DecodePicker, PrefillPicker, UnsupportedWorkerTypePicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};
 
-const PREFILL_WORKER_TYPE: &str = "prefill";
-const DECODE_WORKER_TYPE: &str = "decode";
-
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Parameters {
@@ -52,7 +49,7 @@ fn create_prefill_policy(
 
     WorkerSelectionPolicy::new_with_filters(
         config.clone(),
-        PREFILL_WORKER_TYPE,
+        WorkerType::Prefill.default_selector_label(),
         filters,
         vec![Box::new(PrefillLoadScorer)],
         Box::new(PrefillPicker),
@@ -70,7 +67,7 @@ fn create_decode_policy(
 
     WorkerSelectionPolicy::new_with_filters(
         config.clone(),
-        DECODE_WORKER_TYPE,
+        WorkerType::Decode.default_selector_label(),
         filters,
         vec![Box::new(DecodeLoadScorer)],
         Box::new(DecodePicker),
@@ -92,7 +89,7 @@ fn create_policy(
             config.clone(),
             unsupported.as_str(),
             Vec::new(),
-            Box::new(UnsupportedWorkerTypePicker::new(unsupported.as_str())),
+            Box::new(UnsupportedWorkerTypePicker::new(unsupported)),
         ),
     }
 }
