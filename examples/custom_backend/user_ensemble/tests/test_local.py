@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -161,7 +161,7 @@ def _request(image_count: int = 1) -> GenerateRequest:
     )
 
 
-def _bind(engine, encoder, adapter, decoder) -> None:
+async def _bind(engine, encoder, adapter, decoder) -> None:
     engine._encoder = encoder
     engine._decoder_stage = decoder
     runners = {
@@ -170,7 +170,7 @@ def _bind(engine, encoder, adapter, decoder) -> None:
         "generator": decoder,
     }
     plan = compile_workflow(define_workflow())
-    engine._executor = WorkflowExecutor(plan, runners)
+    engine._executor = await WorkflowExecutor.bind(plan, local_runners=runners)
 
 
 async def _collect(
@@ -213,9 +213,9 @@ async def test_start_builds_prompt_adapter_outside_decoder() -> None:
             return_value=plan,
         ) as compile_local,
         patch(
-            "examples.custom_backend.user_ensemble.local.worker.WorkflowExecutor",
-            return_value=executor,
-        ),
+            "examples.custom_backend.user_ensemble.local.worker.WorkflowExecutor.bind",
+            new=AsyncMock(return_value=executor),
+        ) as bind_executor,
     ):
         config = await engine.start(worker_id=1)
 
@@ -229,6 +229,14 @@ async def test_start_builds_prompt_adapter_outside_decoder() -> None:
     authored_workflow = compile_local.call_args.args[0]
     assert len(compile_local.call_args.args) == 1
     assert authored_workflow.build() == define_workflow().build()
+    bind_executor.assert_awaited_once_with(
+        plan,
+        local_runners={
+            "encoder": encoder_stage,
+            "classifier": engine._classifier,
+            "generator": decoder_stage,
+        },
+    )
     assert engine._decoder_runtime is decoder_runtime
     assert engine._decoder_stage is decoder_stage
     assert engine._encoder is encoder
@@ -246,7 +254,7 @@ async def test_encoder_artifacts_fan_out_once_and_join_in_terminal_response():
     adapter = _FakeAdapter()
     decoder = _FakeDecoder()
     engine = _engine(classifier)
-    _bind(engine, encoder, adapter, decoder)
+    await _bind(engine, encoder, adapter, decoder)
 
     chunks = await _collect(engine, _request())
 
@@ -299,7 +307,7 @@ async def test_classifier_failure_cancels_and_aborts_decoder():
     barrier = _BranchBarrier(2)
     decoder = _BlockingDecoder(barrier)
     engine = _engine(_FailingClassifier(barrier))
-    _bind(engine, _FakeEncoder([object()]), _FakeAdapter(), decoder)
+    await _bind(engine, _FakeEncoder([object()]), _FakeAdapter(), decoder)
 
     with pytest.raises(RuntimeError, match="classifier failed"):
         await _collect(engine, _request())
@@ -310,7 +318,7 @@ async def test_classifier_failure_cancels_and_aborts_decoder():
 @pytest.mark.parametrize("image_count", [0, 2])
 async def test_rejects_non_single_image_requests(image_count: int):
     engine = _engine()
-    _bind(engine, _FakeEncoder([object()]), _FakeAdapter(), _FakeDecoder())
+    await _bind(engine, _FakeEncoder([object()]), _FakeAdapter(), _FakeDecoder())
 
     with pytest.raises(InvalidArgument, match="exactly one image"):
         await _collect(engine, _request(image_count))
@@ -322,7 +330,7 @@ async def test_abort_and_cleanup_delegate_and_cleanup_is_idempotent():
     decoder_runtime = _FakeRuntime()
     prometheus_temp_dir = _FakeTempDir()
     engine = _engine()
-    _bind(engine, encoder, _FakeAdapter(), decoder)
+    await _bind(engine, encoder, _FakeAdapter(), decoder)
     engine._decoder_runtime = decoder_runtime
     engine._prometheus_temp_dir = prometheus_temp_dir
 

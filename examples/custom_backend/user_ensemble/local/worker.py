@@ -103,7 +103,7 @@ class UserEnsembleEngine(LLMEngine):
                 "generator": decoder_stage,
             }
             plan = compile_workflow(define_workflow())
-            executor = WorkflowExecutor(plan, runners)
+            executor = await WorkflowExecutor.bind(plan, local_runners=runners)
         except BaseException:
             cleanup_resources(encoder, decoder_runtime, prometheus_temp_dir)
             raise
