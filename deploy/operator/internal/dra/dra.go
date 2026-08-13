@@ -223,7 +223,7 @@ func gpuCountFromDeviceRequest(
 	request resourcev1.DeviceRequest,
 ) (int, bool, error) {
 	if request.Exactly != nil {
-		isGPU, err := deviceClasses.isGPU(ctx, request.Exactly.DeviceClassName)
+		isGPU, err := deviceClasses.isGPU(ctx, request.Exactly.DeviceClassName, request.Exactly.Selectors)
 		if err != nil {
 			return 0, false, err
 		}
@@ -240,7 +240,7 @@ func gpuCountFromDeviceRequest(
 	var count int
 	var hasGPU, hasNonGPU bool
 	for _, subRequest := range request.FirstAvailable {
-		isGPU, err := deviceClasses.isGPU(ctx, subRequest.DeviceClassName)
+		isGPU, err := deviceClasses.isGPU(ctx, subRequest.DeviceClassName, subRequest.Selectors)
 		if err != nil {
 			return 0, false, err
 		}
@@ -293,47 +293,46 @@ func looksLikeGPUIdentifier(name string) bool {
 
 type deviceClassResolver struct {
 	reader client.Reader
-	cache  map[string]bool
+	cache  map[string]*resourcev1.DeviceClass
 }
 
 func newDeviceClassResolver(reader client.Reader) *deviceClassResolver {
 	return &deviceClassResolver{
 		reader: reader,
-		cache:  map[string]bool{},
+		cache:  map[string]*resourcev1.DeviceClass{},
 	}
 }
 
-func (r *deviceClassResolver) isGPU(ctx context.Context, name string) (bool, error) {
-	if isGPU, ok := r.cache[name]; ok {
-		return isGPU, nil
+func (r *deviceClassResolver) isGPU(ctx context.Context, name string, requestSelectors []resourcev1.DeviceSelector) (bool, error) {
+	deviceClass, ok := r.cache[name]
+	if !ok {
+		deviceClass = &resourcev1.DeviceClass{}
+		if err := r.reader.Get(ctx, types.NamespacedName{Name: name}, deviceClass); err != nil {
+			return false, fmt.Errorf("failed to get DeviceClass %q: %w", name, err)
+		}
+		r.cache[name] = deviceClass
 	}
 
-	deviceClass := &resourcev1.DeviceClass{}
-	if err := r.reader.Get(ctx, types.NamespacedName{Name: name}, deviceClass); err != nil {
-		return false, fmt.Errorf("failed to get DeviceClass %q: %w", name, err)
-	}
-
-	isGPU, known, err := classifyDeviceClass(deviceClass)
+	isGPU, known, err := classifyDeviceRequest(deviceClass, requestSelectors)
 	if err != nil {
 		return false, err
 	}
 	if !known {
 		return false, fmt.Errorf(
-			"cannot determine whether DeviceClass %q provides GPUs: set spec.extendedResourceName or constrain device.driver in a CEL selector",
+			"cannot determine whether DeviceClass %q provides GPUs: set spec.extendedResourceName or constrain device.driver in a DeviceClass or request CEL selector",
 			name,
 		)
 	}
-	r.cache[name] = isGPU
 	return isGPU, nil
 }
 
-func classifyDeviceClass(deviceClass *resourcev1.DeviceClass) (bool, bool, error) {
-	if deviceClass.Spec.ExtendedResourceName != nil {
-		return isGPUResourceName(corev1.ResourceName(*deviceClass.Spec.ExtendedResourceName)), true, nil
-	}
-
+func classifyDeviceRequest(deviceClass *resourcev1.DeviceClass, requestSelectors []resourcev1.DeviceSelector) (bool, bool, error) {
+	// Kubernetes requires both DeviceClass and request selectors to match.
+	selectors := make([]resourcev1.DeviceSelector, 0, len(deviceClass.Spec.Selectors)+len(requestSelectors))
+	selectors = append(selectors, deviceClass.Spec.Selectors...)
+	selectors = append(selectors, requestSelectors...)
 	var isGPU, hasDriver bool
-	for _, selector := range deviceClass.Spec.Selectors {
+	for _, selector := range selectors {
 		if selector.CEL == nil || strings.Contains(selector.CEL.Expression, "||") {
 			continue
 		}
@@ -341,7 +340,7 @@ func classifyDeviceClass(deviceClass *resourcev1.DeviceClass) (bool, bool, error
 		for _, match := range matches {
 			candidateIsGPU := looksLikeGPUIdentifier(match[1])
 			if hasDriver && candidateIsGPU != isGPU {
-				return false, false, fmt.Errorf("DeviceClass %q constrains device.driver to both GPU and non-GPU drivers", deviceClass.Name)
+				return false, false, fmt.Errorf("DeviceClass %q and its request selectors constrain device.driver to both GPU and non-GPU drivers", deviceClass.Name)
 			}
 			isGPU = candidateIsGPU
 			hasDriver = true
@@ -350,10 +349,13 @@ func classifyDeviceClass(deviceClass *resourcev1.DeviceClass) (bool, bool, error
 	if hasDriver {
 		return isGPU, true, nil
 	}
+	if deviceClass.Spec.ExtendedResourceName != nil {
+		return isGPUResourceName(corev1.ResourceName(*deviceClass.Spec.ExtendedResourceName)), true, nil
+	}
 	// Keep canonical GPU class names working only when the class has no selectors.
-	// A present but unsupported selector must remain unclassified instead of being
-	// overridden by a suggestive class name.
-	if len(deviceClass.Spec.Selectors) == 0 && looksLikeGPUIdentifier(deviceClass.Name) {
+	// A present but unsupported class or request selector must remain unclassified
+	// instead of being overridden by a suggestive class name.
+	if len(selectors) == 0 && looksLikeGPUIdentifier(deviceClass.Name) {
 		return true, true, nil
 	}
 	return false, false, nil

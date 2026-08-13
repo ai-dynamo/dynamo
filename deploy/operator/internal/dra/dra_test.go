@@ -170,6 +170,11 @@ func TestExtractGPUCountFromResourceRequirements_RejectsFractionalGPU(t *testing
 }
 
 func TestResolveGPUCountFromResourceClaims(t *testing.T) {
+	driverSelectors := func(driver string) []resourcev1.DeviceSelector {
+		return []resourcev1.DeviceSelector{{
+			CEL: &resourcev1.CELDeviceSelector{Expression: "device.driver == '" + driver + "'"},
+		}}
+	}
 	exactRequest := func(name, deviceClass string, count int64, mode resourcev1.DeviceAllocationMode) resourcev1.DeviceRequest {
 		return resourcev1.DeviceRequest{
 			Name: name,
@@ -179,6 +184,11 @@ func TestResolveGPUCountFromResourceClaims(t *testing.T) {
 				Count:           count,
 			},
 		}
+	}
+	exactRequestWithDriver := func(name, deviceClass, driver string, count int64) resourcev1.DeviceRequest {
+		request := exactRequest(name, deviceClass, count, resourcev1.DeviceAllocationModeExactCount)
+		request.Exactly.Selectors = driverSelectors(driver)
+		return request
 	}
 	claimTemplate := func(name string, requests ...resourcev1.DeviceRequest) client.Object {
 		return &resourcev1.ResourceClaimTemplate{
@@ -208,9 +218,7 @@ func TestResolveGPUCountFromResourceClaims(t *testing.T) {
 		return &resourcev1.DeviceClass{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: resourcev1.DeviceClassSpec{
-				Selectors: []resourcev1.DeviceSelector{{
-					CEL: &resourcev1.CELDeviceSelector{Expression: "device.driver == '" + driver + "'"},
-				}},
+				Selectors: driverSelectors(driver),
 			},
 		}
 	}
@@ -290,6 +298,55 @@ func TestResolveGPUCountFromResourceClaims(t *testing.T) {
 			want:     4,
 		},
 		{
+			name: "request selector overrides a GPU-like empty DeviceClass",
+			objects: []client.Object{
+				&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.example.com"}},
+				claimTemplate(
+					"network-template",
+					exactRequestWithDriver("network", "gpu.example.com", "dra.net.example.com", 1),
+				),
+			},
+			podClaim: templatePodClaim("network", "network-template"),
+			want:     0,
+		},
+		{
+			name: "request selector classifies an otherwise unknown DeviceClass as GPU",
+			objects: []client.Object{
+				&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "accelerators.example.com"}},
+				claimTemplate(
+					"gpu-template",
+					exactRequestWithDriver("gpus", "accelerators.example.com", "gpu.nvidia.com", 2),
+				),
+			},
+			podClaim: templatePodClaim("accelerators", "gpu-template"),
+			want:     2,
+		},
+		{
+			name: "same DeviceClass is classified independently for each request",
+			objects: []client.Object{
+				&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "devices.example.com"}},
+				claimTemplate(
+					"devices-template",
+					exactRequestWithDriver("gpus", "devices.example.com", "gpu.nvidia.com", 2),
+					exactRequestWithDriver("network", "devices.example.com", "dra.net.example.com", 1),
+				),
+			},
+			podClaim: templatePodClaim("devices", "devices-template"),
+			want:     2,
+		},
+		{
+			name: "conflicting class and request driver selectors are rejected",
+			objects: []client.Object{
+				deviceClass("shared-gpus.example.com", "gpu.nvidia.com"),
+				claimTemplate(
+					"conflicting-template",
+					exactRequestWithDriver("devices", "shared-gpus.example.com", "dra.net.example.com", 1),
+				),
+			},
+			podClaim: templatePodClaim("devices", "conflicting-template"),
+			wantErr:  "constrain device.driver to both GPU and non-GPU drivers",
+		},
+		{
 			name: "non-GPU claim is ignored",
 			objects: []client.Object{claimTemplate(
 				"network-template",
@@ -324,16 +381,20 @@ func TestResolveGPUCountFromResourceClaims(t *testing.T) {
 		},
 		{
 			name: "equal-count GPU firstAvailable alternatives are supported",
-			objects: []client.Object{claimTemplate(
-				"gpu-template",
-				resourcev1.DeviceRequest{
-					Name: "gpus",
-					FirstAvailable: []resourcev1.DeviceSubRequest{
-						{Name: "nvidia", DeviceClassName: "gpu.nvidia.com", Count: 2},
-						{Name: "intel", DeviceClassName: "gpu.intel.com", Count: 2},
+			objects: []client.Object{
+				&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "nvidia.example.com"}},
+				&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "intel.example.com"}},
+				claimTemplate(
+					"gpu-template",
+					resourcev1.DeviceRequest{
+						Name: "gpus",
+						FirstAvailable: []resourcev1.DeviceSubRequest{
+							{Name: "nvidia", DeviceClassName: "nvidia.example.com", Selectors: driverSelectors("gpu.nvidia.com"), Count: 2},
+							{Name: "intel", DeviceClassName: "intel.example.com", Selectors: driverSelectors("gpu.intel.com"), Count: 2},
+						},
 					},
-				},
-			)},
+				),
+			},
 			podClaim: templatePodClaim("accelerators", "gpu-template"),
 			want:     2,
 		},
