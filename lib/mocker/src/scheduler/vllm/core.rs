@@ -1338,7 +1338,9 @@ impl VllmCore {
         self.kv_manager.native_prefix_overlap_tokens(tokens)
     }
 
-    pub(crate) fn native_prefix_snapshot(&self) -> Option<crate::kv_manager::NativePrefixSnapshot> {
+    pub(crate) fn native_prefix_snapshot(
+        &mut self,
+    ) -> Option<crate::kv_manager::NativePrefixSnapshot> {
         self.kv_manager.native_prefix_snapshot()
     }
 

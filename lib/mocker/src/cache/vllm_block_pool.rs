@@ -53,6 +53,22 @@ enum CopyRemoval {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResidentHashDelta {
+    Insert(SequenceHash),
+    Remove(SequenceHash),
+}
+
+impl ResidentHashDelta {
+    fn apply(self, hashes: &mut FxHashSet<SequenceHash>) {
+        let changed = match self {
+            Self::Insert(hash) => hashes.insert(hash),
+            Self::Remove(hash) => hashes.remove(&hash),
+        };
+        assert!(changed, "resident-hash delta must change membership");
+    }
+}
+
 impl HashCopies {
     fn new(primary: BlockCopyId) -> Self {
         Self {
@@ -137,8 +153,10 @@ pub(crate) struct VllmBlockPool {
     copies: SlotMap<BlockCopyId, BlockCopy>,
     by_hash: FxHashMap<SequenceHash, HashCopies>,
     /// Immutable view of the exact `by_hash` key set. Prefix snapshots may
-    /// retain an older `Arc` while an eager scheduler pass mutates the pool.
+    /// retain an older `Arc` while a later operation mutates the pool.
     resident_hashes: OnceLock<Arc<FxHashSet<SequenceHash>>>,
+    /// Ordered membership changes not yet applied to the immutable view.
+    resident_hash_deltas: Vec<ResidentHashDelta>,
     /// Intrusive ordinary LRU: head is evicted first, tail was released last.
     inactive_head: Option<BlockCopyId>,
     inactive_tail: Option<BlockCopyId>,
@@ -154,6 +172,7 @@ impl VllmBlockPool {
             copies: SlotMap::with_key(),
             by_hash: FxHashMap::default(),
             resident_hashes: OnceLock::new(),
+            resident_hash_deltas: Vec::new(),
             inactive_head: None,
             inactive_tail: None,
             inactive_len: 0,
@@ -172,15 +191,61 @@ impl VllmBlockPool {
         })
     }
 
-    pub(crate) fn resident_hashes(&self) -> Arc<FxHashSet<SequenceHash>> {
+    pub(crate) fn resident_hashes(&mut self) -> Arc<FxHashSet<SequenceHash>> {
+        if self.resident_hashes.get().is_none() {
+            debug_assert!(self.resident_hash_deltas.is_empty());
+            let initial = Arc::new(self.by_hash.keys().copied().collect());
+            assert!(
+                self.resident_hashes.set(initial).is_ok(),
+                "resident-hash view initialized twice"
+            );
+        }
+
+        if !self.resident_hash_deltas.is_empty() {
+            let Self {
+                resident_hashes,
+                resident_hash_deltas,
+                ..
+            } = self;
+            let hashes = Arc::make_mut(
+                resident_hashes
+                    .get_mut()
+                    .expect("resident-hash view must be initialized"),
+            );
+            for delta in resident_hash_deltas.drain(..) {
+                delta.apply(hashes);
+            }
+        }
+
         Arc::clone(
             self.resident_hashes
-                .get_or_init(|| Arc::new(self.by_hash.keys().copied().collect())),
+                .get()
+                .expect("resident-hash view must be initialized"),
         )
     }
 
-    fn invalidate_resident_hashes(&mut self) {
-        self.resident_hashes.take();
+    fn note_resident_hash_delta(&mut self, delta: ResidentHashDelta) {
+        if self.resident_hashes.get().is_none() {
+            return;
+        }
+
+        if self.resident_hash_deltas.is_empty() {
+            let hashes = self
+                .resident_hashes
+                .get_mut()
+                .expect("resident-hash view must be initialized");
+            if let Some(hashes) = Arc::get_mut(hashes) {
+                delta.apply(hashes);
+                return;
+            }
+        }
+
+        self.resident_hash_deltas.push(delta);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resident_hashes_initialized(&self) -> bool {
+        self.resident_hashes.get().is_some()
     }
 
     /// Atomically pins `prefix` and reserves `fresh` additional copies.
@@ -392,7 +457,7 @@ impl VllmBlockPool {
             }
         };
         if became_visible {
-            self.invalidate_resident_hashes();
+            self.note_resident_hash_delta(ResidentHashDelta::Insert(hash));
         }
         became_visible
     }
@@ -708,16 +773,25 @@ impl VllmBlockPool {
     #[cfg(test)]
     fn assert_hash_index_consistent(&self) {
         if let Some(resident_hashes) = self.resident_hashes.get() {
+            let mut effective_resident_hashes = FxHashSet::clone(resident_hashes);
+            for delta in self.resident_hash_deltas.iter().copied() {
+                delta.apply(&mut effective_resident_hashes);
+            }
             assert_eq!(
-                resident_hashes.len(),
+                effective_resident_hashes.len(),
                 self.by_hash.len(),
-                "resident-hash snapshot has the wrong cardinality"
+                "effective resident-hash view has the wrong cardinality"
             );
             assert!(
                 self.by_hash
                     .keys()
-                    .all(|hash| resident_hashes.contains(hash)),
-                "resident-hash snapshot differs from the hash index"
+                    .all(|hash| effective_resident_hashes.contains(hash)),
+                "effective resident-hash view differs from the hash index"
+            );
+        } else {
+            assert!(
+                self.resident_hash_deltas.is_empty(),
+                "an absent resident-hash view cannot have pending changes"
             );
         }
 
@@ -786,7 +860,7 @@ impl VllmBlockPool {
         };
         if remove_hash {
             self.by_hash.remove(&hash);
-            self.invalidate_resident_hashes();
+            self.note_resident_hash_delta(ResidentHashDelta::Remove(hash));
             Some(hash)
         } else {
             None
@@ -843,6 +917,7 @@ mod tests {
         let mut first = reserve(&mut pool, &[], 1).reservation;
         let first_id = pool.allocate_private(&mut first);
         assert!(pool.cache_private(first_id, 7));
+        assert_eq!(pool.resident_hash_deltas, [ResidentHashDelta::Insert(7)]);
         let visible = pool.resident_hashes();
         assert!(!Arc::ptr_eq(&empty, &visible));
         assert!(empty.is_empty(), "older snapshots must remain frozen");
@@ -853,6 +928,7 @@ mod tests {
         let mut duplicate = reserve(&mut pool, &[], 1).reservation;
         let duplicate_id = pool.allocate_private(&mut duplicate);
         assert!(!pool.cache_private(duplicate_id, 7));
+        assert!(pool.resident_hash_deltas.is_empty());
         assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
 
         let pinned = reserve(&mut pool, &[7], 0);
@@ -863,16 +939,92 @@ mod tests {
         pool.release(duplicate_id);
         assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
         assert_eq!(pool.evict_one(), None, "one duplicate must remain visible");
+        assert!(pool.resident_hash_deltas.is_empty());
         assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
 
         pool.release(first_id);
         assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
         assert_eq!(pool.evict_one(), Some(7));
+        assert_eq!(pool.resident_hash_deltas, [ResidentHashDelta::Remove(7)]);
         let removed = pool.resident_hashes();
         assert!(!Arc::ptr_eq(&visible, &removed));
         assert!(removed.is_empty());
         assert!(visible.contains(&7), "older snapshots must remain frozen");
         pool.assert_lru_consistent();
+        pool.assert_hash_index_consistent();
+    }
+
+    #[test]
+    fn resident_hash_snapshot_materializes_in_place_after_prior_view_drops() {
+        let mut pool = VllmBlockPool::new(1);
+        let retained = pool.resident_hashes();
+        let retained_ptr = Arc::as_ptr(&retained);
+
+        let mut reservation = reserve(&mut pool, &[], 1).reservation;
+        let id = pool.allocate_private(&mut reservation);
+        assert!(pool.cache_private(id, 11));
+        assert_eq!(
+            pool.resident_hash_deltas,
+            [ResidentHashDelta::Insert(11)],
+            "a retained view must defer membership changes"
+        );
+        assert_eq!(
+            retained_ptr,
+            Arc::as_ptr(pool.resident_hashes.get().unwrap()),
+            "deferred changes must retain the materialized allocation"
+        );
+        let delta_capacity = pool.resident_hash_deltas.capacity();
+        drop(retained);
+
+        let updated = pool.resident_hashes();
+        assert_eq!(retained_ptr, Arc::as_ptr(&updated));
+        assert_eq!(updated.iter().copied().collect::<Vec<_>>(), [11]);
+        assert!(pool.resident_hash_deltas.is_empty());
+        assert_eq!(pool.resident_hash_deltas.capacity(), delta_capacity);
+        pool.assert_hash_index_consistent();
+    }
+
+    #[test]
+    fn resident_hash_snapshot_applies_ordered_remove_reinsert_without_loss() {
+        let mut pool = VllmBlockPool::new(1);
+        let mut first_reservation = reserve(&mut pool, &[], 1).reservation;
+        let first_id = pool.allocate_private(&mut first_reservation);
+        assert!(pool.cache_private(first_id, 13));
+        let retained = pool.resident_hashes();
+        assert!(retained.contains(&13));
+
+        pool.release(first_id);
+        assert_eq!(pool.evict_one(), Some(13));
+        let mut second_reservation = reserve(&mut pool, &[], 1).reservation;
+        let second_id = pool.allocate_private(&mut second_reservation);
+        assert!(pool.cache_private(second_id, 13));
+        assert_eq!(
+            pool.resident_hash_deltas,
+            [ResidentHashDelta::Remove(13), ResidentHashDelta::Insert(13)]
+        );
+        pool.assert_hash_index_consistent();
+
+        let current = pool.resident_hashes();
+        assert!(current.contains(&13));
+        assert!(retained.contains(&13), "a retained view must remain frozen");
+        assert!(!Arc::ptr_eq(&retained, &current));
+        assert!(pool.resident_hash_deltas.is_empty());
+        pool.assert_hash_index_consistent();
+    }
+
+    #[test]
+    fn uninitialized_resident_hash_view_accumulates_no_changes() {
+        let mut pool = VllmBlockPool::new(1);
+        let mut reservation = reserve(&mut pool, &[], 1).reservation;
+        let id = pool.allocate_private(&mut reservation);
+        assert!(pool.cache_private(id, 17));
+        assert!(!pool.resident_hashes_initialized());
+        assert!(pool.resident_hash_deltas.is_empty());
+
+        pool.release(id);
+        assert_eq!(pool.evict_one(), Some(17));
+        assert!(!pool.resident_hashes_initialized());
+        assert!(pool.resident_hash_deltas.is_empty());
         pool.assert_hash_index_consistent();
     }
 

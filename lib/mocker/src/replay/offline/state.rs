@@ -479,6 +479,7 @@ impl OfflineWorkerState {
     }
 
     pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
+        drop(self.committed_native_prefix_snapshot.take());
         self.committed_native_prefix_snapshot = self.core.native_prefix_snapshot();
         let pass = self.core.try_execute_pass(now_ms)?;
         self.committed_scheduler_observation = self.core.pass_start_observation();
@@ -525,10 +526,13 @@ impl OfflineWorkerState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use uuid::Uuid;
 
     use super::{AggRequestState, DisaggRequestState, OfflineWorkerState};
     use crate::common::handoff::{HandoffId, HandoffOrder};
+    use crate::common::perf_model::{AicCallback, PerfModel};
     use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, WorkerType};
     use crate::loadgen::{ReplayRequestPayload, SessionTrace, Trace, TurnTrace, WorkloadDriver};
     use crate::replay::offline::extensions::kv_events::KvCacheEventData;
@@ -569,6 +573,73 @@ mod tests {
             max_output_tokens: 2,
             ..Default::default()
         }
+    }
+
+    struct ZeroLatency;
+
+    impl AicCallback for ZeroLatency {
+        fn predict_prefill(
+            &self,
+            _batch_size: usize,
+            _effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(0.0)
+        }
+
+        fn predict_decode(
+            &self,
+            _batch_size: usize,
+            _isl: usize,
+            _osl: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(0.0)
+        }
+    }
+
+    #[test]
+    fn repeated_same_time_pass_capture_reuses_prefix_view_allocation() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .worker_type(WorkerType::Aggregated)
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(1.0)
+            .perf_model(Arc::new(PerfModel::from_aic_callback(Arc::new(
+                ZeroLatency,
+            ))))
+            .build()
+            .unwrap();
+        let mut worker = OfflineWorkerState::new(0, args, false);
+        worker.receive_request(DirectRequest {
+            uuid: Some(Uuid::from_u128(849)),
+            tokens: (0..12).collect(),
+            max_output_tokens: 1,
+            ..Default::default()
+        });
+
+        let first = worker.try_execute_pass(0.0).unwrap();
+        assert_eq!(first.end_ms, 0.0);
+        let first_snapshot = worker.committed_native_prefix_snapshot.as_ref().unwrap();
+        assert_eq!(
+            first_snapshot.overlap_tokens(&(0..12).collect::<Vec<_>>()),
+            0
+        );
+        let first_ptr = first_snapshot.resident_hashes_ptr().unwrap();
+
+        let second = worker.try_execute_pass(0.0).unwrap();
+        assert_eq!(second.end_ms, 0.0);
+        let second_snapshot = worker.committed_native_prefix_snapshot.as_ref().unwrap();
+        assert_eq!(
+            second_snapshot.overlap_tokens(&(0..12).collect::<Vec<_>>()),
+            4
+        );
+        let second_ptr = second_snapshot.resident_hashes_ptr().unwrap();
+        assert_eq!(first_ptr, second_ptr);
     }
 
     #[test]

@@ -229,8 +229,8 @@ impl G1Manager {
         }
     }
 
-    pub(crate) fn native_prefix_snapshot(&self) -> Option<NativePrefixSnapshot> {
-        match &self.backend {
+    pub(crate) fn native_prefix_snapshot(&mut self) -> Option<NativePrefixSnapshot> {
+        match &mut self.backend {
             G1ManagerBackend::Native(manager) => Some(manager.prefix_snapshot()),
             G1ManagerBackend::Kvbm(_) => None,
         }

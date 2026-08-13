@@ -203,6 +203,11 @@ impl NativePrefixSnapshot {
             .count();
         (overlap_blocks * self.block_size).min(tokens.len())
     }
+
+    #[cfg(test)]
+    pub(crate) fn resident_hashes_ptr(&self) -> Option<*const FxHashSet<SequenceHash>> {
+        self.resident_hashes.as_ref().map(Arc::as_ptr)
+    }
 }
 
 impl VllmKvManager {
@@ -633,7 +638,7 @@ impl VllmKvManager {
         (overlap_blocks * self.block_size).min(tokens.len())
     }
 
-    pub(crate) fn prefix_snapshot(&self) -> NativePrefixSnapshot {
+    pub(crate) fn prefix_snapshot(&mut self) -> NativePrefixSnapshot {
         NativePrefixSnapshot {
             resident_hashes: self
                 .enable_prefix_caching
@@ -871,6 +876,7 @@ mod tests {
         manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 0, tokens.len());
 
         let snapshot = manager.prefix_snapshot();
+        assert!(manager.pool.resident_hashes_initialized());
         let live_overlap = manager.prefix_overlap_tokens(&tokens);
         assert!(live_overlap > 0);
         assert_eq!(snapshot.overlap_tokens(&tokens), live_overlap);
@@ -902,10 +908,12 @@ mod tests {
             "a retained snapshot must preserve its pre-pass membership"
         );
 
-        let disabled =
+        let mut disabled =
             VllmKvManager::new_with_event_sink(2, 4, false, KvEventPublishers::default(), 0);
+        assert!(!disabled.pool.resident_hashes_initialized());
         let disabled_snapshot = disabled.prefix_snapshot();
         assert!(disabled_snapshot.resident_hashes.is_none());
+        assert!(!disabled.pool.resident_hashes_initialized());
         assert_eq!(disabled_snapshot.overlap_tokens(&tokens), 0);
         assert_eq!(
             disabled_snapshot.overlap_tokens(&tokens),

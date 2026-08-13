@@ -346,7 +346,9 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn native_prefix_snapshot(&self) -> Option<crate::kv_manager::NativePrefixSnapshot> {
+    pub(crate) fn native_prefix_snapshot(
+        &mut self,
+    ) -> Option<crate::kv_manager::NativePrefixSnapshot> {
         match self {
             Self::Vllm(core) => core.native_prefix_snapshot(),
             Self::Sglang(_) => None,
