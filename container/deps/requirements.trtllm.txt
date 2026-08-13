@@ -9,6 +9,7 @@
 # GPL-encumbered ffmpeg binary that has CVE exposure; we point imageio at the
 # in-tree LGPL ffmpeg CLI via IMAGEIO_FFMPEG_EXE instead.
 --no-binary imageio-ffmpeg
+aiohttp>=3.14.3
 # The upstream tensorrt-llm/release image bundles gitpython and jupyterlab at
 # older releases than PyPI currently publishes; floor them so the --no-deps
 # install refreshes the bundled copies in place.
