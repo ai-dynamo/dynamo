@@ -161,12 +161,20 @@ Workers accept the same flags as the frontend, on vLLM, SGLang, TensorRT-LLM, an
 # Frontend default for the deployment
 python -m dynamo.frontend --router-mode round-robin --http-port 8000
 
-# Every replica of this worker set is launched with the same router flags
+# Worker set A -- overrides to KV. Every replica is launched with the same flags.
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
+
+# Worker set B -- a different model, no router flags, so it inherits round-robin
+python -m dynamo.vllm --model meta-llama/Llama-3.1-8B-Instruct
+
+# Worker set C -- a different model again, on its own strategy
+python -m dynamo.vllm --model BAAI/bge-m3 --router-mode device-aware-weighted
 ```
 
-A worker that omits `--router-mode` advertises nothing and inherits the frontend's configuration. That is the default, and it is what every deployment written before this option did.
+Sets A, B, and C are distinct because a worker set is keyed on model name as well as endpoint and worker type. Each carries its own routing configuration and the three do not interact.
+
+A worker that omits `--router-mode`, like set B, advertises nothing and inherits the frontend's configuration. That is the default, and it is what every deployment written before this option did.
 
 ### The override is per worker set, not per worker
 
