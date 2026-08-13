@@ -193,13 +193,9 @@ where
     decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
-    /// Router mode of the decode worker set that owns this prefill router.
-    ///
-    /// This governs decode-side decisions only (conditional disagg peeks the
-    /// decode router, which exists only in KV mode). It is *not* the mode of
-    /// the prefill hop: that is resolved per activation from the prefill
-    /// worker's own card and lives on [`PrefillBinding::prefill_router_mode`].
-    /// It does serve as the fallback when the prefill card advertises none.
+    /// Mode of the decode set that owns this router. Governs decode-side
+    /// decisions, and is the fallback for the prefill hop -- not its mode. That
+    /// lives on [`PrefillBinding::prefill_router_mode`].
     decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
@@ -213,7 +209,6 @@ where
     model_name: String,
     /// Namespace (used for logging / lifecycle messages).
     namespace: String,
-    is_eagle: bool,
     task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
@@ -227,11 +222,9 @@ where
 {
     endpoint_id: EndpointId,
     router: InnerPrefillRouter<Sel>,
-    /// Mode the prefill hop was actually built with, resolved at activation
-    /// from the prefill worker's advertised card (falling back to the decode
-    /// set's mode). Kept here rather than on `PrefillRouter` because it is only
-    /// knowable once a prefill target has been discovered, and it changes when
-    /// the binding is rebuilt against a new target.
+    /// Resolved at activation from the prefill card. Lives here rather than on
+    /// `PrefillRouter` because it is unknowable until a target is discovered,
+    /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
 }
 
@@ -246,7 +239,6 @@ where
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     model_name: String,
-    is_eagle: bool,
 }
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
@@ -408,12 +400,8 @@ where
             return next.generate(context.map(|_| req)).await;
         };
 
-        // Direct routing on the prefill hop requires the caller to name the
-        // worker. This is keyed on the *prefill* mode, not the decode set's:
-        // the two are independently configurable, and an external router (EPP)
-        // may pin prefill while decode still routes normally. Checked after the
-        // binding loads because the prefill mode is only known once a prefill
-        // target has been discovered.
+        // Keyed on the prefill mode, not the decode set's, and checked after
+        // the binding loads because that is where the prefill mode lives.
         if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
             return Err(anyhow::anyhow!(
                 "Prefill worker ID required in Direct routing mode but none found in request. \
@@ -889,7 +877,6 @@ mod tests {
             None,
             "test-model".to_string(),
             "test-namespace".to_string(),
-            false,
             None,
         );
         let task_state = Arc::downgrade(&router.activation_task_state);
