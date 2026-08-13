@@ -40,7 +40,7 @@ use dynamo_kv_router::services::selection::{
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
-use dynamo_kv_router::{WorkerSelectionPolicyFactory, WorkerType};
+use dynamo_kv_router::WorkerSelectionPolicyFactory;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -1621,24 +1621,46 @@ impl Drop for RadixTree {
     }
 }
 
-/// Helper function to create a KV router from an endpoint using the ModelManager
-/// to ensure proper etcd registration.
-/// Uses the discovered model card's typed worker role for policy selection.
-fn policy_role_and_metric_label(
-    worker_role: Option<WorkerType>,
+/// Preserve the standalone Python router's historical metric and LoRA classification.
+fn infer_metric_worker_type(
+    namespace: &str,
+    component: &str,
+    endpoint: &str,
     track_active_blocks: bool,
-) -> (WorkerType, &'static str) {
-    let fallback_role = if track_active_blocks {
-        WorkerType::Aggregated
+) -> &'static str {
+    let endpoint_is_prefill = namespace.to_lowercase().contains("prefill")
+        || component.to_lowercase().contains("prefill")
+        || endpoint.to_lowercase().contains("prefill");
+    if endpoint_is_prefill || !track_active_blocks {
+        llm_rs::discovery::WORKER_TYPE_PREFILL
     } else {
-        WorkerType::Prefill
-    };
-    let effective_worker_role = worker_role.unwrap_or(fallback_role);
-    let metric_worker_type =
-        effective_worker_role.default_selector_label_with_tracking(track_active_blocks);
-    (effective_worker_role, metric_worker_type)
+        llm_rs::discovery::WORKER_TYPE_DECODE
+    }
 }
 
+#[cfg(test)]
+mod metric_worker_type_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_prefill_fallback_before_discovery() {
+        assert_eq!(
+            infer_metric_worker_type("prod", "prefill-workers", "generate", true),
+            llm_rs::discovery::WORKER_TYPE_PREFILL
+        );
+        assert_eq!(
+            infer_metric_worker_type("prod", "workers", "generate", false),
+            llm_rs::discovery::WORKER_TYPE_PREFILL
+        );
+        assert_eq!(
+            infer_metric_worker_type("prod", "decode-workers", "generate", true),
+            llm_rs::discovery::WORKER_TYPE_DECODE
+        );
+    }
+}
+
+/// Create a KV router from an endpoint using the ModelManager for registration.
+/// Custom policies use the discovered model card's typed worker role for selection.
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
@@ -1649,6 +1671,16 @@ async fn create_kv_router_from_endpoint(
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let endpoint_id = endpoint.inner.id();
+    let track_active_blocks = kv_router_config
+        .as_ref()
+        .map(|config| config.router_track_active_blocks)
+        .unwrap_or(true);
+    let metric_worker_type = infer_metric_worker_type(
+        &endpoint_id.namespace,
+        &endpoint_id.component,
+        &endpoint_id.name,
+        track_active_blocks,
+    );
 
     // A linked policy requires the worker's typed role, and remote/served indexing
     // requires the model name. Wait for a model card only for those cases. Stock
@@ -1727,15 +1759,6 @@ async fn create_kv_router_from_endpoint(
     #[cfg(not(feature = "custom-policy"))]
     let _ = policy_model_name;
 
-    let track_active_blocks = kv_router_config
-        .as_ref()
-        .map(|config| config.router_track_active_blocks)
-        .unwrap_or(true);
-    let (effective_worker_role, metric_worker_type) =
-        policy_role_and_metric_label(worker_role, track_active_blocks);
-    #[cfg(not(feature = "custom-policy"))]
-    let _ = effective_worker_role;
-
     #[cfg(not(feature = "custom-policy"))]
     let kv_router = model_manager
         .kv_chooser_for_with_worker_role(
@@ -1757,9 +1780,12 @@ async fn create_kv_router_from_endpoint(
         let selector = worker_selection_policy_factory.map_or_else(
             || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
             |factory| {
+                let worker_role = worker_role.expect(
+                    "a configured worker-selection policy waits for a typed model card above",
+                );
                 factory(
                     &effective_config,
-                    effective_worker_role,
+                    worker_role,
                     dynamo_kv_router::RoutingPartitionRef::new(
                         policy_model_name.as_deref().unwrap_or_default(),
                         dynamo_kv_router::DEFAULT_ROUTING_GROUP,

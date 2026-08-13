@@ -71,8 +71,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             Arc::new(|config, worker_type, _partition| {
                 DefaultWorkerSelector::new(
                     Some(config.clone()),
-                    worker_type
-                        .default_selector_label_with_tracking(config.router_track_active_blocks),
+                    worker_type.default_selector_label(),
                 )
             }),
             prefill_load_estimator,

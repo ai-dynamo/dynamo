@@ -43,21 +43,6 @@ impl WorkerType {
             Self::Decode | Self::Encode | Self::Aggregated => "decode",
         }
     }
-
-    /// Built-in selector label after applying active-block tracking configuration.
-    ///
-    /// Disabling active-block tracking historically selects the prefill scoring path regardless
-    /// of the discovered worker role. Custom policy factories still receive the typed role.
-    pub const fn default_selector_label_with_tracking(
-        self,
-        track_active_blocks: bool,
-    ) -> &'static str {
-        if track_active_blocks {
-            self.default_selector_label()
-        } else {
-            Self::Prefill.default_selector_label()
-        }
-    }
 }
 
 impl fmt::Display for WorkerType {
@@ -114,14 +99,6 @@ mod tests {
         assert_eq!(WorkerType::Decode.default_selector_label(), "decode");
         assert_eq!(WorkerType::Encode.default_selector_label(), "decode");
         assert_eq!(WorkerType::Aggregated.default_selector_label(), "decode");
-        assert_eq!(
-            WorkerType::Aggregated.default_selector_label_with_tracking(false),
-            "prefill"
-        );
-        assert_eq!(
-            WorkerType::Decode.default_selector_label_with_tracking(true),
-            "decode"
-        );
     }
 
     #[test]
