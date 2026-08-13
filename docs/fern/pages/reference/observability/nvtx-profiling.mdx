@@ -9,8 +9,10 @@ Dynamo emits NVIDIA Tools Extension (NVTX) ranges and markers so an Nsight Syste
 shows where time goes inside Dynamo, not just inside the inference engine. The Rust runtime and the
 Python components are annotated separately and switch on independently.
 
-Both layers are **off by default**. Neither costs anything until you turn it on, and the Rust layer
-is not even compiled into released builds.
+Both layers are **off by default**, and the Rust layer is not compiled into released builds at all.
+A Rust build that *does* include the feature still pays a small gate check at each annotation site
+while `DYN_ENABLE_RUST_NVTX` is unset — an inlined atomic load and a branch, with the marker name
+never constructed.
 
 ## How the two layers are gated
 
@@ -116,7 +118,9 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o worker.nsys-rep \
 </ParamField>
 
 <ParamField path="DYN_NVTX" type="boolean" default="false">
-  Enables the Python components' NVTX annotations. Accepts `1`, `true`, or `yes`. Requires the
+  Enables the Python components' NVTX annotations. Accepts `1`, `true`, `on`, or `yes` to enable
+  and `0`, `false`, `off`, or `no` to disable, trimmed and case-insensitive, matching
+  `DYN_ENABLE_RUST_NVTX`. Any other value raises rather than silently disabling. Requires the
   `nvtx` package from the `ai-dynamo[profiling]` extra; raises at import if it is missing.
 </ParamField>
 
