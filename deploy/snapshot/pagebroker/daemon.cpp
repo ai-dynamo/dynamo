@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -20,6 +21,13 @@ using snapshot::pagebroker::Response;
 namespace {
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 enum ArgumentIndex { kSocketPath = 1, kStagingDirectory, kArgumentCount };
+volatile sig_atomic_t shutting_down;
+
+void
+Stop(int)
+{
+  shutting_down = 1;
+}
 
 bool
 ReadAll(int fd, void* buffer, size_t size)
@@ -102,6 +110,14 @@ main(int argc, char** argv)
     return 2;
   }
 
+  struct sigaction action {};
+  action.sa_handler = Stop;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGINT, &action, nullptr) < 0 || sigaction(SIGTERM, &action, nullptr) < 0) {
+    std::cerr << "install signal handler: " << std::strerror(errno) << '\n';
+    return 1;
+  }
+
   const fs::path socket_path(argv[kSocketPath]);
   std::error_code error;
   fs::create_directories(socket_path.parent_path(), error);
@@ -135,7 +151,7 @@ main(int argc, char** argv)
   }
 
   Broker broker(argv[kStagingDirectory]);
-  for (;;) {
+  while (!shutting_down) {
     FileDescriptor connection(accept(listener.get(), nullptr, nullptr));
     if (connection.get() < 0) {
       if (errno != EINTR)
