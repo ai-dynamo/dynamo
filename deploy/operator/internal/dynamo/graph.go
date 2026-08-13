@@ -322,9 +322,45 @@ func GenerateDynamoComponentsDeployments(
 			return nil, err
 		}
 		deployments[componentName] = dcd
+
+		// On the non-Grove pathway an elastic-EP leader also gets an optional
+		// follower, rendered as its own DynamoComponentDeployment that rests at
+		// zero replicas so it can be scaled up on demand without gang-blocking the
+		// leader. (A Grove clique cannot rest at zero -- grove#676 -- so the
+		// follower lives on this pathway until grove#686 lands.)
+		if follower := synthesizeElasticEPFollowerDCD(dcd, componentName); follower != nil {
+			deployments[follower.Labels[commonconsts.KubeLabelDynamoComponent]] = follower
+		}
 	}
 
 	return deployments, nil
+}
+
+// synthesizeElasticEPFollowerDCD derives the optional follower DCD for an
+// elastic-EP leader, or returns nil when the leader is not an elastic-EP Ray
+// launch. The follower is a deep copy of the leader (same image, GPU, model
+// args) that rests at zero replicas and carries a marker annotation; the
+// workload renderer reads that marker to launch it with the follower Ray-join
+// command (RoleFollower) instead of the leader's serve command. Its component
+// identity is "<leader>-flw" so its Deployment, Service, and selector never
+// collide with the leader's -- the renderer trims that suffix to rejoin the
+// leader's headless Ray Service.
+func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string) *v1beta1.DynamoComponentDeployment {
+	if c := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec); c == nil || !IsElasticEPRayLaunch(c) {
+		return nil
+	}
+	follower := leaderDCD.DeepCopy()
+	follower.Name = NormalizeKubeResourceName(leaderDCD.Name + "-" + commonconsts.GroveRoleSuffixFollower)
+	follower.Spec.Replicas = ptr.To(int32(0))
+	if follower.Labels == nil {
+		follower.Labels = map[string]string{}
+	}
+	follower.Labels[commonconsts.KubeLabelDynamoComponent] = leaderComponentName + "-" + commonconsts.GroveRoleSuffixFollower
+	if follower.Annotations == nil {
+		follower.Annotations = map[string]string{}
+	}
+	follower.Annotations[commonconsts.KubeAnnotationElasticEPFollower] = commonconsts.KubeLabelValueTrue
+	return follower
 }
 
 // gmsExtraClientContainersError returns a deterministic error for invalid
@@ -1294,19 +1330,13 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 	case component.IsGroveScalingGroupForced():
 		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
-		roles := expandSingleNodeRoles(componentName, componentReplicas)
-		// An elastic-EP single-pod leader gets an on-demand follower clique: a
-		// standalone PodClique that rests at zero replicas and is scaled up to add
-		// data-parallel ranks. Gate on the same Ray-launch predicate as the leader's
-		// Ray head so only real elastic-EP components grow a follower.
-		if c := GetMainContainer(component); c != nil && IsElasticEPRayLaunch(c) {
-			roles = append(roles, ServiceRole{
-				Name:     componentName + "-" + commonconsts.GroveRoleSuffixFollower,
-				Role:     RoleFollower,
-				Replicas: 0,
-			})
-		}
-		return roles
+		// NOTE: the elastic-EP follower is NOT emitted here. A Grove clique cannot
+		// rest at zero replicas (grove#676: minAvailable must be > 0), so an optional
+		// follower that never gang-blocks the leader is rendered on the non-Grove
+		// pathway instead (see synthesizeElasticEPFollowerDCD). Revisit emitting the
+		// follower as a Grove clique once grove#686 (GREP-0677, replicas:0 as a valid
+		// idle state) lands.
+		return expandSingleNodeRoles(componentName, componentReplicas)
 	}
 }
 
@@ -2297,9 +2327,6 @@ type cliqueParams struct {
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 }
 
-// buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
-// injecting labels, annotations, checkpoint config, and scheduler settings.
-//
 // injectElasticEPFollowerAntiAffinity adds a required one-pod-per-node anti-affinity so
 // each elastic-EP follower (and the leader it selects) lands on its own node -- packing
 // several data-parallel ranks onto a node would starve them of the cross-node NVLink the
@@ -2327,6 +2354,8 @@ func injectElasticEPFollowerAntiAffinity(podSpec *corev1.PodSpec, componentName,
 	)
 }
 
+// buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
+// injecting labels, annotations, checkpoint config, and scheduler settings.
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
@@ -2385,20 +2414,6 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
-	}
-
-	// The elastic-EP follower is a standalone, on-demand clique. It rests at zero
-	// replicas, so MinAvailable must be 0 -- a non-zero floor would gang-terminate the
-	// leader's PodGang whenever no follower is running. It also gets a required
-	// one-pod-per-node anti-affinity so each rank lands on its own node's NVLink;
-	// packing several onto a node would starve the cross-node EP collective.
-	if p.r.Role == RoleFollower {
-		minAvailable = 0
-		injectElasticEPFollowerAntiAffinity(
-			podSpec,
-			p.componentName,
-			p.dynamoDeployment.GetDynamoNamespaceForComponent(p.component),
-		)
 	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{

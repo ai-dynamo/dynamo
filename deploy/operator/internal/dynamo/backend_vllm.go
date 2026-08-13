@@ -554,8 +554,8 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 			healthGate, leaderHostname, VLLMPort,
 		)}
 	case RoleFollower:
-		// The follower is a standalone clique, not a worker in the leader's gang, so
-		// it reaches the leader through the headless elastic-EP Service (Phase 3)
+		// The follower is an optional pod that is not a worker in the leader's gang,
+		// so it reaches the leader through the headless elastic-EP Service (Phase 3)
 		// rather than the deployment framework's leader hostname. Same /live gate as
 		// the worker so the join lands after the leader has placed its data-parallel
 		// group. Its container carries the leader's vLLM serve command, but the
@@ -563,7 +563,14 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		// pod's GPU as a Ray actor -- so that command is dropped and replaced with a
 		// bare Ray join. --node-ip-address pins the node to the pod IP so the leader's
 		// engine finds this rank's GPU under the address Ray registers.
-		leaderHostname := ElasticEPLeaderServiceName(serviceName)
+		//
+		// serviceName is the follower's own component name. On the Grove pathway the
+		// follower is a role inside the leader component, so serviceName already is
+		// the leader's name; on the non-Grove pathway the follower is a synthesized
+		// "<leader>-flw" component, so trim that suffix to recover the leader's
+		// headless Service. TrimSuffix is a no-op when the suffix is absent.
+		leaderComponentName := strings.TrimSuffix(serviceName, "-"+commonconsts.GroveRoleSuffixFollower)
+		leaderHostname := ElasticEPLeaderServiceName(leaderComponentName)
 		healthGate := fmt.Sprintf(
 			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
 				`2>/dev/null; do `+

@@ -698,7 +698,60 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	if err != nil {
 		return false, err
 	}
-	return modified, nil
+	// An elastic-EP leader additionally owns a headless "<component>-ray" Service
+	// that its follower joins as a Ray head. The Grove pathway emits the same
+	// Service from its stable-resources reconciler; this is the non-Grove twin.
+	modifiedRay, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateElasticEPHeadlessService(ctx, opt)
+	})
+	if err != nil {
+		return false, err
+	}
+	return modified || modifiedRay, nil
+}
+
+// generateElasticEPHeadlessService returns the headless "<component>-ray" Service
+// for an elastic-EP leader DCD, or a delete stub for any other DCD (including the
+// follower, which joins the Service but does not own it). Keeping the generator
+// total lets SyncResource garbage-collect the Service if a component stops being
+// an elastic-EP launch.
+func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {
+	dcd := opt.dynamoComponentDeployment
+	componentName := dynamo.GetDCDComponentName(dcd)
+	deleteStub := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dynamo.ElasticEPLeaderServiceName(componentName),
+			Namespace: dcd.Namespace,
+		},
+	}
+	// The follower joins the leader's Ray head but never emits it.
+	if dcd.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
+		return deleteStub, true, nil
+	}
+	c := dynamo.GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	if c == nil || !dynamo.IsElasticEPRayLaunch(c) {
+		return deleteStub, true, nil
+	}
+	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)
+	if dynamoNamespace == "" {
+		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", dcd.Name)
+	}
+	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
+	if err != nil {
+		return nil, false, err
+	}
+	annotations := dynamo.GetDCDKubeAnnotations(dcd)
+	svc := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
+		ServiceName:     componentName,
+		Namespace:       dcd.Namespace,
+		ComponentType:   componentType,
+		DynamoNamespace: dynamoNamespace,
+		ComponentName:   componentName,
+		Labels:          dynamo.GetDCDKubeLabels(dcd),
+		Annotations:     annotations,
+		IsK8sDiscovery:  commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, annotations),
+	})
+	return svc, false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {
@@ -814,8 +867,16 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		},
 	}
 
+	// A synthesized elastic-EP follower carries the leader's serve command but must
+	// launch as a Ray-join (RoleFollower); every other single-pod Deployment is a
+	// RoleMain serve. The operator sets this marker; users never do.
+	role := dynamo.RoleMain
+	if annotations[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
+		role = dynamo.RoleFollower
+	}
+
 	// nolint: gosimple
-	podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, dynamo.RoleMain)
+	podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, role)
 	if err != nil {
 		return
 	}
