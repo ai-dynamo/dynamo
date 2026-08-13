@@ -307,6 +307,54 @@ impl ModelManager {
         true
     }
 
+    /// Register a LoRA model as a lightweight view of an existing base WorkerSet.
+    pub(crate) fn add_adapter_view(
+        &self,
+        card_key: &str,
+        base_model_name: &str,
+        worker_set_key: &str,
+        adapter_card: ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
+        let _reservation = self.reservation_lock.lock();
+        let adapter_name = adapter_card.name().to_string();
+        anyhow::ensure!(
+            adapter_card.lora.is_some(),
+            "adapter view requires LoRA metadata"
+        );
+        anyhow::ensure!(
+            adapter_name != base_model_name,
+            "LoRA adapter name collides with its base model"
+        );
+        anyhow::ensure!(
+            !self.alias_to_primary.contains_key(&adapter_name),
+            "LoRA adapter name is reserved as a model alias"
+        );
+        if let Some(existing) = self.models.get(&adapter_name) {
+            anyhow::ensure!(
+                existing
+                    .worker_sets()
+                    .iter()
+                    .all(|worker_set| worker_set.card().lora.is_some()),
+                "LoRA adapter name collides with a registered base model"
+            );
+        }
+
+        let base_worker_set = self
+            .models
+            .get(base_model_name)
+            .and_then(|model| model.get_worker_set(worker_set_key))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "base WorkerSet for LoRA adapter {adapter_name:?} is not registered"
+                )
+            })?;
+        let adapter_view = Arc::new(base_worker_set.adapter_view(adapter_card.clone()));
+        self.cards.insert(card_key.to_string(), adapter_card);
+        self.get_or_create_model(&adapter_name)
+            .add_worker_set(worker_set_key.to_string(), adapter_view);
+        Ok(())
+    }
+
     /// Record that `alias` is an alternate name for `primary`. Used to normalize metrics labels.
     ///
     /// The claim is taken atomically through the map entry so two concurrent
@@ -1091,8 +1139,8 @@ impl ModelManager {
         let lora_domain = self.lora_domain(&endpoint.id());
 
         // Register router via discovery mechanism.
-        let discovery = endpoint.component().drt().discovery();
-        let instance_id = discovery.instance_id();
+        let drt = endpoint.component().drt();
+        let instance_id = drt.discovery().instance_id();
 
         // Build transport for router endpoint based on request plane mode
         // Use the worker's component name so each target pool gets its own router discovery group
@@ -1109,7 +1157,7 @@ impl ModelManager {
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        discovery.register(discovery_spec).await?;
+        let registration = drt.register_endpoint_lease(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
@@ -1148,7 +1196,7 @@ impl ModelManager {
                 None
             };
 
-        let chooser = KvRouter::new_with_worker_role(
+        let mut chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -1165,6 +1213,7 @@ impl ModelManager {
             self.lora_enabled.then(|| lora_domain.filter.clone()),
         )
         .await?;
+        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -2038,7 +2087,7 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
         transports::event_plane::EventScope,
     };

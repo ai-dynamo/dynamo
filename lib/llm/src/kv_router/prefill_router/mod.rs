@@ -165,8 +165,11 @@ pub struct PrefillRouter {
     /// Namespace (used for logging / lifecycle messages).
     namespace: String,
     is_eagle: bool,
+    task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
+    #[cfg(test)]
+    activation_task_state: Arc<()>,
 }
 
 impl Drop for PrefillRouter {
@@ -264,7 +267,9 @@ impl
                 }
             } else {
                 drop(prefill_phase_barrier);
-                let completion = Self::consume_prefill_stream(prefill_stream, tracker).await?;
+                let completion =
+                    Self::consume_prefill_stream(prefill_stream, tracker, self.task_guard.clone())
+                        .await?;
 
                 match completion {
                     PrefillCompletion::Handoff {
@@ -631,6 +636,37 @@ mod tests {
             RouterMode::RoundRobin,
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_router_releases_activation_task() {
+        let (_activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let router = PrefillRouter::new(
+            activation_rx,
+            Arc::new(crate::discovery::ModelManager::new()),
+            RouterMode::RoundRobin,
+            16,
+            None,
+            None,
+            None,
+            "test-model".to_string(),
+            "test-namespace".to_string(),
+            false,
+            None,
+            None,
+        );
+        let task_state = Arc::downgrade(&router.activation_task_state);
+        let weak = Arc::downgrade(&router);
+
+        drop(router);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while weak.strong_count() != 0 || task_state.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending activation task retained its PrefillRouter");
     }
 
     #[test]

@@ -2315,6 +2315,7 @@ dependencies = [
  "image",
  "ipnet",
  "json-five",
+ "libc",
  "llm-multimodal",
  "llm-tokenizer",
  "lru 0.16.4",

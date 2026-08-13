@@ -13,6 +13,10 @@ use tokio_util::sync::CancellationToken;
 mod metadata;
 pub use metadata::{DiscoveryMetadata, MetadataSnapshot};
 
+mod registration;
+pub use registration::EndpointRegistrationLease;
+pub(crate) use registration::EndpointRegistrationManager;
+
 mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
 mod kv_store;
