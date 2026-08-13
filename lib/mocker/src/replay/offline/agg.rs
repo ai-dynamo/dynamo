@@ -2929,22 +2929,64 @@ mod tests {
         }
     }
 
-    fn completion_payload(
-        worker_idx: usize,
+    fn retarget_completion_signals(
+        mut payload: WorkerCompletionPayload<()>,
+        expected_worker_idx: usize,
+        expected_uuid: Uuid,
+        expected_completed: bool,
         output_signals: Vec<OutputSignal>,
     ) -> WorkerCompletionPayload<()> {
-        WorkerCompletionPayload {
-            stage: SimulationWorkerStage::Aggregated,
-            worker_idx,
-            completed_requests: usize::from(output_signals.iter().any(|signal| signal.completed)),
-            output_signals,
-            lifecycle_events: Vec::new(),
-            engine_events: (),
-            progress: Default::default(),
-            fpm: None,
-            accept_length_output_tokens: 0,
-            accept_length_decode_forwards: 0,
+        assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
+        assert_eq!(payload.worker_idx, expected_worker_idx);
+        assert_eq!(payload.output_signals.len(), 1);
+        let canonical_signal = &payload.output_signals[0];
+        assert_eq!(canonical_signal.uuid, expected_uuid);
+        assert_eq!(canonical_signal.completed, expected_completed);
+        assert!(!canonical_signal.rejected);
+        assert!(canonical_signal.token_id.is_some());
+        assert_eq!(
+            payload.completed_requests,
+            usize::from(expected_completed),
+            "scheduler-issued completion payload must match core ownership"
+        );
+        assert!(!output_signals.is_empty());
+        assert!(
+            output_signals
+                .iter()
+                .all(|signal| signal.uuid == expected_uuid
+                    && !signal.rejected
+                    && signal.token_id.is_some())
+        );
+        assert_eq!(
+            output_signals
+                .iter()
+                .filter(|signal| signal.completed)
+                .count(),
+            usize::from(expected_completed),
+            "replacement signals must preserve completion ownership"
+        );
+        payload.output_signals = output_signals;
+        payload
+    }
+
+    fn take_ready_completion_payloads(
+        events: &mut BinaryHeap<SimulationEvent<()>>,
+        now_ms: f64,
+        expected_payloads: usize,
+    ) -> SmallVec<[WorkerCompletionPayload<()>; 2]> {
+        let mut payloads = SmallVec::new();
+        while let Some(completions) = pop_ready_worker_completions(events, now_ms) {
+            match completions {
+                ReadyWorkerCompletions::Single(payload) => payloads.push(payload),
+                ReadyWorkerCompletions::Batch(batch) => payloads.extend(batch),
+            }
         }
+        assert_eq!(
+            payloads.len(),
+            expected_payloads,
+            "test must consume every scheduler-issued completion at the boundary"
+        );
+        payloads
     }
 
     fn completion_test_args() -> MockEngineArgs {
@@ -2963,7 +3005,11 @@ mod tests {
     fn runtime_with_busy_requests(
         request_ids: &[Uuid],
         num_workers: usize,
-    ) -> RoundRobinAggRuntime {
+        max_output_tokens: usize,
+    ) -> (
+        RoundRobinAggRuntime,
+        SmallVec<[WorkerCompletionPayload<()>; 2]>,
+    ) {
         let mut runtime = RoundRobinAggRuntime::new_round_robin(
             &completion_test_args(),
             request_ids
@@ -2971,7 +3017,7 @@ mod tests {
                 .enumerate()
                 .map(|(index, uuid)| DirectRequest {
                     tokens: vec![index as u32 + 1; 64],
-                    max_output_tokens: 2,
+                    max_output_tokens,
                     uuid: Some(*uuid),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
@@ -2984,6 +3030,14 @@ mod tests {
         .unwrap()
         .with_per_request_records(true);
         runtime.ensure_stepping_started().unwrap();
+        let completion_ms = runtime
+            .events
+            .peek()
+            .expect("scheduler-issued completion must be queued")
+            .at_ms;
+        runtime.advance_now_ms(completion_ms);
+        let payloads =
+            take_ready_completion_payloads(&mut runtime.events, runtime.now_ms, request_ids.len());
         assert!(
             runtime
                 .engine
@@ -2992,7 +3046,7 @@ mod tests {
                 .all(|worker| worker.busy),
             "test payloads must settle genuinely committed worker passes"
         );
-        runtime
+        (runtime, payloads)
     }
 
     fn deferred_placement(request_id: u128) -> Placement {
@@ -3007,19 +3061,21 @@ mod tests {
     fn runtime_with_audited_busy_requests(
         request_ids: &[Uuid],
         num_workers: usize,
+        max_output_tokens: usize,
         progress_release: Option<Placement>,
         terminal_release: Option<Placement>,
         observation_release: Option<Placement>,
     ) -> (
         CompletionAuditRuntime,
         Rc<RefCell<Vec<CompletionPhaseEvent>>>,
+        SmallVec<[WorkerCompletionPayload<()>; 2]>,
     ) {
         let pending = request_ids
             .iter()
             .enumerate()
             .map(|(index, uuid)| DirectRequest {
                 tokens: vec![index as u32 + 1; 64],
-                max_output_tokens: 2,
+                max_output_tokens,
                 uuid: Some(*uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
@@ -3052,6 +3108,14 @@ mod tests {
         )
         .unwrap();
         runtime.ensure_stepping_started().unwrap();
+        let completion_ms = runtime
+            .events
+            .peek()
+            .expect("scheduler-issued completion must be queued")
+            .at_ms;
+        runtime.advance_now_ms(completion_ms);
+        let payloads =
+            take_ready_completion_payloads(&mut runtime.events, runtime.now_ms, request_ids.len());
         assert!(
             runtime
                 .engine
@@ -3064,7 +3128,7 @@ mod tests {
         runtime.placement.terminal_release = terminal_release;
         runtime.placement.observation_release = observation_release;
         events.borrow_mut().clear();
-        (runtime, events)
+        (runtime, events, payloads)
     }
 
     fn request_phase(
@@ -3106,14 +3170,36 @@ mod tests {
     fn singleton_completion_fast_path_matches_atomic_batch_path() {
         for completed in [false, true] {
             let uuid = Uuid::from_u128(0x8100 + u128::from(completed));
-            let mut fast = runtime_with_busy_requests(&[uuid], 1);
-            let mut batch = runtime_with_busy_requests(&[uuid], 1);
+            let max_output_tokens = if completed { 1 } else { 2 };
+            let (mut fast, mut fast_payloads) =
+                runtime_with_busy_requests(&[uuid], 1, max_output_tokens);
+            let (mut batch, mut batch_payloads) =
+                runtime_with_busy_requests(&[uuid], 1, max_output_tokens);
             let signal = output_signal(uuid, Some(71), completed);
+            let fast_payload = retarget_completion_signals(
+                fast_payloads
+                    .pop()
+                    .expect("singleton fast-path completion must exist"),
+                0,
+                uuid,
+                completed,
+                vec![signal.clone()],
+            );
+            assert!(fast_payloads.is_empty());
+            let batch_payload = retarget_completion_signals(
+                batch_payloads
+                    .pop()
+                    .expect("singleton batch completion must exist"),
+                0,
+                uuid,
+                completed,
+                vec![signal],
+            );
+            assert!(batch_payloads.is_empty());
 
-            fast.settle_worker_completion(completion_payload(0, vec![signal.clone()]))
-                .unwrap();
+            fast.settle_worker_completion(fast_payload).unwrap();
             batch
-                .settle_worker_completion_batch([completion_payload(0, vec![signal])])
+                .settle_worker_completion_batch([batch_payload])
                 .unwrap();
 
             assert_runtime_visible_state_eq(&fast, &batch);
@@ -3138,20 +3224,27 @@ mod tests {
             let progress = deferred_placement(0x8112);
             let terminal = deferred_placement(0x8113);
             let observation = deferred_placement(0x8114);
-            let (mut runtime, events) = runtime_with_audited_busy_requests(
+            let max_output_tokens = if completed { 1 } else { 2 };
+            let (mut runtime, events, mut payloads) = runtime_with_audited_busy_requests(
                 &[uuid],
                 1,
+                max_output_tokens,
                 (!completed).then_some(progress),
                 completed.then_some(terminal),
                 Some(observation),
             );
+            let payload = retarget_completion_signals(
+                payloads
+                    .pop()
+                    .expect("singleton audited completion must exist"),
+                0,
+                uuid,
+                completed,
+                vec![output_signal(uuid, Some(72), completed)],
+            );
+            assert!(payloads.is_empty());
 
-            runtime
-                .settle_worker_completion(completion_payload(
-                    0,
-                    vec![output_signal(uuid, Some(72), completed)],
-                ))
-                .unwrap();
+            runtime.settle_worker_completion(payload).unwrap();
 
             let expected_events = if completed {
                 vec![
@@ -3186,23 +3279,29 @@ mod tests {
         let progress = deferred_placement(0x8201);
         let terminal = deferred_placement(0x8202);
         let observation = deferred_placement(0x8203);
-        let (mut runtime, events) = runtime_with_audited_busy_requests(
+        let (mut runtime, events, mut payloads) = runtime_with_audited_busy_requests(
             &[uuid],
+            1,
             1,
             Some(progress),
             Some(terminal),
             Some(observation),
         );
+        let payload = retarget_completion_signals(
+            payloads
+                .pop()
+                .expect("singleton multi-signal completion must exist"),
+            0,
+            uuid,
+            true,
+            vec![
+                output_signal(uuid, Some(81), false),
+                output_signal(uuid, Some(82), true),
+            ],
+        );
+        assert!(payloads.is_empty());
 
-        runtime
-            .settle_worker_completion(completion_payload(
-                0,
-                vec![
-                    output_signal(uuid, Some(81), false),
-                    output_signal(uuid, Some(82), true),
-                ],
-            ))
-            .unwrap();
+        runtime.settle_worker_completion(payload).unwrap();
 
         assert!(!runtime.requests.contains_key(&uuid));
         assert_eq!(
@@ -3229,19 +3328,40 @@ mod tests {
         let second = Uuid::from_u128(0x8302);
         let terminal = deferred_placement(0x8303);
         let observation = deferred_placement(0x8304);
-        let (mut runtime, events) = runtime_with_audited_busy_requests(
+        let (mut runtime, events, mut payloads) = runtime_with_audited_busy_requests(
             &[first, second],
             2,
+            1,
             None,
             Some(terminal),
             Some(observation),
         );
+        payloads.sort_unstable_by_key(|payload| payload.worker_idx);
+        assert_eq!(
+            payloads
+                .iter()
+                .map(|payload| payload.worker_idx)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let first_payload = retarget_completion_signals(
+            payloads.remove(0),
+            0,
+            first,
+            true,
+            vec![output_signal(first, Some(91), true)],
+        );
+        let second_payload = retarget_completion_signals(
+            payloads.remove(0),
+            1,
+            second,
+            true,
+            vec![output_signal(second, Some(92), true)],
+        );
+        assert!(payloads.is_empty());
 
         runtime
-            .settle_worker_completion_batch([
-                completion_payload(0, vec![output_signal(first, Some(91), true)]),
-                completion_payload(1, vec![output_signal(second, Some(92), true)]),
-            ])
+            .settle_worker_completion_batch([first_payload, second_payload])
             .unwrap();
 
         assert!(runtime.requests.is_empty());
