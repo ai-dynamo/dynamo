@@ -39,6 +39,10 @@ Use this backend for supported `tokenizer.json` models when you need Baseten Tok
 
 Set the backend with a CLI flag or environment variable. The CLI flag takes precedence.
 
+> [!WARNING]
+> Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
+> Set `--no-tokenizer-fallback` or `DYN_TOKENIZER_FALLBACK=false` to adopt the future behavior now.
+
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
 | `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens`, `basetenkenizer` | `default` |

@@ -39,6 +39,10 @@ Stay on the default backend if:
 
 ## Enable and Validate FastTokens
 
+> [!WARNING]
+> Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
+> Set `--no-tokenizer-fallback` or `DYN_TOKENIZER_FALLBACK=false` to adopt the future behavior now.
+
 <Steps>
   <Step title="Quick Start">
     `fastokens` is a **frontend** setting. Enable it on the Frontend component with the `DYN_TOKENIZER` environment variable:

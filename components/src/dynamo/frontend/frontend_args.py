@@ -560,8 +560,10 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TOKENIZER_FALLBACK",
             default=True,
             help=(
-                "Fall back to HuggingFace when the selected fastokens or "
-                "basetenkenizer backend cannot load the model tokenizer. Use "
+                "Automatic fallback to HuggingFace is deprecated and will be "
+                "disabled by default in a future release. The current behavior "
+                "falls back when the selected fastokens or basetenkenizer backend "
+                "cannot load the model tokenizer. Use "
                 "--no-tokenizer-fallback to fail model initialization instead. "
                 "In dynamic mode, discovery retries the load while the frontend "
                 "continues running."

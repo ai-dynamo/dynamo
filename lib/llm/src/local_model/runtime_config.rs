@@ -581,18 +581,29 @@ impl ModelRuntimeConfig {
     }
 
     pub fn is_tokenizer_fallback_enabled(&self) -> anyhow::Result<bool> {
-        if let Some(enabled) = self.tokenizer_fallback_enabled {
-            return Ok(enabled);
+        let enabled = if let Some(enabled) = self.tokenizer_fallback_enabled {
+            enabled
+        } else {
+            match std::env::var(ENV_TOKENIZER_FALLBACK) {
+                Ok(value) => dynamo_runtime::config::parse_bool(&value)
+                    .map_err(|error| anyhow::anyhow!("{ENV_TOKENIZER_FALLBACK}: {error}"))?,
+                Err(std::env::VarError::NotPresent) => true,
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    anyhow::bail!("{ENV_TOKENIZER_FALLBACK} must contain valid UTF-8")
+                }
+            }
+        };
+
+        if enabled && self.effective_tokenizer_backend() != TokenizerBackend::Default {
+            static TOKENIZER_FALLBACK_DEPRECATION_WARNED: std::sync::Once = std::sync::Once::new();
+            TOKENIZER_FALLBACK_DEPRECATION_WARNED.call_once(|| {
+                tracing::warn!(
+                    "Automatic tokenizer fallback is deprecated and will be disabled by default in a future release. Set tokenizer fallback to false (`--no-tokenizer-fallback` in the frontend) to adopt the future behavior now."
+                );
+            });
         }
 
-        match std::env::var(ENV_TOKENIZER_FALLBACK) {
-            Ok(value) => dynamo_runtime::config::parse_bool(&value)
-                .map_err(|error| anyhow::anyhow!("{ENV_TOKENIZER_FALLBACK}: {error}")),
-            Err(std::env::VarError::NotPresent) => Ok(true),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("{ENV_TOKENIZER_FALLBACK} must contain valid UTF-8")
-            }
-        }
+        Ok(enabled)
     }
 
     /// Resolve the KV-state endpoint, preserving the serving endpoint as the compatibility
