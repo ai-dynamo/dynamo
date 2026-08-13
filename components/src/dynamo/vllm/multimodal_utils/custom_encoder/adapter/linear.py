@@ -32,6 +32,7 @@ separator between consecutive images.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import torch
@@ -48,12 +49,22 @@ from dynamo.vllm.multimodal_utils.model_config import _hidden_size, _is_multimod
 logger = logging.getLogger(__name__)
 
 
-def build_mixed_embeds(
+@dataclass(frozen=True)
+class LinearVisualPrompt:
+    """Compact mixed-prompt layout plus only its visual embedding rows."""
+
+    visual_embeds: torch.Tensor
+    prompt_token_ids: list[int]
+    prompt_is_token_ids: list[bool]
+    image_token_id: int
+
+
+def build_mixed_layout(
     token_ids: list[int],
     img_tensors: list[torch.Tensor],
     placeholder_id: int,
-) -> tuple[torch.Tensor, list[int], list[bool]]:
-    """Build the mixed token-ids/embeds inputs for an aggregated request.
+) -> LinearVisualPrompt:
+    """Build a mixed-prompt layout without allocating its dense text rows.
 
     Args:
         token_ids: The full prompt token IDs (text + one placeholder token per
@@ -63,11 +74,9 @@ def build_mixed_embeds(
         placeholder_id: The token ID marking image positions.
 
     Returns:
-        ``(prompt_embeds, prompt_token_ids, prompt_is_token_ids)`` where
-        ``prompt_embeds`` is a CPU ``(seq_len, hidden)`` tensor (text rows zero,
-        image rows from ``img_tensors``), ``prompt_token_ids`` has each
-        placeholder token expanded to its tensor's row count, and
-        ``prompt_is_token_ids[i]`` is ``False`` at image positions.
+        A compact prompt containing the concatenated visual rows, expanded
+        token IDs, and the mixed-prompt token mask. Visual rows are ordered
+        exactly like the ``False`` positions in the mask.
 
     Raises:
         ValueError: if ``img_tensors`` is empty, the number of placeholder
@@ -112,6 +121,11 @@ def build_mixed_embeds(
                 f"image tensor {i} has 0 rows (shape {tuple(tensor.shape)}); the "
                 "encoder returned no visual tokens for an image"
             )
+        if tensor.dtype != dtype:
+            raise ValueError(
+                f"image tensor {i} has dtype {tensor.dtype}; expected {dtype} "
+                "from image tensor 0"
+            )
         # forward_batch must fence + copy to CPU before returning, so the scatter
         # below is a plain assignment into the CPU prompt_embeds buffer. Fail loud
         # here instead of an opaque cross-device error on the row-copy.
@@ -121,13 +135,11 @@ def build_mixed_embeds(
                 "return CPU tensors"
             )
 
-    # Build the token-id / mask layout and record where each image block lands,
-    # then scatter the image rows into one pre-zeroed (seq_len, hidden) buffer.
-    # Text rows stay zero (vLLM overwrites them via the model's embedding table),
-    # so there is no need to allocate per-text-segment zero tensors and concat.
+    # Build the token-id / mask layout. The visual rows stay compact and in the
+    # same order as the False positions; a remote consumer can transfer these
+    # rows without also moving zero-filled text rows.
     out_token_ids: list[int] = []
     is_token_ids: list[bool] = []
-    image_slots: list[tuple[int, torch.Tensor]] = []  # (row_start, tensor)
 
     def _emit_text(text_ids: list[int]) -> None:
         if not text_ids:
@@ -139,27 +151,54 @@ def build_mixed_embeds(
     for pos, tensor in zip(positions, img_tensors):
         _emit_text(token_ids[cursor:pos])
         n = tensor.shape[0]
-        image_slots.append((len(out_token_ids), tensor))
         out_token_ids.extend([placeholder_id] * n)
         is_token_ids.extend([False] * n)
         cursor = pos + 1
     _emit_text(token_ids[cursor:])
 
-    seq_len = len(out_token_ids)
+    visual_embeds = (
+        img_tensors[0].contiguous()
+        if len(img_tensors) == 1
+        else torch.cat(img_tensors, dim=0).contiguous()
+    )
+    return LinearVisualPrompt(
+        visual_embeds=visual_embeds,
+        prompt_token_ids=out_token_ids,
+        prompt_is_token_ids=is_token_ids,
+        image_token_id=placeholder_id,
+    )
+
+
+def build_mixed_embeds(
+    token_ids: list[int],
+    img_tensors: list[torch.Tensor],
+    placeholder_id: int,
+) -> tuple[torch.Tensor, list[int], list[bool]]:
+    """Build the dense mixed prompt consumed by in-process vLLM.
+
+    The compact layout helper is shared with the remote route. Only this inline
+    path allocates the zero-filled text rows before handing the prompt to vLLM.
+    """
+    layout = build_mixed_layout(token_ids, img_tensors, placeholder_id)
+
+    seq_len = len(layout.prompt_token_ids)
+    hidden = layout.visual_embeds.shape[1]
     # CPU tensor: vLLM's renderer forces prompt_embeds to CPU anyway.
-    prompt_embeds = torch.zeros(seq_len, hidden, dtype=dtype)
-    for row_start, tensor in image_slots:
-        n = tensor.shape[0]
-        prompt_embeds[row_start : row_start + n] = tensor
+    prompt_embeds = torch.zeros(seq_len, hidden, dtype=layout.visual_embeds.dtype)
+    visual_mask = torch.tensor(
+        [not is_token_id for is_token_id in layout.prompt_is_token_ids],
+        dtype=torch.bool,
+    )
+    prompt_embeds[visual_mask] = layout.visual_embeds
 
     logger.debug(
         "[custom_embeds] images=%d seq_len=%d hidden=%d dtype=%s",
         len(img_tensors),
         seq_len,
         hidden,
-        dtype,
+        layout.visual_embeds.dtype,
     )
-    return prompt_embeds, out_token_ids, is_token_ids
+    return prompt_embeds, layout.prompt_token_ids, layout.prompt_is_token_ids
 
 
 class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
@@ -193,18 +232,17 @@ class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
         model_dtype = getattr(model_config, "dtype", None)
         self._dtype = model_dtype if isinstance(model_dtype, torch.dtype) else None
 
-    def prepare_prompt(
+    def prepare_compact_prompt(
         self,
         token_ids: list[int],
         artifacts: Sequence[torch.Tensor],
-    ) -> EmbedsPrompt | TokensPrompt:
-        """Build a mixed prompt from per-image visual embedding tensors.
+    ) -> LinearVisualPrompt:
+        """Validate artifacts and retain only rows that cross a remote hop."""
+        rows = self._validated_rows(artifacts)
+        return build_mixed_layout(token_ids, rows, self._image_token_id)
 
-        Each artifact must be a CPU tensor shaped
-        ``(n_visual_tokens, decoder_hidden_size)`` with the decoder's dtype.
-        Artifacts must appear in the same order as the image placeholders in
-        ``token_ids``.
-        """
+    def _validated_rows(self, artifacts: Sequence[torch.Tensor]) -> list[torch.Tensor]:
+        """Validate the decoder-facing tensor contract once for both routes."""
         rows = list(artifacts)
         for index, tensor in enumerate(rows):
             if not isinstance(tensor, torch.Tensor):
@@ -222,6 +260,21 @@ class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
                     f"image tensor {index} has dtype {tensor.dtype}; "
                     f"expected decoder dtype {self._dtype}"
                 )
+        return rows
+
+    def prepare_prompt(
+        self,
+        token_ids: list[int],
+        artifacts: Sequence[torch.Tensor],
+    ) -> EmbedsPrompt | TokensPrompt:
+        """Build a mixed prompt from per-image visual embedding tensors.
+
+        Each artifact must be a CPU tensor shaped
+        ``(n_visual_tokens, decoder_hidden_size)`` with the decoder's dtype.
+        Artifacts must appear in the same order as the image placeholders in
+        ``token_ids``.
+        """
+        rows = self._validated_rows(artifacts)
 
         prompt_embeds, prompt_token_ids, prompt_is_token_ids = build_mixed_embeds(
             token_ids, rows, self._image_token_id

@@ -20,6 +20,7 @@ from dynamo.vllm.backend_args import (
     DynamoVllmConfig,
     _reject_removed_multimodal_env_vars,
 )
+from dynamo.vllm.constants import CustomEncoderRoutingMode, EmbeddingTransferMode
 
 pytestmark = [
     pytest.mark.unit,
@@ -48,6 +49,10 @@ def create_config() -> DynamoVllmConfig:
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
+    config.route_to_encoder = False
+    config.custom_encoder_routing_mode = CustomEncoderRoutingMode.INLINE
+    config.engine_args = SimpleNamespace(enable_prompt_embeds=True)
+    config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
     return config
 
 
@@ -443,3 +448,56 @@ class TestValidateCustomEncoder:
         config.custom_encoder_class = None
         config.enable_multimodal = False
         config._validate_custom_encoder()
+
+    def test_frontend_encode_worker_owns_custom_encoder(self):
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+
+        config._validate_custom_encoder()
+
+    def test_frontend_defers_prompt_embeds_check_until_engine_args_exist(self):
+        config = create_config()
+        del config.engine_args
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+
+        # Config.validate() runs before vLLM's AsyncEngineArgs are attached.
+        config._validate_custom_encoder()
+
+    def test_frontend_pd_has_no_custom_encoder_class(self):
+        config = create_config()
+        config.custom_encoder_class = None
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        config._validate_custom_encoder()
+
+    def test_frontend_pd_cannot_route_to_encoder_again(self):
+        config = create_config()
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.route_to_encoder = True
+
+        with pytest.raises(ValueError, match="frontend owns the encoder call"):
+            config._validate_custom_encoder()
+
+    @pytest.mark.parametrize(
+        "transfer_mode",
+        [EmbeddingTransferMode.LOCAL, EmbeddingTransferMode.NIXL_READ],
+    )
+    def test_frontend_requires_nixl_write(self, transfer_mode):
+        config = create_config()
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.embedding_transfer_mode = transfer_mode
+
+        with pytest.raises(ValueError, match="nixl-write"):
+            config._validate_custom_encoder()

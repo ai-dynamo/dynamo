@@ -647,7 +647,17 @@ where
             };
 
             let encoder_chooser = if needs_preprocessed_routing {
-                Some(EncoderRouter::new(model_name.clone(), namespace.clone()))
+                let require_handoff = card
+                    .runtime_config
+                    .runtime_data
+                    .get("encoder_result_handoff")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                Some(EncoderRouter::new(
+                    model_name.clone(),
+                    namespace.clone(),
+                    require_handoff,
+                ))
             } else {
                 None
             };

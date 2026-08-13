@@ -168,6 +168,98 @@ async def test_decode_worker_without_custom_encoder_uses_lifecycle():
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
+def _encode_worker_test_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        namespace="test",
+        component="encode",
+        endpoint="generate",
+        embedding_transfer_mode="nixl-write",
+        model="decoder",
+        served_model_name=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_async_init_failure_cleans_up_handler(monkeypatch):
+    handler = Mock()
+    handler.async_init = AsyncMock(side_effect=RuntimeError("async init failed"))
+    handler.cleanup = AsyncMock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.EncodeWorkerHandler",
+        Mock(return_value=handler),
+    )
+    endpoint = Mock()
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    with pytest.raises(RuntimeError, match="async init failed"):
+        await _make_factory()._create_multimodal_encode_worker(
+            runtime,
+            _encode_worker_test_config(),
+            asyncio.Event(),
+            [],
+        )
+
+    handler.cleanup.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_registration_failure_cleans_up_handler(monkeypatch):
+    handler = Mock()
+    handler.async_init = AsyncMock()
+    handler.cleanup = AsyncMock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.EncodeWorkerHandler",
+        Mock(return_value=handler),
+    )
+    register = AsyncMock(side_effect=RuntimeError("registration failed"))
+    monkeypatch.setattr("dynamo.vllm.worker_factory.register_model", register)
+    endpoint = Mock()
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    with pytest.raises(RuntimeError, match="registration failed"):
+        await _make_factory()._create_multimodal_encode_worker(
+            runtime,
+            _encode_worker_test_config(),
+            asyncio.Event(),
+            [],
+        )
+
+    handler.cleanup.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_preserves_startup_error_when_cleanup_fails(
+    monkeypatch, caplog
+):
+    startup_error = RuntimeError("async init failed")
+    handler = Mock()
+    handler.async_init = AsyncMock(side_effect=startup_error)
+    handler.cleanup = AsyncMock(side_effect=RuntimeError("cleanup failed"))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.EncodeWorkerHandler",
+        Mock(return_value=handler),
+    )
+    runtime = Mock()
+    runtime.endpoint.return_value = Mock()
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(RuntimeError, match="async init failed") as exc_info:
+        await _make_factory()._create_multimodal_encode_worker(
+            runtime,
+            _encode_worker_test_config(),
+            asyncio.Event(),
+            [],
+        )
+
+    assert exc_info.value is startup_error
+    handler.cleanup.assert_awaited_once_with()
+    assert "Failed to clean up encode worker after an earlier failure" in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["configure", "handler"])
 async def test_custom_encoder_shutdown_engine_on_startup_failure(

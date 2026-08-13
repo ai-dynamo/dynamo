@@ -59,6 +59,7 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .constants import CustomEncoderRoutingMode
 from .engine_generate import publish_engine_generate_capability
 from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
 from .headless import run_dynamo_headless
@@ -694,6 +695,16 @@ async def register_vllm_model(
         runtime_config, model_input, model_type, worker_type
     ):
         logging.info("Published vLLM engine-native generate capability")
+    if (
+        worker_type == WorkerType.Aggregated
+        and getattr(
+            config,
+            "custom_encoder_routing_mode",
+            CustomEncoderRoutingMode.INLINE,
+        )
+        == CustomEncoderRoutingMode.FRONTEND
+    ):
+        runtime_config.set_engine_specific("encoder_result_handoff", "true")
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len

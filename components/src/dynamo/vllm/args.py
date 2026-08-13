@@ -25,7 +25,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
-from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.constants import CustomEncoderRoutingMode, DisaggregationMode
 
 from . import envs
 
@@ -146,6 +146,14 @@ def cross_validate_config(
             "--stream-interval=%d will be propagated to the Dynamo frontend. "
             "Set DYN_VLLM_STREAM_INTERVAL env var to override.",
             engine_config.stream_interval,
+        )
+
+    if (
+        dynamo_config.custom_encoder_routing_mode == CustomEncoderRoutingMode.FRONTEND
+        and not engine_config.enable_prompt_embeds
+    ):
+        raise ValueError(
+            "--custom-encoder-routing-mode=frontend requires " "--enable-prompt-embeds"
         )
 
     # Validate --gms-shadow-mode requires --load-format gms

@@ -3289,6 +3289,7 @@ mod tests {
         let encoder = crate::kv_router::EncoderRouter::new(
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
+            false,
         );
         worker_set.prefill_router = Some(prefill.clone());
         worker_set.encoder_router = Some(encoder.clone());

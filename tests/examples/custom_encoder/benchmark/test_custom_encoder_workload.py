@@ -22,6 +22,11 @@ from examples.custom_encoder.benchmark.fixed_text_image_workload import (
     generate_workload,
     validate_workload,
 )
+from examples.custom_encoder.benchmark.summarize_frontend_encoder_comparison import (
+    MIN_FRONTEND_TO_INLINE_RATIO,
+    REPETITIONS,
+    TOPOLOGIES,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -65,6 +70,9 @@ def test_default_contract_is_fixed_text_plus_balanced_unique_images() -> None:
     assert TEXT_ISL == 644
     assert TARGET_OSL == 7
     assert BENCHMARK_IMAGE_SIZE_COUNTS == ((300, 300, 500), (500, 500, 500))
+    assert TOPOLOGIES == ("inline", "frontend")
+    assert REPETITIONS == 3
+    assert MIN_FRONTEND_TO_INLINE_RATIO == 0.90
 
 
 def test_prompt_calibration_requires_exact_raw_token_count() -> None:
