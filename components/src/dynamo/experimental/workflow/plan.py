@@ -9,15 +9,21 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping, Tuple
 
+from dynamo.experimental.workflow.definition import WorkflowDefinition, WorkflowHandler
 from dynamo.experimental.workflow.ir import WorkflowIR
-from dynamo.experimental.workflow.types import ValueRef, WorkflowValidationError, validate_name
+from dynamo.experimental.workflow.types import (
+    StageContract,
+    ValueRef,
+    WorkflowValidationError,
+    validate_name,
+)
 
 LOCAL_CARRIER = "local"
 
 
 @dataclass(frozen=True)
 class LocalBinding:
-    """Resolve one logical stage to a named in-process runner at hydration time."""
+    """Resolve one logical stage to a named in-process runner at bind time."""
 
     runner_key: str
 
@@ -50,13 +56,15 @@ class EdgePlan:
 class ExecutionPlan:
     """A workflow plus in-memory placement and carrier decisions."""
 
-    workflow: WorkflowIR
+    definition: WorkflowDefinition
     bindings: Mapping[str, Binding]
     edges: Tuple[EdgePlan, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.workflow, WorkflowIR):
-            raise WorkflowValidationError("execution plan requires WorkflowIR")
+        if not isinstance(self.definition, (WorkflowIR, WorkflowHandler)):
+            raise WorkflowValidationError(
+                "execution plan requires WorkflowIR or WorkflowHandler"
+            )
         if not isinstance(self.bindings, Mapping):
             raise WorkflowValidationError("execution plan bindings must be a mapping")
 
@@ -69,7 +77,7 @@ class ExecutionPlan:
                 )
             bindings[stage_id] = binding
 
-        expected_stages = {stage.id for stage in self.workflow.stages}
+        expected_stages = set(self.stage_contracts)
         actual_stages = set(bindings)
         if actual_stages != expected_stages:
             raise WorkflowValidationError(
@@ -90,11 +98,14 @@ class ExecutionPlan:
                 )
             actual_edges[key] = edge
 
-        expected_edges = {
-            (stage.id, port): source
-            for stage in self.workflow.stages
-            for port, source in stage.inputs.items()
-        }
+        if isinstance(self.definition, WorkflowIR):
+            expected_edges = {
+                (stage.id, port): source
+                for stage in self.definition.stages
+                for port, source in stage.inputs.items()
+            }
+        else:
+            expected_edges = {}
         if set(actual_edges) != set(expected_edges):
             missing = sorted(set(expected_edges) - set(actual_edges))
             extra = sorted(set(actual_edges) - set(expected_edges))
@@ -107,7 +118,7 @@ class ExecutionPlan:
             if edge.source != source:
                 raise WorkflowValidationError(
                     f"edge targeting stage {key[0]!r} port {key[1]!r} "
-                    "does not match WorkflowIR"
+                    "does not match the workflow definition"
                 )
             if edge.carrier != LOCAL_CARRIER:
                 raise WorkflowValidationError(
@@ -122,3 +133,13 @@ class ExecutionPlan:
                 sorted(edges, key=lambda edge: (edge.target_stage, edge.target_port))
             ),
         )
+
+    @property
+    def stage_contracts(self) -> Mapping[str, StageContract]:
+        """Return every stage contract keyed by its authored stage ID."""
+
+        if isinstance(self.definition, WorkflowIR):
+            return MappingProxyType(
+                {stage.id: stage.contract for stage in self.definition.stages}
+            )
+        return self.definition.stages
