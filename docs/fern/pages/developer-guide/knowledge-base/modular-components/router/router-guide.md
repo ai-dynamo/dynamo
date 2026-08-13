@@ -151,6 +151,31 @@ When using KV routing, the router needs to know what each worker has cached. The
 
 Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](disaggregated-serving.md) for details.
 
+## Per-Worker Router Configuration
+
+`--router-mode` on the frontend sets the default for every worker. A worker set can override it for itself by declaring its own routing in its model deployment card, which the frontend then uses in place of its own configuration when routing to that set. This lets one deployment serve worker sets that want different strategies — for example a heterogeneous CPU/GPU encoder pool on `device-aware-weighted` while everything else stays round-robin.
+
+Workers accept the same flags as the frontend, on vLLM, SGLang, TensorRT-LLM, and the mocker:
+
+```bash
+# Frontend default for the deployment
+python -m dynamo.frontend --router-mode round-robin --http-port 8000
+
+# This worker set overrides it for itself
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
+```
+
+A worker that omits `--router-mode` advertises nothing and inherits the frontend's configuration. That is the default, and it is what every deployment written before this option did.
+
+> [!IMPORTANT]
+> An advertised configuration **replaces** the frontend's for that worker set rather than merging with it. If you set `--router-mode kv` on a worker and the frontend was tuned with KV flags such as `--router-temperature`, restate those flags on the worker too, or that set falls back to KV defaults.
+
+Because the flags are shared with the frontend, they read the same environment variables — `--router-mode` reads `DYN_ROUTER_MODE`. Setting that variable deployment-wide therefore makes every worker advertise it rather than inherit. Prefer passing the flag on the specific worker sets that need it.
+
+The frontend-only options (`--router-min-initial-workers`, `--enforce-disagg`, `--admission-control`) are not accepted by workers, since a model card does not carry them.
+
+Advertised configuration applies to the worker sets the frontend routes to directly — aggregated and decode. See [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router) for the full flag list.
+
 ## More Router Docs
 
 - **[Routing Concepts](routing-concepts.md)**: Cost model, worker selection, and routing primitives
