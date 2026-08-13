@@ -21,7 +21,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.4.0 (upcoming)
 
-5 entries — 3 behavioral changes, 2 removed.
+6 entries — 3 behavioral changes, 1 deprecated, 2 removed.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Audit subsystem migrated into request trace** (`"log_type":"audit"` records and the `"Audit sinks ready"` readiness marker -> records carrying `"schema":"dynamo.request.trace.v1"` and the `"Request trace sinks ready"` marker); payload logging is unified under the request-trace pipeline and the standalone audit module is gone ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390), [#11180](https://github.com/ai-dynamo/dynamo/pull/11180)).
 
@@ -34,6 +34,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Codex session identity changed from run-wide to per-thread** (`session-id` -> `thread-id`, with `x-codex-parent-thread-id` for child lineage); each root or child thread now has a separate session and affinity key ([#12331](https://github.com/ai-dynamo/dynamo/pull/12331)).
 
   > **Migrate:** Upgrade Codex to a version that sends `thread-id`, or send `X-Dynamo-Session-ID` from a custom client. Dynamo ignores `session-id` when `thread-id` is absent.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Automatic tokenizer fallback to HuggingFace is deprecated**; fallback remains enabled by default for compatibility when `fastokens` or `basetenkenizer` cannot load a model tokenizer, but it will be disabled by default in a future release ([#12923](https://github.com/ai-dynamo/dynamo/pull/12923)).
+
+  > **Migrate:** Pass `--no-tokenizer-fallback` or set `DYN_TOKENIZER_FALLBACK=false` to fail model initialization when the selected tokenizer backend cannot load the model tokenizer.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Removed the deprecated multimodal worker flags** (`--multimodal-worker` / `--multimodal-encode-worker` -> `--enable-multimodal` with `--disaggregation-mode` / `--dedicated-mm-encoder`) across the vLLM, SGLang, and TensorRT-LLM backends; deprecated in v1.3.0 ([#11887](https://github.com/ai-dynamo/dynamo/pull/11887)).
 

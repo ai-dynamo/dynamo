@@ -244,7 +244,7 @@ const DEFAULT_THINKING_MODE_RUNTIME_KEY: &str = "default_thinking_mode";
 /// frontend's own recordings (when present) take precedence over the forwarded values.
 fn drain_router_routing_data(
     data: &mut Option<BackendOutput>,
-    tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
+    tracker: Option<&crate::protocols::common::timing::RequestTracker>,
 ) {
     let Some(routing_data) = data.as_mut().and_then(|d| d.routing_data.take()) else {
         return;
@@ -289,6 +289,41 @@ where
     }
 
     attach_metrics_annotation(response, &metrics);
+}
+
+#[inline]
+fn build_llm_metric_annotation(
+    tracker: Option<&RequestTracker>,
+    input_tokens: usize,
+    output_tokens: usize,
+    chunk_tokens: usize,
+    cached_tokens: Option<usize>,
+    mm_counts: MultimodalCounts,
+    image_tokens: Option<usize>,
+) -> LLMMetricAnnotation {
+    LLMMetricAnnotation {
+        input_tokens,
+        output_tokens,
+        chunk_tokens,
+        cached_tokens,
+        image_count: mm_counts.image,
+        video_count: mm_counts.video,
+        audio_count: mm_counts.audio,
+        image_tokens,
+        prefill_worker_id: tracker.and_then(|t| t.prefill_worker_id()),
+        prefill_dp_rank: tracker.and_then(|t| t.prefill_dp_rank()),
+        prefill_worker_type: tracker
+            .and_then(|t| t.prefill_worker_type())
+            .map(String::from),
+        decode_worker_id: tracker.and_then(|t| t.decode_worker_id()),
+        decode_dp_rank: tracker.and_then(|t| t.decode_dp_rank()),
+        decode_worker_type: tracker
+            .and_then(|t| t.decode_worker_type())
+            .map(String::from),
+        tokenize_latency: tracker.and_then(|t| t.tokenize_latency()),
+        detokenize_total_latency: tracker.and_then(|t| t.detokenize_total_latency()),
+        detokenize_count: tracker.map(|t| t.detokenize_count()),
+    }
 }
 
 // Reasoning State for reasoning parsing transformation step.
@@ -3321,12 +3356,36 @@ impl OpenAIPreprocessor {
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
+        struct DetokenizeMetricsGuard {
+            tracker: Option<Arc<RequestTracker>>,
+        }
+
+        impl DetokenizeMetricsGuard {
+            #[inline]
+            fn tracker(&self) -> Option<&RequestTracker> {
+                self.tracker.as_deref()
+            }
+        }
+
+        impl Drop for DetokenizeMetricsGuard {
+            fn drop(&mut self) {
+                let Some(tracker) = self.tracker() else {
+                    return;
+                };
+                if let Some(total) = tracker.detokenize_total_latency() {
+                    DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
+                }
+                DETOKENIZE_TOKEN_COUNT.inc_by(tracker.detokenize_count() as f64);
+            }
+        }
+
         struct State<Resp>
         where
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
             response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
+            detokenize_metrics: DetokenizeMetricsGuard,
             context: Arc<dyn AsyncEngineContext>,
             cancelled: bool,
             cumulative_output_tokens: usize,
@@ -3343,9 +3402,11 @@ impl OpenAIPreprocessor {
             image_tokens: Option<usize>,
         }
 
+        let tracker = generator.tracker();
         let state = State {
             response_stream: Box::pin(stream),
             response_generator: generator,
+            detokenize_metrics: DetokenizeMetricsGuard { tracker },
             context: context.clone(),
             cancelled: false,
             cumulative_output_tokens: 0,
@@ -3388,7 +3449,7 @@ impl OpenAIPreprocessor {
                     // frontend's nvext/timing surfaces populate.
                     drain_router_routing_data(
                         &mut response.data,
-                        inner.response_generator.tracker().as_ref(),
+                        inner.detokenize_metrics.tracker(),
                     );
 
                     if inner.cancelled {
@@ -3451,56 +3512,23 @@ impl OpenAIPreprocessor {
 
                     // Create LLM metrics annotation with prefill/decode worker info from tracker.
                     // Worker types are stored at routing time to avoid expensive MDC lookup.
-                    let tracker = inner.response_generator.tracker();
-                    let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
-                    let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
-                    let prefill_worker_type = tracker
-                        .as_ref()
-                        .and_then(|t| t.prefill_worker_type())
-                        .map(String::from);
-                    let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
-                    let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
-                    let decode_worker_type = tracker
-                        .as_ref()
-                        .and_then(|t| t.decode_worker_type())
-                        .map(String::from);
-                    let llm_metrics = LLMMetricAnnotation {
-                        input_tokens: isl.unwrap_or(0),
-                        output_tokens: current_osl,
+                    let tracker = inner.detokenize_metrics.tracker();
+                    let llm_metrics = build_llm_metric_annotation(
+                        tracker,
+                        isl.unwrap_or(0),
+                        current_osl,
                         chunk_tokens,
-                        cached_tokens: None,
-                        image_count: inner.mm_counts.image,
-                        video_count: inner.mm_counts.video,
-                        audio_count: inner.mm_counts.audio,
-                        image_tokens: inner.image_tokens,
-                        prefill_worker_id,
-                        prefill_dp_rank,
-                        prefill_worker_type,
-                        decode_worker_id,
-                        decode_dp_rank,
-                        decode_worker_type,
-                        tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
-                        detokenize_total_latency: tracker
-                            .as_ref()
-                            .and_then(|t| t.detokenize_total_latency()),
-                        detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
-                    };
+                        None,
+                        inner.mm_counts,
+                        inner.image_tokens,
+                    );
                     if inner.trace_tokens_enabled {
                         crate::request_trace::record_llm_metric_tokens(
-                            tracker.as_deref(),
+                            tracker,
                             isl,
                             current_osl,
                             None,
                         );
-                    }
-
-                    // Flush per-request detokenize accumulators to global Prometheus counters
-                    // (once per request instead of per-token).
-                    if let Some(t) = tracker.as_ref() {
-                        if let Some(total) = t.detokenize_total_latency() {
-                            DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
-                        }
-                        DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                     }
 
                     attach_llm_metrics(&mut response, llm_metrics);
@@ -3527,61 +3555,27 @@ impl OpenAIPreprocessor {
 
                         let usage_chunk = inner.response_generator.create_usage_chunk();
                         let usage = inner.response_generator.get_usage();
-                        let tracker = inner.response_generator.tracker();
+                        let tracker = inner.detokenize_metrics.tracker();
                         let cached_tokens = usage
                             .prompt_tokens_details
                             .as_ref()
                             .and_then(|d| d.cached_tokens.map(|c| c as usize));
-                        let prefill_worker_id =
-                            tracker.as_ref().and_then(|t| t.prefill_worker_id());
-                        let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
-                        let prefill_worker_type = tracker
-                            .as_ref()
-                            .and_then(|t| t.prefill_worker_type())
-                            .map(String::from);
-                        let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
-                        let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
-                        let decode_worker_type = tracker
-                            .as_ref()
-                            .and_then(|t| t.decode_worker_type())
-                            .map(String::from);
-                        let llm_metrics = LLMMetricAnnotation {
-                            input_tokens: usage.prompt_tokens as usize,
-                            output_tokens: usage.completion_tokens as usize,
-                            chunk_tokens: 0,
+                        let llm_metrics = build_llm_metric_annotation(
+                            tracker,
+                            usage.prompt_tokens as usize,
+                            usage.completion_tokens as usize,
+                            0,
                             cached_tokens,
-                            image_count: inner.mm_counts.image,
-                            video_count: inner.mm_counts.video,
-                            audio_count: inner.mm_counts.audio,
-                            image_tokens: inner.image_tokens,
-                            prefill_worker_id,
-                            prefill_dp_rank,
-                            prefill_worker_type,
-                            decode_worker_id,
-                            decode_dp_rank,
-                            decode_worker_type,
-                            tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
-                            detokenize_total_latency: tracker
-                                .as_ref()
-                                .and_then(|t| t.detokenize_total_latency()),
-                            detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
-                        };
+                            inner.mm_counts,
+                            inner.image_tokens,
+                        );
                         if inner.trace_tokens_enabled {
                             crate::request_trace::record_llm_metric_tokens(
-                                tracker.as_deref(),
+                                tracker,
                                 Some(usage.prompt_tokens as usize),
                                 usage.completion_tokens as usize,
                                 cached_tokens,
                             );
-                        }
-
-                        // Flush per-request detokenize accumulators to global Prometheus counters
-                        // (once per request instead of per-token).
-                        if let Some(t) = tracker.as_ref() {
-                            if let Some(total) = t.detokenize_total_latency() {
-                                DETOKENIZE_TOTAL_US.inc_by(total.as_micros() as f64);
-                            }
-                            DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                         }
 
                         let usage_requested = inner.response_generator.is_usage_enabled();
