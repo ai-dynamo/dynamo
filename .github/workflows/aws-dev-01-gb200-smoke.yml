@@ -7,6 +7,13 @@ on:
   push:
     branches:
       - "test/aws-dev-01-runner-smoke"
+  workflow_dispatch:
+    inputs:
+      run_capacity_smoke:
+        description: Run the five-job, eight-GPU capacity test
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,6 +61,7 @@ jobs:
   capacity-smoke:
     name: Capacity slot ${{ matrix.slot }}
     needs: functional-smoke
+    if: github.event_name == 'workflow_dispatch' && inputs.run_capacity_smoke
     strategy:
       fail-fast: false
       max-parallel: 5
