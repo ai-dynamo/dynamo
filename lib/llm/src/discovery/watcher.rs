@@ -992,6 +992,13 @@ where
     }
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator_after_lora_removal() {
+    // SAFETY: malloc_trim is process-wide and internally synchronizes glibc arenas.
+    let released_pages = unsafe { libc::malloc_trim(0) != 0 };
+    tracing::debug!(released_pages, "Trimmed allocator after LoRA removal");
+}
+
 #[async_trait]
 impl<Sel> ControllerHost for ModelWatcher<Sel>
 where
@@ -1156,12 +1163,18 @@ where
                 self.emit_update(ModelUpdate::Added(card.clone()));
             }
         }
+        let mut removed_lora = false;
         for (name, card) in previous {
             if was_available.get(&name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(&name).is_none()
             {
                 self.emit_update(ModelUpdate::Removed(card));
+                removed_lora = true;
             }
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if removed_lora {
+            trim_allocator_after_lora_removal();
         }
         Ok(())
     }
@@ -1170,6 +1183,7 @@ where
         let Some(removed) = self.manager.remove_discovery_group(&key.id()) else {
             return;
         };
+        let removed_lora = removed.cards.iter().any(|card| card.lora.is_some());
         let removed_members = removed.cards.len();
         let mut removed_adapter_names = HashSet::new();
         for removed_card in &removed.cards {
@@ -1186,6 +1200,10 @@ where
         let card = removed.representative;
         for removed_card in removed_model_cards(&self.manager, &card) {
             self.emit_update(ModelUpdate::Removed(removed_card));
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if removed_lora {
+            trim_allocator_after_lora_removal();
         }
         tracing::info!(
             model_name = card.name(),

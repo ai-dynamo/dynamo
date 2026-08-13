@@ -2679,6 +2679,7 @@ dependencies = [
  "ipnet",
  "json-five",
  "lazy_static",
+ "libc",
  "llm-multimodal",
  "llm-tokenizer",
  "lru 0.16.4",
