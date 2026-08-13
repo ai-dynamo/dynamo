@@ -3189,12 +3189,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         rejected below).
 
         Raises:
-            InvalidArgument: the request cannot be served as given. This is the
-                request-level failure channel: the frontend maps it to HTTP 400
-                and forwards the message verbatim, so the caller learns which
-                part of their request the encoder rejected. Reporting the same
-                condition through ``finish_reason`` instead would strip the
-                message and surface an unattributed 500.
+            InvalidArgument: the request's multimodal payload is malformed in a
+                way checked for directly below. The frontend maps this to HTTP
+                400 and forwards the message verbatim, so both messages are
+                built here and never interpolate foreign text.
+            Exception: whatever the encoder or adapter raised, unchanged. The
+                bindings map the exception type to a ``BackendError``, so a
+                validation fault (``ValueError``/``TypeError``, which is what
+                the adapters raise) still reaches the caller as a 400, while a
+                timeout, CUDA fault, or cancellation keeps its own type and its
+                retry semantics.
         """
         # Internal invariant: callers guard on `self._custom_encoder is not None`
         # before reaching here. Use an explicit raise (not assert, which is
@@ -3243,10 +3247,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return None
 
         token_ids: list[int] = request.get("token_ids") or []
-        # Both encode() and adapter preparation run user/model-specific code, so
-        # keep them inside one guard. The guard exists to turn a failure into a
-        # per-request rejection carrying its message, rather than letting an
-        # arbitrary exception escape as an untyped 500.
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
@@ -3255,15 +3255,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 token_ids,
                 artifacts,
             )
-        except Exception as exc:
-            msg = f"CustomEncoder failed: {exc}"
-            logger.exception("Request %s: %s", request_id, msg)
-            # `logger.exception` above keeps the traceback server-side; the
-            # caller gets only `msg`. Classified as a request-level rejection
-            # because this guard wraps per-request work on caller-supplied
-            # images — an encoder that cannot place this request's content
-            # will fail it again on retry, so 400 is the honest answer.
-            raise InvalidArgument(msg) from exc
+        except Exception:
+            # Log with the traceback here — this is the last frame that knows
+            # which request and which encoder — then re-raise unchanged.
+            #
+            # Deliberately not converted to `InvalidArgument`. The adapters
+            # raise `ValueError`/`TypeError` for genuine input faults, which the
+            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
+            # the message, so the actionable case needs no help. Coercing the
+            # rest would relabel timeouts, CUDA faults, batcher shutdown and
+            # cancellations as client errors, suppressing retries — and since
+            # `encode()` is co-batched, it could blame a caller for a failure
+            # that originated in someone else's request.
+            logger.exception("Request %s: CustomEncoder failed", request_id)
+            raise
 
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
@@ -3308,8 +3313,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # A configured CustomEncoder owns the aggregated image path. Bypass
             # raw-media loading and let its decoder-selected adapter prepare the
             # final engine prompt.
-            # A rejection raises InvalidArgument, which the bindings turn into a
-            # typed backend error the frontend answers with 400 plus the message.
+            # Failures propagate as exceptions; the bindings map the type to a
+            # typed backend error, so an input fault answers 400 with its
+            # message and an engine fault stays a retryable 5xx.
             custom_prompt = await self._assemble_custom_encoder_prompt(
                 request,
                 request_id,

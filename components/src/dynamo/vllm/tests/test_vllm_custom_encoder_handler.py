@@ -86,31 +86,48 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
     assert prompt["prompt_token_ids"] == [1, 99, 99, 2]
 
 
-async def test_custom_encoder_handler_rejects_encoder_failure_with_message():
-    """An encoder failure must reach the caller as a typed rejection.
-
-    `InvalidArgument` is what the bindings translate into a backend error the
-    frontend answers with HTTP 400, forwarding the message verbatim. Reporting
-    the same condition through `finish_reason` strips the message.
-    """
+async def _assemble_with_encoder_error(exc: Exception):
     handler = object.__new__(DecodeWorkerHandler)
     handler._custom_encoder_adapter = _adapter()
-    handler._custom_encoder = SimpleNamespace(
-        encode=AsyncMock(side_effect=RuntimeError("encoder failed"))
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock(side_effect=exc))
+    return await handler._assemble_custom_encoder_prompt(
+        {
+            "token_ids": [99],
+            "multi_modal_data": {
+                "image_url": [{"Url": "data:image/png;base64,unused"}]
+            },
+        },
+        "request-id",
     )
 
-    with pytest.raises(InvalidArgument) as excinfo:
-        await handler._assemble_custom_encoder_prompt(
-            {
-                "token_ids": [99],
-                "multi_modal_data": {
-                    "image_url": [{"Url": "data:image/png;base64,unused"}]
-                },
-            },
-            "request-id",
-        )
 
-    assert str(excinfo.value) == "CustomEncoder failed: encoder failed"
+async def test_custom_encoder_input_fault_propagates_as_value_error():
+    """An input fault stays a `ValueError`, which the bindings already map to
+    `Backend(InvalidArgument)` — HTTP 400 carrying the message. The adapters
+    raise `ValueError`/`TypeError` for every validation failure, so the
+    actionable case needs no conversion here."""
+    with pytest.raises(ValueError) as excinfo:
+        await _assemble_with_encoder_error(ValueError("placeholder tokens (0) != 1"))
+
+    assert "placeholder tokens (0) != 1" in str(excinfo.value)
+
+
+async def test_custom_encoder_engine_fault_keeps_its_own_type():
+    """The complement, and the point of not converting: an engine fault must
+    not be relabelled a client error. Doing so would answer 400 and suppress
+    retries for timeouts, CUDA faults and batcher shutdown — and since
+    `encode()` is co-batched, could blame a caller for another request's
+    failure."""
+    with pytest.raises(RuntimeError) as excinfo:
+        await _assemble_with_encoder_error(RuntimeError("CUDA error: out of memory"))
+
+    assert not isinstance(excinfo.value, InvalidArgument)
+    assert "out of memory" in str(excinfo.value)
+
+
+async def test_custom_encoder_timeout_keeps_its_own_type():
+    with pytest.raises(TimeoutError):
+        await _assemble_with_encoder_error(TimeoutError("encoder timed out"))
 
 
 async def test_custom_encoder_handler_rejects_unsupported_modality():
