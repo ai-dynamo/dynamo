@@ -10,10 +10,25 @@ import (
 )
 
 const (
-	SglangPort = "29500"
+	SglangPort        = "29500"
+	sglangGMSV1EnvVar = "DYN_SGL_ENABLE_GMS_V1"
 )
 
 type SGLangBackend struct{}
+
+func usesSGLangSnapshotGMSV1(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return GetCheckpoint(component) != nil &&
+		GetGPUMemoryService(component) != nil &&
+		!component.IsInterPodGMSEnabled()
+}
+
+// EnableSGLangGMSV1 selects the V1 client protocol for an SGLang container.
+func EnableSGLangGMSV1(container *corev1.Container) {
+	container.Env = MergeEnvs(container.Env, []corev1.EnvVar{{
+		Name:  sglangGMSV1EnvVar,
+		Value: "true",
+	}})
+}
 
 // isPythonCommand checks if the command is a Python interpreter
 func isPythonCommand(cmd string) bool {
@@ -35,6 +50,10 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 			"cache-dir", component.CompilationCache.MountPath,
 			"env-vars-set", false,
 			"next-steps", "upstream SGLang changes needed")
+	}
+
+	if usesSGLangSnapshotGMSV1(component) {
+		EnableSGLangGMSV1(container)
 	}
 
 	// For single node, nothing to do
