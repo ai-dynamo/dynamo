@@ -86,17 +86,21 @@ class TestDiffusionParallelConfigCoverage:
             f"Add to OmniParallelKwargs and OmniArgGroup, or add to _SKIP_FIELDS with a reason."
         )
 
-    def test_tensor_parallel_size_read_from_engine_args(self):
-        """tensor_parallel_size must come from engine_args (vLLM's --tensor-parallel-size),
-        not from OmniParallelKwargs, so it applies to both LLM encoder and diffusion transformer.
+    def test_tensor_parallel_fields_forwarded_from_separate_configs(self):
+        """Forward transformer and text-encoder TP from their respective configs.
+
+        tensor_parallel_size comes from engine_args so it applies to both the
+        LLM encoder and diffusion transformer. text_encoder_tp_size is an
+        Omni-only diffusion setting.
         """
-        config = _make_config()
+        config = _make_config(text_encoder_tp_size=2)
         config.engine_args.tensor_parallel_size = 4
         with patch("dynamo.vllm.omni.base_handler.DiffusionParallelConfig") as MockCfg:
             MockCfg.return_value = SimpleNamespace()
             _build_kwargs(config)
             _, kwargs = MockCfg.call_args
             assert kwargs.get("tensor_parallel_size") == 4
+            assert kwargs.get("text_encoder_tp_size") == 2
 
     def test_output_modalities_forwarded_to_async_omni(self):
         config = _make_config()
