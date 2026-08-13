@@ -95,7 +95,7 @@ spec:
           # aiperf depends on crick, which has no Linux aarch64 wheel. ARM
           # benchmark pods need build tools to compile it from source.
           apt-get update && apt-get install -y --no-install-recommends build-essential && apt-get clean
-          pip install --no-cache-dir "aiperf[accuracy]==0.11.0" > /dev/null
+          pip install --no-cache-dir "aiperf[accuracy]==0.12.0" > /dev/null
           EPOCH=$(date +%s)
 
           wait_for_model_ready() {
@@ -180,9 +180,11 @@ spec:
         # also used to fetch the tokenizer, so it must resolve on Hugging Face.
         - name: TARGET_MODEL
           value: <org/model-id>
-        # Benchmark to run. AIPerf ships graders for MMLU, MMLU-Pro, GSM8K,
-        # MATH-500, AIME, GPQA-Diamond, HellaSwag, BIG-Bench Hard, and
-        # LiveCodeBench — see
+        # Benchmark to run, by its CLI name: mmlu, mmlu_pro, gsm8k, math_500,
+        # gpqa_diamond, hellaswag, bigbench (BIG-Bench Hard), lcb_codegeneration
+        # (LiveCodeBench), or one of three AIME variants — aime (2024, 8-shot),
+        # aime24 (2024, 0-shot, matches most published trt-llm/lighteval
+        # numbers), aime25 (2025, 0-shot). Full list:
         # https://github.com/ai-dynamo/aiperf/blob/main/docs/accuracy/accuracy-benchmarking.md
         - name: BENCHMARK
           value: gpqa_diamond
