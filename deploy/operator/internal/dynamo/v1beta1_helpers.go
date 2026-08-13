@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -15,6 +16,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ComponentsByName returns the graph deployment components indexed by their
@@ -301,68 +303,47 @@ func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 	)
 }
 
-// groveComponentCutover records the live Grove state relevant to publishing a
-// worker runtime namespace.
-type groveComponentCutover struct {
-	// TargetCutOver is true when the target worker revision is committed and ready.
-	TargetCutOver bool
-	// CurrentRevisionCommitted is true when Grove has completed the target
-	// revision, even if that revision later becomes unhealthy.
-	CurrentRevisionCommitted bool
-}
-
 // GetGroveRuntimeNamespace returns the runtime namespace published for a Grove
-// component. A worker keeps its previous namespace only while the target
-// revision has neither cut over nor committed.
+// component. A worker keeps its previous namespace until Grove has committed
+// the target worker revision.
 func GetGroveRuntimeNamespace(
+	ctx context.Context,
+	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	currentGenerationReady bool,
-) (string, error) {
-	return getGroveRuntimeNamespace(dgd, component, groveComponentCutover{
-		TargetCutOver:            currentGenerationReady,
-		CurrentRevisionCommitted: currentGenerationReady,
-	})
-}
-
-func getGroveRuntimeNamespace(
-	dgd *v1beta1.DynamoGraphDeployment,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	cutover groveComponentCutover,
 ) (string, error) {
 	if dgd == nil || component == nil {
 		return "", nil
 	}
 
-	desiredNamespace, err := getDesiredGroveRuntimeNamespace(dgd, component)
-	if err != nil {
-		return "", err
+	namespace := dgd.GetDynamoNamespaceForComponent(component)
+	if !IsWorkerComponent(string(component.ComponentType)) ||
+		dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != commonconsts.KubeLabelValueTrue {
+		return namespace, nil
 	}
 
-	// Keep routing consumers on the active worker namespace until Grove commits the target revision.
-	if !cutover.TargetCutOver && !cutover.CurrentRevisionCommitted && IsWorkerComponent(string(component.ComponentType)) {
+	workerHash, err := ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return "", fmt.Errorf("compute Grove worker hash suffix: %w", err)
+	}
+	desiredNamespace := ComponentRuntimeNamespace(namespace, string(component.ComponentType), workerHash)
+
+	pcs, err := getGrovePodCliqueSet(ctx, reader, dgd)
+	if err != nil {
+		return "", fmt.Errorf("failed to get Grove PodCliqueSet for component %q: %w", component.ComponentName, err)
+	}
+
+	committed, err := groveComponentTargetRevisionCommitted(ctx, reader, dgd, component, pcs)
+	if err != nil {
+		return "", fmt.Errorf("failed to check if component %q target revision is committed: %w", component.ComponentName, err)
+	}
+	if !committed {
 		if previousNamespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace; previousNamespace != "" {
 			return previousNamespace, nil
 		}
 	}
 
 	return desiredNamespace, nil
-}
-
-func getDesiredGroveRuntimeNamespace(
-	dgd *v1beta1.DynamoGraphDeployment,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-) (string, error) {
-	namespace := dgd.GetDynamoNamespaceForComponent(component)
-	if !IsWorkerComponent(string(component.ComponentType)) ||
-		dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != commonconsts.KubeLabelValueTrue {
-		return namespace, nil
-	}
-	workerHash, err := ComputeDGDWorkersSpecHash(dgd)
-	if err != nil {
-		return "", fmt.Errorf("compute Grove worker hash suffix: %w", err)
-	}
-	return ComponentRuntimeNamespace(namespace, string(component.ComponentType), workerHash), nil
 }
 
 // GetDCDSubComponentType returns the alpha subcomponent type restored by API

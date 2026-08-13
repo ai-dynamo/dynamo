@@ -1423,8 +1423,10 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				},
 			}
 			component := dgd.GetComponentByName("prefill")
-			desiredNamespace, err := GetGroveRuntimeNamespace(dgd, component, true)
+			t.Log("Calculate the namespace rendered for the desired worker revision.")
+			workerHash, err := ComputeDGDWorkersSpecHash(dgd)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
+			desiredNamespace := ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), workerHash)
 
 			t.Log("Record the namespace published by the previous worker generation.")
 			previousNamespace := ""

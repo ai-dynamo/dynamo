@@ -1,16 +1,20 @@
 package dynamo
 
 import (
+	"context"
 	"maps"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestComponentsByNameNil(t *testing.T) {
@@ -232,7 +236,9 @@ func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
 				want += "-" + hash
 			}
 
-			got, err := GetGroveRuntimeNamespace(dgd, component, true)
+			t.Log("Read the namespace against a Grove worker at the committed target revision.")
+			reader := committedGroveWorkerReader(t, dgd, component)
+			got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component)
 			if err != nil {
 				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 			}
@@ -243,7 +249,7 @@ func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
 	}
 }
 
-func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilReady(t *testing.T) {
+func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilTargetRevisionCommits(t *testing.T) {
 	t.Log("Build a suffixed worker with a namespace from the active generation")
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -265,8 +271,10 @@ func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilReady(t *tes
 	}
 	component := dgd.GetComponentByName("worker")
 
-	t.Log("Keep the active namespace while the current worker generation is unready")
-	got, err := GetGroveRuntimeNamespace(dgd, component, false)
+	g := gomega.NewWithT(t)
+	var reader client.Reader = newFakeGroveClient(g)
+	t.Log("Keep the active namespace while the target revision is pending.")
+	got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component)
 	if err != nil {
 		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 	}
@@ -274,18 +282,58 @@ func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilReady(t *tes
 		t.Fatalf("GetGroveRuntimeNamespace() = %q, want active worker namespace", got)
 	}
 
-	t.Log("Publish the desired namespace once the current worker generation is ready")
-	want, err := getDesiredGroveRuntimeNamespace(dgd, component)
+	t.Log("Publish the desired namespace after the target revision commits.")
+	hash, err := ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
-		t.Fatalf("getDesiredGroveRuntimeNamespace() error = %v", err)
+		t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
 	}
-	got, err = GetGroveRuntimeNamespace(dgd, component, true)
+	want := ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), hash)
+	reader = committedGroveWorkerReader(t, dgd, component)
+	got, err = GetGroveRuntimeNamespace(context.Background(), reader, dgd, component)
 	if err != nil {
 		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 	}
 	if got != want {
 		t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, want)
 	}
+}
+
+func committedGroveWorkerReader(
+	t *testing.T,
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) client.Reader {
+	t.Helper()
+	g := gomega.NewWithT(t)
+	targetRevision := "target-revision"
+	completedAt := metav1.Now()
+
+	pcs := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Namespace:  dgd.Namespace,
+			Generation: 1,
+		},
+		Status: grovev1alpha1.PodCliqueSetStatus{
+			ObservedGeneration:    ptr.To(int64(1)),
+			CurrentGenerationHash: &targetRevision,
+			UpdateProgress:        &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateEndedAt: &completedAt},
+		},
+	}
+	podClique := &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      GroveComponentResourceName(dgd, component.ComponentName),
+			Namespace: dgd.Namespace,
+		},
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: grovev1alpha1.PodCliqueStatus{
+			Replicas:                          1,
+			UpdatedReplicas:                   1,
+			CurrentPodCliqueSetGenerationHash: &targetRevision,
+			UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
+		},
+	}
+	return newFakeGroveClient(g, pcs, podClique)
 }
 
 func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testing.T) {
