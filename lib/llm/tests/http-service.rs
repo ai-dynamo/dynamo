@@ -1664,7 +1664,9 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
 async fn test_audio_speech_streams_worker_chunks() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(EndpointType::Audios, true);
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
