@@ -85,9 +85,10 @@ if ENABLED:
         import nvtx as _nvtx_lib
     except ImportError as exc:
         raise ImportError(
-            "DYN_NVTX=1 requires the `nvtx` package, which is not installed. "
-            "Install it with `pip install ai-dynamo[profiling]`, or unset "
-            "DYN_NVTX to run without NVTX markers."
+            f"DYN_NVTX={os.getenv('DYN_NVTX')!r} requires the `nvtx` package, "
+            "which is not installed. Install it with "
+            "`pip install ai-dynamo[profiling]`, or unset DYN_NVTX to run "
+            "without NVTX markers."
         ) from exc
 
     # Named domain + pre-allocated EventAttributes: no per-call object
