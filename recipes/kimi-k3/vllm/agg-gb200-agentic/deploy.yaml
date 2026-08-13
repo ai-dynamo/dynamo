@@ -104,7 +104,7 @@ spec:
               --mm-encoder-attn-backend TORCH_SDPA \
               --attention-backend FLASHINFER_MLA \
               --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
-              --moe-backend flashinfer_trtllm \
+              --moe-backend auto \
               --kda-prefill-backend flashkda \
               --kernel-config '{"enable_cutedsl_warmup":true}' \
               --max-num-seqs 256 \
@@ -116,8 +116,10 @@ spec:
               --enable-multimodal \
               --disable-custom-all-reduce \
               --enable-prefix-caching \
+              --no-disable-hybrid-kv-cache-manager \
+              --no-enable-log-requests \
               --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
-              --cpu-distributed-timeout-seconds 1800 \
+              --cpu-distributed-timeout-seconds 3600 \
               --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
               --dyn-tool-call-parser kimi_k3 \
               --reasoning-parser kimi_k3 \
@@ -134,12 +136,37 @@ spec:
             value: '1'
           - name: TRANSFORMERS_OFFLINE
             value: '1'
+          - name: FLASHINFER_WORKSPACE_BASE
+            value: /tmp/flashinfer
+          - name: XDG_CACHE_HOME
+            value: /tmp/.cache
+          - name: GP_DISABLE_CUDNN
+            value: '1'
           - name: VLLM_ENGINE_READY_TIMEOUT_S
             value: '7200'
+          - name: VLLM_SSM_CONV_STATE_LAYOUT
+            value: DS
           - name: VLLM_USE_V2_MODEL_RUNNER
             value: '0'
           - name: VLLM_USE_NCCL_SYMM_MEM
             value: '0'
+          - name: VLLM_DEEP_GEMM_WARMUP
+            value: skip
+          - name: VLLM_FASTSAFETENSORS_QUEUE_SIZE
+            value: '1'
+          - name: TILELANG_CLEANUP_TEMP_FILES
+            value: '1'
+          # Fuses MoE tail ops in the CuTeDSL kernel; ~20% decode-latency reduction on GB200.
+          - name: VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION
+            value: '1'
+          # Fuses FP8 all-reduce combine, reducing combine overhead.
+          - name: VLLM_DSV4_MEGA_FP8_COMBINE
+            value: '1'
+          # Disable periodic KDA checkpoint; removes ~300 ms TTFT overhead for fixed system prompts.
+          - name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+            value: '0'
+          - name: TORCHINDUCTOR_ENABLE_PDL
+            value: '1'
           # TP all-reduce over MNNVL via FlashInfer — reduces collective latency vs NCCL.
           - name: VLLM_ALLREDUCE_USE_FLASHINFER
             value: '1'
