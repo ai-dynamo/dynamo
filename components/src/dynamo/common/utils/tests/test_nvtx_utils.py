@@ -24,7 +24,9 @@ import functools
 import importlib.abc
 import importlib.util
 import sys
+import types
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -34,39 +36,11 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-UTILS_DIR = Path(__file__).resolve().parents[1]
-NVTX_UTILS_PATH = UTILS_DIR / "nvtx_utils.py"
-ENV_PATH = UTILS_DIR / "env.py"
+NVTX_UTILS_PATH = Path(__file__).resolve().parents[1] / "nvtx_utils.py"
 
 # Load under a private name so a real ``dynamo.common.utils.nvtx_utils`` entry in
 # ``sys.modules`` (if the package is importable in this environment) is untouched.
 MODULE_NAME = "_test_nvtx_utils_under_test"
-
-# nvtx_utils does `from dynamo.common.utils.env import env_bool`. Rather than
-# stub that out — which would stop the tests from exercising the real DYN_NVTX
-# parsing — pre-seed sys.modules with the genuine env.py (it imports only `os`)
-# plus empty placeholders for its parent packages, so the from-import resolves
-# without executing dynamo/common/utils/__init__.py and its dynamo._core chain.
-_ENV_MODULE_NAME = "dynamo.common.utils.env"
-_PLACEHOLDER_PACKAGES = ("dynamo", "dynamo.common", "dynamo.common.utils")
-
-
-def _seed_env_dependency(monkeypatch):
-    """Make ``dynamo.common.utils.env`` importable without the real package."""
-    if _ENV_MODULE_NAME in sys.modules:
-        return
-    for name in _PLACEHOLDER_PACKAGES:
-        if name not in sys.modules:
-            package = importlib.util.module_from_spec(
-                importlib.machinery.ModuleSpec(name, None, is_package=True)
-            )
-            monkeypatch.setitem(sys.modules, name, package)
-
-    spec = importlib.util.spec_from_file_location(_ENV_MODULE_NAME, ENV_PATH)
-    assert spec is not None and spec.loader is not None
-    env_module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, _ENV_MODULE_NAME, env_module)
-    spec.loader.exec_module(env_module)
 
 
 def _load_nvtx_utils():
@@ -87,7 +61,6 @@ def _load_nvtx_utils():
 @pytest.fixture
 def load_module(monkeypatch):
     """Reload nvtx_utils from source, cleaning up sys.modules afterwards."""
-    _seed_env_dependency(monkeypatch)
     yield _load_nvtx_utils
     sys.modules.pop(MODULE_NAME, None)
 
@@ -250,32 +223,39 @@ class TestEnabledWithoutPackage:
 
 
 class TestEnvParsing:
-    """DYN_NVTX goes through env_bool, matching the Rust twin DYN_ENABLE_RUST_NVTX.
+    """DYN_NVTX parses exactly like its Rust twin, DYN_ENABLE_RUST_NVTX.
 
-    Both accept 1/true/yes. The regression guarded here is the earlier
-    ``bool(int(os.getenv("DYN_NVTX", "0")))``, under which every non-integer
-    value — including ``true`` and an explicitly empty string — raised a bare
-    ``ValueError`` at import instead of enabling or disabling markers.
+    Both accept 1/true/on/yes and 0/false/off/no, trimmed and case-insensitive
+    (``dynamo_truthy::is_truthy``). Two regressions are guarded here: the
+    original ``bool(int(...))``, under which ``true`` raised a bare
+    ``ValueError``; and a later ``env_bool`` form, under which ``on`` silently
+    recorded nothing while the Rust half of the same capture was enabled.
     """
 
-    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", "yes", "YES"])
+    @pytest.mark.parametrize(
+        "value", ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON", " 1 ", " on "]
+    )
     def test_truthy_values_enable(self, monkeypatch, load_module, stub_nvtx, value):
         monkeypatch.setenv("DYN_NVTX", value)
         assert load_module().ENABLED is True
 
     @pytest.mark.parametrize(
-        "value", ["0", "false", "no", "off", "", "2", "maybe", " 1 "]
+        "value", ["0", "false", "FALSE", "no", "off", "OFF", "", "  "]
     )
-    def test_other_values_disable_without_raising(
-        self, monkeypatch, load_module, value
-    ):
-        """Anything not explicitly truthy is off — and never raises.
-
-        ``2`` and ``" 1 "`` are the deliberate behaviour change from int
-        parsing: env_bool matches on the exact token, so only 1/true/yes count.
-        """
+    def test_falsey_values_disable(self, monkeypatch, load_module, value):
         monkeypatch.setenv("DYN_NVTX", value)
         assert load_module().ENABLED is False
+
+    @pytest.mark.parametrize("value", ["2", "maybe", "enabled", "-1"])
+    def test_unrecognized_values_raise(self, monkeypatch, load_module, value):
+        """Fail loudly rather than defaulting to off.
+
+        Silently disabling on an unrecognized value is the failure this module
+        exists to prevent: the run completes and the timeline is empty.
+        """
+        monkeypatch.setenv("DYN_NVTX", value)
+        with pytest.raises(ValueError, match="not a recognized boolean"):
+            load_module()
 
 
 # --------------------------------------------------------------------------- #
@@ -309,7 +289,7 @@ class _StubDomain:
 class _StubAnnotate:
     """Stand-in for ``nvtx.annotate``: decorator and context manager."""
 
-    instances: list = []
+    instances: ClassVar[list] = []
 
     def __init__(self, message="", color="white", domain=None):
         self.message = message
@@ -335,8 +315,6 @@ class _StubAnnotate:
 @pytest.fixture
 def stub_nvtx(monkeypatch):
     """Inject a fake ``nvtx`` module and return (module, domains-by-name)."""
-    import types
-
     domains: dict = {}
 
     def get_domain(name):

@@ -3,7 +3,10 @@
 """
 Lightweight NVTX wrappers for Dynamo profiling.
 
-Set DYN_NVTX to 1/true/yes to enable markers; default is disabled (zero overhead).
+Set DYN_NVTX to 1/true/on/yes to enable markers; default is disabled (zero
+overhead). Values are trimmed and case-insensitive, matching the Rust switch
+DYN_ENABLE_RUST_NVTX; an unrecognized value raises rather than silently
+disabling.
 
 The `nvtx` package is an optional dependency (`pip install ai-dynamo[profiling]`,
 already present in the container images). It is imported only when DYN_NVTX=1,
@@ -39,18 +42,39 @@ or domain cache lookups on the hot path.
 """
 import functools
 import inspect
+import os
 
-from dynamo.common.utils.env import env_bool
-
-# env_bool, not bool(int(...)): DYN_NVTX's Rust-side twin DYN_ENABLE_RUST_NVTX
-# goes through config::env_is_truthy, which accepts 1/true/yes. Parsing this one
-# as an int made `DYN_NVTX=true` raise a bare ValueError at import — the exact
-# confusing failure the fail-fast ImportError below exists to avoid.
+# Parsed to match DYN_NVTX's Rust-side twin DYN_ENABLE_RUST_NVTX exactly, which
+# goes through dynamo_truthy::is_truthy (lib/truthy/src/lib.rs): 1/true/on/yes
+# to enable, 0/false/off/no to disable, case-insensitive and whitespace-trimmed.
 #
+# Deliberately not the shared env_bool helper: it treats "on" as false by
+# design (asserted in utils/tests/test_env.py), so DYN_NVTX=on would silently
+# record nothing while DYN_ENABLE_RUST_NVTX=on enabled the Rust half of the
+# same capture. An unrecognized value raises rather than defaulting to off, for
+# the same reason the ImportError below exists: a profiling switch that quietly
+# does nothing costs a whole run to discover.
+_TRUTHY = frozenset({"1", "true", "on", "yes"})
+_FALSEY = frozenset({"0", "false", "off", "no"})
+
+
+def _parse_enabled(name: str) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw or raw in _FALSEY:
+        return False
+    if raw in _TRUTHY:
+        return True
+    raise ValueError(
+        f"{name}={os.getenv(name)!r} is not a recognized boolean. Use one of "
+        f"{sorted(_TRUTHY)} to enable NVTX markers, or one of {sorted(_FALSEY)} "
+        f"(or leave it unset) to disable them."
+    )
+
+
 # `nvtx` is not a dependency of ai-dynamo — it ships in the optional
 # `ai-dynamo[profiling]` extra and in the container images. It is imported only
-# under DYN_NVTX=1, so the marker call sites carry no dependency on it.
-ENABLED: bool = env_bool("DYN_NVTX")
+# when DYN_NVTX is enabled, so the marker call sites carry no dependency on it.
+ENABLED: bool = _parse_enabled("DYN_NVTX")
 
 if ENABLED:
     # Fail fast and loud. Silently degrading to no-ops would mean discovering at
