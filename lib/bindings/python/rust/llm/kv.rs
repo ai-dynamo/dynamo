@@ -22,6 +22,8 @@ use crate::Endpoint;
 use clap::Parser;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::TrackingHashAlgorithm;
+#[cfg(feature = "custom-policy")]
+use dynamo_kv_router::WorkerSelectionPolicy;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
@@ -34,15 +36,24 @@ use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
     SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
     SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyFactory,
+    WorkerPatchRequest, WorkerRequest,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
+use dynamo_kv_router::{WorkerSelectionPolicyFactory, WorkerType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
-use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
+use llm_rs::kv_router::KvPushRouter;
+#[cfg(not(feature = "custom-policy"))]
+type RsKvPushRouter = KvPushRouter;
+#[cfg(feature = "custom-policy")]
+type RsKvPushRouter = KvPushRouter<WorkerSelectionPolicy>;
+#[cfg(not(feature = "custom-policy"))]
+type RsKvRouter = llm_rs::kv_router::KvRouter;
+#[cfg(feature = "custom-policy")]
+type RsKvRouter = llm_rs::kv_router::KvRouter<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -1612,33 +1623,17 @@ impl Drop for RadixTree {
 
 /// Helper function to create a KV router from an endpoint using the ModelManager
 /// to ensure proper etcd registration.
-/// Infers worker type using endpoint naming and router config:
-/// - If endpoint name/component contains "prefill", treat as prefill
-/// - If router_track_active_blocks is disabled, treat as prefill
-/// - Otherwise, default to decode
+/// Uses the discovered model card's typed worker role for policy selection.
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
-) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+) -> Result<Arc<RsKvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let endpoint_id = endpoint.inner.id();
-    let namespace = endpoint_id.namespace.to_lowercase();
-    let component = endpoint_id.component.to_lowercase();
-    let name = endpoint_id.name.to_lowercase();
-    let endpoint_is_prefill =
-        namespace.contains("prefill") || component.contains("prefill") || name.contains("prefill");
-    let track_active_blocks = kv_router_config
-        .as_ref()
-        .map(|cfg| cfg.router_track_active_blocks)
-        .unwrap_or(true);
-    let worker_type = if endpoint_is_prefill || !track_active_blocks {
-        llm_rs::discovery::WORKER_TYPE_PREFILL
-    } else {
-        llm_rs::discovery::WORKER_TYPE_DECODE
-    };
 
     // Look up the worker's model card so we can derive both model_name (required
     // for remote/served indexer) and Eagle routing semantics. When the model_name
@@ -1649,8 +1644,9 @@ async fn create_kv_router_from_endpoint(
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-    let (model_name, enable_eagle, worker_role) = {
-        let maybe_card = if needs_model_name {
+    let needs_policy_role = worker_selection_policy_factory.is_some();
+    let (model_name, policy_model_name, enable_eagle, worker_role) = {
+        let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1660,7 +1656,9 @@ async fn create_kv_router_from_endpoint(
                 component = %endpoint_id.component,
                 endpoint = %endpoint_id.name,
                 wait_secs,
-                "Waiting for worker model card in discovery (required for remote/served indexer)"
+                needs_model_name,
+                needs_policy_role,
+                "Waiting for worker model card in discovery"
             );
             llm_rs::discovery::wait_for_endpoint_model_card(
                 &endpoint.inner,
@@ -1692,22 +1690,42 @@ async fn create_kv_router_from_endpoint(
                 let model_name = needs_model_name.then(|| card.display_name.clone());
                 (
                     model_name,
+                    Some(card.display_name.clone()),
                     card.runtime_config.enable_eagle,
-                    card.worker_type,
+                    Some(card.effective_worker_type()),
                 )
             }
             None => {
+                if needs_policy_role {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "worker-selection policy requires a discovered model card with a typed worker role",
+                    ));
+                }
                 tracing::warn!(
                     namespace = %endpoint_id.namespace,
                     component = %endpoint_id.component,
                     endpoint = %endpoint_id.name,
                     "No model card found in discovery; defaulting to non-Eagle routing semantics"
                 );
-                (None, false, None)
+                (None, None, false, None)
             }
         }
     };
+    #[cfg(not(feature = "custom-policy"))]
+    let _ = policy_model_name;
 
+    let fallback_role = if kv_router_config
+        .as_ref()
+        .is_some_and(|config| !config.router_track_active_blocks)
+    {
+        WorkerType::Prefill
+    } else {
+        WorkerType::Aggregated
+    };
+    let effective_worker_role = worker_role.unwrap_or(fallback_role);
+    let metric_worker_type = effective_worker_role.as_str();
+
+    #[cfg(not(feature = "custom-policy"))]
     let kv_router = model_manager
         .kv_chooser_for_with_worker_role(
             &endpoint.inner,
@@ -1715,12 +1733,44 @@ async fn create_kv_router_from_endpoint(
             kv_router_config,
             prefill_load_estimator,
             worker_role,
-            worker_type,
+            metric_worker_type,
             model_name,
             enable_eagle,
         )
         .await
         .map_err(to_pyerr)?;
+
+    #[cfg(feature = "custom-policy")]
+    let kv_router = {
+        let effective_config = kv_router_config.clone().unwrap_or_default();
+        let selector = worker_selection_policy_factory.map_or_else(
+            || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
+            |factory| {
+                factory(
+                    &effective_config,
+                    effective_worker_role,
+                    dynamo_kv_router::RoutingPartitionRef::new(
+                        policy_model_name.as_deref().unwrap_or_default(),
+                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                    ),
+                )
+            },
+        );
+        model_manager
+            .kv_chooser_for_with_selector(
+                &endpoint.inner,
+                block_size as u32,
+                selector,
+                kv_router_config,
+                prefill_load_estimator,
+                worker_role,
+                metric_worker_type,
+                model_name,
+                enable_eagle,
+            )
+            .await
+            .map_err(to_pyerr)?
+    };
 
     Ok(kv_router)
 }
@@ -1860,8 +1910,7 @@ impl KvRouter {
     /// * `block_size` - KV cache block size for routing decisions
     /// * `kv_router_config` - Configuration for the KV router
     ///
-    /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
-    /// (contains "prefill") or by `router_track_active_blocks` being disabled.
+    /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
     #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
@@ -1878,15 +1927,8 @@ impl KvRouter {
             ));
         }
         let kv_router_config = kv_router_config.inner();
-        if let Some(instance) = kv_router_config
-            .selected_standalone_worker_selection_policy_instance()
-            .map_err(to_pyerr)?
-        {
-            return Err(PyValueError::new_err(format!(
-                "worker-selection instance {instance:?} is configured, but python -m dynamo.router does not support linked worker-selection policies; use python -m dynamo.frontend or a custom EPP binary"
-            )));
-        }
-        crate::warn_if_standalone_ignores_stage_policies(&kv_router_config).map_err(to_pyerr)?;
+        let worker_selection_policy_factory =
+            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -1939,6 +1981,7 @@ impl KvRouter {
                     block_size,
                     Some(kv_router_config),
                     prefill_load_estimator,
+                    worker_selection_policy_factory,
                 )
                 .await?;
 

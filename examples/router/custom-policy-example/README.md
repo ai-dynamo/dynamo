@@ -32,7 +32,7 @@ The `simple-filter-score-pick` policy shows the complete pipeline. It filters on
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
 
-The embedded frontend supplies `prefill` or `decode` after discovery scopes the worker pool. This disaggregated policy rejects the standalone EPP's single-pool `select` stage because it cannot identify separate prefill and decode pools. Other unsupported stages also stop instead of silently using the prefill policy.
+The embedded frontend supplies `WorkerType::Prefill` or `WorkerType::Decode` after discovery scopes the worker pool. This disaggregated policy rejects the standalone EPP's `WorkerType::Aggregated` pool because it cannot apply separate prefill and decode behavior. Other unsupported roles also stop instead of silently using the prefill policy.
 
 The `simple-stacked-score-pick` policy has no custom filter. It adds active-request and uncached-request costs before its picker selects the lowest total.
 
@@ -103,7 +103,7 @@ fn provider(
 
         WorkerSelectionPolicy::new_with_filters(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             filters,
             vec![Box::new(ActiveRequestsScorer)],
             Box::new(RequestAwarePicker),
@@ -119,7 +119,7 @@ The provider and factory have different lifetimes:
 3. Dynamo calls the factory once for each model and routing-group partition.
 4. Each factory call creates a new filter, scorer, and picker set for that partition.
 
-The factory also receives `worker_type`. The Python frontend supplies `prefill` or `decode`. A standalone EPP supplies `select`. Use the partition value when models or routing groups need separate policy state.
+The factory also receives the typed `WorkerType` role. Hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use the partition value when models or routing groups need separate policy state.
 
 ## 4. Register the Policy Type
 
@@ -143,7 +143,7 @@ Create a YAML file outside the source tree:
 
 ```yaml
 worker_selection:
-  default: simple-filter-score-pick
+  aggregated: simple-filter-score-pick
   prefill: disagg-prefill
   decode: disagg-decode
   instances:
@@ -170,11 +170,11 @@ worker_selection:
 
 - `type` selects a registered provider.
 - `name` identifies one configured instance.
-- `worker_selection.default` selects an instance at startup.
+- `worker_selection.aggregated` selects the instance for a full-request worker pool.
 - `worker_selection.prefill` and `worker_selection.decode` select separate instances for the embedded frontend's worker pools.
 - `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections.
 - `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.
-- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the YAML selections for both stages.
+- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every role-specific YAML selection.
 - The override value `default` selects Dynamo's built-in policy.
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.
@@ -245,7 +245,7 @@ DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
   cargo run --release -p dynamo-custom-policy-example-epp
 ```
 
-Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. A policy that branches on `worker_type` must handle `select`; `disagg-filter-score-pick` intentionally rejects it and is only usable with the embedded frontend. The Rust EPP's Dynamo-runtime mode has native prefill/decode routing, but linked custom policy catalogs are not supported in that mode.
+Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. `disagg-filter-score-pick` intentionally rejects that role and is only usable with disaggregated frontend pools. The Rust EPP's Dynamo-runtime mode has native prefill/decode routing, but linked custom policy catalogs are not supported in that mode.
 
 Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes resources.
 

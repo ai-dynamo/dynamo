@@ -69,7 +69,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             kv_router_config,
             decode_router,
             Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                DefaultWorkerSelector::new(Some(config.clone()), worker_type.as_str())
             }),
             prefill_load_estimator,
             session_affinity_ttl_secs,
@@ -232,7 +232,7 @@ where
             let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
             let selector = (context.worker_selector_factory)(
                 &effective_kv_router_config,
-                WORKER_TYPE_PREFILL,
+                crate::worker_type::WorkerType::Prefill,
                 RoutingPartitionRef::new(&context.model_name, DEFAULT_ROUTING_GROUP),
             );
             let kv_chooser = context

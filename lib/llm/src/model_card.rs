@@ -986,6 +986,28 @@ impl ModelDeploymentCard {
         ModelDeploymentCardBuilder::default()
     }
 
+    /// Return this card's explicit worker role, with compatibility for legacy cards.
+    ///
+    /// Before `worker_type` was added, prefill cards used `ModelType::Prefill`; every other
+    /// worker was a full-request worker.
+    pub fn effective_worker_type(&self) -> crate::worker_type::WorkerType {
+        Self::resolve_worker_type(self.worker_type, self.model_type)
+    }
+
+    /// Resolve an explicit or legacy worker role without constructing a model card.
+    pub fn resolve_worker_type(
+        worker_type: Option<crate::worker_type::WorkerType>,
+        model_type: ModelType,
+    ) -> crate::worker_type::WorkerType {
+        worker_type.unwrap_or_else(|| {
+            if model_type.supports_prefill() {
+                crate::worker_type::WorkerType::Prefill
+            } else {
+                crate::worker_type::WorkerType::Aggregated
+            }
+        })
+    }
+
     /// Create a ModelDeploymentCard where only the name is filled in.
     ///
     /// Single-process setups don't need an MDC to communicate model details, but it

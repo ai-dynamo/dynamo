@@ -12,16 +12,16 @@ use super::policy_config::{RouterPolicyConfigError, validate_identifier};
 /// Process-wide configuration for worker selection in a custom Dynamo image.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerSelectionConfig {
-    default: Option<String>,
+    aggregated: Option<String>,
     prefill: Option<String>,
     decode: Option<String>,
     instances: HashMap<String, WorkerSelectionInstance>,
 }
 
 impl WorkerSelectionConfig {
-    /// The selected instance when no environment override is provided.
-    pub fn default_instance(&self) -> Option<&str> {
-        self.default.as_deref()
+    /// The selected instance for a full-request worker pool.
+    pub fn aggregated_instance(&self) -> Option<&str> {
+        self.aggregated.as_deref()
     }
 
     pub(crate) fn prefill_instance(&self) -> Option<&str> {
@@ -68,7 +68,7 @@ impl WorkerSelectionInstance {
 #[serde(deny_unknown_fields)]
 pub(super) struct RawWorkerSelectionConfig {
     #[serde(default)]
-    default: Option<String>,
+    aggregated: Option<String>,
     #[serde(default)]
     prefill: Option<String>,
     #[serde(default)]
@@ -80,12 +80,12 @@ pub(super) struct RawWorkerSelectionConfig {
 impl RawWorkerSelectionConfig {
     pub(super) fn resolve(self) -> Result<WorkerSelectionConfig, RouterPolicyConfigError> {
         if self.instances.is_empty()
-            && self.default.is_none()
+            && self.aggregated.is_none()
             && self.prefill.is_none()
             && self.decode.is_none()
         {
             return Err(RouterPolicyConfigError::Validation(
-                "worker_selection must define an instance or a default, prefill, or decode selection"
+                "worker_selection must define an instance or an aggregated, prefill, or decode selection"
                     .to_string(),
             ));
         }
@@ -118,7 +118,7 @@ impl RawWorkerSelectionConfig {
         }
 
         for (stage, selected) in [
-            ("default", self.default.as_deref()),
+            ("aggregated", self.aggregated.as_deref()),
             ("prefill", self.prefill.as_deref()),
             ("decode", self.decode.as_deref()),
         ] {
@@ -133,7 +133,7 @@ impl RawWorkerSelectionConfig {
         }
 
         Ok(WorkerSelectionConfig {
-            default: self.default,
+            aggregated: self.aggregated,
             prefill: self.prefill,
             decode: self.decode,
             instances,

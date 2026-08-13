@@ -187,13 +187,7 @@ fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
 /// the readiness path handles that by not topology-gating namespaces that
 /// still contain legacy cards — see `Model::is_workers_ready`.)
 fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType) -> WorkerType {
-    worker_type.unwrap_or_else(|| {
-        if model_type.supports_prefill() {
-            WorkerType::Prefill
-        } else {
-            WorkerType::Aggregated
-        }
-    })
+    ModelDeploymentCard::resolve_worker_type(worker_type, model_type)
 }
 
 #[derive(Debug, Clone)]
@@ -317,7 +311,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
             prefill_load_estimator,
             metrics,
             Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                DefaultWorkerSelector::new(Some(config.clone()), worker_type.as_str())
             }),
         )
     }
@@ -567,7 +561,7 @@ where
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
                     let selector = (self.worker_selector_factory)(
                         &router_config.kv_router_config,
-                        WORKER_TYPE_DECODE,
+                        effective_worker_type(card.worker_type, card.model_type),
                         RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
                     );
                     Some(

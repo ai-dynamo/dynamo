@@ -140,7 +140,9 @@ pub async fn run() -> Result<()> {
 }
 
 fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()> {
-    if let Some(instance) = config.selected_standalone_worker_selection_policy_instance()? {
+    if let Some(instance) = config
+        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
+    {
         anyhow::bail!(
             "worker-selection instance {instance:?} is configured, but this stock EPP has no linked worker-selection policy catalog; run a custom EPP binary that links the catalog"
         );
@@ -152,7 +154,7 @@ fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()
 fn warn_if_epp_ignores_stage_policies(config: &KvRouterConfig) -> Result<()> {
     if config.has_explicit_stage_worker_selection_policy()? {
         tracing::warn!(
-            "worker_selection.prefill, worker_selection.decode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are frontend-only and are ignored by EPP"
+            "worker_selection.prefill, worker_selection.decode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are ignored by aggregated EPP selection"
         );
     }
     Ok(())
@@ -176,7 +178,13 @@ pub async fn run_with_worker_selection_policy_registry(
     let mode = EppMode::from_env()?;
     let kv_router_config = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
     warn_if_epp_ignores_stage_policies(&kv_router_config)?;
-    let Some(factory) = registry.resolve_standalone(&kv_router_config)? else {
+    if kv_router_config
+        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
+        .is_none()
+    {
+        return run_inner(mode, StandaloneSelectionService::Default).await;
+    }
+    let Some(factory) = registry.resolve(&kv_router_config)? else {
         return run_inner(mode, StandaloneSelectionService::Default).await;
     };
     require_standalone_mode_for_linked_worker_selection_policy(mode)?;
@@ -428,7 +436,7 @@ mod tests {
             policy_file.path(),
             r#"
 worker_selection:
-  default: custom
+  aggregated: custom
   instances:
     - name: custom
       type: acme

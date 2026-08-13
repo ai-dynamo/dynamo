@@ -16,7 +16,7 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy};
+use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy, WorkerType};
 use filter::MinimumDeviceOverlapFilter;
 use picker::{DecodePicker, PrefillPicker, UnsupportedWorkerTypePicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};
@@ -82,17 +82,17 @@ fn create_decode_policy(
 /// Discovery has already scoped the worker pool before the factory receives this stage.
 fn create_policy(
     config: &KvRouterConfig,
-    worker_type: &'static str,
+    worker_type: WorkerType,
     min_device_overlap_blocks: f64,
 ) -> WorkerSelectionPolicy {
     match worker_type {
-        PREFILL_WORKER_TYPE => create_prefill_policy(config, min_device_overlap_blocks),
-        DECODE_WORKER_TYPE => create_decode_policy(config, min_device_overlap_blocks),
+        WorkerType::Prefill => create_prefill_policy(config, min_device_overlap_blocks),
+        WorkerType::Decode => create_decode_policy(config, min_device_overlap_blocks),
         unsupported => WorkerSelectionPolicy::new(
             config.clone(),
-            unsupported,
+            unsupported.as_str(),
             Vec::new(),
-            Box::new(UnsupportedWorkerTypePicker::new(unsupported)),
+            Box::new(UnsupportedWorkerTypePicker::new(unsupported.as_str())),
         ),
     }
 }
@@ -183,8 +183,8 @@ mod tests {
     #[test]
     fn creates_each_supported_worker_policy() {
         let config = KvRouterConfig::default();
-        create_policy(&config, PREFILL_WORKER_TYPE, 0.0);
-        create_policy(&config, DECODE_WORKER_TYPE, 0.0);
+        create_policy(&config, WorkerType::Prefill, 0.0);
+        create_policy(&config, WorkerType::Decode, 0.0);
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
         let workers = HashMap::from([(0, TestWorker)]);
         let request = request();
 
-        for worker_type in ["select", "unknown"] {
+        for worker_type in [WorkerType::Aggregated, WorkerType::Encode] {
             let policy = create_policy(&KvRouterConfig::default(), worker_type, 0.0);
             let error = policy
                 .select_worker(&workers, &request, request.eligibility(), 16)
@@ -200,7 +200,7 @@ mod tests {
             assert!(matches!(
                 error,
                 KvSchedulerError::WorkerSelectionPolicy(WorkerSelectionPolicyError::Failed(message))
-                    if message.contains(worker_type)
+                    if message.contains(worker_type.as_str())
             ));
         }
     }

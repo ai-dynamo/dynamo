@@ -281,12 +281,13 @@ pub(crate) fn worker_selection_policy_factory(
     }
 }
 
+#[cfg(feature = "select-service")]
 pub(crate) fn warn_if_standalone_ignores_stage_policies(
     config: &KvRouterConfig,
 ) -> anyhow::Result<()> {
     if config.has_explicit_stage_worker_selection_policy()? {
         tracing::warn!(
-            "router_prefill_policy and router_decode_policy are frontend-only and are ignored by standalone selection hosts"
+            "prefill and decode worker-selection policies are ignored by aggregated standalone selection hosts"
         );
     }
     Ok(())
@@ -297,25 +298,13 @@ pub(crate) fn standalone_worker_selection_policy_factory(
     config: &KvRouterConfig,
 ) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
     warn_if_standalone_ignores_stage_policies(config)?;
-
-    #[cfg(feature = "custom-policy")]
+    if config
+        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
+        .is_none()
     {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| registry.resolve_standalone(config))
-            .transpose()?
-            .flatten())
+        return Ok(None);
     }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        if let Some(instance) = config.selected_standalone_worker_selection_policy_instance()? {
-            anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
-            );
-        }
-        Ok(None)
-    }
+    worker_selection_policy_factory(config)
 }
 
 #[cfg(feature = "custom-policy")]

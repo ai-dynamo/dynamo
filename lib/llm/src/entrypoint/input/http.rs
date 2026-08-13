@@ -22,7 +22,7 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy,
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::DistributedRuntime;
@@ -56,7 +56,7 @@ impl HttpFrontend {
     where
         F: for<'a> Fn(
                 &KvRouterConfig,
-                &'static str,
+                WorkerType,
                 RoutingPartitionRef<'a>,
             ) -> WorkerSelectionPolicy
             + Send
@@ -97,7 +97,7 @@ impl HttpFrontend {
                     engine_config,
                     self.frontend_route_extensions,
                     Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                        DefaultWorkerSelector::new(Some(config.clone()), worker_type.as_str())
                     }),
                 )
                 .await

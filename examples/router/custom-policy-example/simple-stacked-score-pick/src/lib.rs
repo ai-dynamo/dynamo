@@ -30,7 +30,7 @@ fn provider(
         |config: &KvRouterConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
-                worker_type,
+                worker_type.as_str(),
                 vec![
                     Box::new(ActiveRequestsScorer),
                     Box::new(UncachedBlocksScorer),

@@ -389,8 +389,8 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
-    pub(crate) fn default(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
+    /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
+    pub fn default(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
         Self {
             kv_router_config,

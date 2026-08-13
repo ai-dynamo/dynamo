@@ -603,7 +603,7 @@ mod tests {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
-  default: example
+  aggregated: example
   instances:
     - name: example
       type: example-policy
@@ -614,7 +614,7 @@ worker_selection:
         .unwrap();
 
         let selection = config.worker_selection().unwrap();
-        assert_eq!(selection.default_instance(), Some("example"));
+        assert_eq!(selection.aggregated_instance(), Some("example"));
         let instance = selection.instance("example").unwrap();
         assert_eq!(instance.policy_type(), "example-policy");
         assert!(matches!(
@@ -646,7 +646,7 @@ worker_selection:
         .unwrap();
 
         let selection = config.worker_selection().unwrap();
-        assert_eq!(selection.default_instance(), None);
+        assert_eq!(selection.aggregated_instance(), None);
         assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
         assert_eq!(selection.decode_instance(), Some("default"));
     }
@@ -659,7 +659,7 @@ worker_selection: {}
 "#,
             r#"
 worker_selection:
-  default: missing
+  aggregated: missing
   instances:
     - name: present
       type: alpha

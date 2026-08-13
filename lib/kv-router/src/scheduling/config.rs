@@ -11,6 +11,7 @@ use std::time::Duration;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use crate::WorkerType;
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
     compute_seq_hash_for_block,
@@ -38,7 +39,7 @@ pub const DYN_ROUTER_DECODE_POLICY: &str = "DYN_ROUTER_DECODE_POLICY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerSelectionPolicySelections {
-    pub(crate) fallback: Option<String>,
+    pub(crate) aggregated: Option<String>,
     pub(crate) prefill: Option<String>,
     pub(crate) decode: Option<String>,
 }
@@ -1079,10 +1080,10 @@ impl KvRouterConfig {
 
     /// Return one configured custom worker-selection instance, if any.
     ///
-    /// `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the YAML default. The reserved value
-    /// `default`, and an absent selection, both use Dynamo's built-in worker selector. This method
-    /// also reports a stage-specific instance so stock builds can reject unsupported custom policy
-    /// configuration instead of silently ignoring it.
+    /// `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the role-specific YAML selections. The
+    /// reserved value `default`, and an absent selection, both use Dynamo's built-in worker
+    /// selector. This method also reports a stage-specific instance so stock builds can reject
+    /// unsupported custom policy configuration instead of silently ignoring it.
     pub fn selected_worker_selection_policy_instance(
         &self,
     ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
@@ -1092,22 +1093,26 @@ impl KvRouterConfig {
             Err(source) => Err(source),
         };
         let selected = self.selected_worker_selection_policy_instances_from(selected)?;
-        Ok(selected.fallback.or(selected.prefill).or(selected.decode))
+        Ok(selected.aggregated.or(selected.prefill).or(selected.decode))
     }
 
-    /// Return the custom worker-selection instance used by a standalone, single-pool host.
-    ///
-    /// Stage-specific prefill and decode selections belong to the embedded frontend and are not
-    /// constructed by standalone router or EPP processes.
-    pub fn selected_standalone_worker_selection_policy_instance(
+    /// Return the custom worker-selection instance selected for one explicit worker role.
+    pub fn selected_worker_selection_policy_instance_for(
         &self,
+        worker_type: WorkerType,
     ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
         let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
             Ok(name) => Ok(Some(name)),
             Err(VarError::NotPresent) => Ok(None),
             Err(source) => Err(source),
         };
-        self.selected_standalone_worker_selection_policy_instance_from(selected)
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(match worker_type {
+            WorkerType::Aggregated => selected.aggregated,
+            WorkerType::Prefill => selected.prefill,
+            WorkerType::Decode => selected.decode,
+            WorkerType::Encode => None,
+        })
     }
 
     /// Return whether a stage-specific worker-selection setting was explicitly configured.
@@ -1131,22 +1136,13 @@ impl KvRouterConfig {
             }))
     }
 
-    fn selected_standalone_worker_selection_policy_instance_from(
-        &self,
-        selected: Result<Option<String>, VarError>,
-    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
-        Ok(self
-            .selected_worker_selection_policy_instances_from(selected)?
-            .fallback)
-    }
-
     #[cfg(test)]
     fn selected_worker_selection_policy_instance_from(
         &self,
         selected: Result<Option<String>, VarError>,
     ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
         let selected = self.selected_worker_selection_policy_instances_from(selected)?;
-        Ok(selected.fallback.or(selected.prefill).or(selected.decode))
+        Ok(selected.aggregated.or(selected.prefill).or(selected.decode))
     }
 
     #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
@@ -1182,29 +1178,27 @@ impl KvRouterConfig {
         let global = selected
             .map_err(|source| WorkerSelectionPolicyConfigError::Environment { source })?
             .and_then(|name| normalized(Some(&name)));
-        let yaml_default = policy_config
-            .and_then(|config| config.default_instance())
+        let yaml_aggregated = policy_config
+            .and_then(|config| config.aggregated_instance())
             .map(str::to_owned);
-        let fallback = global.clone().or_else(|| yaml_default.clone());
+        let aggregated = global.clone().or(yaml_aggregated);
         let prefill = normalized(self.router_prefill_policy.as_deref())
             .or_else(|| global.clone())
             .or_else(|| {
                 policy_config
                     .and_then(|config| config.prefill_instance())
                     .map(str::to_owned)
-            })
-            .or_else(|| yaml_default.clone());
+            });
         let decode = normalized(self.router_decode_policy.as_deref())
             .or(global)
             .or_else(|| {
                 policy_config
                     .and_then(|config| config.decode_instance())
                     .map(str::to_owned)
-            })
-            .or(yaml_default);
+            });
 
         Ok(WorkerSelectionPolicySelections {
-            fallback: custom_only(fallback),
+            aggregated: custom_only(aggregated),
             prefill: custom_only(prefill),
             decode: custom_only(decode),
         })
@@ -1756,13 +1750,13 @@ mod tests {
     }
 
     #[test]
-    fn selected_worker_selection_policy_instance_uses_override_or_yaml_default() {
+    fn selected_worker_selection_policy_instance_uses_override_or_yaml_aggregated() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
             r#"
 worker_selection:
-  default: custom
+  aggregated: custom
   instances:
     - name: custom
       type: acme
@@ -1774,6 +1768,17 @@ worker_selection:
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(None))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some("custom".to_string()),
+                prefill: None,
+                decode: None,
+            }
+        );
 
         assert_eq!(
             config
@@ -1814,11 +1819,11 @@ worker_selection:
             policy_file.path(),
             r#"
 worker_selection:
-  default: yaml-default
+  aggregated: yaml-aggregated
   prefill: yaml-prefill
   decode: yaml-decode
   instances:
-    - name: yaml-default
+    - name: yaml-aggregated
       type: acme
     - name: yaml-prefill
       type: acme
@@ -1841,7 +1846,7 @@ worker_selection:
                 .selected_worker_selection_policy_instances_from(Ok(None))
                 .unwrap(),
             WorkerSelectionPolicySelections {
-                fallback: Some("yaml-default".to_string()),
+                aggregated: Some("yaml-aggregated".to_string()),
                 prefill: Some("yaml-prefill".to_string()),
                 decode: Some("yaml-decode".to_string()),
             }
@@ -1854,29 +1859,15 @@ worker_selection:
                 .selected_worker_selection_policy_instances_from(Ok(Some("global".to_string())))
                 .unwrap(),
             WorkerSelectionPolicySelections {
-                fallback: Some("global".to_string()),
+                aggregated: Some("global".to_string()),
                 prefill: Some("cli-prefill".to_string()),
                 decode: None,
             }
         );
 
-        assert_eq!(
-            config
-                .selected_standalone_worker_selection_policy_instance_from(Ok(Some(
-                    "global".to_string()
-                )))
-                .unwrap(),
-            Some("global".to_string())
-        );
         assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
 
         config.router_policy_config = None;
-        assert_eq!(
-            config
-                .selected_standalone_worker_selection_policy_instance_from(Ok(None))
-                .unwrap(),
-            None
-        );
         assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
         assert!(
             !KvRouterConfig::default()
@@ -2016,7 +2007,7 @@ worker_selection:
             policy_file.path(),
             r#"
 worker_selection:
-  default: custom
+  aggregated: custom
   instances:
     - name: custom
       type: acme
