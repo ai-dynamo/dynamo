@@ -28,6 +28,7 @@ spec:
           imagePullPolicy: IfNotPresent
           name: main
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     type: frontend
   - name: decode
     podTemplate:
@@ -45,12 +46,9 @@ spec:
           - "1"
           - --trust-remote-code
           - --skip-tokenizer-init
-          - --enable-metrics
           - --device
           - xpu
           - --disable-cuda-graph
-          - --grammar-backend
-          - none
           - --disaggregation-mode
           - decode
           - --disaggregation-transfer-backend
@@ -58,7 +56,7 @@ spec:
           - --disaggregation-bootstrap-port
           - "12345"
           - --host
-          - "0.0.0.0"
+          - 0.0.0.0
           command:
           - python3
           - -m
@@ -75,20 +73,12 @@ spec:
           resources:
             claims:
             - name: gpu
-            requests:
-              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu
           resourceClaimTemplateName: gpu-template
-        # Uncomment if needed for your environment.
-        # securityContext:
-        #   runAsUser: 1000
-        #   runAsGroup: 1000
-        #   supplementalGroups:
-        #     - 44    # video group
-        #     - 991   # render group
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     type: decode
   - name: prefill
     podTemplate:
@@ -106,12 +96,9 @@ spec:
           - "1"
           - --trust-remote-code
           - --skip-tokenizer-init
-          - --enable-metrics
           - --device
           - xpu
           - --disable-cuda-graph
-          - --grammar-backend
-          - none
           - --disaggregation-mode
           - prefill
           - --disaggregation-transfer-backend
@@ -119,9 +106,7 @@ spec:
           - --disaggregation-bootstrap-port
           - "12345"
           - --host
-          - "0.0.0.0"
-          - --port
-          - "40000"
+          - 0.0.0.0
           command:
           - python3
           - -m
@@ -138,18 +123,10 @@ spec:
           resources:
             claims:
             - name: gpu
-            requests:
-              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu
           resourceClaimTemplateName: gpu-template
-        # Uncomment if needed for your environment.
-        # securityContext:
-        #   runAsUser: 1000
-        #   runAsGroup: 1000
-        #   supplementalGroups:
-        #     - 44    # video group
-        #     - 991   # render group
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     type: prefill

@@ -19,10 +19,42 @@ Hardware-specific deployment templates for Intel GPUs, with Kubernetes Dynamic R
 
 ## Prerequisites
 
-1. **Kubernetes v1.34 or later** with the DRA v1 API enabled
-2. **Intel GPU DRA driver** with the `gpu.intel.com` device class
-3. **Custom XPU runtime image** built from source with `--device xpu`
-4. **Hugging Face token secret** named `hf-token-secret`, with the token stored under the `HF_TOKEN` key
+Build the XPU runtime image from the current source:
+
+```bash
+python3 container/render.py --framework=sglang --device=xpu --target=runtime
+docker build -t docker.io/library/dynamo-sglang-xpu:latest \
+  -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+```
+
+For `disagg_planner_xpu_dra.yaml`, also build the Planner image:
+
+```bash
+python3 container/render.py --framework=dynamo --target=planner
+docker build -t docker.io/library/dynamo-planner:latest \
+  -f container/dynamo-planner-cuda13.0-amd64-rendered.Dockerfile .
+```
+
+The manifests use `imagePullPolicy: IfNotPresent`. Load these images on every eligible Kubernetes node, or push them to a registry and update the image references. If you build from a Dynamo version other than 1.4.0, update each `runtimeVersionOverride` to match.
+
+Create the Hugging Face token secret:
+
+```bash
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="${HF_TOKEN}" \
+  -n "${NAMESPACE}"
+```
+
+### DRA Templates
+
+The files ending in `_dra.yaml` require:
+
+1. Kubernetes v1.34 or later with the DRA v1 API enabled
+2. The [Intel GPU resource driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) with the `gpu.intel.com` device class
+
+### Device Plugin Template
+
+`disagg_xpu.yaml` requires the [Intel device plugins for Kubernetes](https://github.com/intel/intel-device-plugins-for-kubernetes) and allocates `gpu.intel.com/xe`.
 
 ## Key Differences from NVIDIA Templates
 
@@ -31,35 +63,36 @@ Hardware-specific deployment templates for Intel GPUs, with Kubernetes Dynamic R
 | GPU Allocation | `nvidia.com/gpu` resource limit | DRA `ResourceClaimTemplate` or `gpu.intel.com/xe` resource limit |
 | Device Target | Default (CUDA) | `--device xpu` flag |
 | CUDA Graph | Enabled | `--disable-cuda-graph` |
-| Grammar Backend | Default | `--grammar-backend none` |
 | DeviceClass | `nvidia.com` | `gpu.intel.com` |
 | Disagg KV Transfer | Default | `hostIPC: true`, `UCX_TLS=ze_ipc,...` |
 
 > [!NOTE]
-> Do not set `ZE_AFFINITY_MASK` with DRA. It conflicts with DRA device allocation and can cause a segmentation fault.
+> Do not hardcode `ZE_AFFINITY_MASK` in these Kubernetes manifests. DRA and the Intel device plugin select the allocated device.
+
+`agg_router_xpu_dra.yaml` starts two workers and requires two GPUs. `disagg_planner_xpu_dra.yaml` starts two decode workers and one prefill worker and requires three GPUs.
+
+The Planner template includes bootstrap profile data for `Qwen/Qwen3-0.6B` because the current XPU SGLang build does not publish live forward pass metrics. Replace this data with measurements from your target XPU hardware before tuning production scaling.
 
 ## Deploy
 
 ```bash
-# Apply template (includes ResourceClaimTemplate)
-kubectl apply -f xpu/agg_xpu_dra.yaml -n ${NAMESPACE}
+kubectl apply \
+  -f examples/backends/sglang/deploy/xpu/agg_xpu_dra.yaml \
+  -n "${NAMESPACE}"
 
-# Verify GPU allocation
-kubectl get resourceclaim -n ${NAMESPACE}
+kubectl get resourceclaim -n "${NAMESPACE}"
 kubectl get resourceslices
 
-# Check deployment status
-kubectl get dynamographdeployment -n ${NAMESPACE}
-kubectl get pods -n ${NAMESPACE}
+kubectl get dynamographdeployment -n "${NAMESPACE}"
+kubectl get pods -n "${NAMESPACE}"
 ```
 
 ## Testing
 
 ```bash
-# Port forward to frontend
-kubectl port-forward deployment/sglang-agg-xpu-dra-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward deployment/sglang-agg-xpu-dra-frontend 8000:8000 \
+  -n "${NAMESPACE}"
 
-# Test inference
 curl localhost:8000/v1/models
 curl localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
@@ -68,5 +101,4 @@ curl localhost:8000/v1/completions \
 
 ## Further Reading
 
-- [Main Deployment README](../README.md) - Overview of all deployment patterns
-- [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes)
+- [SGLang Kubernetes deployment configurations](../README.md)

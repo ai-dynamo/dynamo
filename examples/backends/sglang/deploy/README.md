@@ -35,7 +35,7 @@ High-performance deployment with separated prefill and decode workers.
 - Communication via NIXL transfer backend (`--disaggregation-transfer-backend nixl`)
 
 ### 4. **Deployments with Intel XPU (Optional)** (see [`xpu/`](./xpu/))
-Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynamic Resource Allocation (DRA).
+Hardware-specific deployment templates for Intel GPUs using Kubernetes Dynamic Resource Allocation (DRA) or the Intel device plugin.
 
 **Available Templates:**
 - `agg_xpu_dra.yaml`: Aggregated deployment with DRA
@@ -114,7 +114,7 @@ Select the deployment pattern that matches your requirements:
 - Use `agg_router.yaml` for production with load balancing
 - Use `disagg.yaml` for maximum performance
 - Use `disagg_planner.yaml` for SLA-optimized performance
-- Use [XPU templates](./xpu/) for Intel XPU clusters with Kubernetes DRA
+- Use [XPU templates](./xpu/) for Intel GPU clusters
 
 ### 2. Customize Configuration
 Edit the template to match your environment:

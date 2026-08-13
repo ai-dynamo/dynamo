@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated serving with KV-aware router for Intel XPU.
-# 2 workers behind a KV router, each on a separate GPU.
+# Two workers behind a KV router, each on a separate GPU.
 # Workers publish KV events via ZMQ for routing optimization.
 #
 # Prerequisites:
 # - Intel XPU GPU with DRA driver installed
-# - 2+ GPU devices available
+# - Two or more GPU devices available
 # - hf-token-secret created in target namespace
 
 apiVersion: resource.k8s.io/v1
@@ -36,13 +36,11 @@ spec:
         - env:
           - name: DYN_ROUTER_MODE
             value: kv
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
           image: docker.io/library/dynamo-sglang-xpu:latest
           imagePullPolicy: IfNotPresent
           name: main
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     type: frontend
   - name: decode
     podTemplate:
@@ -62,11 +60,6 @@ spec:
           - --device
           - xpu
           - --disable-cuda-graph
-          - --grammar-backend
-          - none
-          - --enable-metrics
-          # KV events for router - endpoint differs per worker instance.
-          # Dynamo auto-assigns unique ports for each replica.
           - --kv-events-config
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
           command:
@@ -88,12 +81,6 @@ spec:
         resourceClaims:
         - name: gpu
           resourceClaimTemplateName: gpu-template
-        # Uncomment if needed for your environment.
-        # securityContext:
-        #   runAsUser: 1000
-        #   runAsGroup: 1000
-        #   supplementalGroups:
-        #     - 44    # video group
-        #     - 991   # render group
     replicas: 2
+    runtimeVersionOverride: 1.4.0
     type: worker

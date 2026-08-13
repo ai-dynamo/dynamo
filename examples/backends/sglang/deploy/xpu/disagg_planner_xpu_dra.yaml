@@ -52,6 +52,7 @@ spec:
           imagePullPolicy: IfNotPresent
           name: main
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     type: frontend
   - name: Planner
     podTemplate:
@@ -59,17 +60,24 @@ spec:
         containers:
         - args:
           - --config
-          - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1}'
+          - '{"environment": "kubernetes", "backend": "sglang", "optimization_target": "sla",
+            "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode":
+            "thorough", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds":
+            5, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu":
+            1, "decode_engine_num_gpu": 1}'
           command:
           - python3
           - -m
           - dynamo.planner
+          env:
+          # Keep the optional query string non-empty until Planner accepts an unset value.
+          - name: PROMETHEUS_EXTRA_QUERY_PARAMS
+            value: "_="
           envFrom:
           - secretRef:
               name: hf-token-secret
-          # Use the official CPU-only Dynamo Planner image.
-          # For Dynamo 1.1.0 and later, Planner uses a separate image from the worker runtime.
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly-2025-05-01
+          image: docker.io/library/dynamo-planner:latest
+          imagePullPolicy: IfNotPresent
           name: main
           volumeMounts:
           - mountPath: /workspace/profiling_results
@@ -80,12 +88,12 @@ spec:
             name: planner-profile-data-xpu
           name: planner-profile-data-xpu
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     type: planner
   - name: decode
     podTemplate:
       spec:
         hostIPC: true
-        hostPID: true
         containers:
         - args:
           - --model-path
@@ -98,12 +106,9 @@ spec:
           - "1"
           - --trust-remote-code
           - --skip-tokenizer-init
-          - --enable-metrics
           - --device
           - xpu
           - --disable-cuda-graph
-          - --grammar-backend
-          - none
           - --disaggregation-mode
           - decode
           - --disaggregation-transfer-backend
@@ -111,18 +116,14 @@ spec:
           - --disaggregation-bootstrap-port
           - "12345"
           - --host
-          - "0.0.0.0"
+          - 0.0.0.0
           command:
           - python3
           - -m
           - dynamo.sglang
           env:
-          # XPU-specific environment variables for disaggregated KV transfer.
-          # Do not set ZE_AFFINITY_MASK with DRA; let DRA allocate GPUs.
           - name: UCX_TLS
             value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
-          - name: UCX_LOG_LEVEL
-            value: "info"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -132,26 +133,17 @@ spec:
           resources:
             claims:
             - name: gpu
-            requests:
-              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu
           resourceClaimTemplateName: gpu-template
-        # Uncomment if needed for your environment.
-        # securityContext:
-        #   runAsUser: 1000
-        #   runAsGroup: 1000
-        #   supplementalGroups:
-        #     - 44    # video group
-        #     - 991   # render group
     replicas: 2
+    runtimeVersionOverride: 1.4.0
     type: decode
   - name: prefill
     podTemplate:
       spec:
         hostIPC: true
-        hostPID: true
         containers:
         - args:
           - --model-path
@@ -164,12 +156,9 @@ spec:
           - "1"
           - --trust-remote-code
           - --skip-tokenizer-init
-          - --enable-metrics
           - --device
           - xpu
           - --disable-cuda-graph
-          - --grammar-backend
-          - none
           - --disaggregation-mode
           - prefill
           - --disaggregation-transfer-backend
@@ -177,20 +166,14 @@ spec:
           - --disaggregation-bootstrap-port
           - "12345"
           - --host
-          - "0.0.0.0"
-          - --port
-          - "40000"
+          - 0.0.0.0
           command:
           - python3
           - -m
           - dynamo.sglang
           env:
-          # XPU-specific environment variables for disaggregated KV transfer.
-          # Do not set ZE_AFFINITY_MASK with DRA; let DRA allocate GPUs.
           - name: UCX_TLS
             value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
-          - name: UCX_LOG_LEVEL
-            value: "info"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -200,18 +183,10 @@ spec:
           resources:
             claims:
             - name: gpu
-            requests:
-              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu
           resourceClaimTemplateName: gpu-template
-        # Uncomment if needed for your environment.
-        # securityContext:
-        #   runAsUser: 1000
-        #   runAsGroup: 1000
-        #   supplementalGroups:
-        #     - 44    # video group
-        #     - 991   # render group
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     type: prefill
