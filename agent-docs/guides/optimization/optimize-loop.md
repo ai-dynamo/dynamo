@@ -158,8 +158,10 @@ one of:
   recommendation's `Correctness status:` line, BEFORE submitting the stop-request — the stop-request references the
   draft recommendation, and operator grant closes the engagement rather than starting its write-up. A `ruled-out` row must cite a measurement, a sourced hard
   constraint, a confirmed incompatibility, or an explicit operator decision; the generator's own unsourced reasoning
-  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. Hand the
-  stop-request to `hypothesis-challenger` for evidence-class validation.
+  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. While
+  more than half of any granted budget remains, `deferred` is not a terminal state for a family whose recorded
+  expected upside is medium or higher: test it, ask about it, or rule it out with qualifying evidence before
+  requesting a stop. Hand the stop-request to `hypothesis-challenger` for evidence-class validation.
 
 While a stop-request awaits challenger validation and operator grant (`STOP_REQUESTED`), continue confirmatory
 runs, cleanup, and any still-testable work; launch no new candidate families. If the challenger or operator returns

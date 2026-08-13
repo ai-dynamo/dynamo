@@ -104,7 +104,8 @@ notices. Two rules:
    the budget (GPU-hours, wall-clock, failed-deployment limit) in the condition; a bare "never stop" silently relies
    on credential expiry as its budget. Tell the operator at the START of any optimization
    engagement — not only when they say "unattended" — that this is long-running work and how to arm goal mode; the
-   user-interviewer's contract handoff is the natural moment. The template's parked-on-asks pause assumes a
+   user-interviewer's contract handoff is the natural moment. Arm goal mode only AFTER the contract questions are
+   answered: a goal hook armed while questions are outstanding forces the run past them onto its own defaults. The template's parked-on-asks pause assumes a
    reachable operator: for runs where the operator will be away, instruct the agent not to park on asks (asks are
    logged and the loop continues) and keep only the hard stops. Blocking question tools suspend the turn BEFORE the
    goal hook can evaluate, so one blocking question can hang an unattended run for hours; harnesses that support
