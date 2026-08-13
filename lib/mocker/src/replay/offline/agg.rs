@@ -4021,14 +4021,13 @@ mod tests {
     }
 
     fn interactive_round_robin_runtime(requests: VecDeque<DirectRequest>) -> RoundRobinAggRuntime {
-        let mut runtime = RoundRobinAggRuntime::new_round_robin(
+        let runtime = RoundRobinAggRuntime::new_round_robin(
             &parity_args(EngineType::Vllm),
             requests,
             1,
             ReplayMode::Trace,
         )
         .unwrap();
-        runtime.enable_interactive_capture(false, false);
         runtime
     }
 
