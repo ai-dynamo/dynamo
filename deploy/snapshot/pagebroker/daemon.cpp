@@ -1,5 +1,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -8,8 +10,11 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
+#include <thread>
 
 #include "broker.hpp"
+#include "connection_tracker.hpp"
 #include "file_descriptor.hpp"
 
 namespace fs = std::filesystem;
@@ -20,6 +25,8 @@ using snapshot::pagebroker::Response;
 
 namespace {
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
+constexpr timeval kConnectionTimeout{30, 0};
+constexpr int kShutdownPollTimeoutMs = 1000;
 enum ArgumentIndex { kSocketPath = 1, kStagingDirectory, kArgumentCount };
 volatile sig_atomic_t shutting_down;
 
@@ -100,6 +107,22 @@ HandleConnection(int connection, Broker& broker)
   WriteAll(connection, &size, sizeof(size));
   WriteAll(connection, message.data(), message.size());
 }
+
+void
+ServeConnection(int connection, Broker& broker, ConnectionTracker& connections)
+{
+  FileDescriptor descriptor(connection);
+  try {
+    if (setsockopt(descriptor.get(), SOL_SOCKET, SO_RCVTIMEO, &kConnectionTimeout, sizeof(kConnectionTimeout)) < 0 ||
+        setsockopt(descriptor.get(), SOL_SOCKET, SO_SNDTIMEO, &kConnectionTimeout, sizeof(kConnectionTimeout)) < 0)
+      throw std::system_error(errno, std::generic_category(), "set connection timeout");
+    HandleConnection(descriptor.get(), broker);
+  }
+  catch (const std::exception& error) {
+    std::cerr << "handle connection: " << error.what() << '\n';
+  }
+  connections.Finish();
+}
 }  // namespace
 
 int
@@ -149,15 +172,33 @@ main(int argc, char** argv)
     std::cerr << "listen: " << std::strerror(errno) << '\n';
     return 1;
   }
+  const int listener_flags = fcntl(listener.get(), F_GETFL);
+  if (listener_flags < 0 || fcntl(listener.get(), F_SETFL, listener_flags | O_NONBLOCK) < 0) {
+    std::cerr << "make listener nonblocking: " << std::strerror(errno) << '\n';
+    return 1;
+  }
 
   Broker broker(argv[kStagingDirectory]);
+  ConnectionTracker connections;
   while (!shutting_down) {
-    FileDescriptor connection(accept(listener.get(), nullptr, nullptr));
-    if (connection.get() < 0) {
+    pollfd poll_descriptor{listener.get(), POLLIN, 0};
+    if (poll(&poll_descriptor, 1, kShutdownPollTimeoutMs) <= 0)
+      continue;
+    const int connection = accept(listener.get(), nullptr, nullptr);
+    if (connection < 0) {
       if (errno != EINTR)
         std::cerr << "accept: " << std::strerror(errno) << '\n';
       continue;
     }
-    HandleConnection(connection.get(), broker);
+    connections.Start();
+    try {
+      std::thread(ServeConnection, connection, std::ref(broker), std::ref(connections)).detach();
+    }
+    catch (const std::system_error& error) {
+      FileDescriptor descriptor(connection);
+      connections.Finish();
+      std::cerr << "start connection: " << error.what() << '\n';
+    }
   }
+  connections.Wait();
 }

@@ -98,6 +98,30 @@ Broker::Broker(Path staging_root) : staging_root_(fs::weakly_canonical(std::move
   fs::create_directories(staging_root_ / "checkpoint");
 }
 
+Transaction&
+Broker::GetTransaction(const std::string& transaction_id)
+{
+  std::lock_guard lock(transactions_mutex_);
+  return transactions_.try_emplace(transaction_id).first->second;
+}
+
+bool
+Broker::ReserveStaging(uintmax_t bytes)
+{
+  std::lock_guard lock(transactions_mutex_);
+  if (!HasAvailableSpace(staging_root_, bytes + reserved_staging_bytes_))
+    return false;
+  reserved_staging_bytes_ += bytes;
+  return true;
+}
+
+void
+Broker::ReleaseStaging(uintmax_t bytes)
+{
+  std::lock_guard lock(transactions_mutex_);
+  reserved_staging_bytes_ -= bytes;
+}
+
 const TransferEngine&
 Broker::Engine(TransferEngineType engine_type) const
 {
@@ -147,20 +171,28 @@ Broker::Restore(const Request& request)
   const Path staging_directory = TransactionDirectory(restore_root, request.transaction_id());
   if (!source.is_absolute() || fs::is_symlink(source) || !fs::is_directory(source))
     return Fail(request, Failure::INVALID_REQUEST, "source must be an absolute storage directory");
-  if (fs::exists(staging_directory) || transaction_states_.contains(request.transaction_id()))
+  Transaction& transaction = GetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction.mutex());
+  if (transaction.state() != Transaction::State::NEW || fs::exists(staging_directory))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
-  if (!HasAvailableSpace(staging_root_, TreeSize(source)))
+  const uintmax_t bytes = TreeSize(source);
+  if (!ReserveStaging(bytes))
     return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
-
   try {
-    transaction_states_.emplace(request.transaction_id(), TransactionState::LIVE);
+    transaction.set_state(Transaction::State::PREPARING);
+    transaction.set_reserved_bytes(bytes);
     engine.CopyDirectory(source, staging_directory);
-    restore_transactions_.emplace(request.transaction_id(), RestoreTransactionDescriptor(staging_directory));
+    ReleaseStaging(bytes);
+    transaction.set_reserved_bytes(0);
+    transaction.set_descriptor(RestoreTransactionDescriptor(staging_directory));
+    transaction.set_state(Transaction::State::STAGED);
   }
   catch (...) {
+    ReleaseStaging(transaction.reserved_bytes());
+    transaction.set_reserved_bytes(0);
     fs::remove_all(staging_directory);
-    transaction_states_.erase(request.transaction_id());
-    restore_transactions_.erase(request.transaction_id());
+    transaction.clear_descriptor();
+    transaction.set_state(Transaction::State::NEW);
     throw;
   }
   auto response = Reply(request);
@@ -181,19 +213,20 @@ Broker::PrepareCheckpoint(const Request& request)
   const Path staging_directory = TransactionDirectory(checkpoint_root, request.transaction_id());
   if (!destination.is_absolute())
     return Fail(request, Failure::INVALID_REQUEST, "destination must be an absolute storage directory");
-  if (fs::exists(staging_directory) || transaction_states_.contains(request.transaction_id()))
+  Transaction& transaction = GetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction.mutex());
+  if (transaction.state() != Transaction::State::NEW || fs::exists(staging_directory))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
   try {
-    transaction_states_.emplace(request.transaction_id(), TransactionState::LIVE);
+    transaction.set_state(Transaction::State::PREPARING);
     fs::create_directory(staging_directory);
-    checkpoint_transactions_.emplace(
-        request.transaction_id(),
-        CheckpointTransactionDescriptor(staging_directory, operation.destination(), engine.type()));
+    transaction.set_descriptor(CheckpointTransactionDescriptor(staging_directory, operation.destination(), engine.type()));
+    transaction.set_state(Transaction::State::STAGED);
   }
   catch (...) {
     fs::remove_all(staging_directory);
-    transaction_states_.erase(request.transaction_id());
-    checkpoint_transactions_.erase(request.transaction_id());
+    transaction.clear_descriptor();
+    transaction.set_state(Transaction::State::NEW);
     throw;
   }
   auto response = Reply(request);
@@ -204,29 +237,32 @@ Broker::PrepareCheckpoint(const Request& request)
 Response
 Broker::Commit(const Request& request)
 {
-  const auto state = transaction_states_.find(request.transaction_id());
-  if (state == transaction_states_.end() || state->second == TransactionState::ABORTED)
+  Transaction& transaction = GetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction.mutex());
+  if (transaction.state() == Transaction::State::NEW || transaction.state() == Transaction::State::ABORTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  if (state->second == TransactionState::COMMITTED)
+  if (transaction.state() == Transaction::State::PREPARING)
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is preparing");
+  if (transaction.state() == Transaction::State::COMMITTED)
     return CommitSucceeded(request);
 
-  const auto restore = restore_transactions_.find(request.transaction_id());
-  if (restore != restore_transactions_.end())
-    return CleanupRestore(request, restore->second);
+  if (const auto* restore = std::get_if<RestoreTransactionDescriptor>(&transaction.descriptor()))
+    return CleanupRestore(request, *restore);
 
-  const auto checkpoint = checkpoint_transactions_.find(request.transaction_id());
-  if (checkpoint == checkpoint_transactions_.end())
+  const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction.descriptor());
+  if (checkpoint == nullptr)
     return Fail(request, Failure::INTERNAL_ERROR, "live transaction has no descriptor");
 
-  return PublishCheckpoint(request, checkpoint->second);
+  return PublishCheckpoint(request, *checkpoint);
 }
 
 Response
 Broker::CleanupRestore(const Request& request, const RestoreTransactionDescriptor& transaction)
 {
   fs::remove_all(transaction.staging_directory());
-  restore_transactions_.erase(request.transaction_id());
-  transaction_states_.at(request.transaction_id()) = TransactionState::COMMITTED;
+  Transaction& current = GetTransaction(request.transaction_id());
+  current.clear_descriptor();
+  current.set_state(Transaction::State::COMMITTED);
   return CommitSucceeded(request);
 }
 
@@ -248,8 +284,9 @@ Broker::PublishCheckpoint(const Request& request, const CheckpointTransactionDes
     Engine(transaction.engine_type()).CopyDirectory(staging_directory, partial);
     fs::remove_all(published_directory);
     fs::rename(partial, published_directory);
-    checkpoint_transactions_.erase(request.transaction_id());
-    transaction_states_.at(request.transaction_id()) = TransactionState::COMMITTED;
+    Transaction& current = GetTransaction(request.transaction_id());
+    current.clear_descriptor();
+    current.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
     fs::remove_all(staging_directory, cleanup_error);
   }
@@ -263,19 +300,19 @@ Broker::PublishCheckpoint(const Request& request, const CheckpointTransactionDes
 Response
 Broker::Abort(const Request& request)
 {
-  const auto state = transaction_states_.find(request.transaction_id());
-  if (state == transaction_states_.end() || state->second == TransactionState::COMMITTED)
+  Transaction& transaction = GetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction.mutex());
+  if (transaction.state() == Transaction::State::NEW || transaction.state() == Transaction::State::COMMITTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  if (state->second == TransactionState::ABORTED)
+  if (transaction.state() == Transaction::State::ABORTED)
     return AbortSucceeded(request);
 
   const Path restore_root = staging_root_ / "restore";
   const Path checkpoint_root = staging_root_ / "checkpoint";
   fs::remove_all(TransactionDirectory(restore_root, request.transaction_id()));
   fs::remove_all(TransactionDirectory(checkpoint_root, request.transaction_id()));
-  checkpoint_transactions_.erase(request.transaction_id());
-  restore_transactions_.erase(request.transaction_id());
-  state->second = TransactionState::ABORTED;
+  transaction.clear_descriptor();
+  transaction.set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
 }
 

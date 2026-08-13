@@ -67,6 +67,9 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	c.Storage.AccessMode = accessMode
+	if c.PageBroker.Enabled && strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
+		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required when PageBroker is enabled"}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",

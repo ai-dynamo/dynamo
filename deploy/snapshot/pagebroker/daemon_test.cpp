@@ -4,6 +4,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "broker.hpp"
 
@@ -75,6 +76,25 @@ TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
   const auto abort_response = broker().HandleRequest(abort);
   ASSERT_TRUE(abort_response.has_failure());
   EXPECT_EQ(abort_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
+{
+  auto first = RequestFor("first");
+  auto second = RequestFor("second");
+  Configure(first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
+  Configure(second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
+
+  Response first_response;
+  Response second_response;
+  std::thread first_request([&] { first_response = broker().HandleRequest(first); });
+  std::thread second_request([&] { second_response = broker().HandleRequest(second); });
+  first_request.join();
+  second_request.join();
+
+  ASSERT_TRUE(first_response.has_staged_restore_directory());
+  ASSERT_TRUE(second_response.has_staged_restore_directory());
+  EXPECT_NE(first_response.staged_restore_directory().image_directory(), second_response.staged_restore_directory().image_directory());
 }
 
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)

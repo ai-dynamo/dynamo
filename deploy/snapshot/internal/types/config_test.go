@@ -50,3 +50,12 @@ func TestAgentConfigValidateDefaultsStorageAccessMode(t *testing.T) {
 		t.Fatalf("Storage.AccessMode = %q, want %q", cfg.Storage.AccessMode, StorageAccessModeAgentMount)
 	}
 }
+
+func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
+	cfg := validAgentConfig()
+	cfg.PageBroker.Enabled = true
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for missing PageBroker control socket")
+	}
+}
