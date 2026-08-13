@@ -8,11 +8,13 @@ import os
 import queue
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 import traceback
+from multiprocessing.reduction import recv_handle, send_handle
 from pathlib import Path
 from typing import NamedTuple
 
@@ -29,6 +31,8 @@ CHECKPOINT_TIMEOUT_SECONDS = 120
 WORKER_TIMEOUT_SECONDS = 240
 JOB_ID = "1" * 32
 PARENT_PARTICIPANT_ID = "a" * 32
+LOGICAL_HANDLE_TAG = 0xD94D000000000000
+LOGICAL_HANDLE_TAG_MASK = 0xFFFF000000000000
 POSIX_FD_HANDLE_TYPE = (
     driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
 )
@@ -83,6 +87,13 @@ def _allocation_size(properties: driver.CUmemAllocationProp) -> int:
     )
 
 
+def _assert_handle_namespace(handle, logical: bool, stage: str) -> None:
+    tagged = int(handle) & LOGICAL_HANDLE_TAG_MASK == LOGICAL_HANDLE_TAG
+    if tagged != logical:
+        expected = "logical" if logical else "raw"
+        raise AssertionError(f"{stage}: handle {int(handle):#x} is not {expected}")
+
+
 def _map_allocation(handle, size: int, device) -> int:
     address = int(_cuda_call(driver.cuMemAddressReserve, size, size, 0, 0))
     mapped = False
@@ -121,7 +132,11 @@ def _destroy_mapped_allocation(address: int, size: int, handle) -> None:
 
 
 def _worker(
-    rank: int, raw_fds: tuple[int, int], sync_dir: Path, store_path: Path
+    rank: int,
+    raw_fds: tuple[int, int],
+    restore_fds: tuple[int, int],
+    sync_dir: Path,
+    store_path: Path,
 ) -> None:
     _cuda_call(driver.cuInit, 0)
     device = _cuda_call(driver.cuDeviceGet, rank)
@@ -129,11 +144,16 @@ def _worker(
     private_size = _allocation_size(properties)
     _assert_no_current_context("worker before private cuMemCreate")
     private_handle = _cuda_call(driver.cuMemCreate, private_size, properties, 0)
+    _assert_handle_namespace(private_handle, True, "managed cuMemCreate")
 
     torch.cuda.set_device(rank)
     for other_rank, fd in enumerate(raw_fds):
         if other_rank != rank:
             os.close(fd)
+    for other_rank, fd in enumerate(restore_fds):
+        if other_rank != rank:
+            os.close(fd)
+    restore_socket = socket.socket(fileno=restore_fds[rank])
     raw_fd = raw_fds[rank]
     external_handle = None
     external_address = 0
@@ -143,6 +163,7 @@ def _worker(
             raw_fd,
             POSIX_FD_HANDLE_TYPE,
         )
+        _assert_handle_namespace(external_handle, False, "raw external import")
     finally:
         os.close(raw_fd)
     try:
@@ -163,6 +184,12 @@ def _worker(
             _cuda_call(driver.cuMemRelease, external_handle)
 
     private_address = _map_allocation(private_handle, private_size, device)
+    retained_handle = _cuda_call(
+        driver.cuMemRetainAllocationHandle,
+        private_address,
+    )
+    _assert_handle_namespace(retained_handle, True, "managed retain")
+    _cuda_call(driver.cuMemRelease, retained_handle)
     private_expected = bytes([0xA0 + rank]) * 32
     _write_bytes(private_address, private_expected)
 
@@ -197,10 +224,40 @@ def _worker(
             raise TimeoutError("timed out waiting for restore")
         time.sleep(0.05)
 
+    fresh_fd = recv_handle(restore_socket)
+    restore_socket.close()
+    fresh_handle = None
+    fresh_address = 0
+    try:
+        fresh_handle = _cuda_call(
+            driver.cuMemImportFromShareableHandle,
+            fresh_fd,
+            POSIX_FD_HANDLE_TYPE,
+        )
+        _assert_handle_namespace(fresh_handle, False, "fresh raw import after restore")
+    finally:
+        os.close(fresh_fd)
+    try:
+        fresh_address = _map_allocation(fresh_handle, private_size, device)
+        _assert_bytes(
+            fresh_address,
+            bytes([0x40 + rank]) * 32,
+            "fresh raw allocation after restore",
+        )
+    finally:
+        if fresh_address:
+            _destroy_mapped_allocation(
+                fresh_address,
+                private_size,
+                fresh_handle,
+            )
+        elif fresh_handle is not None:
+            _cuda_call(driver.cuMemRelease, fresh_handle)
+
+    _assert_bytes(private_address, private_expected, "private allocation after restore")
     graph.replay()
     torch.cuda.synchronize()
     _assert_exact_result(output, "after restore")
-    _assert_bytes(private_address, private_expected, "private allocation after restore")
     (sync_dir / f"done-{rank}").touch()
 
     dist.barrier()
@@ -232,19 +289,19 @@ def _visible_gpus() -> tuple[str, str]:
     return devices[0], devices[1]
 
 
-def _create_external_allocations() -> list[_ExternalAllocation]:
+def _create_external_allocations(byte_base: int) -> list[_ExternalAllocation]:
     _cuda_call(driver.cuInit, 0)
     allocations = []
     try:
         for rank in range(WORLD_SIZE):
-            allocations.append(_create_external_allocation(rank))
+            allocations.append(_create_external_allocation(rank, byte_base))
     except Exception:
         _destroy_external_allocations(allocations)
         raise
     return allocations
 
 
-def _create_external_allocation(rank: int) -> _ExternalAllocation:
+def _create_external_allocation(rank: int, byte_base: int) -> _ExternalAllocation:
     device = _cuda_call(driver.cuDeviceGet, rank)
     context = _cuda_call(driver.cuDevicePrimaryCtxRetain, device)
     handle = None
@@ -256,7 +313,7 @@ def _create_external_allocation(rank: int) -> _ExternalAllocation:
             size = _allocation_size(properties)
             handle = _cuda_call(driver.cuMemCreate, size, properties, 0)
             address = _map_allocation(handle, size, device)
-            _write_bytes(address, bytes([rank + 1]) * 32)
+            _write_bytes(address, bytes([byte_base + rank]) * 32)
             fd = int(
                 _cuda_call(
                     driver.cuMemExportToShareableHandle,
@@ -342,6 +399,7 @@ def _build_native_tools(tmp_path: Path) -> tuple[Path, Path]:
 
 def _fork_workers(
     raw_fds: tuple[int, int],
+    restore_fds: tuple[int, int],
     sync_dir: Path,
     store_path: Path,
 ) -> None:
@@ -354,7 +412,7 @@ def _fork_workers(
         child = os.fork()
         if child == 0:
             try:
-                _worker(rank, raw_fds, sync_dir, store_path)
+                _worker(rank, raw_fds, restore_fds, sync_dir, store_path)
             except BaseException:  # noqa: BLE001 -- report child failures to parent
                 traceback.print_exc()
                 os._exit(1)
@@ -363,6 +421,8 @@ def _fork_workers(
         (sync_dir / f"pid-{rank}").write_text(f"{child}\n")
 
     for fd in raw_fds:
+        os.close(fd)
+    for fd in restore_fds:
         os.close(fd)
 
     remaining = dict(children)
@@ -395,6 +455,7 @@ def _start_parent(
     sync_dir: Path,
     store_path: Path,
     raw_fds: tuple[int, int],
+    restore_fds: tuple[int, int],
 ) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment.update(
@@ -420,6 +481,7 @@ def _start_parent(
             str(Path(__file__).resolve()),
             "--parent",
             *(str(fd) for fd in raw_fds),
+            *(str(fd) for fd in restore_fds),
             str(sync_dir),
             str(store_path),
         ],
@@ -428,7 +490,7 @@ def _start_parent(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        pass_fds=raw_fds,
+        pass_fds=raw_fds + restore_fds,
     )
 
 
@@ -612,9 +674,10 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
     output_collected = False
     failure: Exception | None = None
     external_allocations: list[_ExternalAllocation] = []
+    restore_channels = [socket.socketpair() for _ in range(WORLD_SIZE)]
 
     try:
-        external_allocations = _create_external_allocations()
+        external_allocations = _create_external_allocations(1)
         parent = _start_parent(
             gpus,
             interposer,
@@ -622,7 +685,10 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
             sync_dir,
             store_path,
             tuple(allocation.fd for allocation in external_allocations),
+            tuple(receiver.fileno() for _, receiver in restore_channels),
         )
+        for _, receiver in restore_channels:
+            receiver.close()
         child_pids = _wait_for_child_pids(parent, sync_dir)
         _wait_for_workers(parent, sync_dir, "ready")
         _destroy_external_allocations(external_allocations)
@@ -649,6 +715,9 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
             control_dir,
             child_pids,
         )
+        external_allocations = _create_external_allocations(0x40)
+        for rank, (sender, _) in enumerate(restore_channels):
+            send_handle(sender, external_allocations[rank].fd, child_pids[rank])
         (sync_dir / "continue").touch()
         _wait_for_workers(parent, sync_dir, "done")
 
@@ -674,6 +743,9 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
                     pass
                 output = parent.communicate(timeout=10)
         _destroy_external_allocations(external_allocations)
+        for sender, receiver in restore_channels:
+            sender.close()
+            receiver.close()
 
     if failure is not None:
         parent_pid = parent.pid if parent is not None else "not started"
@@ -690,12 +762,14 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 6 or sys.argv[1] != "--parent":
+    if len(sys.argv) != 8 or sys.argv[1] != "--parent":
         raise SystemExit(
-            "usage: test_cucheckpoint.py --parent RAW_FD_0 RAW_FD_1 SYNC_DIR STORE_PATH"
+            "usage: test_cucheckpoint.py --parent RAW_FD_0 RAW_FD_1 "
+            "RESTORE_FD_0 RESTORE_FD_1 SYNC_DIR STORE_PATH"
         )
     _fork_workers(
         (int(sys.argv[2]), int(sys.argv[3])),
-        Path(sys.argv[4]),
-        Path(sys.argv[5]),
+        (int(sys.argv[4]), int(sys.argv[5])),
+        Path(sys.argv[6]),
+        Path(sys.argv[7]),
     )

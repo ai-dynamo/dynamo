@@ -39,7 +39,10 @@ communication-library setup, and teardown must not be in flight.
 
 During ordinary execution:
 
-- CUDA generic allocation handles are real driver handles.
+- CUDA generic allocation handles for POSIX-capable allocations tracked by the
+  shim are tagged logical tokens; the corresponding real driver handles remain
+  internal.
+- Untracked CUDA generic allocation handles remain real driver handles.
 - A POSIX-capable allocation becomes checkpoint-managed when its shim
   capability is exported.
 - POSIX exports return sealed capability FDs containing the job, creator,
@@ -49,6 +52,14 @@ During ordinary execution:
   closed immediately, and never returned to the application.
 - A raw external POSIX import is passed directly to CUDA and is not tracked by
   the shim.
+
+Handle ownership is explicit:
+
+| Source | Application receives | Managed table | Driver-handle owner |
+| --- | --- | --- | --- |
+| POSIX-capable create, tracked retain, or capability import | Tagged logical token | Logical token to driver handle | Shim |
+| Raw external import or other pass-through | Real driver handle | None | Application |
+| Checkpoint carrier | Nothing | No separate entry | Shim |
 
 `posix.c` owns the sealed capability format and remote creator exchange.
 `interpose.c` owns CUDA interception, allocation state, and local raw exports.
@@ -98,6 +109,10 @@ destination GPUs 4/5 with user-mode `libcuda` 615.65 and kernel RM 595.58.03.
 > and released before checkpoint prepare, as the GMS saver/sleep flow does. If
 > retained, native checkpoint may fail, or restore may later see stale or
 > incomplete sharing; the shim cannot validate this.
+
+The shim reserves generic handles whose top 16 bits are `0xd94d` for logical
+tokens. If CUDA returns a raw pass-through handle in that range, the shim
+releases it and returns `CUDA_ERROR_INVALID_HANDLE`.
 
 ### Potentially silent gaps
 

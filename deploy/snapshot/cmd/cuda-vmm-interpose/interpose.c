@@ -33,6 +33,9 @@
 
 #define CONTROL_DIR "/snapshot-control"
 #define CONTROL_TIMEOUT_SECONDS 30
+#define LOGICAL_HANDLE_TAG UINT64_C(0xd94d000000000000)
+#define LOGICAL_HANDLE_TAG_MASK UINT64_C(0xffff000000000000)
+#define LOGICAL_HANDLE_VALUE_MASK UINT64_C(0x0000ffffffffffff)
 
 CUresult CUDAAPI cuGetProcAddress(const char*, void**, int, cuuint64_t);
 CUresult CUDAAPI cuGetProcAddress_v2(const char*, void**, int, cuuint64_t, CUdriverProcAddressQueryResult*);
@@ -57,8 +60,8 @@ typedef CUresult(CUDAAPI* context_set_fn)(CUcontext);
 struct allocation;
 
 struct handle {
-  CUmemGenericAllocationHandle application;
-  CUmemGenericAllocationHandle current;
+  CUmemGenericAllocationHandle logical;
+  CUmemGenericAllocationHandle driver;
   bool live;
   struct allocation* allocation;
   struct handle* next;
@@ -116,6 +119,7 @@ static char control_directory[sizeof(((struct sockaddr_un*)0)->sun_path)];
 static char socket_path[sizeof(((struct sockaddr_un*)0)->sun_path)];
 static int listener = -1;
 static bool endpoint_needs_initialization;
+static uint64_t next_logical_handle = 1;
 static pthread_once_t real_dlsym_once = PTHREAD_ONCE_INIT;
 static void* (*real_dlsym_function)(void*, const char*);
 static _Atomic(uintptr_t) explicit_libcuda_handle;
@@ -258,16 +262,50 @@ find_allocation(const uint8_t id[SNAPSHOT_VMM_ALLOCATION_ID_SIZE])
   return NULL;
 }
 
+static bool
+is_logical_handle(CUmemGenericAllocationHandle handle)
+{
+  return ((uint64_t)handle & LOGICAL_HANDLE_TAG_MASK) == LOGICAL_HANDLE_TAG;
+}
+
 static struct handle*
-find_handle(CUmemGenericAllocationHandle application)
+resolve_managed_handle(CUmemGenericAllocationHandle logical)
 {
   struct handle* handle;
 
+  if (!is_logical_handle(logical))
+    return NULL;
   for (handle = handles; handle != NULL; handle = handle->next) {
-    if (handle->live && handle->application == application)
+    if (handle->live && handle->logical == logical)
       return handle;
   }
   return NULL;
+}
+
+static int
+allocate_logical_handle(CUmemGenericAllocationHandle* output)
+{
+  if (next_logical_handle == 0 || next_logical_handle > LOGICAL_HANDLE_VALUE_MASK)
+    return -1;
+  *output = (CUmemGenericAllocationHandle)(LOGICAL_HANDLE_TAG | next_logical_handle++);
+  return 0;
+}
+
+static CUresult
+transfer_passthrough_handle(CUresult result, CUmemGenericAllocationHandle driver, CUmemGenericAllocationHandle* output)
+{
+  release_fn release;
+
+  if (result != CUDA_SUCCESS)
+    return result;
+  if (output == NULL || is_logical_handle(driver)) {
+    release = (release_fn)real_symbol("cuMemRelease");
+    if (release != NULL)
+      (void)release(driver);
+    return CUDA_ERROR_INVALID_HANDLE;
+  }
+  *output = driver;
+  return CUDA_SUCCESS;
 }
 
 static struct mapping*
@@ -332,15 +370,17 @@ first_live_handle(const struct allocation* allocation)
 }
 
 static int
-add_handle(
-    struct allocation* allocation, CUmemGenericAllocationHandle application, CUmemGenericAllocationHandle current)
+add_managed_handle(
+    struct allocation* allocation, CUmemGenericAllocationHandle driver, CUmemGenericAllocationHandle* logical)
 {
   struct handle* handle = calloc(1, sizeof(*handle));
 
-  if (handle == NULL)
+  if (handle == NULL || allocate_logical_handle(logical) != 0) {
+    free(handle);
     return -1;
-  handle->application = application;
-  handle->current = current;
+  }
+  handle->logical = *logical;
+  handle->driver = driver;
   handle->live = true;
   handle->allocation = allocation;
   handle->next = handles;
@@ -417,7 +457,7 @@ export_raw(struct allocation* allocation, int* output)
   if (allocation->carrier != 0)
     temporary = allocation->carrier;
   else if (handle != NULL)
-    temporary = handle->current;
+    temporary = handle->driver;
   else if ((mapping = first_mapping(allocation)) != NULL && retain != NULL) {
     result = retain(&temporary, (void*)(uintptr_t)mapping->address);
     if (result != CUDA_SUCCESS)
@@ -427,7 +467,7 @@ export_raw(struct allocation* allocation, int* output)
     goto done;
   }
   result = export_handle(output, temporary, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
-  if (temporary != allocation->carrier && (handle == NULL || temporary != handle->current) && release != NULL)
+  if (temporary != allocation->carrier && (handle == NULL || temporary != handle->driver) && release != NULL)
     (void)release(temporary);
 done:
   if (leave_context(&scope) != 0) {
@@ -556,12 +596,12 @@ inspect_records(uint32_t* count)
 }
 
 static bool
-handle_current_used(const struct handle* except, CUmemGenericAllocationHandle current)
+driver_handle_used(const struct handle* except, CUmemGenericAllocationHandle driver)
 {
   const struct handle* handle;
 
   for (handle = handles; handle != NULL; handle = handle->next) {
-    if (handle != except && handle->live && handle->current == current)
+    if (handle != except && handle->live && handle->driver == driver)
       return true;
   }
   return false;
@@ -587,7 +627,7 @@ create_checkpoint_carriers(void)
     carrier_handle = first_live_handle(allocation);
     carrier_mapping = first_mapping(allocation);
     if (carrier_handle != NULL) {
-      allocation->carrier = carrier_handle->current;
+      allocation->carrier = carrier_handle->driver;
       continue;
     }
     if (carrier_mapping == NULL || enter_context(allocation->context, &scope) != 0)
@@ -642,16 +682,16 @@ prepare_topology(void)
 
       if (!handle->live || handle->allocation != allocation)
         continue;
-      old = handle->current;
+      old = handle->driver;
       if (allocation->creator && old == allocation->carrier) {
-        handle->current = allocation->carrier;
+        handle->driver = allocation->carrier;
         continue;
       }
-      if (!handle_current_used(handle, old) && release(old) != CUDA_SUCCESS) {
+      if (!driver_handle_used(handle, old) && release(old) != CUDA_SUCCESS) {
         (void)leave_context(&scope);
         goto failed;
       }
-      handle->current = allocation->creator ? allocation->carrier : 0;
+      handle->driver = allocation->creator ? allocation->carrier : 0;
     }
     if (leave_context(&scope) != 0)
       goto failed;
@@ -717,7 +757,7 @@ restore_creators(void)
     }
     for (handle = handles; handle != NULL; handle = handle->next) {
       if (handle->live && handle->allocation == allocation)
-        handle->current = allocation->carrier;
+        handle->driver = allocation->carrier;
     }
     if (live_handle_count(allocation) == 0) {
       if (release(allocation->carrier) != CUDA_SUCCESS) {
@@ -825,7 +865,7 @@ restore_importers(void)
     }
     for (handle = handles; handle != NULL; handle = handle->next) {
       if (handle->live && handle->allocation == allocation)
-        handle->current = imported;
+        handle->driver = imported;
     }
     if (live_handle_count(allocation) == 0) {
       cuda_result = release(imported);
@@ -1025,6 +1065,7 @@ fork_child(void)
   allocations = NULL;
   handles = NULL;
   mappings = NULL;
+  next_logical_handle = 1;
   current_phase = PHASE_ACTIVE;
   failure[0] = '\0';
   pthread_mutex_unlock(&state_lock);
@@ -1107,17 +1148,25 @@ cuMemCreate(
 {
   create_fn function = (create_fn)real_symbol("cuMemCreate");
   struct allocation* allocation;
+  CUmemGenericAllocationHandle driver = 0;
+  CUmemGenericAllocationHandle logical;
   CUresult result;
 
-  if (!enabled || properties == NULL || properties->requestedHandleTypes == 0)
+  if (!enabled)
     return function != NULL ? function(output, size, properties, flags) : unavailable();
+  if (output == NULL)
+    return CUDA_ERROR_INVALID_VALUE;
+  if (properties == NULL || properties->requestedHandleTypes == 0) {
+    result = function != NULL ? function(&driver, size, properties, flags) : unavailable();
+    return transfer_passthrough_handle(result, driver, output);
+  }
   if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
   if (properties->requestedHandleTypes != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
     return CUDA_ERROR_NOT_SUPPORTED;
   if (function == NULL)
     return unavailable();
-  result = function(output, size, properties, flags);
+  result = function(&driver, size, properties, flags);
   if (result != CUDA_SUCCESS)
     return result;
   allocation = calloc(1, sizeof(*allocation));
@@ -1125,10 +1174,10 @@ cuMemCreate(
   if (allocation == NULL || current_phase != PHASE_ACTIVE ||
       random_bytes(allocation->id, sizeof(allocation->id)) != 0 ||
       random_bytes(allocation->authorization, sizeof(allocation->authorization)) != 0 ||
-      add_handle(allocation, *output, *output) != 0) {
+      add_managed_handle(allocation, driver, &logical) != 0) {
     release_fn release = (release_fn)real_symbol("cuMemRelease");
     if (release != NULL)
-      (void)release(*output);
+      (void)release(driver);
     free(allocation);
     pthread_mutex_unlock(&state_lock);
     return CUDA_ERROR_OUT_OF_MEMORY;
@@ -1140,6 +1189,7 @@ cuMemCreate(
   snprintf(allocation->creator_endpoint, sizeof(allocation->creator_endpoint), "%s", socket_path);
   allocation->next = allocations;
   allocations = allocation;
+  *output = logical;
   pthread_mutex_unlock(&state_lock);
   return CUDA_SUCCESS;
 }
@@ -1156,18 +1206,20 @@ cuMemRelease(CUmemGenericAllocationHandle application)
   if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
   pthread_mutex_lock(&state_lock);
-  handle = find_handle(application);
+  handle = resolve_managed_handle(application);
   if (handle == NULL) {
     pthread_mutex_unlock(&state_lock);
+    if (is_logical_handle(application))
+      return CUDA_ERROR_INVALID_HANDLE;
     return function != NULL ? function(application) : unavailable();
   }
-  if (current_phase != PHASE_ACTIVE || handle->current == 0) {
+  if (current_phase != PHASE_ACTIVE || handle->driver == 0) {
     pthread_mutex_unlock(&state_lock);
     return CUDA_ERROR_NOT_READY;
   }
   result = CUDA_SUCCESS;
-  if (!handle_current_used(handle, handle->current))
-    result = function != NULL ? function(handle->current) : unavailable();
+  if (!driver_handle_used(handle, handle->driver))
+    result = function != NULL ? function(handle->driver) : unavailable();
   if (result == CUDA_SUCCESS)
     handle->live = false;
   pthread_mutex_unlock(&state_lock);
@@ -1179,22 +1231,32 @@ cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* output, void* address)
 {
   retain_fn function = (retain_fn)real_symbol("cuMemRetainAllocationHandle");
   struct mapping* mapping;
+  CUmemGenericAllocationHandle driver = 0;
+  CUmemGenericAllocationHandle logical;
   CUresult result;
 
   if (enabled && (result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
   if (function == NULL)
     return unavailable();
-  result = function(output, address);
-  if (!enabled || result != CUDA_SUCCESS)
+  if (!enabled)
+    return function(output, address);
+  if (output == NULL)
+    return CUDA_ERROR_INVALID_VALUE;
+  result = function(&driver, address);
+  if (result != CUDA_SUCCESS)
     return result;
   pthread_mutex_lock(&state_lock);
   mapping = find_mapping_at((CUdeviceptr)(uintptr_t)address);
-  if (mapping != NULL && add_handle(mapping->allocation, *output, *output) != 0) {
+  if (mapping == NULL) {
+    result = transfer_passthrough_handle(result, driver, output);
+  } else if (add_managed_handle(mapping->allocation, driver, &logical) != 0) {
     release_fn release = (release_fn)real_symbol("cuMemRelease");
     if (release != NULL)
-      (void)release(*output);
+      (void)release(driver);
     result = CUDA_ERROR_OUT_OF_MEMORY;
+  } else {
+    *output = logical;
   }
   pthread_mutex_unlock(&state_lock);
   return result;
@@ -1214,16 +1276,18 @@ cuMemMap(
   if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
   pthread_mutex_lock(&state_lock);
-  handle = find_handle(application);
+  handle = resolve_managed_handle(application);
   if (handle == NULL) {
     pthread_mutex_unlock(&state_lock);
+    if (is_logical_handle(application))
+      return CUDA_ERROR_INVALID_HANDLE;
     return function != NULL ? function(address, size, offset, application, flags) : unavailable();
   }
-  if (current_phase != PHASE_ACTIVE || handle->current == 0) {
+  if (current_phase != PHASE_ACTIVE || handle->driver == 0) {
     pthread_mutex_unlock(&state_lock);
     return CUDA_ERROR_NOT_READY;
   }
-  result = function != NULL ? function(address, size, offset, handle->current, flags) : unavailable();
+  result = function != NULL ? function(address, size, offset, handle->driver, flags) : unavailable();
   if (result == CUDA_SUCCESS) {
     mapping = calloc(1, sizeof(*mapping));
     if (mapping == NULL) {
@@ -1320,9 +1384,11 @@ cuMemExportToShareableHandle(
   if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
     return CUDA_ERROR_NOT_SUPPORTED;
   pthread_mutex_lock(&state_lock);
-  handle = find_handle(application);
+  handle = resolve_managed_handle(application);
   if (handle == NULL) {
     pthread_mutex_unlock(&state_lock);
+    if (is_logical_handle(application))
+      return CUDA_ERROR_INVALID_HANDLE;
     return function != NULL ? function(shareable, application, type, flags) : unavailable();
   }
   if (!handle->allocation->creator || current_phase != PHASE_ACTIVE || current_context(&context) != 0 ||
@@ -1344,17 +1410,22 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
   properties_fn get_properties;
   struct snapshot_vmm_posix_capability capability;
   struct allocation* allocation;
-  CUmemGenericAllocationHandle imported;
+  CUmemGenericAllocationHandle logical;
+  CUmemGenericAllocationHandle imported = 0;
   int raw_fd = -1;
   int capability_fd = (int)(uintptr_t)os_handle;
   CUresult result;
 
   if (!enabled)
     return function != NULL ? function(output, os_handle, type) : unavailable();
+  if (output == NULL)
+    return CUDA_ERROR_INVALID_VALUE;
   if (type != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
     return CUDA_ERROR_INVALID_HANDLE;
-  if (snapshot_vmm_posix_read_capability(capability_fd, &capability) != 0)
-    return function != NULL ? function(output, os_handle, type) : unavailable();
+  if (snapshot_vmm_posix_read_capability(capability_fd, &capability) != 0) {
+    result = function != NULL ? function(&imported, os_handle, type) : unavailable();
+    return transfer_passthrough_handle(result, imported, output);
+  }
   get_properties = (properties_fn)real_symbol("cuMemGetAllocationPropertiesFromHandle");
   if (function == NULL || get_properties == NULL || strcmp(capability.job_id, job_id) != 0)
     return CUDA_ERROR_INVALID_HANDLE;
@@ -1369,8 +1440,12 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
   if (request_export(&capability, &raw_fd, NULL, 0) != 0)
     return CUDA_ERROR_INVALID_HANDLE;
   result = function(&imported, (void*)(uintptr_t)raw_fd, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
-  if (close(raw_fd) != 0 && result == CUDA_SUCCESS)
-    result = CUDA_ERROR_UNKNOWN;
+  if (close(raw_fd) != 0 && result == CUDA_SUCCESS) {
+    release_fn release = (release_fn)real_symbol("cuMemRelease");
+    if (release != NULL)
+      (void)release(imported);
+    return CUDA_ERROR_UNKNOWN;
+  }
   if (result != CUDA_SUCCESS)
     return result;
   pthread_mutex_lock(&state_lock);
@@ -1400,14 +1475,14 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
     allocation->shared = true;
   if (allocation == NULL || current_context(&allocation->context) != 0 ||
       get_properties(&allocation->properties, imported) != CUDA_SUCCESS ||
-      add_handle(allocation, imported, imported) != 0) {
+      add_managed_handle(allocation, imported, &logical) != 0) {
     release_fn release = (release_fn)real_symbol("cuMemRelease");
     if (release != NULL)
       (void)release(imported);
     pthread_mutex_unlock(&state_lock);
     return CUDA_ERROR_OUT_OF_MEMORY;
   }
-  *output = imported;
+  *output = logical;
   pthread_mutex_unlock(&state_lock);
   return CUDA_SUCCESS;
 }
@@ -1424,11 +1499,13 @@ cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp* properties, CUmemGen
   if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
   pthread_mutex_lock(&state_lock);
-  handle = find_handle(application);
-  result = handle == NULL
-               ? (function != NULL ? function(properties, application) : unavailable())
-               : (current_phase == PHASE_ACTIVE && handle->current != 0 ? function(properties, handle->current)
-                                                                        : CUDA_ERROR_NOT_READY);
+  handle = resolve_managed_handle(application);
+  if (handle == NULL)
+    result = is_logical_handle(application) ? CUDA_ERROR_INVALID_HANDLE
+                                            : (function != NULL ? function(properties, application) : unavailable());
+  else
+    result = current_phase == PHASE_ACTIVE && handle->driver != 0 ? function(properties, handle->driver)
+                                                                  : CUDA_ERROR_NOT_READY;
   pthread_mutex_unlock(&state_lock);
   return result;
 }
