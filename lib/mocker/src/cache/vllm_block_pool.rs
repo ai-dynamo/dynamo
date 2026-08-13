@@ -872,6 +872,13 @@ impl VllmBlockPool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn block_pool_retains_send_sync_auto_traits() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<VllmBlockPool>();
+    }
+
     fn reserve(pool: &mut VllmBlockPool, prefix: &[u64], fresh: usize) -> ReserveOutcome {
         pool.reserve(prefix, fresh)
             .unwrap_or_else(|| panic!("unexpected capacity exhaustion"))
