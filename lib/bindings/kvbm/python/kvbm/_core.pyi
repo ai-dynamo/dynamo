@@ -1,7 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional
+
+class PyLayoutType:
+    """
+    How the blocks of a KVBM tier are laid out in memory.
+
+    LayerSeparate describes one storage region per layer, so every NIXL transfer
+    is emitted as num_layers * outer_dim descriptors per block. FullyContiguous
+    describes a single cross-layer contiguous region and is transferred as one
+    descriptor per block.
+    """
+
+    FullyContiguous: ClassVar["PyLayoutType"]
+    LayerSeparate: ClassVar["PyLayoutType"]
 
 class NcclBootstrap:
     """
@@ -127,9 +140,9 @@ class KvbmWorker:
         dtype_width_bytes: int = 2,
         drt: Optional[Any] = None,
         layout_blocking: bool = False,
-        device_layout_type: Optional[Any] = None,
-        host_layout_type: Optional[Any] = None,
-        disk_layout_type: Optional[Any] = None,
+        device_layout_type: Optional[PyLayoutType] = None,
+        host_layout_type: Optional[PyLayoutType] = None,
+        disk_layout_type: Optional[PyLayoutType] = None,
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
         nccl_comm_ref: Optional["NcclCommRef"] = None,
@@ -153,12 +166,12 @@ class KvbmWorker:
             Distributed runtime, if applicable
         layout_blocking: bool
             Whether to block on layout initialization, defaults to False
-        device_layout_type: Optional[Any]
-            Layout type for device blocks
-        host_layout_type: Optional[Any]
-            Layout type for host blocks
-        disk_layout_type: Optional[Any]
-            Layout type for disk blocks
+        device_layout_type: Optional[PyLayoutType]
+            Layout type for device blocks; auto-detected from the tensor shapes when None
+        host_layout_type: Optional[PyLayoutType]
+            Layout type for host blocks, defaults to FullyContiguous
+        disk_layout_type: Optional[PyLayoutType]
+            Layout type for disk blocks, defaults to FullyContiguous
         rank: Optional[int]
             Rank for replicated mode (None = sharded mode)
         world_size: Optional[int]

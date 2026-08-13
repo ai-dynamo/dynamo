@@ -22,7 +22,31 @@ use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
 use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+
+/// Reads the device layout override from [`env_kvbm::DYN_KVBM_DEVICE_LAYOUT_TYPE`].
+///
+/// Returns `None` when the variable is unset, empty, or holds an unparsable value, in
+/// which case the caller keeps its shape-based auto-detection.
+fn device_layout_type_from_env() -> Option<LayoutType> {
+    let raw = std::env::var(env_kvbm::DYN_KVBM_DEVICE_LAYOUT_TYPE).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    match raw.parse::<LayoutType>() {
+        Ok(layout) => Some(layout),
+        Err(e) => {
+            tracing::warn!(
+                "Ignoring {}={raw}: {e}",
+                env_kvbm::DYN_KVBM_DEVICE_LAYOUT_TYPE
+            );
+            None
+        }
+    }
+}
 
 pub trait Worker: Send + Sync {
     #[allow(clippy::too_many_arguments)]
@@ -169,9 +193,17 @@ impl Worker for KvConnectorWorker {
 
         self.layer_events = raw_event_handles;
 
-        // Auto-detect device layout type if not explicitly provided
-        let detected_device_layout_type = match device_layout_type {
-            Some(layout) => layout,
+        // Auto-detect device layout type if neither the caller nor the environment set it.
+        // A LayerSeparate device tier fragments every disk/host transfer into
+        // `num_layers * outer_dim` NIXL descriptors per block, so operators whose engine
+        // allocates a cross-layer contiguous KV cache can force FullyContiguous instead.
+        let requested_device_layout_type = device_layout_type.or_else(device_layout_type_from_env);
+
+        let detected_device_layout_type = match requested_device_layout_type {
+            Some(layout) => {
+                tracing::info!("Using explicit device layout: {:?}", layout);
+                layout
+            }
             None => {
                 if let Some(ref shape) = first_tensor_shape {
                     match LayoutType::layer_separate_auto(shape, num_device_blocks) {

@@ -62,6 +62,12 @@ KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3) → object stor
   Maximum number of block transfers in flight at once.
 </ParamField>
 
+<ParamField path="DYN_KVBM_DEVICE_LAYOUT_TYPE" type="string" default="unset">
+  Override the device (G1) layout of the vLLM connector instead of detecting it from the KV cache tensor shapes. Accepts `fully_contiguous` or `layer_separate`.
+
+  A `layer_separate` device tier splits every host or disk transfer into `num_layers * outer_dim` NIXL descriptors per block, which costs throughput on network storage where the cost is per request rather than per byte. Set this to `fully_contiguous` only when the engine allocates a single cross-layer contiguous KV cache; otherwise layout creation fails at startup.
+</ParamField>
+
 <ParamField path="DYN_KVBM_DISABLE_WRITE_COMBINED" type="boolean" default="false">
   Disable write-combined memory for transfers.
 </ParamField>

@@ -219,6 +219,13 @@ pub mod kvbm {
     /// Disable disk offload filter
     pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
 
+    /// Override the device (G1) layout type instead of detecting it from the KV cache
+    /// tensor shapes. Accepts `fully_contiguous` or `layer_separate`.
+    ///
+    /// A `layer_separate` device tier forces every NIXL transfer to be split into
+    /// `num_layers * outer_dim` descriptors per block, which is costly on network storage.
+    pub const DYN_KVBM_DEVICE_LAYOUT_TYPE: &str = "DYN_KVBM_DEVICE_LAYOUT_TYPE";
+
     /// CPU cache configuration
     pub mod cpu_cache {
         /// CPU cache size in GB

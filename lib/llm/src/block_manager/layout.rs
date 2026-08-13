@@ -189,6 +189,39 @@ impl LayoutType {
     }
 }
 
+impl std::str::FromStr for LayoutType {
+    type Err = LayoutError;
+
+    /// Parse a layout type from a user-supplied string, e.g. an environment variable.
+    ///
+    /// Accepted values are case-insensitive and ignore `_` and `-`:
+    /// - `fully_contiguous`
+    /// - `layer_separate` (equivalent to [`LayoutType::layer_separate_auto_default`];
+    ///   use `layer_separate_block_contiguous` to select `outer_contiguous = false`)
+    /// - `layer_separate_outer_contiguous`
+    /// - `layer_separate_block_contiguous`
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalized = s
+            .chars()
+            .filter(|c| *c != '_' && *c != '-')
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+
+        match normalized.as_str() {
+            "fullycontiguous" => Ok(LayoutType::FullyContiguous),
+            "layerseparate" | "layerseparateoutercontiguous" => {
+                Ok(LayoutType::layer_separate(true))
+            }
+            "layerseparateblockcontiguous" => Ok(LayoutType::layer_separate(false)),
+            _ => Err(LayoutError::InvalidConfig(format!(
+                "unknown layout type '{s}'; expected one of \
+                 'fully_contiguous', 'layer_separate', \
+                 'layer_separate_outer_contiguous', 'layer_separate_block_contiguous'"
+            ))),
+        }
+    }
+}
+
 /// Local Memory Region
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Getters)]
 pub struct LocalMemoryRegion {
@@ -1049,6 +1082,38 @@ pub mod tests {
         };
 
         FullyContiguous::allocate(config, &NullDeviceAllocator)
+    }
+
+    #[test]
+    fn test_layout_type_from_str() {
+        use std::str::FromStr;
+
+        // A disk (FullyContiguous) -> device (LayerSeparate) onboard is emitted as
+        // `num_layers * outer_dim` NIXL descriptors per block, so operators need a way
+        // to force the device tier to FullyContiguous when the engine allows it.
+        for input in ["fully_contiguous", "FullyContiguous", "FULLY-CONTIGUOUS"] {
+            assert_eq!(
+                LayoutType::from_str(input).unwrap(),
+                LayoutType::FullyContiguous,
+                "failed to parse {input}"
+            );
+        }
+
+        for input in ["layer_separate", "layer_separate_outer_contiguous"] {
+            assert_eq!(
+                LayoutType::from_str(input).unwrap(),
+                LayoutType::layer_separate(true),
+                "failed to parse {input}"
+            );
+        }
+
+        assert_eq!(
+            LayoutType::from_str("layer_separate_block_contiguous").unwrap(),
+            LayoutType::layer_separate(false)
+        );
+
+        assert!(LayoutType::from_str("").is_err());
+        assert!(LayoutType::from_str("contiguous").is_err());
     }
 
     #[test]

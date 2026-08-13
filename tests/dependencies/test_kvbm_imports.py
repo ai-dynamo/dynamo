@@ -43,12 +43,17 @@ def _check_kvbm_imports():
     """Helper to verify KVBM package and core classes can be imported."""
     try:
         import kvbm
-        from kvbm import BlockManager, KvbmLeader, KvbmWorker
+        from kvbm import BlockManager, KvbmLeader, KvbmWorker, PyLayoutType
 
         assert kvbm is not None, "kvbm module is None"
         assert BlockManager is not None, "BlockManager class not available"
         assert KvbmLeader is not None, "KvbmLeader class not available"
         assert KvbmWorker is not None, "KvbmWorker class not available"
+
+        # PyLayoutType is the only way to supply the `*_layout_type` arguments of
+        # KvbmWorker/register_kv_caches, so it has to be registered on the module.
+        assert PyLayoutType is not None, "PyLayoutType class not available"
+        assert PyLayoutType.FullyContiguous != PyLayoutType.LayerSeparate
     except ImportError as e:
         pytest.fail(f"Failed to import KVBM package or core classes: {e}")
 
