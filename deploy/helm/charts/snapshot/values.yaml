@@ -75,6 +75,15 @@ storage:
   oci:
     uri: ""
 
+pageBroker:
+  enabled: false
+  # Optional maximum size for tmpfs staging, for example "100Gi".
+  stagingSizeLimit: ""
+  image:
+    repository: nvcr.io/nvidia/ai-dynamo/pagebroker
+    tag: 1.4.0
+    pullPolicy: Always
+
 # DaemonSet configuration for snapshot (checkpoint/restore) agent
 daemonset:
   # Container image

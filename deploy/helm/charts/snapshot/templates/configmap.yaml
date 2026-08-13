@@ -9,6 +9,9 @@ kind: ConfigMap
 {{- if not (has .Values.storage.accessMode (list "agentMount" "podMount")) }}
 {{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount or podMount" .Values.storage.accessMode) }}
 {{- end }}
+{{- if and .Values.pageBroker.enabled (ne .Values.storage.accessMode "agentMount") }}
+{{- fail "snapshot.pageBroker requires storage.accessMode=agentMount" }}
+{{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -25,6 +28,12 @@ data:
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
+
+    pageBroker:
+      enabled: {{ .Values.pageBroker.enabled }}
+      {{- if .Values.pageBroker.enabled }}
+      controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
+      {{- end }}
 
     restore:
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}

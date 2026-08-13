@@ -2,6 +2,8 @@
 {{- $socket := include "snapshot.runtimeSocket" . -}}
 {{- $socketDir := $socket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}
+{{- $pageBrokerControlPath := include "snapshot.pageBrokerControlPath" . -}}
+{{- $pageBrokerStagingPath := include "snapshot.pageBrokerStagingPath" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -95,6 +97,19 @@ spec:
               mountPath: /host-seccomp
       {{- end }}
       containers:
+        {{- if .Values.pageBroker.enabled }}
+        - name: pagebroker
+          image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag }}"
+          imagePullPolicy: {{ .Values.pageBroker.image.pullPolicy }}
+          args:
+            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
+            - {{ $pageBrokerStagingPath | quote }}
+          volumeMounts:
+            - name: pagebroker
+              mountPath: /pagebroker
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+        {{- end }}
         - name: agent
           image: "{{ .Values.daemonset.image.repository }}:{{ .Values.daemonset.image.tag }}"
           imagePullPolicy: {{ .Values.daemonset.image.pullPolicy }}
@@ -125,6 +140,10 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
+            {{- if .Values.pageBroker.enabled }}
+            - name: pagebroker
+              mountPath: /pagebroker
+            {{- end }}
             {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             # Mount the checkpoint PVC directly in namespace-local agent mode
             - name: checkpoints
@@ -171,6 +190,14 @@ spec:
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
+        {{- if .Values.pageBroker.enabled }}
+        - name: pagebroker
+          emptyDir:
+            medium: Memory
+            {{- with .Values.pageBroker.stagingSizeLimit }}
+            sizeLimit: {{ . | quote }}
+            {{- end }}
+        {{- end }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
