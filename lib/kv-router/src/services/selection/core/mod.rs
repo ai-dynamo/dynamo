@@ -21,7 +21,7 @@ use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
-    ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+    ScheduleRequest, SessionContext, TieredOverlapRefresher, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -794,7 +794,8 @@ impl SelectionCore {
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context: session_id
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -1601,7 +1602,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
 
         for worker_id in [1, 2] {
@@ -1665,7 +1667,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(2, 0, 1, &[], &[11, 12], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")

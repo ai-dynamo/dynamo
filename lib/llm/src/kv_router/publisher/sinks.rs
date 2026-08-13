@@ -8,7 +8,9 @@ use anyhow::Result;
 
 use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier};
+use dynamo_kv_router::protocols::{
+    KvCacheEvent, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
+};
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
@@ -143,14 +145,23 @@ pub(super) async fn emit(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
     storage_tier: StorageTier,
+    residency_domain: ResidencyDomain,
     event: KvCacheEvent,
     output: &mut Vec<RouterEvent>,
-) {
-    let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
-    if let Some(indexer) = local_indexer
-        && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
-    {
-        tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
-    }
+) -> bool {
+    let router_event =
+        RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
+    let applied = if let Some(indexer) = local_indexer {
+        match indexer.apply_event_with_buffer(router_event.clone()).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(worker_id, %error, "Failed to apply event to local indexer");
+                false
+            }
+        }
+    } else {
+        true
+    };
     output.push(router_event);
+    applied
 }
