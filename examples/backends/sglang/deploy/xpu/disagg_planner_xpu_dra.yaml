@@ -38,172 +38,180 @@ spec:
             deviceClassName: gpu.intel.com
             count: 1
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: sglang-disagg-planner-xpu-dra
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: docker.io/library/dynamo-sglang-xpu:latest
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: docker.io/library/dynamo-sglang-xpu:latest
           imagePullPolicy: IfNotPresent
-    Planner:
-      envFromSecret: hf-token-secret
-      componentType: planner
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          # Use official dynamo-planner image (CPU-only)
-          # For Dynamo >= 1.1.0, planner is a separate image from worker runtime
+          name: main
+    replicas: 1
+    type: frontend
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1}'
+          command:
+          - python3
+          - -m
+          - dynamo.planner
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          # Use the official CPU-only Dynamo Planner image.
+          # For Dynamo 1.1.0 and later, Planner uses a separate image from the worker runtime.
           image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly-2025-05-01
-          command:
-            - python3
-            - -m
-            - dynamo.planner
-          args:
-            - --config
-            - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1}'
+          name: main
           volumeMounts:
-            - name: planner-profile-data-xpu
-              mountPath: /workspace/profiling_results
-              readOnly: true
+          - mountPath: /workspace/profiling_results
+            name: planner-profile-data-xpu
+            readOnly: true
         volumes:
-          - name: planner-profile-data-xpu
-            configMap:
-              name: planner-profile-data-xpu
-    decode:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
-      replicas: 2
-      resources:
-        requests:
-          custom:
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
+        - configMap:
+            name: planner-profile-data-xpu
+          name: planner-profile-data-xpu
+    replicas: 1
+    type: planner
+  - name: decode
+    podTemplate:
+      spec:
         hostIPC: true
         hostPID: true
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --enable-metrics
+          - --device
+          - xpu
+          - --disable-cuda-graph
+          - --grammar-backend
+          - none
+          - --disaggregation-mode
+          - decode
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - "0.0.0.0"
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          env:
+          # XPU-specific environment variables for disaggregated KV transfer.
+          # Do not set ZE_AFFINITY_MASK with DRA; let DRA allocate GPUs.
+          - name: UCX_TLS
+            value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
+          - name: UCX_LOG_LEVEL
+            value: "info"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/sglang
         resourceClaims:
-          - name: gpu
-            resourceClaimTemplateName: gpu-template
-        # Uncomment if needed for your environment
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+        # Uncomment if needed for your environment.
         # securityContext:
         #   runAsUser: 1000
         #   runAsGroup: 1000
         #   supplementalGroups:
         #     - 44    # video group
         #     - 991   # render group
-        mainContainer:
-          image: docker.io/library/dynamo-sglang-xpu:latest
-          imagePullPolicy: IfNotPresent
-          resources:
-            claims:
-              - name: gpu
-          env:
-            # XPU-specific environment variables for disaggregated KV transfer
-            # Note: Do not set ZE_AFFINITY_MASK when using DRA - let DRA allocate GPUs automatically
-            - name: UCX_TLS
-              value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
-            - name: UCX_LOG_LEVEL
-              value: "info"
-          workingDir: /workspace/examples/backends/sglang
-          command:
-            - python3
-            - -m
-            - dynamo.sglang
-          args:
-            - --model-path
-            - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --page-size
-            - "16"
-            - --tp
-            - "1"
-            - --trust-remote-code
-            - --skip-tokenizer-init
-            - --enable-metrics
-            - --device
-            - xpu
-            - --disable-cuda-graph
-            - --grammar-backend
-            - none
-            - --disaggregation-mode
-            - decode
-            - --disaggregation-transfer-backend
-            - nixl
-            - --disaggregation-bootstrap-port
-            - "12345"
-            - --host
-            - "0.0.0.0"
-    prefill:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      resources:
-        requests:
-          custom:
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
+    replicas: 2
+    type: decode
+  - name: prefill
+    podTemplate:
+      spec:
         hostIPC: true
         hostPID: true
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --enable-metrics
+          - --device
+          - xpu
+          - --disable-cuda-graph
+          - --grammar-backend
+          - none
+          - --disaggregation-mode
+          - prefill
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - "0.0.0.0"
+          - --port
+          - "40000"
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          env:
+          # XPU-specific environment variables for disaggregated KV transfer.
+          # Do not set ZE_AFFINITY_MASK with DRA; let DRA allocate GPUs.
+          - name: UCX_TLS
+            value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
+          - name: UCX_LOG_LEVEL
+            value: "info"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/sglang
         resourceClaims:
-          - name: gpu
-            resourceClaimTemplateName: gpu-template
-        # Uncomment if needed for your environment
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+        # Uncomment if needed for your environment.
         # securityContext:
         #   runAsUser: 1000
         #   runAsGroup: 1000
         #   supplementalGroups:
         #     - 44    # video group
         #     - 991   # render group
-        mainContainer:
-          image: docker.io/library/dynamo-sglang-xpu:latest
-          imagePullPolicy: IfNotPresent
-          resources:
-            claims:
-              - name: gpu
-          env:
-            # XPU-specific environment variables for disaggregated KV transfer
-            # Note: Do not set ZE_AFFINITY_MASK when using DRA - let DRA allocate GPUs automatically
-            - name: UCX_TLS
-              value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
-            - name: UCX_LOG_LEVEL
-              value: "info"
-          workingDir: /workspace/examples/backends/sglang
-          command:
-            - python3
-            - -m
-            - dynamo.sglang
-          args:
-            - --model-path
-            - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --page-size
-            - "16"
-            - --tp
-            - "1"
-            - --trust-remote-code
-            - --skip-tokenizer-init
-            - --enable-metrics
-            - --device
-            - xpu
-            - --disable-cuda-graph
-            - --grammar-backend
-            - none
-            - --disaggregation-mode
-            - prefill
-            - --disaggregation-transfer-backend
-            - nixl
-            - --disaggregation-bootstrap-port
-            - "12345"
-            - --host
-            - "0.0.0.0"
-            - --port
-            - "40000"
+    replicas: 1
+    type: prefill
