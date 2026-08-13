@@ -287,6 +287,8 @@ worker_selection:
 
 The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.aggregated` selects a full-request worker pool. `worker_selection.prefill` and `worker_selection.decode` select the matching disaggregated worker pools. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
 
+For compatibility with v1.4 policy files, deprecated `worker_selection.default` fills every role that has no explicit selection. Do not combine it with `worker_selection.aggregated`. New policy files should name each intended role explicitly.
+
 For prefill and decode, the selection order is the role-specific CLI or environment override, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then Dynamo's built-in policy. For aggregated pools, the order is `DYN_ROUTER_WORKER_SELECTION_POLICY`, `worker_selection.aggregated`, and then the built-in policy. Set any selection to `default` to use the built-in policy for that scope.
 
 <Note>
@@ -397,6 +399,8 @@ python3 -m dynamo.frontend \
   --router-prefill-policy prefill-least-busy \
   --router-decode-policy least-busy
 ```
+
+The linked extension also applies custom policies in `python3 -m dynamo.router`. When a custom instance is selected, that process waits for a worker model card so it can choose the policy from the card's typed role. `DYN_ROUTER_MODEL_CARD_WAIT_SECS` bounds the startup wait and defaults to 600 seconds.
 
 </Tab>
 <Tab title="EPP">

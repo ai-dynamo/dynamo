@@ -97,7 +97,10 @@ impl HttpFrontend {
                     engine_config,
                     self.frontend_route_extensions,
                     Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(Some(config.clone()), worker_type.as_str())
+                        DefaultWorkerSelector::new(
+                            Some(config.clone()),
+                            worker_type.default_selector_label(),
+                        )
                     }),
                 )
                 .await

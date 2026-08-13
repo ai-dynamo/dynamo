@@ -311,9 +311,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-decode-policy" type="string" default="null">
-  Frontend-only worker-selection instance for decode workers and the single worker pool in an
-  aggregated deployment. This option overrides `worker_selection.decode` from
-  `--router-policy-config`. Set it to `default` to use Dynamo's built-in worker selector.
+  Frontend-only worker-selection instance for decode workers in a disaggregated deployment. This
+  option overrides `worker_selection.decode` from `--router-policy-config`. Set it to `default` to
+  use Dynamo's built-in worker selector. Configure an aggregated pool with
+  `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
 
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>

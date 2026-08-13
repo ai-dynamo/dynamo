@@ -313,7 +313,10 @@ impl ModelWatcher<DefaultWorkerSelector> {
             prefill_load_estimator,
             metrics,
             Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(Some(config.clone()), worker_type.as_str())
+                DefaultWorkerSelector::new(
+                    Some(config.clone()),
+                    worker_type.default_selector_label(),
+                )
             }),
         )
     }

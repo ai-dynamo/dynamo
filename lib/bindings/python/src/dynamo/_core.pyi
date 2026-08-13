@@ -1819,7 +1819,7 @@ class KvRouterConfig:
             router_prefill_policy: Frontend-only override of
                 worker_selection.prefill for disaggregated prefill workers.
             router_decode_policy: Frontend-only override of worker_selection.decode
-                for decode workers and the single worker pool in aggregated deployments.
+                for decode workers in a disaggregated deployment.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.

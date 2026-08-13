@@ -1723,7 +1723,7 @@ async fn create_kv_router_from_endpoint(
         WorkerType::Aggregated
     };
     let effective_worker_role = worker_role.unwrap_or(fallback_role);
-    let metric_worker_type = effective_worker_role.as_str();
+    let metric_worker_type = effective_worker_role.default_selector_label();
 
     #[cfg(not(feature = "custom-policy"))]
     let kv_router = model_manager

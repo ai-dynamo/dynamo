@@ -448,7 +448,7 @@ class KvRouterArgGroup(ArgGroup):
             default=None,
             help=(
                 "KV Router: Frontend-only named worker-selection instance for decode "
-                "workers and for the single worker pool in aggregated deployments. "
+                "workers in a disaggregated deployment. "
                 "Overrides worker_selection.decode from --router-policy-config. "
                 "Use 'default' for Dynamo's built-in worker selector."
             ),

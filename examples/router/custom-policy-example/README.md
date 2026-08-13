@@ -172,6 +172,7 @@ worker_selection:
 - `name` identifies one configured instance.
 - `worker_selection.aggregated` selects the instance for a full-request worker pool.
 - `worker_selection.prefill` and `worker_selection.decode` select separate instances for the embedded frontend's worker pools.
+- Deprecated `worker_selection.default` fills roles without an explicit selection for compatibility with v1.4 policy files. Do not combine it with `worker_selection.aggregated`.
 - `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections.
 - `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.
 - `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every role-specific YAML selection.
@@ -224,7 +225,7 @@ python3 -m dynamo.frontend \
   --router-policy-config /path/to/worker-selection.yaml
 ```
 
-For a private catalog, keep the dependency alias and change the package name and path. Linked policies apply to the embedded frontend selection service. They do not apply to `python3 -m dynamo.router`.
+For a private catalog, keep the dependency alias and change the package name and path. Linked policies apply to the embedded frontend selection service and to `python3 -m dynamo.router`. When the standalone Python router selects a linked policy, startup waits for a worker model card so the router can dispatch by its typed role. `DYN_ROUTER_MODEL_CARD_WAIT_SECS` bounds this wait and defaults to 600 seconds.
 
 ## Run With EPP
 

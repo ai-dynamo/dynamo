@@ -652,6 +652,28 @@ worker_selection:
     }
 
     #[test]
+    fn worker_selection_legacy_default_fills_unset_roles() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  default: legacy-policy
+  prefill: prefill-policy
+  instances:
+    - name: legacy-policy
+      type: legacy
+    - name: prefill-policy
+      type: cache-aware
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.aggregated_instance(), Some("legacy-policy"));
+        assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
+        assert_eq!(selection.decode_instance(), Some("legacy-policy"));
+    }
+
+    #[test]
     fn rejects_invalid_worker_selection_config() {
         for yaml in [
             r#"
@@ -674,6 +696,14 @@ worker_selection:
             r#"
 worker_selection:
   decode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  default: present
+  aggregated: present
   instances:
     - name: present
       type: alpha

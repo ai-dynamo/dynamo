@@ -157,7 +157,10 @@ impl WorkerSelectionPolicyRegistry {
             };
             match selected {
                 Some(factory) => factory(config, worker_type, partition),
-                None => WorkerSelectionPolicy::default(config.clone(), worker_type.as_str()),
+                None => WorkerSelectionPolicy::default(
+                    config.clone(),
+                    worker_type.default_selector_label(),
+                ),
             }
         })))
     }

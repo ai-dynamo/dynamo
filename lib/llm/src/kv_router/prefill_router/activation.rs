@@ -69,7 +69,10 @@ impl PrefillRouter<DefaultWorkerSelector> {
             kv_router_config,
             decode_router,
             Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(Some(config.clone()), worker_type.as_str())
+                DefaultWorkerSelector::new(
+                    Some(config.clone()),
+                    worker_type.default_selector_label(),
+                )
             }),
             prefill_load_estimator,
             session_affinity_ttl_secs,

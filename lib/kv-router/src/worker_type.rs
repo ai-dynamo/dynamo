@@ -32,6 +32,17 @@ impl WorkerType {
             Self::Aggregated => "aggregated",
         }
     }
+
+    /// Pool label expected by Dynamo's built-in worker selector.
+    ///
+    /// The built-in selector historically distinguishes only prefill pools from all other pools.
+    /// Keep that scoring and metric-label contract while typed roles select custom policies.
+    pub const fn default_selector_label(self) -> &'static str {
+        match self {
+            Self::Prefill => "prefill",
+            Self::Decode | Self::Encode | Self::Aggregated => "decode",
+        }
+    }
 }
 
 impl fmt::Display for WorkerType {
@@ -80,6 +91,14 @@ mod tests {
         assert_eq!(WorkerType::Decode.to_string(), "decode");
         assert_eq!(WorkerType::Encode.to_string(), "encode");
         assert_eq!(WorkerType::Aggregated.to_string(), "aggregated");
+    }
+
+    #[test]
+    fn built_in_selector_preserves_prefill_and_decode_pool_labels() {
+        assert_eq!(WorkerType::Prefill.default_selector_label(), "prefill");
+        assert_eq!(WorkerType::Decode.default_selector_label(), "decode");
+        assert_eq!(WorkerType::Encode.default_selector_label(), "decode");
+        assert_eq!(WorkerType::Aggregated.default_selector_label(), "decode");
     }
 
     #[test]
