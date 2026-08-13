@@ -4,10 +4,12 @@
 //! Public, polling-based control surface for causal offline replay.
 
 use std::collections::{BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::common::protocols::{EngineType, G1Backend, MockEngineArgs, WorkerType};
@@ -113,6 +115,222 @@ pub enum ReplayEvent {
     Admitted(ReplayEventData),
     FirstToken(ReplayEventData),
     Terminal(ReplayEventData),
+}
+
+impl ReplayEvent {
+    fn event_type(&self) -> &'static str {
+        match self {
+            Self::PlacementNeeded(_) => "placement_needed",
+            Self::Routed(_) => "routed",
+            Self::Queued(_) => "queued",
+            Self::Admitted(_) => "admitted",
+            Self::FirstToken(_) => "first_token",
+            Self::Terminal(_) => "terminal",
+        }
+    }
+}
+
+/// Eager, immutable replay event snapshot used by high-volume adapters.
+///
+/// Unlike [`ReplayEventData`], repeated authored metadata and placement
+/// candidates share their frozen backing allocations. Every lifecycle scalar
+/// is copied at capture time, so this never observes later request mutation.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedReplayEventData {
+    metadata: Arc<InteractiveRequestMetadata>,
+    timestamp_ms: f64,
+    pool_id: Option<Arc<str>>,
+    worker_id: Option<usize>,
+    dp_rank: Option<usize>,
+    terminal_status: Option<ReplayTerminalStatus>,
+    requested_output_length: Option<usize>,
+    emitted_output_count: usize,
+    reused_input_tokens: Option<usize>,
+    ttft_ms: Option<f64>,
+    e2e_latency_ms: Option<f64>,
+    eligible_pool_ids: Arc<Vec<String>>,
+    candidates: Arc<Vec<ReplayPlacementCandidate>>,
+}
+
+/// Borrowed declaration-order view of one immutable captured event.
+#[doc(hidden)]
+pub struct CapturedReplayEventDataView<'a> {
+    pub logical_request_id: &'a str,
+    pub attempt_id: &'a str,
+    pub group_id: &'a str,
+    pub internal_uuid: Uuid,
+    pub session_id: &'a str,
+    pub authored_turn_index: usize,
+    pub timestamp_ms: f64,
+    pub pool_id: Option<&'a str>,
+    pub worker_id: Option<usize>,
+    pub dp_rank: Option<usize>,
+    pub terminal_status: Option<ReplayTerminalStatus>,
+    pub input_length: usize,
+    pub requested_output_length: Option<usize>,
+    pub emitted_output_count: usize,
+    pub reused_input_tokens: Option<usize>,
+    pub ttft_ms: Option<f64>,
+    pub e2e_latency_ms: Option<f64>,
+    pub priority: i32,
+    pub strict_priority: u32,
+    pub policy_class: Option<&'a str>,
+    pub routing_constraints: &'a ReplayRoutingConstraints,
+    pub eligible_pool_ids: &'a [String],
+    pub candidates: &'a [ReplayPlacementCandidate],
+}
+
+impl CapturedReplayEventData {
+    pub fn view(&self) -> CapturedReplayEventDataView<'_> {
+        CapturedReplayEventDataView {
+            logical_request_id: &self.metadata.logical_request_id,
+            attempt_id: &self.metadata.attempt_id,
+            group_id: &self.metadata.group_id,
+            internal_uuid: self.metadata.internal_uuid,
+            session_id: &self.metadata.session_id,
+            authored_turn_index: self.metadata.authored_turn_index,
+            timestamp_ms: self.timestamp_ms,
+            pool_id: self.pool_id.as_deref(),
+            worker_id: self.worker_id,
+            dp_rank: self.dp_rank,
+            terminal_status: self.terminal_status,
+            input_length: self.metadata.input_length,
+            requested_output_length: self.requested_output_length,
+            emitted_output_count: self.emitted_output_count,
+            reused_input_tokens: self.reused_input_tokens,
+            ttft_ms: self.ttft_ms,
+            e2e_latency_ms: self.e2e_latency_ms,
+            priority: self.metadata.priority,
+            strict_priority: self.metadata.strict_priority,
+            policy_class: self.metadata.policy_class.as_deref(),
+            routing_constraints: &self.metadata.routing_constraints,
+            eligible_pool_ids: self.eligible_pool_ids.as_slice(),
+            candidates: self.candidates.as_slice(),
+        }
+    }
+
+    pub fn into_owned(self) -> ReplayEventData {
+        let metadata = self.metadata;
+        ReplayEventData {
+            logical_request_id: metadata.logical_request_id.clone(),
+            attempt_id: metadata.attempt_id.clone(),
+            group_id: metadata.group_id.clone(),
+            internal_uuid: metadata.internal_uuid,
+            session_id: metadata.session_id.clone(),
+            authored_turn_index: metadata.authored_turn_index,
+            timestamp_ms: self.timestamp_ms,
+            pool_id: self.pool_id.as_deref().map(str::to_owned),
+            worker_id: self.worker_id,
+            dp_rank: self.dp_rank,
+            terminal_status: self.terminal_status,
+            input_length: metadata.input_length,
+            requested_output_length: self.requested_output_length,
+            emitted_output_count: self.emitted_output_count,
+            reused_input_tokens: self.reused_input_tokens,
+            ttft_ms: self.ttft_ms,
+            e2e_latency_ms: self.e2e_latency_ms,
+            priority: metadata.priority,
+            strict_priority: metadata.strict_priority,
+            policy_class: metadata.policy_class.clone(),
+            routing_constraints: metadata.routing_constraints.clone(),
+            eligible_pool_ids: Arc::unwrap_or_clone(self.eligible_pool_ids),
+            candidates: Arc::unwrap_or_clone(self.candidates),
+        }
+    }
+}
+
+impl Serialize for CapturedReplayEventData {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let data = self.view();
+        let mut value = serializer.serialize_struct("ReplayEventData", 23)?;
+        value.serialize_field("logical_request_id", data.logical_request_id)?;
+        value.serialize_field("attempt_id", data.attempt_id)?;
+        value.serialize_field("group_id", data.group_id)?;
+        value.serialize_field("internal_uuid", &data.internal_uuid)?;
+        value.serialize_field("session_id", data.session_id)?;
+        value.serialize_field("authored_turn_index", &data.authored_turn_index)?;
+        value.serialize_field("timestamp_ms", &data.timestamp_ms)?;
+        value.serialize_field("pool_id", &data.pool_id)?;
+        value.serialize_field("worker_id", &data.worker_id)?;
+        value.serialize_field("dp_rank", &data.dp_rank)?;
+        value.serialize_field("terminal_status", &data.terminal_status)?;
+        value.serialize_field("input_length", &data.input_length)?;
+        value.serialize_field("requested_output_length", &data.requested_output_length)?;
+        value.serialize_field("emitted_output_count", &data.emitted_output_count)?;
+        value.serialize_field("reused_input_tokens", &data.reused_input_tokens)?;
+        value.serialize_field("ttft_ms", &data.ttft_ms)?;
+        value.serialize_field("e2e_latency_ms", &data.e2e_latency_ms)?;
+        value.serialize_field("priority", &data.priority)?;
+        value.serialize_field("strict_priority", &data.strict_priority)?;
+        value.serialize_field("policy_class", &data.policy_class)?;
+        value.serialize_field("routing_constraints", data.routing_constraints)?;
+        value.serialize_field("eligible_pool_ids", data.eligible_pool_ids)?;
+        value.serialize_field("candidates", data.candidates)?;
+        value.end()
+    }
+}
+
+/// Eager immutable counterpart to [`ReplayEvent`] for direct adapters.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "event_type", content = "event", rename_all = "snake_case")]
+pub enum CapturedReplayEvent {
+    PlacementNeeded(CapturedReplayEventData),
+    Routed(CapturedReplayEventData),
+    Queued(CapturedReplayEventData),
+    Admitted(CapturedReplayEventData),
+    FirstToken(CapturedReplayEventData),
+    Terminal(CapturedReplayEventData),
+}
+
+impl CapturedReplayEvent {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::PlacementNeeded(_) => "placement_needed",
+            Self::Routed(_) => "routed",
+            Self::Queued(_) => "queued",
+            Self::Admitted(_) => "admitted",
+            Self::FirstToken(_) => "first_token",
+            Self::Terminal(_) => "terminal",
+        }
+    }
+
+    pub fn data(&self) -> &CapturedReplayEventData {
+        match self {
+            Self::PlacementNeeded(data)
+            | Self::Routed(data)
+            | Self::Queued(data)
+            | Self::Admitted(data)
+            | Self::FirstToken(data)
+            | Self::Terminal(data) => data,
+        }
+    }
+
+    pub fn into_data(self) -> CapturedReplayEventData {
+        match self {
+            Self::PlacementNeeded(data)
+            | Self::Routed(data)
+            | Self::Queued(data)
+            | Self::Admitted(data)
+            | Self::FirstToken(data)
+            | Self::Terminal(data) => data,
+        }
+    }
+
+    pub fn into_owned(self) -> ReplayEvent {
+        match self {
+            Self::PlacementNeeded(data) => ReplayEvent::PlacementNeeded(data.into_owned()),
+            Self::Routed(data) => ReplayEvent::Routed(data.into_owned()),
+            Self::Queued(data) => ReplayEvent::Queued(data.into_owned()),
+            Self::Admitted(data) => ReplayEvent::Admitted(data.into_owned()),
+            Self::FirstToken(data) => ReplayEvent::FirstToken(data.into_owned()),
+            Self::Terminal(data) => ReplayEvent::Terminal(data.into_owned()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -224,37 +442,57 @@ pub struct ReplaySnapshot {
     pub workers: Vec<ReplayWorkerSnapshot>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct InteractiveRequestIdentity {
-    pub logical_request_id: String,
-    pub attempt_id: String,
-    pub group_id: String,
-    pub internal_uuid: Uuid,
-    pub session_id: String,
-    pub authored_turn_index: usize,
-    pub input_length: usize,
-    pub requested_output_length: usize,
-    pub priority: i32,
-    pub strict_priority: u32,
-    pub policy_class: Option<String>,
-    pub routing_constraints: ReplayRoutingConstraints,
-    pub ready_at_ms: Option<f64>,
-    pub worker: Option<WorkerTarget>,
-    pub emitted_output_count: usize,
-    pub reused_input_tokens: Option<usize>,
-    pub first_token_ms: Option<f64>,
-    pub terminal_ms: Option<f64>,
+    metadata: Arc<InteractiveRequestMetadata>,
+    ready_at_ms: Option<f64>,
+    worker: Option<InteractiveWorkerIdentity>,
+    emitted_output_count: usize,
+    reused_input_tokens: Option<usize>,
+    first_token_ms: Option<f64>,
+    terminal_ms: Option<f64>,
+}
+
+impl std::ops::Deref for InteractiveRequestIdentity {
+    type Target = InteractiveRequestMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct InteractiveRequestMetadata {
+    pub(crate) logical_request_id: String,
+    pub(crate) attempt_id: String,
+    pub(crate) group_id: String,
+    pub(crate) internal_uuid: Uuid,
+    pub(crate) session_id: String,
+    pub(crate) authored_turn_index: usize,
+    pub(crate) input_length: usize,
+    pub(crate) requested_output_length: usize,
+    pub(crate) priority: i32,
+    pub(crate) strict_priority: u32,
+    pub(crate) policy_class: Option<String>,
+    pub(crate) routing_constraints: ReplayRoutingConstraints,
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveWorkerIdentity {
+    pool_id: Arc<str>,
+    worker_id: usize,
+    dp_rank: usize,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct InteractiveCapture {
     external_placement: bool,
     session_affinity: bool,
-    eligible_pool_ids: Vec<String>,
+    eligible_pool_ids: Arc<Vec<String>>,
     identities: FxHashMap<Uuid, InteractiveRequestIdentity>,
     logical_to_uuid: FxHashMap<String, Uuid>,
     session_turn_to_uuid: FxHashMap<(String, usize), Uuid>,
-    events: VecDeque<ReplayEvent>,
+    events: VecDeque<CapturedReplayEvent>,
     /// Exactly one externally controlled request may have a policy-visible
     /// observation at a time. Clearing this after assignment forces the next
     /// same-time request to observe the scheduler state changed by its
@@ -267,7 +505,7 @@ pub(crate) struct InteractiveCapture {
 #[derive(Debug)]
 struct AnnouncedPlacementObservation {
     request_id: Uuid,
-    candidates: Vec<ReplayPlacementCandidate>,
+    candidates: Arc<Vec<ReplayPlacementCandidate>>,
 }
 
 impl InteractiveCapture {
@@ -279,7 +517,7 @@ impl InteractiveCapture {
         Self {
             external_placement,
             session_affinity,
-            eligible_pool_ids,
+            eligible_pool_ids: Arc::new(eligible_pool_ids),
             ..Self::default()
         }
     }
@@ -293,19 +531,20 @@ impl InteractiveCapture {
     }
 
     pub(crate) fn register(&mut self, identity: InteractiveRequestIdentity) -> anyhow::Result<()> {
-        if identity.logical_request_id.trim().is_empty() {
+        let metadata = &identity.metadata;
+        if metadata.logical_request_id.trim().is_empty() {
             anyhow::bail!("interactive replay logical_request_id must not be empty");
         }
         if self
             .logical_to_uuid
-            .contains_key(&identity.logical_request_id)
+            .contains_key(&metadata.logical_request_id)
         {
             anyhow::bail!(
                 "interactive replay duplicate logical_request_id {:?}",
-                identity.logical_request_id
+                metadata.logical_request_id
             );
         }
-        let session_turn = (identity.session_id.clone(), identity.authored_turn_index);
+        let session_turn = (metadata.session_id.clone(), metadata.authored_turn_index);
         if let Some(existing) = self.session_turn_to_uuid.get(&session_turn) {
             anyhow::bail!(
                 "interactive replay session {:?} authored turn {} conflicts with internal UUID {existing}",
@@ -313,17 +552,17 @@ impl InteractiveCapture {
                 session_turn.1
             );
         }
-        if self.identities.contains_key(&identity.internal_uuid) {
+        if self.identities.contains_key(&metadata.internal_uuid) {
             anyhow::bail!(
                 "interactive replay duplicate internal UUID {}",
-                identity.internal_uuid
+                metadata.internal_uuid
             );
         }
         self.logical_to_uuid
-            .insert(identity.logical_request_id.clone(), identity.internal_uuid);
+            .insert(metadata.logical_request_id.clone(), metadata.internal_uuid);
         self.session_turn_to_uuid
-            .insert(session_turn, identity.internal_uuid);
-        self.identities.insert(identity.internal_uuid, identity);
+            .insert(session_turn, metadata.internal_uuid);
+        self.identities.insert(metadata.internal_uuid, identity);
         Ok(())
     }
 
@@ -336,9 +575,12 @@ impl InteractiveCapture {
             self.announced_placement = None;
         }
         if let Some(identity) = self.identities.remove(&uuid) {
-            self.logical_to_uuid.remove(&identity.logical_request_id);
-            self.session_turn_to_uuid
-                .remove(&(identity.session_id, identity.authored_turn_index));
+            self.logical_to_uuid
+                .remove(&identity.metadata.logical_request_id);
+            self.session_turn_to_uuid.remove(&(
+                identity.metadata.session_id.clone(),
+                identity.metadata.authored_turn_index,
+            ));
         }
     }
 
@@ -355,35 +597,29 @@ impl InteractiveCapture {
         uuid: Uuid,
         timestamp_ms: f64,
         terminal: bool,
-    ) -> anyhow::Result<ReplayEventData> {
+    ) -> anyhow::Result<CapturedReplayEventData> {
         let identity = self.identities.get(&uuid).ok_or_else(|| {
             anyhow::anyhow!("interactive replay has no authored identity for request {uuid}")
         })?;
         let (pool_id, worker_id, dp_rank) = identity
             .worker
             .as_ref()
-            .map(|target| {
+            .map(|worker| {
                 (
-                    Some(target.pool_id.clone()),
-                    Some(target.worker_id),
-                    Some(target.dp_rank),
+                    Some(Arc::clone(&worker.pool_id)),
+                    Some(worker.worker_id),
+                    Some(worker.dp_rank),
                 )
             })
             .unwrap_or((None, None, None));
-        Ok(ReplayEventData {
-            logical_request_id: identity.logical_request_id.clone(),
-            attempt_id: identity.attempt_id.clone(),
-            group_id: identity.group_id.clone(),
-            internal_uuid: identity.internal_uuid,
-            session_id: identity.session_id.clone(),
-            authored_turn_index: identity.authored_turn_index,
+        Ok(CapturedReplayEventData {
+            metadata: Arc::clone(&identity.metadata),
             timestamp_ms,
             pool_id,
             worker_id,
             dp_rank,
             terminal_status: None,
-            input_length: identity.input_length,
-            requested_output_length: terminal.then_some(identity.requested_output_length),
+            requested_output_length: terminal.then_some(identity.metadata.requested_output_length),
             emitted_output_count: identity.emitted_output_count,
             reused_input_tokens: identity.reused_input_tokens,
             ttft_ms: identity
@@ -392,12 +628,8 @@ impl InteractiveCapture {
             e2e_latency_ms: identity
                 .terminal_ms
                 .map(|terminal| (terminal - identity.ready_at_ms.unwrap_or(terminal)).max(0.0)),
-            priority: identity.priority,
-            strict_priority: identity.strict_priority,
-            policy_class: identity.policy_class.clone(),
-            routing_constraints: identity.routing_constraints.clone(),
-            eligible_pool_ids: self.eligible_pool_ids.clone(),
-            candidates: Vec::new(),
+            eligible_pool_ids: Arc::clone(&self.eligible_pool_ids),
+            candidates: Arc::default(),
         })
     }
 
@@ -413,7 +645,11 @@ impl InteractiveCapture {
         let identity = self.identities.get_mut(&uuid).ok_or_else(|| {
             anyhow::anyhow!("interactive replay has no authored identity for request {uuid}")
         })?;
-        identity.worker = Some(target);
+        identity.worker = Some(InteractiveWorkerIdentity {
+            pool_id: Arc::from(target.pool_id),
+            worker_id: target.worker_id,
+            dp_rank: target.dp_rank,
+        });
         Ok(())
     }
 
@@ -423,17 +659,46 @@ impl InteractiveCapture {
         now_ms: f64,
         candidates: Vec<ReplayPlacementCandidate>,
     ) -> anyhow::Result<ReplayEvent> {
-        self.mark_placement_observed(uuid, candidates.clone());
+        let (event, retained_candidates) =
+            self.placement_needed_captured_event(uuid, now_ms, candidates)?;
+        let event = event.into_owned();
+        self.mark_shared_placement_observed(uuid, retained_candidates);
+        Ok(event)
+    }
+
+    pub(crate) fn placement_needed_captured_event(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+        candidates: Vec<ReplayPlacementCandidate>,
+    ) -> anyhow::Result<(CapturedReplayEvent, Arc<Vec<ReplayPlacementCandidate>>)> {
+        let candidates = Arc::new(candidates);
         let mut data = self.event_data(uuid, now_ms, false)?;
-        data.eligible_pool_ids = eligible_pool_ids(&candidates);
-        data.candidates = candidates;
-        Ok(ReplayEvent::PlacementNeeded(data))
+        data.eligible_pool_ids = Arc::new(eligible_pool_ids(&candidates));
+        data.candidates = Arc::clone(&candidates);
+        Ok((CapturedReplayEvent::PlacementNeeded(data), candidates))
     }
 
     pub(crate) fn mark_placement_observed(
         &mut self,
         uuid: Uuid,
         candidates: Vec<ReplayPlacementCandidate>,
+    ) {
+        self.mark_shared_placement_observed(uuid, Arc::new(candidates));
+    }
+
+    pub(crate) fn retain_captured_placement(
+        &mut self,
+        uuid: Uuid,
+        candidates: Arc<Vec<ReplayPlacementCandidate>>,
+    ) {
+        self.mark_shared_placement_observed(uuid, candidates);
+    }
+
+    fn mark_shared_placement_observed(
+        &mut self,
+        uuid: Uuid,
+        candidates: Arc<Vec<ReplayPlacementCandidate>>,
     ) {
         self.announced_placement = Some(AnnouncedPlacementObservation {
             request_id: uuid,
@@ -475,11 +740,12 @@ impl InteractiveCapture {
                 "interactive replay request {uuid} is not the current placement boundary"
             );
         }
-        Ok(self
+        let candidates = self
             .announced_placement
             .take()
             .expect("placement observation was validated before consumption")
-            .candidates)
+            .candidates;
+        Ok(Arc::unwrap_or_clone(candidates))
     }
 
     pub(crate) fn cancel_placement_observation(&mut self, uuid: Uuid) {
@@ -495,15 +761,15 @@ impl InteractiveCapture {
         candidates: Vec<ReplayPlacementCandidate>,
     ) -> anyhow::Result<()> {
         let mut data = self.event_data(uuid, now_ms, false)?;
-        data.eligible_pool_ids = eligible_pool_ids(&candidates);
-        data.candidates = candidates;
-        self.events.push_back(ReplayEvent::Routed(data));
+        data.eligible_pool_ids = Arc::new(eligible_pool_ids(&candidates));
+        data.candidates = Arc::new(candidates);
+        self.events.push_back(CapturedReplayEvent::Routed(data));
         Ok(())
     }
 
     pub(crate) fn emit_queued(&mut self, uuid: Uuid, now_ms: f64) -> anyhow::Result<()> {
         let data = self.event_data(uuid, now_ms, false)?;
-        self.events.push_back(ReplayEvent::Queued(data));
+        self.events.push_back(CapturedReplayEvent::Queued(data));
         Ok(())
     }
 
@@ -523,7 +789,7 @@ impl InteractiveCapture {
                 .max(reused_input_tokens),
         );
         let data = self.event_data(uuid, now_ms, false)?;
-        self.events.push_back(ReplayEvent::Admitted(data));
+        self.events.push_back(CapturedReplayEvent::Admitted(data));
         Ok(())
     }
 
@@ -537,7 +803,7 @@ impl InteractiveCapture {
         }
         identity.first_token_ms = Some(now_ms);
         let data = self.event_data(uuid, now_ms, false)?;
-        self.events.push_back(ReplayEvent::FirstToken(data));
+        self.events.push_back(CapturedReplayEvent::FirstToken(data));
         Ok(())
     }
 
@@ -555,11 +821,18 @@ impl InteractiveCapture {
         }
         let mut data = self.event_data(uuid, now_ms, true)?;
         data.terminal_status = Some(status);
-        self.events.push_back(ReplayEvent::Terminal(data));
+        self.events.push_back(CapturedReplayEvent::Terminal(data));
         Ok(())
     }
 
     pub(crate) fn drain_events(&mut self) -> Vec<ReplayEvent> {
+        self.drain_captured_events()
+            .into_iter()
+            .map(CapturedReplayEvent::into_owned)
+            .collect()
+    }
+
+    pub(crate) fn drain_captured_events(&mut self) -> Vec<CapturedReplayEvent> {
         self.events.drain(..).collect()
     }
 
@@ -568,19 +841,19 @@ impl InteractiveCapture {
             .filter_map(|uuid| {
                 let identity = self.identities.get(&uuid)?;
                 Some(ReplayPendingPlacement {
-                    logical_request_id: identity.logical_request_id.clone(),
-                    attempt_id: identity.attempt_id.clone(),
-                    group_id: identity.group_id.clone(),
+                    logical_request_id: identity.metadata.logical_request_id.clone(),
+                    attempt_id: identity.metadata.attempt_id.clone(),
+                    group_id: identity.metadata.group_id.clone(),
                     internal_uuid: uuid,
-                    session_id: identity.session_id.clone(),
-                    authored_turn_index: identity.authored_turn_index,
+                    session_id: identity.metadata.session_id.clone(),
+                    authored_turn_index: identity.metadata.authored_turn_index,
                     ready_at_ms: identity.ready_at_ms.unwrap_or_default(),
-                    input_length: identity.input_length,
-                    priority: identity.priority,
-                    strict_priority: identity.strict_priority,
-                    policy_class: identity.policy_class.clone(),
-                    routing_constraints: identity.routing_constraints.clone(),
-                    eligible_pool_ids: self.eligible_pool_ids.clone(),
+                    input_length: identity.metadata.input_length,
+                    priority: identity.metadata.priority,
+                    strict_priority: identity.metadata.strict_priority,
+                    policy_class: identity.metadata.policy_class.clone(),
+                    routing_constraints: identity.metadata.routing_constraints.clone(),
+                    eligible_pool_ids: self.eligible_pool_ids.as_ref().clone(),
                     candidates: Vec::new(),
                 })
             })
@@ -1424,6 +1697,175 @@ mod tests {
             })
             .max()
             .unwrap_or_else(|| panic!("missing admitted event for {logical_id}"))
+    }
+
+    fn captured_variant(data: CapturedReplayEventData, ordinal: usize) -> CapturedReplayEvent {
+        match ordinal {
+            0 => CapturedReplayEvent::PlacementNeeded(data),
+            1 => CapturedReplayEvent::Routed(data),
+            2 => CapturedReplayEvent::Queued(data),
+            3 => CapturedReplayEvent::Admitted(data),
+            4 => CapturedReplayEvent::FirstToken(data),
+            5 => CapturedReplayEvent::Terminal(data),
+            _ => unreachable!("six replay event variants"),
+        }
+    }
+
+    fn owned_variant(data: ReplayEventData, ordinal: usize) -> ReplayEvent {
+        match ordinal {
+            0 => ReplayEvent::PlacementNeeded(data),
+            1 => ReplayEvent::Routed(data),
+            2 => ReplayEvent::Queued(data),
+            3 => ReplayEvent::Admitted(data),
+            4 => ReplayEvent::FirstToken(data),
+            5 => ReplayEvent::Terminal(data),
+            _ => unreachable!("six replay event variants"),
+        }
+    }
+
+    #[test]
+    fn captured_all_event_schema_matches_owned_and_is_mutation_isolated() -> Result<()> {
+        let uuid = Uuid::from_u128(0x5151);
+        let metadata = Arc::new(InteractiveRequestMetadata {
+            logical_request_id: "request-captured".to_string(),
+            attempt_id: "attempt-captured".to_string(),
+            group_id: "group-captured".to_string(),
+            internal_uuid: uuid,
+            session_id: "session-captured".to_string(),
+            authored_turn_index: 7,
+            input_length: 16,
+            requested_output_length: 8,
+            priority: -2,
+            strict_priority: 3,
+            policy_class: Some("latency".to_string()),
+            routing_constraints: ReplayRoutingConstraints {
+                required_taints: vec!["trusted".to_string()],
+                preferred_taints: [("fast".to_string(), 1.25)].into(),
+            },
+        });
+        let candidate = ReplayPlacementCandidate {
+            target: WorkerTarget::new("pool-a", 7, 2),
+            active: true,
+            draining: false,
+            eligible: true,
+            constraint_reason: None,
+            in_flight_requests: 4,
+            queued_requests: Some(5),
+            running_requests: Some(6),
+            queued_tokens: Some(7),
+            running_tokens: Some(8),
+            max_num_seqs: Some(9),
+            preemption_count: Some(10),
+            kv_prefix_overlap_tokens: Some(11),
+            kv_capacity_blocks: Some(12),
+            kv_occupied_blocks: Some(13),
+            kv_free_blocks: Some(14),
+            tags: vec!["primary".to_string()],
+            taints: vec!["trusted".to_string()],
+            capabilities: vec!["chat".to_string()],
+        };
+        let captured_data = CapturedReplayEventData {
+            metadata,
+            timestamp_ms: 12.5,
+            pool_id: Some(Arc::from("pool-a")),
+            worker_id: Some(7),
+            dp_rank: Some(2),
+            terminal_status: Some(ReplayTerminalStatus::Completed),
+            requested_output_length: Some(8),
+            emitted_output_count: 8,
+            reused_input_tokens: Some(4),
+            ttft_ms: Some(1.5),
+            e2e_latency_ms: Some(2.5),
+            eligible_pool_ids: Arc::new(vec!["pool-a".to_string()]),
+            candidates: Arc::new(vec![candidate]),
+        };
+
+        for ordinal in 0..6 {
+            let captured = captured_variant(captured_data.clone(), ordinal);
+            let owned = owned_variant(captured.clone().into_data().into_owned(), ordinal);
+            assert_eq!(captured.event_type(), owned.event_type());
+            assert_eq!(
+                serde_json::to_value(&captured)?,
+                serde_json::to_value(&owned)?,
+                "captured variant {ordinal} changed the public schema"
+            );
+        }
+
+        let captured = CapturedReplayEvent::PlacementNeeded(captured_data);
+        let mut first = captured.clone().into_owned();
+        let second = captured.into_owned();
+        let ReplayEvent::PlacementNeeded(first_data) = &mut first else {
+            unreachable!()
+        };
+        first_data.logical_request_id.push_str("-mutated");
+        first_data.routing_constraints.required_taints.clear();
+        first_data.eligible_pool_ids.clear();
+        first_data.candidates[0].tags.clear();
+        let ReplayEvent::PlacementNeeded(second_data) = second else {
+            unreachable!()
+        };
+        assert_eq!(second_data.logical_request_id, "request-captured");
+        assert_eq!(second_data.routing_constraints.required_taints, ["trusted"]);
+        assert_eq!(second_data.eligible_pool_ids, ["pool-a"]);
+        assert_eq!(second_data.candidates[0].tags, ["primary"]);
+        Ok(())
+    }
+
+    #[test]
+    fn placement_public_drain_does_not_retain_event_candidate_clone() -> Result<()> {
+        let uuid = Uuid::from_u128(0x6161);
+        let mut capture = InteractiveCapture::new(true, false, vec!["pool-a".to_string()]);
+        capture.register(InteractiveRequestIdentity {
+            metadata: Arc::new(InteractiveRequestMetadata {
+                logical_request_id: "placement-unwrapped".to_string(),
+                attempt_id: "attempt-unwrapped".to_string(),
+                group_id: "group-unwrapped".to_string(),
+                internal_uuid: uuid,
+                session_id: "session-unwrapped".to_string(),
+                authored_turn_index: 0,
+                input_length: 4,
+                requested_output_length: 1,
+                priority: 0,
+                strict_priority: 0,
+                policy_class: None,
+                routing_constraints: ReplayRoutingConstraints::default(),
+            }),
+            ready_at_ms: Some(0.0),
+            worker: None,
+            emitted_output_count: 0,
+            reused_input_tokens: None,
+            first_token_ms: None,
+            terminal_ms: None,
+        })?;
+        let candidate = ReplayPlacementCandidate {
+            target: WorkerTarget::new("pool-a", 0, 0),
+            active: true,
+            draining: false,
+            eligible: true,
+            constraint_reason: None,
+            in_flight_requests: 0,
+            queued_requests: Some(0),
+            running_requests: Some(0),
+            queued_tokens: Some(0),
+            running_tokens: Some(0),
+            max_num_seqs: Some(1),
+            preemption_count: Some(0),
+            kv_prefix_overlap_tokens: Some(0),
+            kv_capacity_blocks: Some(8),
+            kv_occupied_blocks: Some(0),
+            kv_free_blocks: Some(8),
+            tags: vec!["stable".to_string()],
+            taints: Vec::new(),
+            capabilities: Vec::new(),
+        };
+        let event = capture.placement_needed_event(uuid, 0.0, vec![candidate])?;
+        let ReplayEvent::PlacementNeeded(data) = event else {
+            unreachable!()
+        };
+        assert_eq!(data.candidates[0].tags, ["stable"]);
+        let candidates = capture.complete_placement_assignment(uuid)?;
+        assert_eq!(candidates[0].tags, ["stable"]);
+        Ok(())
     }
 
     fn settle_empty_open(session: &mut OfflineReplaySession) -> Result<ReplayStepStatus> {
@@ -3556,18 +3998,20 @@ impl OfflineReplaySession {
                 preassignments.push((uuid, target, authored.request.routing_constraints.clone()));
             }
             identities.push(InteractiveRequestIdentity {
-                logical_request_id: authored.request.logical_request_id.clone(),
-                attempt_id: authored.request.attempt_id.clone(),
-                group_id: authored.request.group_id.clone(),
-                internal_uuid: uuid,
-                session_id: authored.request.session_id.clone(),
-                authored_turn_index: authored.request.authored_turn_index,
-                input_length: authored.request.input_length,
-                requested_output_length: authored.request.output_length,
-                priority: authored.request.priority,
-                strict_priority: authored.request.strict_priority,
-                policy_class: authored.request.policy_class.clone(),
-                routing_constraints: authored.request.routing_constraints.clone(),
+                metadata: Arc::new(InteractiveRequestMetadata {
+                    logical_request_id: authored.request.logical_request_id.clone(),
+                    attempt_id: authored.request.attempt_id.clone(),
+                    group_id: authored.request.group_id.clone(),
+                    internal_uuid: uuid,
+                    session_id: authored.request.session_id.clone(),
+                    authored_turn_index: authored.request.authored_turn_index,
+                    input_length: authored.request.input_length,
+                    requested_output_length: authored.request.output_length,
+                    priority: authored.request.priority,
+                    strict_priority: authored.request.strict_priority,
+                    policy_class: authored.request.policy_class.clone(),
+                    routing_constraints: authored.request.routing_constraints.clone(),
+                }),
                 ready_at_ms: None,
                 worker: None,
                 emitted_output_count: 0,
@@ -3604,7 +4048,7 @@ impl OfflineReplaySession {
 
         let mut registered_uuids = Vec::with_capacity(identities.len());
         for identity in identities {
-            let uuid = identity.internal_uuid;
+            let uuid = identity.metadata.internal_uuid;
             if let Err(error) = self.runtime_mut()?.register_identity(identity) {
                 for uuid in &registered_uuids {
                     self.runtime_mut()?.unregister_identity(*uuid);
