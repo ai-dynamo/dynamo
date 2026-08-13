@@ -232,7 +232,7 @@ func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
 				want += "-" + hash
 			}
 
-			got, err := GetGroveRuntimeNamespace(dgd, component)
+			got, err := GetGroveRuntimeNamespace(dgd, component, true)
 			if err != nil {
 				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 			}
@@ -240,6 +240,51 @@ func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
 				t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilReady(t *testing.T) {
+	t.Log("Build a suffixed worker with a namespace from the active generation")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "grove",
+			Namespace: "k8s",
+			Annotations: map[string]string{
+				commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: commonconsts.ComponentTypeWorker,
+			}},
+		},
+	}
+	dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
+		"worker": {RuntimeNamespace: "active-worker-namespace"},
+	}
+	component := dgd.GetComponentByName("worker")
+
+	t.Log("Keep the active namespace while the current worker generation is unready")
+	got, err := GetGroveRuntimeNamespace(dgd, component, false)
+	if err != nil {
+		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
+	}
+	if got != "active-worker-namespace" {
+		t.Fatalf("GetGroveRuntimeNamespace() = %q, want active worker namespace", got)
+	}
+
+	t.Log("Publish the desired namespace once the current worker generation is ready")
+	want, err := getDesiredGroveRuntimeNamespace(dgd, component)
+	if err != nil {
+		t.Fatalf("getDesiredGroveRuntimeNamespace() error = %v", err)
+	}
+	got, err = GetGroveRuntimeNamespace(dgd, component, true)
+	if err != nil {
+		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, want)
 	}
 }
 

@@ -183,7 +183,7 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 		if checkErr != nil {
 			return false, "", "", nil, fmt.Errorf("component %q: %w", componentName, checkErr)
 		}
-		runtimeNamespace, err := GetGroveRuntimeNamespace(dgd, component)
+		runtimeNamespace, err := GetGroveRuntimeNamespace(dgd, component, ok)
 		if err != nil {
 			return false, "", "", nil, fmt.Errorf("component %q runtime namespace: %w", componentName, err)
 		}

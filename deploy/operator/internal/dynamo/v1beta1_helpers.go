@@ -301,19 +301,40 @@ func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 	)
 }
 
-// GetGroveRuntimeNamespace returns the effective runtime namespace for a Grove
-// component. Grove uses the same canonical worker hash as its rendered pod
-// template once suffixing has been enabled.
+// GetGroveRuntimeNamespace returns the runtime namespace published for a Grove
+// component. A worker keeps its previously published namespace until Grove has
+// reported the current generation ready.
 func GetGroveRuntimeNamespace(
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	currentGenerationReady bool,
 ) (string, error) {
 	if dgd == nil || component == nil {
 		return "", nil
 	}
+
+	desiredNamespace, err := getDesiredGroveRuntimeNamespace(dgd, component)
+	if err != nil {
+		return "", err
+	}
+
+	// Keep routing consumers on the active worker namespace during a rollout.
+	if !currentGenerationReady && IsWorkerComponent(string(component.ComponentType)) {
+		if previousNamespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace; previousNamespace != "" {
+			return previousNamespace, nil
+		}
+	}
+
+	return desiredNamespace, nil
+}
+
+func getDesiredGroveRuntimeNamespace(
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) (string, error) {
 	namespace := dgd.GetDynamoNamespaceForComponent(component)
 	if !IsWorkerComponent(string(component.ComponentType)) ||
-		dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != "true" {
+		dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != commonconsts.KubeLabelValueTrue {
 		return namespace, nil
 	}
 	workerHash, err := ComputeDGDWorkersSpecHash(dgd)

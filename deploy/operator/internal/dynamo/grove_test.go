@@ -1384,7 +1384,7 @@ func TestEvaluateGroveReadinessRetainsPreviousWorkerRuntimeNamespaceUntilReady(t
 				},
 			}
 			component := dgd.GetComponentByName("prefill")
-			desiredNamespace, err := GetGroveRuntimeNamespace(dgd, component)
+			desiredNamespace, err := GetGroveRuntimeNamespace(dgd, component, true)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			t.Log("Record the namespace published by the previous worker generation.")
