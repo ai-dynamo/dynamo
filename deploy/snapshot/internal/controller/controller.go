@@ -590,6 +590,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		TargetPodIP:                 pod.Status.PodIP,
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
+		PageBrokerRequested:         pod.Annotations[snapshotprotocol.PageBrokerAnnotation] == snapshotprotocol.PageBrokerAnnotationEnabled,
+		PageBrokerEnabled:           w.config.PageBroker.Enabled,
+		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 	}
 	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req, w.injector)
 	if err != nil {

@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -40,6 +42,9 @@ type RestoreRequest struct {
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
+	PageBrokerRequested         bool
+	PageBrokerEnabled           bool
+	PageBrokerControlSocketPath string
 }
 
 // Restore performs external restore for the given request.
@@ -58,6 +63,26 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"namespace", req.PodNamespace,
 		"container", req.ContainerName,
 	)
+	transactionID := ""
+	var broker pagebroker.Client
+	committed := false
+	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
+	if brokered {
+		transactionID = uuid.NewString()
+		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
+		defer func() {
+			if !committed {
+				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+				defer cancel()
+				_ = broker.Abort(abortCtx, transactionID)
+			}
+		}()
+		staged, err := broker.StagedRestore(ctx, transactionID, req.CheckpointLocation)
+		if err != nil {
+			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
+		}
+		req.CheckpointLocation = staged
+	}
 
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map.
 	hostInspectStart := time.Now()
@@ -86,10 +111,35 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		}
 	}()
 
+	var mountedStaging nsmount.MountPoint
+	if brokered {
+		stagingMounter, err := nsmount.New(req.CheckpointLocation, nsmount.PageBrokerDst, log)
+		if err != nil {
+			return 0, fmt.Errorf("create PageBroker staging mount: %w", err)
+		}
+		mountedStaging, err = stagingMounter.Mount(ctx, snap.PlaceholderPID)
+		if err != nil {
+			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
+		}
+		req.ContainerCheckpointLocation = nsmount.PageBrokerDst
+	}
+
 	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
 	result, err := execNSRestore(ctx, log, req, snap, mp)
+	if mountedStaging != nil {
+		if cleanupErr := mountedStaging.Unmount(context.Background()); cleanupErr != nil {
+			log.Error(cleanupErr, "failed to unmount PageBroker staging from placeholder namespace")
+		}
+	}
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
+	}
+	if brokered {
+		if err := broker.Commit(ctx, transactionID); err != nil {
+			log.Error(err, "failed to commit PageBroker restore")
+		} else {
+			committed = true
+		}
 	}
 	restoreDuration := hostInspectDuration + injectDuration + result.TotalDuration()
 	log.Info("Restore timing summary",
