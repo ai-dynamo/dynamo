@@ -1137,9 +1137,7 @@ impl SelectionCore {
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(SelectionError::NotFound(format!(
-            "reservation {selection_id} not found"
-        )))
+        Ok(())
     }
 
     pub fn add_output_block(
@@ -1648,6 +1646,31 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn reservation_release_remains_idempotent_after_worker_removal() {
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("removed-worker-reservation"))
+            .await
+            .expect("reservation");
+
+        core.delete_worker(1).await.expect("worker removal");
+        core.free_reservation("removed-worker-reservation")
+            .await
+            .expect("release after worker removal");
+        core.free_reservation("removed-worker-reservation")
+            .await
+            .expect("repeated release");
+        core.abort_reservation("unknown-reservation")
+            .await
+            .expect("unknown abort remains idempotent");
     }
 
     #[tokio::test]
