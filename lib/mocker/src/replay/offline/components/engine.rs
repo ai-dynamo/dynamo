@@ -597,6 +597,7 @@ where
 
     /// Stable IDs of every currently provisioned logical worker, including
     /// active, starting, draining, and static-inactive workers.
+    #[cfg(test)]
     pub(in crate::replay::offline) fn provisioned_group_ids(
         &self,
     ) -> impl Iterator<Item = usize> + '_ {

@@ -587,6 +587,7 @@ where
                     worker.target.dp_rank,
                     worker.lifecycle_status(),
                     gpus_per_worker,
+                    0.0,
                 )
             })
             .collect();
@@ -1949,27 +1950,13 @@ where
                 panic!("offline replay worker {engine_worker_id} has no accounting handle")
             });
         self.collector
-            .set_decode_worker_lifecycle_status(handle, lifecycle_status);
+            .set_decode_worker_lifecycle_status(handle, lifecycle_status, self.now_ms);
     }
 
-    /// Advance the sim clock to `new_now_ms`, integrating provisioned
-    /// worker-seconds over the interval just elapsed. Provisioned workers are
-    /// active + starting-up + draining + static-inactive, so this captures the
-    /// startup ramp, drain tail, and intentionally unavailable static capacity.
-    /// Aggregated replay has no separate prefill role.
+    /// Advance the sim clock to `new_now_ms`. Provisioned worker time is
+    /// accounted at lifecycle boundaries and final settlement rather than on
+    /// every timestamp.
     fn advance_now_ms(&mut self, new_now_ms: f64) {
-        let dt_ms = (new_now_ms - self.now_ms).max(0.0);
-        if dt_ms > 0.0 {
-            let worker_seconds = dt_ms / 1000.0;
-            let handles = &self.decode_worker_accounting_handles;
-            let collector = &mut self.collector;
-            for engine_worker_id in self.engine.provisioned_group_ids() {
-                let handle = handles.get(engine_worker_id).copied().unwrap_or_else(|| {
-                    panic!("offline replay worker {engine_worker_id} has no accounting handle")
-                });
-                collector.add_decode_worker_seconds(handle, worker_seconds);
-            }
-        }
         self.now_ms = new_now_ms;
     }
 
@@ -2028,6 +2015,7 @@ where
                     ReplayWorkerLifecycleStatus::Active
                 },
                 self.decode_gpus_per_worker,
+                self.now_ms,
             );
             anyhow::ensure!(
                 id == self.decode_worker_accounting_handles.len(),
@@ -2455,9 +2443,10 @@ where
     }
 
     pub(in crate::replay::offline) fn finish_interactive(
-        self,
+        mut self,
     ) -> crate::replay::TraceSimulationReport {
         self.progress.finish();
+        self.collector.settle_decode_workers(self.now_ms);
         self.collector.finish()
     }
 
@@ -2509,8 +2498,9 @@ where
 
     /// Finalize the replay and return the simulation report directly.
     #[cfg(test)]
-    fn finalize_report(self) -> crate::replay::TraceSimulationReport {
+    fn finalize_report(mut self) -> crate::replay::TraceSimulationReport {
         self.progress.finish();
+        self.collector.settle_decode_workers(self.now_ms);
         self.collector.finish()
     }
 
@@ -2543,6 +2533,7 @@ where
         }
 
         self.progress.finish();
+        self.collector.settle_decode_workers(self.now_ms);
         Ok((self.collector, self.stats))
     }
 

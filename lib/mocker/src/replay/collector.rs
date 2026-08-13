@@ -931,10 +931,10 @@ pub(crate) struct TraceCollector {
     /// SLA thresholds for goodput classification. All-`None` by default, in
     /// which case `finish()` leaves `TraceSimulationReport::goodput` as `None`.
     sla: SlaThresholds,
-    /// Accumulated provisioned worker-seconds per role, integrated by the
-    /// runtime over the sim clock (see `add_worker_seconds`). Used for the
-    /// runtimes that have an event loop (agg / disagg), where the provisioned
-    /// count varies with startup / drain / scaling.
+    /// Accumulated provisioned worker-seconds per role. Disaggregated replay
+    /// integrates both role counts as its clock advances (see
+    /// `add_worker_seconds`); aggregated replay settles the lifecycle spans in
+    /// `worker_accounting_states` into the decode total.
     prefill_worker_seconds: f64,
     decode_worker_seconds: f64,
     /// Static provisioned worker counts `(prefill, decode)` for runtimes with a
@@ -948,16 +948,16 @@ pub(crate) struct TraceCollector {
     decode_gpus_per_worker: usize,
     /// Registered static/dynamic aggregated workers keyed by authored identity.
     /// The `BTreeMap` is used only for registration and deterministic final
-    /// ordering. Runtime accrual and lifecycle updates use the stable handles
-    /// stored in `worker_accounting_states`, avoiding identity allocation and
-    /// tree lookup at every simulated timestamp.
+    /// ordering. Lifecycle updates use the stable handles stored in
+    /// `worker_accounting_states`, avoiding identity allocation and tree
+    /// lookup in the replay loop.
     worker_accounting: BTreeMap<TraceWorkerAccountingKey, DecodeWorkerAccountingHandle>,
     worker_accounting_states: Vec<Option<TraceWorkerAccountingState>>,
 }
 
 /// Stable, opaque index into one collector's aggregated-worker accounting
-/// arena. Handles are append-only and never reused, matching replay engine
-/// worker IDs across scale-down tombstones and later scale-up.
+/// arena. Arena slots are append-only and never recycled. Re-registering one
+/// authored identity reopens its existing slot without erasing prior time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DecodeWorkerAccountingHandle(usize);
 
@@ -972,7 +972,55 @@ struct TraceWorkerAccountingKey {
 struct TraceWorkerAccountingState {
     lifecycle_status: ReplayWorkerLifecycleStatus,
     worker_seconds: f64,
+    /// Start of the currently open provisioned span. Every lifecycle state
+    /// except `Removed` is billable, so transitions among starting, active,
+    /// static-inactive, and draining leave this span open.
+    provisioned_since_ms: Option<f64>,
     gpus_per_worker: usize,
+}
+
+impl TraceWorkerAccountingState {
+    fn is_provisioned(status: ReplayWorkerLifecycleStatus) -> bool {
+        status != ReplayWorkerLifecycleStatus::Removed
+    }
+
+    /// Settle an open provisioned span through `now_ms`, leaving it open at
+    /// that timestamp so finalization can be repeated safely.
+    fn settle_provisioned_span(&mut self, now_ms: f64) -> f64 {
+        let Some(since_ms) = self.provisioned_since_ms else {
+            return 0.0;
+        };
+        debug_assert!(
+            now_ms >= since_ms,
+            "decode-worker accounting clock moved backward: {now_ms} < {since_ms}"
+        );
+        let worker_seconds = (now_ms - since_ms).max(0.0) / 1000.0;
+        self.worker_seconds += worker_seconds;
+        self.provisioned_since_ms = Some(now_ms.max(since_ms));
+        worker_seconds
+    }
+
+    /// Apply a lifecycle transition and return newly settled worker-seconds.
+    fn transition_to(&mut self, lifecycle_status: ReplayWorkerLifecycleStatus, now_ms: f64) -> f64 {
+        let was_provisioned = Self::is_provisioned(self.lifecycle_status);
+        let will_be_provisioned = Self::is_provisioned(lifecycle_status);
+        debug_assert_eq!(was_provisioned, self.provisioned_since_ms.is_some());
+
+        let settled = match (was_provisioned, will_be_provisioned) {
+            (true, false) => {
+                let settled = self.settle_provisioned_span(now_ms);
+                self.provisioned_since_ms = None;
+                settled
+            }
+            (false, true) => {
+                self.provisioned_since_ms = Some(now_ms);
+                0.0
+            }
+            _ => 0.0,
+        };
+        self.lifecycle_status = lifecycle_status;
+        settled
+    }
 }
 
 impl TraceRequestStats {
@@ -1073,13 +1121,12 @@ impl TraceCollector {
         self.sla = sla;
     }
 
-    /// Add provisioned worker-seconds for the interval just elapsed. The runtime
-    /// calls this each time it advances the sim clock, with
+    /// Add provisioned worker-seconds for the interval just elapsed. The
+    /// disaggregated runtime calls this each time it advances the sim clock, with
     /// `provisioned_count × dt_ms / 1000` per role — the time-integral of the
     /// *provisioned* worker count (active + starting-up + draining +
     /// static-inactive), so the startup ramp, drain tail, and unavailable
-    /// static capacity are included. Agg replay passes `prefill = 0` and
-    /// reports through `decode`.
+    /// static capacity are included.
     pub(crate) fn add_worker_seconds(&mut self, prefill: f64, decode: f64) {
         self.prefill_worker_seconds += prefill;
         self.decode_worker_seconds += decode;
@@ -1113,6 +1160,7 @@ impl TraceCollector {
         dp_rank: usize,
         lifecycle_status: ReplayWorkerLifecycleStatus,
         gpus_per_worker: usize,
+        now_ms: f64,
     ) -> DecodeWorkerAccountingHandle {
         let key = TraceWorkerAccountingKey {
             pool_id,
@@ -1123,8 +1171,9 @@ impl TraceCollector {
             let state = self.worker_accounting_states[handle.0]
                 .as_mut()
                 .expect("registered decode worker accounting handle must remain live");
-            state.lifecycle_status = lifecycle_status;
+            let settled = state.transition_to(lifecycle_status, now_ms);
             state.gpus_per_worker = gpus_per_worker;
+            self.decode_worker_seconds += settled;
             return handle;
         }
 
@@ -1133,6 +1182,8 @@ impl TraceCollector {
             .push(Some(TraceWorkerAccountingState {
                 lifecycle_status,
                 worker_seconds: 0.0,
+                provisioned_since_ms: TraceWorkerAccountingState::is_provisioned(lifecycle_status)
+                    .then_some(now_ms),
                 gpus_per_worker,
             }));
         self.worker_accounting.insert(key, handle);
@@ -1143,6 +1194,7 @@ impl TraceCollector {
         &mut self,
         handle: DecodeWorkerAccountingHandle,
         lifecycle_status: ReplayWorkerLifecycleStatus,
+        now_ms: f64,
     ) {
         let state = self
             .worker_accounting_states
@@ -1151,24 +1203,21 @@ impl TraceCollector {
             .unwrap_or_else(|| {
                 panic!("offline replay updated lifecycle through invalid {handle:?}")
             });
-        state.lifecycle_status = lifecycle_status;
+        let settled = state.transition_to(lifecycle_status, now_ms);
+        self.decode_worker_seconds += settled;
     }
 
-    /// Accrue billed time for one provisioned aggregated worker. This updates
-    /// both the per-worker ledger and the legacy aggregate decode total so the
-    /// final reconciliation has a single accounting source.
-    pub(crate) fn add_decode_worker_seconds(
-        &mut self,
-        handle: DecodeWorkerAccountingHandle,
-        worker_seconds: f64,
-    ) {
-        let state = self
+    /// Settle every currently provisioned aggregated worker through `now_ms`.
+    /// Lifecycle transitions close removed workers eagerly; this final sweep is
+    /// therefore O(workers) once per replay rather than O(timestamps * workers).
+    pub(crate) fn settle_decode_workers(&mut self, now_ms: f64) {
+        let settled = self
             .worker_accounting_states
-            .get_mut(handle.0)
-            .and_then(Option::as_mut)
-            .unwrap_or_else(|| panic!("offline replay accrued time through invalid {handle:?}"));
-        state.worker_seconds += worker_seconds;
-        self.decode_worker_seconds += worker_seconds;
+            .iter_mut()
+            .filter_map(Option::as_mut)
+            .map(|state| state.settle_provisioned_span(now_ms))
+            .sum::<f64>();
+        self.decode_worker_seconds += settled;
     }
 
     pub(crate) fn on_arrival(
@@ -2089,7 +2138,8 @@ impl TraceCollector {
 
         let duration_s = (duration_ms / 1000.0).max(1e-9);
         // Provisioned worker-seconds: static count × duration for the
-        // single-worker path, else the runtime-integrated accumulator.
+        // single-worker path, else the runtime accumulator (including settled
+        // aggregated-worker lifecycle spans).
         let (prefill_worker_seconds, decode_worker_seconds) = match static_worker_count {
             Some((prefill, decode)) => (prefill as f64 * duration_s, decode as f64 * duration_s),
             None => (
@@ -2875,27 +2925,131 @@ mod tests {
     }
 
     #[test]
+    fn decode_worker_lifecycle_span_excludes_removed_gap_and_reopens() {
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(0, 2);
+        let handle = collector.register_decode_worker(
+            "pool-a".to_string(),
+            3,
+            0,
+            ReplayWorkerLifecycleStatus::Starting,
+            2,
+            1000.0,
+        );
+
+        // Starting -> active -> draining is one continuous provisioned span.
+        collector.set_decode_worker_lifecycle_status(
+            handle,
+            ReplayWorkerLifecycleStatus::Active,
+            2000.0,
+        );
+        collector.set_decode_worker_lifecycle_status(
+            handle,
+            ReplayWorkerLifecycleStatus::Draining,
+            3000.0,
+        );
+        collector.set_decode_worker_lifecycle_status(
+            handle,
+            ReplayWorkerLifecycleStatus::Removed,
+            4000.0,
+        );
+        collector.settle_decode_workers(6000.0);
+
+        // Re-registering the authored identity reopens the same ledger after a
+        // removed gap without erasing its first three worker-seconds.
+        let reopened = collector.register_decode_worker(
+            "pool-a".to_string(),
+            3,
+            0,
+            ReplayWorkerLifecycleStatus::Active,
+            2,
+            7000.0,
+        );
+        assert_eq!(reopened, handle);
+        collector.settle_decode_workers(9000.0);
+
+        let report = collector.finish();
+        assert_eq!(report.throughput.decode_worker_seconds, 5.0);
+        assert_eq!(report.throughput.gpu_hours, 10.0 / 3600.0);
+        let accounting = report.topology_accounting.unwrap();
+        assert_eq!(accounting.workers[0].worker_seconds, 5.0);
+        assert_eq!(
+            accounting.workers[0].lifecycle_status,
+            ReplayWorkerLifecycleStatus::Active
+        );
+        assert!(accounting.reconciliation.all_reconciled());
+    }
+
+    #[test]
+    fn decode_worker_spans_close_at_startup_cancellation_and_drained_removal() {
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(0, 1);
+        let cancelled = collector.register_decode_worker(
+            "pool-a".to_string(),
+            1,
+            0,
+            ReplayWorkerLifecycleStatus::Starting,
+            1,
+            100.0,
+        );
+        collector.set_decode_worker_lifecycle_status(
+            cancelled,
+            ReplayWorkerLifecycleStatus::Removed,
+            350.0,
+        );
+
+        let drained = collector.register_decode_worker(
+            "pool-a".to_string(),
+            2,
+            0,
+            ReplayWorkerLifecycleStatus::Active,
+            1,
+            1000.0,
+        );
+        collector.set_decode_worker_lifecycle_status(
+            drained,
+            ReplayWorkerLifecycleStatus::Draining,
+            1250.0,
+        );
+        collector.set_decode_worker_lifecycle_status(
+            drained,
+            ReplayWorkerLifecycleStatus::Removed,
+            1750.0,
+        );
+        collector.settle_decode_workers(5000.0);
+
+        let report = collector.finish();
+        let accounting = report.topology_accounting.unwrap();
+        assert_eq!(report.throughput.decode_worker_seconds, 1.0);
+        assert_eq!(accounting.workers[0].worker_seconds, 0.25);
+        assert_eq!(accounting.workers[1].worker_seconds, 0.75);
+        assert!(accounting.workers.iter().all(|worker| !worker.provisioned));
+        assert!(accounting.reconciliation.all_reconciled());
+    }
+
+    #[test]
     fn topology_accounting_is_deterministic_and_reconciles_static_inactive_time() {
         let mut collector = TraceCollector::default();
         collector.set_gpus_per_worker(0, 4);
         // Register out of order to prove report ordering comes from authored
         // identity rather than constructor order.
-        let pool_b = collector.register_decode_worker(
+        collector.register_decode_worker(
             "pool-b".to_string(),
             7,
             0,
             ReplayWorkerLifecycleStatus::StaticInactive,
             4,
+            0.0,
         );
-        let pool_a = collector.register_decode_worker(
+        collector.register_decode_worker(
             "pool-a".to_string(),
             3,
             0,
             ReplayWorkerLifecycleStatus::Active,
             4,
+            0.0,
         );
-        collector.add_decode_worker_seconds(pool_a, 2.0);
-        collector.add_decode_worker_seconds(pool_b, 2.0);
+        collector.settle_decode_workers(2000.0);
 
         let completed = Uuid::from_u128(401);
         collector.on_arrival(completed, 0.0, 8, 1);
@@ -2923,6 +3077,8 @@ mod tests {
 
         let report = collector.finish();
         let accounting = report.topology_accounting.as_ref().unwrap();
+        assert_eq!(report.throughput.decode_worker_seconds, 4.0);
+        assert_eq!(report.throughput.gpu_hours, 16.0 / 3600.0);
         assert_eq!(
             accounting
                 .workers
@@ -2965,6 +3121,43 @@ mod tests {
         );
         assert!(accounting.workers[1].provisioned);
         assert_eq!(accounting.workers[1].worker_seconds, 2.0);
+        assert_eq!(accounting.workers[0].worker_seconds, 2.0);
+        assert_eq!(accounting.pools[0].worker_seconds, 2.0);
+        assert_eq!(accounting.pools[1].worker_seconds, 2.0);
+        assert_eq!(accounting.global.worker_seconds, 4.0);
+        assert_eq!(accounting.global.gpu_hours, 16.0 / 3600.0);
+        assert_eq!(
+            accounting
+                .workers
+                .iter()
+                .map(|worker| worker.worker_seconds)
+                .sum::<f64>(),
+            report.throughput.decode_worker_seconds
+        );
+        assert_eq!(
+            accounting
+                .pools
+                .iter()
+                .map(|pool| pool.worker_seconds)
+                .sum::<f64>(),
+            report.throughput.decode_worker_seconds
+        );
+        assert_eq!(
+            accounting
+                .workers
+                .iter()
+                .map(|worker| worker.gpu_hours)
+                .sum::<f64>(),
+            report.throughput.gpu_hours
+        );
+        assert_eq!(
+            accounting
+                .pools
+                .iter()
+                .map(|pool| pool.gpu_hours)
+                .sum::<f64>(),
+            report.throughput.gpu_hours
+        );
         assert_eq!(accounting.pools[1].static_inactive_workers, 1);
         assert_eq!(accounting.pools[1].provisioned_workers, 1);
         assert_eq!(
