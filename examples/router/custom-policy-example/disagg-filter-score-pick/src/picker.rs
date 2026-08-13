@@ -45,3 +45,27 @@ impl WorkerPicker for DecodePicker {
         lowest_cost_row(input)
     }
 }
+
+/// Rejects worker-pool roles that this disaggregated example does not support.
+pub(crate) struct UnsupportedWorkerTypePicker {
+    worker_type: &'static str,
+}
+
+impl UnsupportedWorkerTypePicker {
+    pub(crate) fn new(worker_type: &'static str) -> Self {
+        Self { worker_type }
+    }
+}
+
+impl WorkerPicker for UnsupportedWorkerTypePicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        Err(WorkerSelectionPolicyError::failed(format!(
+            "disagg-filter-score-pick does not support worker type {:?}; expected prefill or decode",
+            self.worker_type
+        )))
+    }
+}

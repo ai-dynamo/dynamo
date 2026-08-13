@@ -18,7 +18,7 @@ use dynamo_kv_router::services::selection::{
 };
 use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy};
 use filter::MinimumDeviceOverlapFilter;
-use picker::{DecodePicker, PrefillPicker};
+use picker::{DecodePicker, PrefillPicker, UnsupportedWorkerTypePicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};
 
 const PREFILL_WORKER_TYPE: &str = "prefill";
@@ -88,8 +88,11 @@ fn create_policy(
     match worker_type {
         PREFILL_WORKER_TYPE => create_prefill_policy(config, min_device_overlap_blocks),
         DECODE_WORKER_TYPE => create_decode_policy(config, min_device_overlap_blocks),
-        unsupported => panic!(
-            "disagg-filter-score-pick does not support worker type {unsupported:?}; expected prefill or decode"
+        unsupported => WorkerSelectionPolicy::new(
+            config.clone(),
+            unsupported,
+            Vec::new(),
+            Box::new(UnsupportedWorkerTypePicker::new(unsupported)),
         ),
     }
 }
@@ -114,7 +117,60 @@ pub fn register(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike};
+    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
+    use dynamo_kv_router::{
+        KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError, WorkerSelector,
+    };
+
     use super::*;
+
+    struct TestWorker;
+
+    impl WorkerConfigLike for TestWorker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            Some(1024)
+        }
+    }
+
+    fn request() -> SchedulingRequest {
+        SchedulingRequest {
+            mode: ScheduleMode::QueryOnly { request_id: None },
+            token_seq: None,
+            isl_tokens: 16,
+            lora_name: None,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+            router_config_override: None,
+            track_prefill_tokens: true,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            session_context: None,
+            overlap: OverlapSignals::default(),
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
+            shared_cache_hits: None,
+            worker_loads: Default::default(),
+            resp_tx: None,
+        }
+    }
 
     #[test]
     fn validates_min_device_overlap_blocks() {
@@ -132,14 +188,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "does not support worker type \"select\"")]
-    fn rejects_standalone_select_worker_type() {
-        create_policy(&KvRouterConfig::default(), "select", 0.0);
-    }
+    fn unsupported_worker_types_return_selection_errors() {
+        let workers = HashMap::from([(0, TestWorker)]);
+        let request = request();
 
-    #[test]
-    #[should_panic(expected = "does not support worker type \"unknown\"")]
-    fn rejects_unknown_worker_type() {
-        create_policy(&KvRouterConfig::default(), "unknown", 0.0);
+        for worker_type in ["select", "unknown"] {
+            let policy = create_policy(&KvRouterConfig::default(), worker_type, 0.0);
+            let error = policy
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                KvSchedulerError::WorkerSelectionPolicy(WorkerSelectionPolicyError::Failed(message))
+                    if message.contains(worker_type)
+            ));
+        }
     }
 }

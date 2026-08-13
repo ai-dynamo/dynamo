@@ -281,6 +281,29 @@ pub(crate) fn worker_selection_policy_factory(
     }
 }
 
+pub(crate) fn standalone_worker_selection_policy_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| registry.resolve_standalone(config))
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_standalone_worker_selection_policy_instance()? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(feature = "custom-policy")]
 fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut registry = WorkerSelectionPolicyRegistry::default();
@@ -368,7 +391,7 @@ fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()>
     py.allow_threads(move || {
         llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
             argv,
-            worker_selection_policy_factory,
+            standalone_worker_selection_policy_factory,
         )
     })
     .map_err(standalone_to_pyerr)

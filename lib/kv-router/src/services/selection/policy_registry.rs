@@ -127,6 +127,21 @@ impl WorkerSelectionPolicyRegistry {
         self.resolve_selections(policy_config, selected)
     }
 
+    /// Resolve the fallback policy used by a standalone, single-pool host.
+    ///
+    /// Standalone hosts do not construct separate prefill and decode worker pools, so their
+    /// stage-specific selections are intentionally ignored.
+    pub fn resolve_standalone(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
+        let selected = config.selected_standalone_worker_selection_policy_instance()?;
+        let policy_config = config.worker_selection_config().map_err(|source| {
+            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
+        })?;
+        self.resolve_selected(policy_config, selected.as_deref())
+    }
+
     fn resolve_selections(
         &self,
         policy_config: Option<&crate::scheduling::WorkerSelectionConfig>,

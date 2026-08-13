@@ -1095,6 +1095,30 @@ impl KvRouterConfig {
         Ok(selected.fallback.or(selected.prefill).or(selected.decode))
     }
 
+    /// Return the custom worker-selection instance used by a standalone, single-pool host.
+    ///
+    /// Stage-specific prefill and decode selections belong to the embedded frontend and are not
+    /// constructed by standalone router or EPP processes.
+    pub fn selected_standalone_worker_selection_policy_instance(
+        &self,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        self.selected_standalone_worker_selection_policy_instance_from(selected)
+    }
+
+    fn selected_standalone_worker_selection_policy_instance_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        Ok(self
+            .selected_worker_selection_policy_instances_from(selected)?
+            .fallback)
+    }
+
     #[cfg(test)]
     fn selected_worker_selection_policy_instance_from(
         &self,
@@ -1813,6 +1837,23 @@ worker_selection:
                 prefill: Some("cli-prefill".to_string()),
                 decode: None,
             }
+        );
+
+        assert_eq!(
+            config
+                .selected_standalone_worker_selection_policy_instance_from(Ok(Some(
+                    "global".to_string()
+                )))
+                .unwrap(),
+            Some("global".to_string())
+        );
+
+        config.router_policy_config = None;
+        assert_eq!(
+            config
+                .selected_standalone_worker_selection_policy_instance_from(Ok(None))
+                .unwrap(),
+            None
         );
     }
 

@@ -586,8 +586,8 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
-        let factory =
-            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
+        let factory = crate::standalone_worker_selection_policy_factory(&kv_router_config)
+            .map_err(to_pyerr)?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
@@ -1879,7 +1879,7 @@ impl KvRouter {
         }
         if let Some(instance) = kv_router_config
             .inner()
-            .selected_worker_selection_policy_instance()
+            .selected_standalone_worker_selection_policy_instance()
             .map_err(to_pyerr)?
         {
             return Err(PyValueError::new_err(format!(

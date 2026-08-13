@@ -140,7 +140,7 @@ pub async fn run() -> Result<()> {
 }
 
 fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()> {
-    if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+    if let Some(instance) = config.selected_standalone_worker_selection_policy_instance()? {
         anyhow::bail!(
             "worker-selection instance {instance:?} is configured, but this stock EPP has no linked worker-selection policy catalog; run a custom EPP binary that links the catalog"
         );
@@ -165,7 +165,7 @@ pub async fn run_with_worker_selection_policy_registry(
     init_tracing();
     let mode = EppMode::from_env()?;
     let kv_router_config = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-    let Some(factory) = registry.resolve(&kv_router_config)? else {
+    let Some(factory) = registry.resolve_standalone(&kv_router_config)? else {
         return run_inner(mode, StandaloneSelectionService::Default).await;
     };
     require_standalone_mode_for_linked_worker_selection_policy(mode)?;
@@ -431,5 +431,15 @@ worker_selection:
         };
 
         assert!(reject_unlinked_worker_selection_policy(&config).is_err());
+    }
+
+    #[test]
+    fn stock_epp_ignores_embedded_stage_policy() {
+        let config = KvRouterConfig {
+            router_prefill_policy: Some("embedded-only".to_string()),
+            ..Default::default()
+        };
+
+        assert!(reject_unlinked_worker_selection_policy(&config).is_ok());
     }
 }
