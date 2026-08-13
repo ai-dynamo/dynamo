@@ -23,6 +23,25 @@ func requireCheckpointContainer(t *testing.T, containers []corev1.Container, nam
 	return nil
 }
 
+func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, original []string) {
+	t.Helper()
+	if strings.Join(container.Command, "|") != "cuda-checkpoint" {
+		t.Fatalf("expected cuda-checkpoint wrapper command, got %#v", container.Command)
+	}
+	if len(container.Args) < 6 {
+		t.Fatalf("launch-job wrapper args too short: %#v", container.Args)
+	}
+	if container.Args[0] != "--launch-job" || container.Args[1] != "/bin/sh" || container.Args[2] != "-c" || container.Args[4] != "dynamo-cuda-checkpoint" {
+		t.Fatalf("unexpected launch-job wrapper prefix: %#v", container.Args[:6])
+	}
+	if container.Args[5] != CUDAJobFilePath {
+		t.Fatalf("stable job file = %q, want %q", container.Args[5], CUDAJobFilePath)
+	}
+	if got := container.Args[6:]; strings.Join(got, "|") != strings.Join(original, "|") {
+		t.Fatalf("original command = %#v, want %#v", got, original)
+	}
+}
+
 func TestNewCheckpointJob(t *testing.T) {
 	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -98,13 +117,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Spec.Template.Spec.SecurityContext == nil || job.Spec.Template.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", job.Spec.Template.Spec.SecurityContext)
 	}
-	if len(main.Command) != 1 || main.Command[0] != "cuda-checkpoint" {
-		t.Fatalf("expected cuda-checkpoint wrapper command: %#v", main.Command)
-	}
-	expectedArgs := []string{"--launch-job", "python3", "-m", "dynamo.vllm", "--model", "Qwen"}
-	if strings.Join(main.Args, "|") != strings.Join(expectedArgs, "|") {
-		t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, main.Args)
-	}
+	requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm", "--model", "Qwen"})
 	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 {
 		t.Fatalf("expected backoffLimit 0, got %#v", job.Spec.BackoffLimit)
 	}
@@ -139,13 +152,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}
 
 	worker := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
-	if len(worker.Command) != 1 || worker.Command[0] != "cuda-checkpoint" {
-		t.Fatalf("expected target container to be wrapped, got %#v", worker.Command)
-	}
-	expectedArgs := []string{"--launch-job", "python3", "-m", "dynamo.vllm", "--model", "Qwen"}
-	if strings.Join(worker.Args, "|") != strings.Join(expectedArgs, "|") {
-		t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, worker.Args)
-	}
+	requireStableLaunchJobWrapper(t, worker, []string{"python3", "-m", "dynamo.vllm", "--model", "Qwen"})
 
 	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar")
 	if len(sidecar.Command) != 1 || sidecar.Command[0] != "sleep" {

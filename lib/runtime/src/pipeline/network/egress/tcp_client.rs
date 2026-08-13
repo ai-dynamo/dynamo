@@ -407,6 +407,17 @@ fn build_request_plane_tls_connector_from_env() -> anyhow::Result<Option<TlsConn
     Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
 }
 
+impl Drop for TcpConnection {
+    fn drop(&mut self) {
+        self.healthy.store(false, Ordering::Relaxed);
+        self.closed.store(true, Ordering::Release);
+        self.admission.close();
+        self.writer_notify.notify_one();
+        self.writer_handle.abort();
+        self.reader_handle.abort();
+    }
+}
+
 impl TcpConnection {
     /// Create a new connection with lock-free submit and batched write/read tasks
     async fn connect(addr: SocketAddr, timeout: Duration, channel_buffer: usize) -> Result<Self> {
@@ -955,6 +966,19 @@ impl TcpConnection {
     }
 }
 
+fn cannot_connect_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error {
+    let cause = crate::error::DynamoError::from(
+        error.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+    );
+    anyhow::anyhow!(
+        crate::error::DynamoError::builder()
+            .error_type(crate::error::ErrorType::CannotConnect)
+            .message(format!("TCP connection to {addr} failed"))
+            .cause(cause)
+            .build()
+    )
+}
+
 /// Per-host connection pool with LRU lifecycle and ArcSwap-based snapshot.
 ///
 /// Hot path: `ArcSwap::load()` + atomic round-robin (~40ns total, fully lock-free).
@@ -1171,7 +1195,7 @@ impl HostPool {
                     }
                     Err(e) => {
                         self.connect_notify.notify_waiters();
-                        return Err(e);
+                        return Err(cannot_connect_error(self.addr, e));
                     }
                 }
             }
@@ -1584,8 +1608,14 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        // Get shared connection from pool (Arc, not exclusive borrow)
-        let conn = self.pool.get_connection(addr).await?;
+        // Get shared connection from pool (Arc, not exclusive borrow). Actual connection
+        // failures are classified at the dial site; local pool errors retain their type.
+        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = %e, "TCP connection unavailable");
+            e
+        })?;
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
@@ -1672,7 +1702,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncReadExt, AsyncWrite};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
 
     fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
         use std::io::Write as _;
@@ -1745,6 +1775,113 @@ mod tests {
         assert!(client.is_healthy());
     }
 
+    #[tokio::test]
+    async fn test_cold_connection_failure_is_cannot_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+
+        let err = client
+            .send_request(
+                format!("{addr}/generate"),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::CannotConnect],
+            &[],
+        ));
+        assert!(
+            err.chain().count() > 1,
+            "cold connection failure must retain its cause"
+        );
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_closed_connect_limiter_is_not_cannot_connect() {
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        client.pool.connect_limiter.close();
+
+        let err = client
+            .send_request(
+                "127.0.0.1:1/generate".to_string(),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(!crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::CannotConnect],
+            &[],
+        ));
+        assert!(err.to_string().contains("Global connect limiter closed"));
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    async fn echo_requests(stream: TcpStream) {
+        let (mut read_half, mut write_half) = tokio::io::split(stream);
+        loop {
+            let mut len_buf = [0u8; 2];
+            if read_half.read_exact(&mut len_buf).await.is_err() {
+                break;
+            }
+            let path_len = u16::from_be_bytes(len_buf) as usize;
+            let mut path_buf = vec![0u8; path_len];
+            if read_half.read_exact(&mut path_buf).await.is_err() {
+                break;
+            }
+
+            let mut headers_len_buf = [0u8; 2];
+            if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                break;
+            }
+            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+            let mut headers_buf = vec![0u8; headers_len];
+            if read_half.read_exact(&mut headers_buf).await.is_err() {
+                break;
+            }
+
+            let mut payload_len_buf = [0u8; 4];
+            if read_half.read_exact(&mut payload_len_buf).await.is_err() {
+                break;
+            }
+            let payload_len = u32::from_be_bytes(payload_len_buf) as usize;
+            let mut payload = vec![0u8; payload_len];
+            if read_half.read_exact(&mut payload).await.is_err() {
+                break;
+            }
+
+            use crate::pipeline::network::codec::TcpResponseMessage;
+            let encoded = TcpResponseMessage::new(Bytes::from(payload))
+                .encode()
+                .unwrap();
+            if write_half.write_all(&encoded).await.is_err() {
+                break;
+            }
+        }
+    }
+
     /// Helper: spawn a mock TCP server that echoes requests.
     /// Returns (listener_addr, connection_count_tracker).
     async fn spawn_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
@@ -1762,51 +1899,7 @@ mod tests {
                 let (stream, _) = result.unwrap();
                 conn_count_clone.fetch_add(1, Ordering::SeqCst);
 
-                tokio::spawn(async move {
-                    let (mut read_half, mut write_half) = tokio::io::split(stream);
-                    loop {
-                        // Read path length
-                        let mut len_buf = [0u8; 2];
-                        if read_half.read_exact(&mut len_buf).await.is_err() {
-                            break;
-                        }
-                        let path_len = u16::from_be_bytes(len_buf) as usize;
-                        let mut path_buf = vec![0u8; path_len];
-                        if read_half.read_exact(&mut path_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Read headers length
-                        let mut headers_len_buf = [0u8; 2];
-                        if read_half.read_exact(&mut headers_len_buf).await.is_err() {
-                            break;
-                        }
-                        let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
-                        let mut headers_buf = vec![0u8; headers_len];
-                        if read_half.read_exact(&mut headers_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Read payload length + payload
-                        let mut len_buf = [0u8; 4];
-                        if read_half.read_exact(&mut len_buf).await.is_err() {
-                            break;
-                        }
-                        let payload_len = u32::from_be_bytes(len_buf) as usize;
-                        let mut payload_buf = vec![0u8; payload_len];
-                        if read_half.read_exact(&mut payload_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Send response
-                        use crate::pipeline::network::codec::TcpResponseMessage;
-                        let response = TcpResponseMessage::new(Bytes::from(payload_buf));
-                        let encoded = response.encode().unwrap();
-                        if write_half.write_all(&encoded).await.is_err() {
-                            break;
-                        }
-                    }
-                });
+                tokio::spawn(echo_requests(stream));
             }
         });
 
@@ -1932,6 +2025,64 @@ mod tests {
             response, expected,
             "payload should round-trip through the encrypted request plane"
         );
+    }
+
+    async fn spawn_active_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
+        struct ActiveConnection(Arc<AtomicUsize>);
+
+        impl Drop for ActiveConnection {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let active_connections = Arc::new(AtomicUsize::new(0));
+        let tracker = active_connections.clone();
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tracker.fetch_add(1, Ordering::SeqCst);
+                let active = ActiveConnection(tracker.clone());
+                tokio::spawn(async move {
+                    let _active = active;
+                    echo_requests(stream).await;
+                });
+            }
+        });
+
+        (addr, active_connections)
+    }
+
+    #[tokio::test]
+    async fn dropping_client_closes_pooled_connections() {
+        let (addr, active_connections) = spawn_active_echo_server().await;
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        let mut headers = Headers::new();
+        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+
+        client
+            .send_request(addr.to_string(), Bytes::from_static(b"test"), headers)
+            .await
+            .unwrap();
+        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
+
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active_connections.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the TCP client left its pooled connection open");
     }
 
     struct RecordingWriter {

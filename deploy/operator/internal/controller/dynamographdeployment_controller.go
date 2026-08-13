@@ -27,6 +27,7 @@ import (
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
@@ -73,7 +74,7 @@ type DynamoGraphDeploymentReconciler struct {
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
 	Recorder              events.EventRecorder
-	DockerSecretRetriever dockerSecretRetriever
+	DockerSecretRetriever DockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
@@ -262,7 +263,22 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
+		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
+		ctrlBuilder = ctrlBuilder.Watches(
+			&resourcev1.ResourceClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).Watches(
+			&resourcev1.ResourceClaimTemplate{},
+			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimTemplateToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).Watches(
+			&resourcev1.DeviceClass{},
+			handler.EnqueueRequestsFromMapFunc(r.mapDeviceClassToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.Istio) {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
