@@ -30,6 +30,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 )
 
@@ -159,16 +160,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(envtestCutoverServiceUIDs(ctx, current.Namespace, serviceUIDs)).To(Equal(serviceUIDs))
 
 		By("marking the DisaggregatedSet ready and handing service ownership to the DGD")
-		ds := newDisaggregatedSetObject()
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, ds)).To(Succeed())
-		ds.Object["status"] = map[string]any{
-			"observedGeneration": ds.GetGeneration(),
-			"roleStatuses": []any{
-				map[string]any{"name": "prefill", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
-				map[string]any{"name": "decode", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
-			},
-		}
-		Expect(k8sClient.Status().Update(ctx, ds)).To(Succeed())
+		markDisaggregatedSetReady(ctx, current)
 
 		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
@@ -260,16 +252,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 
 		By("creating a DS-owned shared model service")
 		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		ds := newDisaggregatedSetObject()
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, ds)).To(Succeed())
-		ds.Object["status"] = map[string]any{
-			"observedGeneration": ds.GetGeneration(),
-			"roleStatuses": []any{
-				map[string]any{"name": "prefill", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
-				map[string]any{"name": "decode", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
-			},
-		}
-		Expect(k8sClient.Status().Update(ctx, ds)).To(Succeed())
+		markDisaggregatedSetReady(ctx, current)
 		result, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
 
@@ -407,12 +390,58 @@ func markDisaggregatedSetReady(
 ) {
 	ds := newDisaggregatedSetObject()
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)).To(Succeed())
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{}
+	Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(ds.Object, typedDS)).To(Succeed())
+	revision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
+	sliceCount := int(disaggregatedsetutils.GetSlices(typedDS))
+
+	// Simulate LWS v0.10 convergence: each (slice, role, revision) has one ready
+	// child, and children from the previous revision have been removed.
+	existing := &leaderworkersetv1.LeaderWorkerSetList{}
+	Expect(k8sClient.List(ctx, existing, client.InNamespace(ds.GetNamespace()), client.MatchingLabels{
+		disaggregatedsetv1.SetNameLabelKey: ds.GetName(),
+	})).To(Succeed())
+	for i := range existing.Items {
+		Expect(k8sClient.Delete(ctx, &existing.Items[i])).To(Succeed())
+	}
+
+	roleStatuses := make([]any, 0, len(typedDS.Spec.Roles))
+	for i := range typedDS.Spec.Roles {
+		role := &typedDS.Spec.Roles[i]
+		desiredReplicas := ptr.Deref(role.Spec.Replicas, int32(1))
+		for slice := range sliceCount {
+			child := &leaderworkersetv1.LeaderWorkerSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      disaggregatedsetutils.GenerateName(ds.GetName(), slice, revision, role.Name),
+					Namespace: ds.GetNamespace(),
+					Labels:    disaggregatedsetutils.GenerateLabels(ds.GetName(), slice, revision, role.Name),
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: disaggregatedsetv1.GroupVersion.String(),
+						Kind:       "DisaggregatedSet",
+						Name:       ds.GetName(),
+						UID:        ds.GetUID(),
+						Controller: ptr.To(true),
+					}},
+				},
+				Spec: role.Spec,
+			}
+			Expect(k8sClient.Create(ctx, child)).To(Succeed())
+			child.Status = leaderworkersetv1.LeaderWorkerSetStatus{
+				ObservedGeneration: child.Generation,
+				Replicas:           desiredReplicas,
+				UpdatedReplicas:    desiredReplicas,
+				ReadyReplicas:      desiredReplicas,
+			}
+			Expect(k8sClient.Status().Update(ctx, child)).To(Succeed())
+		}
+		totalReplicas := int64(desiredReplicas) * int64(sliceCount)
+		roleStatuses = append(roleStatuses, map[string]any{
+			"name": role.Name, "replicas": totalReplicas, "updatedReplicas": totalReplicas, "readyReplicas": totalReplicas,
+		})
+	}
 	ds.Object["status"] = map[string]any{
 		"observedGeneration": ds.GetGeneration(),
-		"roleStatuses": []any{
-			map[string]any{"name": "prefill", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
-			map[string]any{"name": "decode", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
-		},
+		"roleStatuses":       roleStatuses,
 	}
 	Expect(k8sClient.Status().Update(ctx, ds)).To(Succeed())
 }

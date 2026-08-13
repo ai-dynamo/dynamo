@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strconv"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -61,8 +62,9 @@ const (
 	maxDisaggregatedSetRoles            = 10
 	disaggregatedSetRevisionLength      = 8
 	maxDisaggregatedSetNameLength       = 31
+	maxDisaggregatedSetSliceIndexLength = len("99")
 	disaggregatedSetServiceSuffixLength = len("-prv")
-	maxDisaggregatedSetRoleNameLength   = 63 - maxDisaggregatedSetNameLength - disaggregatedSetRevisionLength - 2 - disaggregatedSetServiceSuffixLength
+	maxDisaggregatedSetRoleNameLength   = 63 - maxDisaggregatedSetNameLength - maxDisaggregatedSetSliceIndexLength - disaggregatedSetRevisionLength - 3 - disaggregatedSetServiceSuffixLength
 	disaggregatedSetNameHashLength      = 8
 	dynamoGraphDeploymentKind           = "DynamoGraphDeployment"
 	dynamoComponentDeploymentKind       = "DynamoComponentDeployment"
@@ -72,6 +74,11 @@ const (
 type disaggregatedSetSelection struct {
 	componentToRole map[string]string
 	desiredReplicas map[string]int32
+}
+
+type disaggregatedSetChildIdentity struct {
+	slice int
+	role  string
 }
 
 func newDisaggregatedSetObject() *unstructured.Unstructured {
@@ -558,6 +565,9 @@ func disaggregatedSetTargetRevision(ds *unstructured.Unstructured) (string, erro
 }
 
 func setDisaggregatedSetServiceSelector(service *corev1.Service, setName, roleName, revision string) {
+	// Dynamo's stable component Service intentionally omits the slice label so it
+	// aggregates every slice for this role and revision. LWS owns separate
+	// slice-local <lws-name>-prv Services for intra-slice discovery.
 	service.Spec.Selector = map[string]string{
 		disaggregatedsetv1.SetNameLabelKey:  setName,
 		disaggregatedsetv1.RoleLabelKey:     roleName,
@@ -1248,11 +1258,12 @@ func checkDisaggregatedSetReadiness(
 	ds *unstructured.Unstructured,
 	selection disaggregatedSetSelection,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
+	sliceCount := disaggregatedSetSliceCount(ds)
 	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.componentToRole))
 	roleStatuses := disaggregatedSetRoleStatuses(ds)
 	notReadyReasons := []string{}
 	for componentName, roleName := range selection.componentToRole {
-		desiredReplicas := selection.desiredReplicas[componentName]
+		desiredReplicas := selection.desiredReplicas[componentName] * sliceCount
 		componentStatus := nvidiacomv1beta1.ComponentReplicaStatus{
 			ComponentKind: nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
 		}
@@ -1299,6 +1310,26 @@ func checkDisaggregatedSetReadiness(
 	return true, "All DisaggregatedSet roles are ready", statuses
 }
 
+func disaggregatedSetSliceCount(ds *unstructured.Unstructured) int32 {
+	if ds == nil {
+		return 1
+	}
+	value, found := nestedInt64FromObject(ds.Object, "spec", "slices")
+	if !found || value < 1 {
+		return 1
+	}
+	return int32(value)
+}
+
+func disaggregatedSetChildSlice(labels map[string]string) (int, bool) {
+	value := labels[disaggregatedsetv1.SliceLabelKey]
+	if value == "" {
+		return 0, true
+	}
+	slice, err := strconv.Atoi(value)
+	return slice, err == nil && slice >= 0
+}
+
 func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 	ctx context.Context,
 	ds *unstructured.Unstructured,
@@ -1314,8 +1345,9 @@ func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 	if err != nil {
 		return false, "", nil, err
 	}
-	targetByRole := make(map[string]*leaderworkersetv1.LeaderWorkerSet)
+	targetByIdentity := make(map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet)
 	childrenByRole := make(map[string][]*leaderworkersetv1.LeaderWorkerSet)
+	sliceCount := int(disaggregatedSetSliceCount(ds))
 	for i := range children.Items {
 		child := &children.Items[i]
 		if !metav1.IsControlledBy(child, ds) {
@@ -1323,35 +1355,33 @@ func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 		}
 		roleName := child.Labels[disaggregatedsetv1.RoleLabelKey]
 		childrenByRole[roleName] = append(childrenByRole[roleName], child)
-		if child.Labels[disaggregatedsetv1.RevisionLabelKey] != targetRevision {
+		slice, validSlice := disaggregatedSetChildSlice(child.Labels)
+		if !validSlice || slice >= sliceCount || child.Labels[disaggregatedsetv1.RevisionLabelKey] != targetRevision {
 			continue
 		}
-		targetByRole[roleName] = child
+		identity := disaggregatedSetChildIdentity{slice: slice, role: roleName}
+		targetByIdentity[identity] = append(targetByIdentity[identity], child)
 	}
 	if len(disaggregatedSetRoleStatuses(ds)) > 0 && disaggregatedSetStatusHasObservation(ds) {
 		ready, reason, statuses := checkDisaggregatedSetReadiness(ds, selection)
 		if !ready {
 			return ready, reason, statuses, nil
 		}
-		if reasons := removedDisaggregatedSetChildLWSNotReadyReasons(selection, childrenByRole); len(reasons) > 0 {
-			return false, strings.Join(reasons, "; "), statuses, nil
-		}
-		return true, reason, statuses, nil
 	}
-	ready, reason, statuses := checkDisaggregatedSetChildLWSReadiness(selection, targetByRole, childrenByRole)
+	ready, reason, statuses := checkDisaggregatedSetChildLWSReadiness(selection, sliceCount, targetByIdentity, childrenByRole)
 	return ready, reason, statuses, nil
 }
 
 func checkDisaggregatedSetChildLWSReadiness(
 	selection disaggregatedSetSelection,
-	targetByRole map[string]*leaderworkersetv1.LeaderWorkerSet,
+	sliceCount int,
+	targetByIdentity map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet,
 	childrenByRole map[string][]*leaderworkersetv1.LeaderWorkerSet,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.componentToRole))
 	notReadyReasons := []string{}
 	for componentName, roleName := range selection.componentToRole {
 		desiredReplicas := selection.desiredReplicas[componentName]
-		child := targetByRole[roleName]
 		status := nvidiacomv1beta1.ComponentReplicaStatus{ComponentKind: nvidiacomv1beta1.ComponentKindLeaderWorkerSet}
 		children := childrenByRole[roleName]
 		sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
@@ -1362,36 +1392,39 @@ func checkDisaggregatedSetChildLWSReadiness(
 			readyReplicas += roleChild.Status.ReadyReplicas
 		}
 		status.ReadyReplicas = ptr.To(readyReplicas)
-		if child == nil {
-			statuses[componentName] = status
-			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s role %q has no child LeaderWorkerSet yet", componentName, roleName))
-			continue
-		}
-		status.UpdatedReplicas = child.Status.UpdatedReplicas
-		statuses[componentName] = status
-		if child.Status.ObservedGeneration < child.Generation {
-			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s child LeaderWorkerSet %q has not observed generation %d", componentName, child.Name, child.Generation))
-			continue
-		}
-		if child.Status.Replicas != desiredReplicas || child.Status.UpdatedReplicas != desiredReplicas || child.Status.ReadyReplicas != desiredReplicas {
-			notReadyReasons = append(notReadyReasons, fmt.Sprintf(
-				"%s child LeaderWorkerSet %q replicas not ready (desired=%d replicas=%d updated=%d ready=%d)",
-				componentName,
-				child.Name,
-				desiredReplicas,
-				child.Status.Replicas,
-				child.Status.UpdatedReplicas,
-				child.Status.ReadyReplicas,
-			))
-		}
-		for _, roleChild := range children {
-			if roleChild != child && roleChild.Status.Replicas != 0 {
-				notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s old child LeaderWorkerSet %q still has %d replicas", componentName, roleChild.Name, roleChild.Status.Replicas))
+		for slice := range sliceCount {
+			identity := disaggregatedSetChildIdentity{slice: slice, role: roleName}
+			targets := targetByIdentity[identity]
+			if len(targets) != 1 {
+				notReadyReasons = append(notReadyReasons, fmt.Sprintf(
+					"%s role %q slice %d has %d target LeaderWorkerSets, expected 1",
+					componentName, roleName, slice, len(targets),
+				))
+				continue
+			}
+			child := targets[0]
+			status.UpdatedReplicas += child.Status.UpdatedReplicas
+			if child.Status.ObservedGeneration < child.Generation {
+				notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s child LeaderWorkerSet %q has not observed generation %d", componentName, child.Name, child.Generation))
+				continue
+			}
+			if child.Status.Replicas != desiredReplicas || child.Status.UpdatedReplicas != desiredReplicas || child.Status.ReadyReplicas != desiredReplicas {
+				notReadyReasons = append(notReadyReasons, fmt.Sprintf(
+					"%s child LeaderWorkerSet %q for slice %d replicas not ready (desired=%d replicas=%d updated=%d ready=%d)",
+					componentName,
+					child.Name,
+					slice,
+					desiredReplicas,
+					child.Status.Replicas,
+					child.Status.UpdatedReplicas,
+					child.Status.ReadyReplicas,
+				))
 			}
 		}
+		statuses[componentName] = status
 	}
 
-	notReadyReasons = append(notReadyReasons, removedDisaggregatedSetChildLWSNotReadyReasons(selection, childrenByRole)...)
+	notReadyReasons = append(notReadyReasons, staleDisaggregatedSetChildLWSNotReadyReasons(targetByIdentity, childrenByRole)...)
 	if len(notReadyReasons) > 0 {
 		sort.Strings(notReadyReasons)
 		return false, strings.Join(notReadyReasons, "; "), statuses
@@ -1399,21 +1432,23 @@ func checkDisaggregatedSetChildLWSReadiness(
 	return true, "All DisaggregatedSet child LeaderWorkerSets are ready", statuses
 }
 
-func removedDisaggregatedSetChildLWSNotReadyReasons(
-	selection disaggregatedSetSelection,
+func staleDisaggregatedSetChildLWSNotReadyReasons(
+	targetByIdentity map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet,
 	childrenByRole map[string][]*leaderworkersetv1.LeaderWorkerSet,
 ) []string {
-	targetRoles := make(map[string]struct{}, len(selection.componentToRole))
-	for _, roleName := range selection.componentToRole {
-		targetRoles[roleName] = struct{}{}
+	targets := make(map[*leaderworkersetv1.LeaderWorkerSet]struct{})
+	for _, children := range targetByIdentity {
+		if len(children) == 1 {
+			targets[children[0]] = struct{}{}
+		}
 	}
 	notReadyReasons := []string{}
 	for roleName, children := range childrenByRole {
-		if _, selected := targetRoles[roleName]; selected {
-			continue
-		}
 		sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
 		for _, child := range children {
+			if _, target := targets[child]; target {
+				continue
+			}
 			if ptr.Deref(child.Spec.Replicas, 1) == 0 &&
 				child.Status.Replicas == 0 &&
 				child.Status.UpdatedReplicas == 0 &&
@@ -1421,7 +1456,7 @@ func removedDisaggregatedSetChildLWSNotReadyReasons(
 				continue
 			}
 			notReadyReasons = append(notReadyReasons, fmt.Sprintf(
-				"removed role %q child LeaderWorkerSet %q has not scaled to zero",
+				"stale role %q child LeaderWorkerSet %q has not scaled to zero",
 				roleName,
 				child.Name,
 			))

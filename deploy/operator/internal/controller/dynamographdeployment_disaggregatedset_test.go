@@ -23,14 +23,15 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
-	disaggregatedsetcontroller "sigs.k8s.io/lws/pkg/controllers/disaggregatedset"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 )
 
@@ -105,7 +106,7 @@ func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
 		map[string]any{"name": "decode"},
 	}}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, current).Build()
-	recorder := record.NewFakeRecorder(10)
+	recorder := events.NewFakeRecorder(10)
 	workloads := newDisaggregatedSetWorkloadsReconciler(k8sClient, recorder, nil, nil, nil, newDGDWorkerRolloutReconciler(k8sClient, recorder))
 
 	modified, synced, err := workloads.syncDisaggregatedSet(t.Context(), dgd, desired)
@@ -130,7 +131,7 @@ func TestDisaggregatedSetServiceSelectorIsRevisionScoped(t *testing.T) {
 		disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
 		disaggregatedsetv1.RoleLabelKey:     "prefill",
 		disaggregatedsetv1.RevisionLabelKey: "abc12345",
-	}, service.Spec.Selector)
+	}, service.Spec.Selector, "the stable component Service must aggregate every slice")
 }
 
 func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
@@ -233,7 +234,7 @@ func TestDisaggregatedSetCleanupUsesAPICapabilityWhenSelectionIsDisabled(t *test
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:    &staleDisaggregatedSetClient{Client: k8sClient},
 		APIReader: k8sClient,
-		Recorder:  record.NewFakeRecorder(10),
+		Recorder:  events.NewFakeRecorder(10),
 		RuntimeConfig: &commoncontroller.RuntimeConfig{
 			Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
 		},
@@ -350,9 +351,9 @@ func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {
 	require.LessOrEqual(t, len(setName), maxDisaggregatedSetNameLength)
 	for _, roleName := range selection.componentToRole {
 		require.LessOrEqual(t, len(roleName), maxDisaggregatedSetRoleNameLength)
-		childName := disaggregatedsetutils.GenerateName(setName, roleName, strings.Repeat("a", disaggregatedSetRevisionLength))
+		childName := disaggregatedsetutils.GenerateName(setName, 99, strings.Repeat("a", disaggregatedSetRevisionLength), roleName)
 		require.LessOrEqual(t, len(childName), 63)
-		serviceName := disaggregatedsetcontroller.GenerateServiceName(setName, roleName, strings.Repeat("a", disaggregatedSetRevisionLength))
+		serviceName := childName + "-prv"
 		require.LessOrEqual(t, len(serviceName), 63)
 	}
 }
@@ -415,9 +416,9 @@ func TestCheckDisaggregatedSetChildLWSReadinessWaitsForRemovedRoles(t *testing.T
 	prefill := readyChild("demo-prefill-target")
 	decode := readyChild("demo-decode-target")
 	removed := readyChild("demo-legacy-worker-old")
-	targetByRole := map[string]*leaderworkersetv1.LeaderWorkerSet{
-		"prefill": prefill,
-		"decode":  decode,
+	targetByIdentity := map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet{
+		{slice: 0, role: "prefill"}: {prefill},
+		{slice: 0, role: "decode"}:  {decode},
 	}
 	childrenByRole := map[string][]*leaderworkersetv1.LeaderWorkerSet{
 		"prefill":       {prefill},
@@ -426,7 +427,7 @@ func TestCheckDisaggregatedSetChildLWSReadinessWaitsForRemovedRoles(t *testing.T
 	}
 
 	t.Log("a removed role with live replicas keeps the DisaggregatedSet unready")
-	ready, reason, _ := checkDisaggregatedSetChildLWSReadiness(selection, targetByRole, childrenByRole)
+	ready, reason, _ := checkDisaggregatedSetChildLWSReadiness(selection, 1, targetByIdentity, childrenByRole)
 	require.False(t, ready)
 	require.Contains(t, reason, removed.Name)
 
@@ -435,8 +436,123 @@ func TestCheckDisaggregatedSetChildLWSReadinessWaitsForRemovedRoles(t *testing.T
 	removed.Status.Replicas = 0
 	removed.Status.UpdatedReplicas = 0
 	removed.Status.ReadyReplicas = 0
-	ready, _, _ = checkDisaggregatedSetChildLWSReadiness(selection, targetByRole, childrenByRole)
+	ready, _, _ = checkDisaggregatedSetChildLWSReadiness(selection, 1, targetByIdentity, childrenByRole)
 	require.True(t, ready)
+}
+
+func TestCheckDisaggregatedSetReadinessTracksEverySlice(t *testing.T) {
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: testNamespace, UID: "demo-uid"},
+		Spec: disaggregatedsetv1.DisaggregatedSetSpec{
+			Slices: ptr.To[int32](2),
+			Roles: []disaggregatedsetv1.DisaggregatedRoleSpec{
+				{Name: "prefill"},
+				{Name: "decode"},
+			},
+		},
+	}
+	dsObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typedDS)
+	require.NoError(t, err)
+	ds := newDisaggregatedSetObject()
+	ds.Object = dsObject
+	ds.SetGroupVersionKind(disaggregatedSetGVK)
+	revision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
+
+	readyChild := func(slice int, role string) *leaderworkersetv1.LeaderWorkerSet {
+		return &leaderworkersetv1.LeaderWorkerSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       disaggregatedsetutils.GenerateName(ds.GetName(), slice, revision, role),
+				Namespace:  ds.GetNamespace(),
+				Generation: 1,
+				Labels:     disaggregatedsetutils.GenerateLabels(ds.GetName(), slice, revision, role),
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: disaggregatedsetv1.GroupVersion.String(),
+					Kind:       "DisaggregatedSet",
+					Name:       ds.GetName(),
+					UID:        ds.GetUID(),
+					Controller: ptr.To(true),
+				}},
+			},
+			Spec: leaderworkersetv1.LeaderWorkerSetSpec{Replicas: ptr.To[int32](1)},
+			Status: leaderworkersetv1.LeaderWorkerSetStatus{
+				ObservedGeneration: 1,
+				Replicas:           1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+			},
+		}
+	}
+	children := []client.Object{
+		readyChild(0, "prefill"),
+		readyChild(0, "decode"),
+		readyChild(1, "prefill"),
+		readyChild(1, "decode"),
+	}
+	// A label-less pre-v0.10 child is slice 0 during an in-place upgrade.
+	delete(children[0].GetLabels(), disaggregatedsetv1.SliceLabelKey)
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
+	workloads := &disaggregatedSetWorkloadsReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(children...).Build(),
+	}
+	selection := disaggregatedSetSelection{
+		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	}
+
+	ready, reason, statuses, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.True(t, ready, reason)
+	require.Equal(t, int32(2), statuses["prefill"].Replicas)
+	require.Equal(t, int32(2), statuses["prefill"].UpdatedReplicas)
+	require.Equal(t, int32(2), ptr.Deref(statuses["prefill"].ReadyReplicas, 0))
+
+	t.Log("legacy and slice-aware children cannot both claim slice 0")
+	duplicate := readyChild(0, "prefill")
+	duplicate.Name += "-duplicate"
+	require.NoError(t, workloads.Create(t.Context(), duplicate))
+	ready, reason, _, err = workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Contains(t, reason, "2 target LeaderWorkerSets")
+	require.NoError(t, workloads.Delete(t.Context(), duplicate))
+
+	t.Log("one missing slice role cannot be hidden by aggregate replica counts")
+	missing := children[3].(*leaderworkersetv1.LeaderWorkerSet)
+	require.NoError(t, workloads.Delete(t.Context(), missing))
+	ready, reason, _, err = workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Contains(t, reason, "slice 1")
+}
+
+func TestDisaggregatedSetWatchMapperMapsNonzeroSlice(t *testing.T) {
+	ds := newDisaggregatedSetObject()
+	ds.SetName("demo-ds")
+	ds.SetNamespace(testNamespace)
+	ds.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+		Kind:       dynamoGraphDeploymentKind,
+		Name:       "demo",
+		Controller: ptr.To(true),
+	}})
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(disaggregatedSetGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(disaggregatedSetGVK.GroupVersion().WithKind("DisaggregatedSetList"), &unstructured.UnstructuredList{})
+	mapper := newDisaggregatedSetWatchMapper(fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build())
+	child := &leaderworkersetv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{
+		Name:      "demo-ds-1-abc12345-prefill",
+		Namespace: testNamespace,
+		Labels: map[string]string{
+			disaggregatedsetv1.SetNameLabelKey: "demo-ds",
+			disaggregatedsetv1.SliceLabelKey:   "1",
+		},
+	}}
+
+	require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{
+		Name: "demo", Namespace: testNamespace,
+	}}}, mapper.MapChildLWSToDGD(t.Context(), child))
 }
 
 func TestDisaggregatedSetStatusReadinessWaitsForRemovedRoleChildren(t *testing.T) {
