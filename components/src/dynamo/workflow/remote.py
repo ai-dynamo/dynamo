@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, AsyncIterator, Mapping, Optional, Protocol
 
-from dynamo.workflow.ir import StageIR
 from dynamo.workflow.plan import REMOTE_VALUE_TYPES
 from dynamo.workflow.runtime import (
     StageContext,
@@ -19,11 +18,11 @@ from dynamo.workflow.runtime import (
     WorkflowExecutionError,
     _validate_value,
 )
-from dynamo.workflow.types import WorkflowValidationError, validate_name
+from dynamo.workflow.types import StageContract, WorkflowValidationError, validate_name
 
 STAGE_REQUEST_SCHEMA = "dynamo.workflow.stage_request"
 STAGE_RESPONSE_SCHEMA = "dynamo.workflow.stage_response"
-STAGE_WIRE_VERSION = 0
+STAGE_WIRE_VERSION = 1
 
 
 def _check_keys(data: Mapping[str, Any], required: set[str]) -> None:
@@ -57,6 +56,7 @@ class StageRequestEnvelope:
     stage_id: str
     contract_id: str
     attempt_id: str
+    invocation_id: str
     timeout_seconds: Optional[float]
     inputs: Mapping[str, Any]
 
@@ -65,6 +65,7 @@ class StageRequestEnvelope:
         validate_name(self.stage_id, "remote stage id")
         validate_name(self.contract_id, "remote contract id")
         _validate_attempt_id(self.attempt_id)
+        _validate_attempt_id(self.invocation_id)
         if self.timeout_seconds is not None and (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
@@ -86,6 +87,7 @@ class StageRequestEnvelope:
             "stage": self.stage_id,
             "contract": self.contract_id,
             "attempt": self.attempt_id,
+            "invocation": self.invocation_id,
             "timeout_seconds": self.timeout_seconds,
             "inputs": dict(self.inputs),
         }
@@ -103,6 +105,7 @@ class StageRequestEnvelope:
                 "stage",
                 "contract",
                 "attempt",
+                "invocation",
                 "timeout_seconds",
                 "inputs",
             },
@@ -124,6 +127,7 @@ class StageRequestEnvelope:
             stage_id=data["stage"],
             contract_id=data["contract"],
             attempt_id=data["attempt"],
+            invocation_id=data["invocation"],
             timeout_seconds=data["timeout_seconds"],
             inputs=data["inputs"],
         )
@@ -136,12 +140,14 @@ class StageResponseEnvelope:
     stage_id: str
     contract_id: str
     attempt_id: str
+    invocation_id: str
     outputs: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         validate_name(self.stage_id, "remote stage id")
         validate_name(self.contract_id, "remote contract id")
         _validate_attempt_id(self.attempt_id)
+        _validate_attempt_id(self.invocation_id)
         if not isinstance(self.outputs, Mapping):
             raise WorkflowExecutionError("remote stage outputs must be an object")
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
@@ -153,6 +159,7 @@ class StageResponseEnvelope:
             "stage": self.stage_id,
             "contract": self.contract_id,
             "attempt": self.attempt_id,
+            "invocation": self.invocation_id,
             "outputs": dict(self.outputs),
         }
 
@@ -162,7 +169,15 @@ class StageResponseEnvelope:
             raise WorkflowExecutionError("remote stage response must be an object")
         _check_keys(
             data,
-            {"schema", "version", "stage", "contract", "attempt", "outputs"},
+            {
+                "schema",
+                "version",
+                "stage",
+                "contract",
+                "attempt",
+                "invocation",
+                "outputs",
+            },
         )
         if data["schema"] != STAGE_RESPONSE_SCHEMA:
             raise WorkflowExecutionError(
@@ -180,55 +195,85 @@ class StageResponseEnvelope:
             stage_id=data["stage"],
             contract_id=data["contract"],
             attempt_id=data["attempt"],
+            invocation_id=data["invocation"],
             outputs=data["outputs"],
         )
 
 
 class _DynamoClient(Protocol):
     async def round_robin(
-        self, request: Mapping[str, Any], *, annotated: bool
+        self,
+        request: Mapping[str, Any],
+        *,
+        annotated: bool,
+        context: Any = None,
     ) -> AsyncIterator[Any]:
         ...
 
 
 class RemoteStageClient:
-    """Invoke a workflow stage through a hydrated Dynamo endpoint client."""
+    """Invoke a workflow stage through a discovered Dynamo endpoint client."""
 
     def __init__(self, client: _DynamoClient) -> None:
         self._client = client
 
     async def run(
-        self, stage: StageIR, inputs: Mapping[str, Any], context: StageContext
+        self,
+        stage_id: str,
+        contract: StageContract,
+        inputs: Mapping[str, Any],
+        context: StageContext,
     ) -> Mapping[str, Any]:
         context.raise_if_cancelled()
         request = StageRequestEnvelope(
             workflow_name=context.workflow_name,
-            stage_id=stage.id,
-            contract_id=stage.contract.id,
+            stage_id=stage_id,
+            contract_id=contract.id,
             attempt_id=context.attempt_id,
+            invocation_id=context.invocation_id,
             timeout_seconds=context.remaining_time(),
             inputs=inputs,
         )
-        stream = await self._client.round_robin(request.to_dict(), annotated=False)
-        responses = []
-        async for response in stream:
-            responses.append(response)
-            if len(responses) > 1:
+        transport_context = None
+        if context.request_context is not None:
+            detach = getattr(context.request_context, "detached", None)
+            if not callable(detach):
                 raise WorkflowExecutionError(
-                    f"remote stage {stage.id!r} returned multiple terminal responses"
+                    "request context cannot create a detached child context"
                 )
+            transport_context = detach(context.invocation_id)
+
+        stream = await self._client.round_robin(
+            request.to_dict(), annotated=False, context=transport_context
+        )
+        responses = []
+        try:
+            async for response in stream:
+                responses.append(response)
+                if len(responses) > 1:
+                    raise WorkflowExecutionError(
+                        f"remote stage {stage_id!r} returned multiple terminal responses"
+                    )
+        except BaseException:
+            if transport_context is not None:
+                transport_context.stop_generating()
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                await close()
+            raise
         if not responses:
             raise WorkflowExecutionError(
-                f"remote stage {stage.id!r} returned no terminal response"
+                f"remote stage {stage_id!r} returned no terminal response"
             )
         envelope = StageResponseEnvelope.from_dict(responses[0])
         if (
-            envelope.stage_id != stage.id
-            or envelope.contract_id != stage.contract.id
+            envelope.stage_id != stage_id
+            or envelope.contract_id != contract.id
             or envelope.attempt_id != context.attempt_id
+            or envelope.invocation_id != context.invocation_id
         ):
             raise WorkflowExecutionError(
-                f"remote stage {stage.id!r} response identity does not match request"
+                f"remote stage {stage_id!r} response identity does not match request"
             )
         return envelope.outputs
 
@@ -296,27 +341,64 @@ class RemoteStageServer:
             workflow_name=envelope.workflow_name,
             stage_id=envelope.stage_id,
             attempt_id=envelope.attempt_id,
+            invocation_id=envelope.invocation_id,
             deadline=deadline,
             _cancelled=cancelled,
+            request_context=transport_context,
         )
 
         async def invoke() -> Mapping[str, Any]:
             return await self._runner.run(envelope.inputs, context)
 
+        invoke_task = asyncio.create_task(
+            invoke(), name=f"workflow-remote:{envelope.invocation_id}"
+        )
+        transport_task: asyncio.Future[Any] | None = None
+        if transport_context is not None:
+            wait_for_stop = getattr(transport_context, "async_killed_or_stopped", None)
+            if callable(wait_for_stop):
+                transport_task = asyncio.ensure_future(wait_for_stop())
+
         try:
-            if envelope.timeout_seconds is None:
-                result = await invoke()
+            if transport_task is None:
+                if envelope.timeout_seconds is None:
+                    result = await invoke_task
+                else:
+                    result = await asyncio.wait_for(
+                        invoke_task, timeout=envelope.timeout_seconds
+                    )
             else:
-                result = await asyncio.wait_for(
-                    invoke(), timeout=envelope.timeout_seconds
+                done, _ = await asyncio.wait(
+                    {invoke_task, transport_task},
+                    timeout=envelope.timeout_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
+                if invoke_task in done:
+                    result = invoke_task.result()
+                elif transport_task in done:
+                    raise asyncio.CancelledError()
+                else:
+                    raise asyncio.TimeoutError()
         except BaseException:
             cancelled.set()
+            if not invoke_task.done():
+                invoke_task.cancel()
+            await asyncio.gather(invoke_task, return_exceptions=True)
             raise
+        finally:
+            if transport_task is not None and not transport_task.done():
+                transport_task.cancel()
+                await asyncio.gather(transport_task, return_exceptions=True)
 
-        if transport_context is not None and transport_context.is_stopped():
+        transport_stopped = transport_context is not None and bool(
+            getattr(transport_context, "is_stopped", lambda: False)()
+        )
+        transport_killed = transport_context is not None and bool(
+            getattr(transport_context, "is_killed", lambda: False)()
+        )
+        if transport_stopped or transport_killed:
             cancelled.set()
-            raise asyncio.CancelledError
+            raise asyncio.CancelledError()
         if not isinstance(result, Mapping):
             raise WorkflowExecutionError(
                 f"remote stage {self._stage_id!r} returned a non-mapping result"
@@ -340,5 +422,6 @@ class RemoteStageServer:
             stage_id=self._stage_id,
             contract_id=self._runner.contract.id,
             attempt_id=envelope.attempt_id,
+            invocation_id=envelope.invocation_id,
             outputs=outputs,
         ).to_dict()
