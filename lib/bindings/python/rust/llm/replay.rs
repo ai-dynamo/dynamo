@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1560,85 +1560,97 @@ fn replay_placement_candidates_ref_to_python<'py>(
     Ok(values)
 }
 
+// Templates contain only immutable authored scalars and placeholders. The
+// declaration-order schema is copied for each event; every mutable or
+// lifecycle-dependent value must be replaced before the copy is returned.
+type CapturedReplayEventTemplateCache = HashMap<Uuid, Py<PyDict>>;
+
+fn replay_captured_event_template<'py>(
+    py: Python<'py>,
+    data: &RsCapturedReplayEventDataView<'_>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    value.set_item(
+        pyo3::intern!(py, "logical_request_id"),
+        data.logical_request_id,
+    )?;
+    value.set_item(pyo3::intern!(py, "attempt_id"), data.attempt_id)?;
+    value.set_item(pyo3::intern!(py, "group_id"), data.group_id)?;
+    value.set_item(
+        pyo3::intern!(py, "internal_uuid"),
+        data.internal_uuid.to_string(),
+    )?;
+    value.set_item(pyo3::intern!(py, "session_id"), data.session_id)?;
+    value.set_item(
+        pyo3::intern!(py, "authored_turn_index"),
+        data.authored_turn_index,
+    )?;
+    value.set_item(pyo3::intern!(py, "timestamp_ms"), py.None())?;
+    value.set_item(pyo3::intern!(py, "pool_id"), py.None())?;
+    value.set_item(pyo3::intern!(py, "worker_id"), py.None())?;
+    value.set_item(pyo3::intern!(py, "dp_rank"), py.None())?;
+    value.set_item(pyo3::intern!(py, "terminal_status"), py.None())?;
+    value.set_item(pyo3::intern!(py, "input_length"), data.input_length)?;
+    value.set_item(pyo3::intern!(py, "requested_output_length"), py.None())?;
+    value.set_item(pyo3::intern!(py, "emitted_output_count"), py.None())?;
+    value.set_item(pyo3::intern!(py, "reused_input_tokens"), py.None())?;
+    value.set_item(pyo3::intern!(py, "ttft_ms"), py.None())?;
+    value.set_item(pyo3::intern!(py, "e2e_latency_ms"), py.None())?;
+    value.set_item(pyo3::intern!(py, "priority"), data.priority)?;
+    value.set_item(pyo3::intern!(py, "strict_priority"), data.strict_priority)?;
+    value.set_item(pyo3::intern!(py, "policy_class"), data.policy_class)?;
+    value.set_item(pyo3::intern!(py, "routing_constraints"), py.None())?;
+    value.set_item(pyo3::intern!(py, "eligible_pool_ids"), py.None())?;
+    value.set_item(pyo3::intern!(py, "candidates"), py.None())?;
+    Ok(value)
+}
+
 fn replay_captured_event_data_to_python<'py>(
     py: Python<'py>,
     data: &RsCapturedReplayEventData,
+    templates: &mut CapturedReplayEventTemplateCache,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let RsCapturedReplayEventDataView {
-        logical_request_id,
-        attempt_id,
-        group_id,
-        internal_uuid,
-        session_id,
-        authored_turn_index,
-        timestamp_ms,
-        pool_id,
-        worker_id,
-        dp_rank,
-        terminal_status,
-        input_length,
-        requested_output_length,
-        emitted_output_count,
-        reused_input_tokens,
-        ttft_ms,
-        e2e_latency_ms,
-        priority,
-        strict_priority,
-        policy_class,
-        routing_constraints,
-        eligible_pool_ids,
-        candidates,
-    } = data.view();
-    let value = PyDict::new(py);
-    value.set_item(pyo3::intern!(py, "logical_request_id"), logical_request_id)?;
-    value.set_item(pyo3::intern!(py, "attempt_id"), attempt_id)?;
-    value.set_item(pyo3::intern!(py, "group_id"), group_id)?;
-    value.set_item(
-        pyo3::intern!(py, "internal_uuid"),
-        internal_uuid.to_string(),
-    )?;
-    value.set_item(pyo3::intern!(py, "session_id"), session_id)?;
-    value.set_item(
-        pyo3::intern!(py, "authored_turn_index"),
-        authored_turn_index,
-    )?;
-    value.set_item(pyo3::intern!(py, "timestamp_ms"), timestamp_ms)?;
-    value.set_item(pyo3::intern!(py, "pool_id"), pool_id)?;
-    value.set_item(pyo3::intern!(py, "worker_id"), worker_id)?;
-    value.set_item(pyo3::intern!(py, "dp_rank"), dp_rank)?;
+    let data = data.view();
+    let template = match templates.entry(data.internal_uuid) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(replay_captured_event_template(py, &data)?.unbind())
+        }
+    };
+    let value = template.bind(py).copy()?;
+    value.set_item(pyo3::intern!(py, "timestamp_ms"), data.timestamp_ms)?;
+    value.set_item(pyo3::intern!(py, "pool_id"), data.pool_id)?;
+    value.set_item(pyo3::intern!(py, "worker_id"), data.worker_id)?;
+    value.set_item(pyo3::intern!(py, "dp_rank"), data.dp_rank)?;
     value.set_item(
         pyo3::intern!(py, "terminal_status"),
-        terminal_status.map(replay_terminal_status_name),
+        data.terminal_status.map(replay_terminal_status_name),
     )?;
-    value.set_item(pyo3::intern!(py, "input_length"), input_length)?;
     value.set_item(
         pyo3::intern!(py, "requested_output_length"),
-        requested_output_length,
+        data.requested_output_length,
     )?;
     value.set_item(
         pyo3::intern!(py, "emitted_output_count"),
-        emitted_output_count,
+        data.emitted_output_count,
     )?;
     value.set_item(
         pyo3::intern!(py, "reused_input_tokens"),
-        reused_input_tokens,
+        data.reused_input_tokens,
     )?;
-    value.set_item(pyo3::intern!(py, "ttft_ms"), ttft_ms)?;
-    value.set_item(pyo3::intern!(py, "e2e_latency_ms"), e2e_latency_ms)?;
-    value.set_item(pyo3::intern!(py, "priority"), priority)?;
-    value.set_item(pyo3::intern!(py, "strict_priority"), strict_priority)?;
-    value.set_item(pyo3::intern!(py, "policy_class"), policy_class)?;
+    value.set_item(pyo3::intern!(py, "ttft_ms"), data.ttft_ms)?;
+    value.set_item(pyo3::intern!(py, "e2e_latency_ms"), data.e2e_latency_ms)?;
     value.set_item(
         pyo3::intern!(py, "routing_constraints"),
-        replay_routing_constraints_ref_to_python(py, routing_constraints)?,
+        replay_routing_constraints_ref_to_python(py, data.routing_constraints)?,
     )?;
     value.set_item(
         pyo3::intern!(py, "eligible_pool_ids"),
-        replay_strings_to_python(py, eligible_pool_ids)?,
+        replay_strings_to_python(py, data.eligible_pool_ids)?,
     )?;
     value.set_item(
         pyo3::intern!(py, "candidates"),
-        replay_placement_candidates_ref_to_python(py, candidates)?,
+        replay_placement_candidates_ref_to_python(py, data.candidates)?,
     )?;
     Ok(value)
 }
@@ -1646,15 +1658,19 @@ fn replay_captured_event_data_to_python<'py>(
 fn replay_captured_events_to_python(
     py: Python<'_>,
     events: Vec<RsCapturedReplayEvent>,
+    templates: &mut CapturedReplayEventTemplateCache,
 ) -> PyResult<PyObject> {
     let values = PyList::empty(py);
     for event in events {
+        let internal_uuid = event.data().view().internal_uuid;
+        let terminal = matches!(&event, RsCapturedReplayEvent::Terminal(_));
         let value = PyDict::new(py);
         value.set_item(pyo3::intern!(py, "event_type"), event.event_type())?;
-        value.set_item(
-            pyo3::intern!(py, "event"),
-            replay_captured_event_data_to_python(py, event.data())?,
-        )?;
+        let event_data = replay_captured_event_data_to_python(py, event.data(), templates);
+        if terminal {
+            templates.remove(&internal_uuid);
+        }
+        value.set_item(pyo3::intern!(py, "event"), event_data?)?;
         values.append(value)?;
     }
     Ok(values.into_any().unbind())
@@ -1734,6 +1750,7 @@ fn parse_interactive_router(router: &str) -> PyResult<RsReplaySessionRouter> {
 #[pyclass(name = "_OfflineReplaySession", unsendable)]
 pub struct PyOfflineReplaySession {
     inner: RsOfflineReplaySession,
+    event_templates: CapturedReplayEventTemplateCache,
 }
 
 #[pymethods]
@@ -1763,7 +1780,10 @@ impl PyOfflineReplaySession {
             RsReplaySessionOptions { session_affinity },
         )
         .map_err(to_pyerr)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            event_templates: HashMap::new(),
+        })
     }
 
     #[staticmethod]
@@ -1790,7 +1810,10 @@ impl PyOfflineReplaySession {
             RsReplaySessionOptions { session_affinity },
         )
         .map_err(to_pyerr)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            event_templates: HashMap::new(),
+        })
     }
 
     fn submit(&mut self, request: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -1835,7 +1858,7 @@ impl PyOfflineReplaySession {
 
     fn drain_events(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let events = self.inner.drain_captured_events().map_err(to_pyerr)?;
-        replay_captured_events_to_python(py, events)
+        replay_captured_events_to_python(py, events, &mut self.event_templates)
     }
 
     fn pending_placements(&mut self, py: Python<'_>) -> PyResult<PyObject> {
@@ -1874,10 +1897,13 @@ impl PyOfflineReplaySession {
     }
 
     fn finalize(&mut self) -> PyResult<OfflineReplayResult> {
-        self.inner
+        let report = self
+            .inner
             .finalize()
             .map(OfflineReplayResult::from_interactive)
-            .map_err(to_pyerr)
+            .map_err(to_pyerr)?;
+        self.event_templates.clear();
+        Ok(report)
     }
 }
 

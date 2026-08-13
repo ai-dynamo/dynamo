@@ -470,11 +470,19 @@ def _mutation_isolation_lifecycle(mutate_returned_event: bool) -> list[dict]:
     retained_placement = copy.deepcopy(placement)
     if mutate_returned_event:
         data = placement["event"]
+        placement["event_type"] = "corrupted"
         data["logical_request_id"] = "corrupted"
+        data["routing_constraints"]["corrupted"] = True
+        data["routing_constraints"]["required_taints"].append("corrupted")
         data["routing_constraints"]["preferred_taints"].clear()
         data["eligible_pool_ids"].clear()
-        data["candidates"][0]["target"]["pool_id"] = "corrupted"
-        data["candidates"][0]["tags"].append("corrupted")
+        candidate = data["candidates"][0]
+        candidate["eligible"] = False
+        candidate["target"]["pool_id"] = "corrupted"
+        candidate["tags"].append("corrupted")
+        candidate["taints"].append("corrupted")
+        candidate["capabilities"].append("corrupted")
+        data["candidates"].append({"corrupted": True})
 
     pending = session.pending_placements()[0]
     assert pending["logical_request_id"] == "mutation-isolation"
@@ -484,11 +492,45 @@ def _mutation_isolation_lifecycle(mutate_returned_event: bool) -> list[dict]:
     assert pending["eligible_pool_ids"] == ["default"]
     assert pending["candidates"][0]["target"]["pool_id"] == "default"
     assert pending["candidates"][0]["tags"] == []
+    assert pending["candidates"][0]["taints"] == []
+    assert pending["candidates"][0]["capabilities"] == []
 
     session.assign("mutation-isolation", WorkerTarget(worker_id=0))
-    lifecycle = [retained_placement] + _drive_external_to_terminals(
-        session, {"mutation-isolation"}
-    )
+    downstream = _drive_external_to_terminals(session, {"mutation-isolation"})
+    routed = next(event for event in downstream if event["event_type"] == "routed")
+    placement_data = placement["event"]
+    routed_data = routed["event"]
+    placement_candidate = placement_data["candidates"][0]
+    routed_candidate = routed_data["candidates"][0]
+    distinct_mutable_pairs = [
+        (placement, routed),
+        (placement_data, routed_data),
+        (
+            placement_data["routing_constraints"],
+            routed_data["routing_constraints"],
+        ),
+        (
+            placement_data["routing_constraints"]["required_taints"],
+            routed_data["routing_constraints"]["required_taints"],
+        ),
+        (
+            placement_data["routing_constraints"]["preferred_taints"],
+            routed_data["routing_constraints"]["preferred_taints"],
+        ),
+        (placement_data["eligible_pool_ids"], routed_data["eligible_pool_ids"]),
+        (placement_data["candidates"], routed_data["candidates"]),
+        (placement_candidate, routed_candidate),
+        (placement_candidate["target"], routed_candidate["target"]),
+        (placement_candidate["tags"], routed_candidate["tags"]),
+        (placement_candidate["taints"], routed_candidate["taints"]),
+        (
+            placement_candidate["capabilities"],
+            routed_candidate["capabilities"],
+        ),
+    ]
+    assert all(left is not right for left, right in distinct_mutable_pairs)
+
+    lifecycle = [retained_placement] + downstream
     session.close()
     session.finalize()
     return lifecycle
