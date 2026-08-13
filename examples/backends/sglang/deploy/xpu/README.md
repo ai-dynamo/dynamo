@@ -54,7 +54,7 @@ The files ending in `_dra.yaml` require:
 
 ### Device Plugin Template
 
-`disagg_xpu.yaml` requires the [Intel device plugins for Kubernetes](https://github.com/intel/intel-device-plugins-for-kubernetes) and allocates `gpu.intel.com/xe`.
+`disagg_xpu.yaml` requires the [Intel device plugins for Kubernetes](https://github.com/intel/intel-device-plugins-for-kubernetes) and allocates `gpu.intel.com/xe`. Its decode and prefill workers use the validated `ZE_AFFINITY_MASK` values `2` and `0`; update them if your node uses different Level Zero device numbering.
 
 ## Key Differences from NVIDIA Templates
 
@@ -67,7 +67,7 @@ The files ending in `_dra.yaml` require:
 | Disagg KV Transfer | Default | `hostIPC: true`, `UCX_TLS=ze_ipc,...` |
 
 > [!NOTE]
-> Do not hardcode `ZE_AFFINITY_MASK` in these Kubernetes manifests. DRA and the Intel device plugin select the allocated device.
+> Do not set `ZE_AFFINITY_MASK` in the DRA templates. DRA selects the allocated device. The device-plugin template retains topology-specific affinity values from the validated configuration.
 
 `agg_router_xpu_dra.yaml` starts two workers and requires two GPUs. `disagg_planner_xpu_dra.yaml` starts two decode workers and one prefill worker and requires three GPUs.
 

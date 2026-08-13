@@ -51,6 +51,10 @@ spec:
           - -m
           - dynamo.sglang
           env:
+          # Select the decode device for the validated multi-device topology.
+          # Adjust this value to match the Level Zero numbering on your node.
+          - name: ZE_AFFINITY_MASK
+            value: "2"
           - name: UCX_TLS
             value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
           envFrom:
@@ -98,6 +102,10 @@ spec:
           - -m
           - dynamo.sglang
           env:
+          # Select the prefill device for the validated multi-device topology.
+          # Adjust this value to match the Level Zero numbering on your node.
+          - name: ZE_AFFINITY_MASK
+            value: "0"
           - name: UCX_TLS
             value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
           envFrom:
