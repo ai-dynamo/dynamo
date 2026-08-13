@@ -302,7 +302,7 @@ class TestAudioFormatterExtractTensor:
         with pytest.raises(ValueError, match="No audio data"):
             f._extract_audio_tensor({"sr": 24000})
 
-    def test_squeezes_extra_dims(self):
+    def test_preserves_channel_dimension(self):
         import numpy as np
 
         from dynamo.vllm.omni.output_formatter import AudioFormatter
@@ -310,7 +310,7 @@ class TestAudioFormatterExtractTensor:
         f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
         mm = {"audio": np.array([[0.1, 0.2, 0.3]], dtype=np.float32), "sr": 24000}
         audio_np, _ = f._extract_audio_tensor(mm)
-        assert audio_np.ndim == 1
+        assert audio_np.shape == (1, 3)
 
 
 class TestAudioFormatterEncode:
@@ -343,6 +343,38 @@ class TestAudioFormatterEncode:
         f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
         _, media_type = f._encode_audio(np.zeros(100, dtype=np.float32), 24000)
         assert media_type == "audio/wav"
+
+    @pytest.mark.parametrize(
+        ("input_shape", "output_shape", "num_channels"),
+        [
+            ((8,), (8,), 1),
+            ((1, 2), (2, 1), 1),
+            ((2, 1), (1, 2), 2),
+            ((1, 2, 8), (8, 2), 2),
+        ],
+    )
+    def test_normalizes_vllm_omni_channel_first_layout(
+        self, input_shape, output_shape, num_channels
+    ):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        normalized, actual_channels = AudioFormatter._normalize_audio_layout(
+            np.zeros(input_shape, dtype=np.float32)
+        )
+
+        assert normalized.shape == output_shape
+        assert actual_channels == num_channels
+
+    @pytest.mark.parametrize("shape", [(2, 1, 8), (3, 8), (1, 1, 1, 8)])
+    def test_rejects_unsupported_audio_layout(self, shape):
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        with pytest.raises(ValueError):
+            AudioFormatter._normalize_audio_layout(np.zeros(shape, dtype=np.float32))
 
 
 class TestAudioFormatterFormat:
@@ -459,7 +491,7 @@ class TestAudioFormatterFormat:
         from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
 
         formatter = AudioFormatter("test", None, None)
-        frame_major = np.linspace(-0.5, 0.5, 16, dtype=np.float32).reshape(8, 2)
+        channel_major = np.linspace(-0.5, 0.5, 16, dtype=np.float32).reshape(2, 8)
 
         async def encode(audio):
             response = await formatter.format(
@@ -470,12 +502,12 @@ class TestAudioFormatterFormat:
             )
             return base64.b64decode(response["data"][0]["b64_json"])
 
-        frame_major_chunk = await encode(frame_major)
-        assert frame_major_chunk == await encode(frame_major.T)
-        assert int.from_bytes(frame_major_chunk[22:24], "little") == 2
-        assert int.from_bytes(frame_major_chunk[28:32], "little") == 96000
-        assert int.from_bytes(frame_major_chunk[32:34], "little") == 4
-        assert len(frame_major_chunk) == 44 + 8 * 2 * 2
+        channel_major_chunk = await encode(channel_major)
+        assert channel_major_chunk == await encode(channel_major[None, ...])
+        assert int.from_bytes(channel_major_chunk[22:24], "little") == 2
+        assert int.from_bytes(channel_major_chunk[28:32], "little") == 96000
+        assert int.from_bytes(channel_major_chunk[32:34], "little") == 4
+        assert len(channel_major_chunk) == 44 + 8 * 2 * 2
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────

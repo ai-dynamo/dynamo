@@ -399,9 +399,6 @@ class AudioFormatter:
         else:
             audio_np = np.array(audio_val, dtype=np.float32)
 
-        if audio_np.ndim > 1:
-            audio_np = audio_np.squeeze()
-
         return audio_np, self._sample_rate(mm_output)
 
     @staticmethod
@@ -418,7 +415,7 @@ class AudioFormatter:
         fmt: str,
         stream_state: AudioStreamState,
     ) -> tuple[bytes, str]:
-        audio_np, num_channels = self._normalize_audio_layout(audio_np)
+        _, num_channels = self._normalize_audio_layout(audio_np)
         pcm_bytes, _ = self._encode_audio(audio_np, sample_rate, "pcm")
         if fmt == "wav" and stream_state.first_chunk:
             pcm_bytes = self._wav_stream_header(sample_rate, num_channels) + pcm_bytes
@@ -427,34 +424,51 @@ class AudioFormatter:
 
     @staticmethod
     def _normalize_audio_layout(audio_np: np.ndarray) -> tuple[np.ndarray, int]:
-        """Return soundfile's frame-major layout and its channel count."""
-        if audio_np.ndim != 2:
+        """Convert vLLM-Omni channel-first audio to soundfile's layout."""
+        if audio_np.ndim == 3:
+            if audio_np.shape[0] != 1:
+                raise ValueError(
+                    f"Expected one audio batch, got shape {audio_np.shape}"
+                )
+            audio_np = audio_np[0]
+
+        if audio_np.ndim == 1:
             return audio_np, 1
-        if audio_np.shape[1] in (1, 2):
-            return audio_np, int(audio_np.shape[1])
-        if audio_np.shape[0] in (1, 2):
-            return audio_np.T, int(audio_np.shape[0])
-        return audio_np, 1
+
+        if audio_np.ndim == 2:
+            num_channels = int(audio_np.shape[0])
+            if num_channels not in (1, 2):
+                raise ValueError(
+                    f"Expected mono or stereo audio, got shape {audio_np.shape}"
+                )
+            return audio_np.T, num_channels
+
+        raise ValueError(f"Unexpected audio shape {audio_np.shape}")
 
     @staticmethod
-    def _wav_stream_header(sample_rate: int, num_channels: int = 1) -> bytes:
+    def _wav_stream_header(
+        sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16
+    ) -> bytes:
         """Build a PCM WAV header whose payload length is not known yet."""
-        bytes_per_sample = 2
+        byte_rate = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        placeholder_size = 0xFFFFFFFF
+
         return struct.pack(
             "<4sI4s4sIHHIIHH4sI",
             b"RIFF",
-            0xFFFFFFFF,
+            placeholder_size,
             b"WAVE",
             b"fmt ",
             16,
             1,
             num_channels,
             sample_rate,
-            sample_rate * num_channels * bytes_per_sample,
-            num_channels * bytes_per_sample,
-            bytes_per_sample * 8,
+            byte_rate,
+            block_align,
+            bits_per_sample,
             b"data",
-            0xFFFFFFFF,
+            placeholder_size,
         )
 
     def _encode_audio(
