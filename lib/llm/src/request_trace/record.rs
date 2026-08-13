@@ -241,7 +241,6 @@ mod tests {
                 parent_session_id: None,
                 session_final: None,
                 compaction: None,
-                kv_hints: None,
                 input_trigger: None,
             }),
             request: None,

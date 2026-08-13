@@ -249,24 +249,6 @@ pub enum WorkerSelectionInputTrigger {
     Other,
 }
 
-/// KV lifecycle hints supplied with an agent request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorkerSelectionKvHints {
-    evict_session: bool,
-}
-
-impl WorkerSelectionKvHints {
-    /// Create the KV hints passed to worker selection.
-    pub fn new(evict_session: bool) -> Self {
-        Self { evict_session }
-    }
-
-    /// Return whether the caller asked consumers to evict the session state.
-    pub fn evict_session(&self) -> bool {
-        self.evict_session
-    }
-}
-
 /// Session metadata supplied to a custom worker-selection policy.
 ///
 /// The internal request protocol supplies these values. Optional values remain
@@ -276,7 +258,6 @@ pub struct SessionContext {
     session_id: String,
     parent_session_id: Option<String>,
     session_final: Option<bool>,
-    kv_hints: Option<WorkerSelectionKvHints>,
     input_trigger: Option<WorkerSelectionInputTrigger>,
 }
 
@@ -286,14 +267,12 @@ impl SessionContext {
         session_id: String,
         parent_session_id: Option<String>,
         session_final: Option<bool>,
-        kv_hints: Option<WorkerSelectionKvHints>,
         input_trigger: Option<WorkerSelectionInputTrigger>,
     ) -> Self {
         Self {
             session_id,
             parent_session_id,
             session_final,
-            kv_hints,
             input_trigger,
         }
     }
@@ -314,11 +293,6 @@ impl SessionContext {
     /// it as continuing, and `None` means the caller supplied no marker.
     pub fn session_final(&self) -> Option<bool> {
         self.session_final
-    }
-
-    /// Return optional KV lifecycle hints from the request.
-    pub fn kv_hints(&self) -> Option<&WorkerSelectionKvHints> {
-        self.kv_hints.as_ref()
     }
 
     /// Return the event that caused this request, when supplied.

@@ -802,7 +802,7 @@ impl SelectionCore {
             strict_priority,
             policy_class,
             session_context: session_id
-                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
+                .map(|session_id| SessionContext::new(session_id, None, None, None)),
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
