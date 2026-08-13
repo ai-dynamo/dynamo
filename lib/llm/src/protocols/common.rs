@@ -105,8 +105,6 @@ impl std::str::FromStr for FinishReason {
             "stop" => Ok(FinishReason::Stop),
             "cancelled" | "abort" => Ok(FinishReason::Cancelled),
             "content_filter" => Ok(FinishReason::ContentFilter),
-            // The `Display` form, and what the Python engine adapters emit.
-            // A bare "error" is deliberately not accepted; see the type docs.
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
@@ -114,13 +112,12 @@ impl std::str::FromStr for FinishReason {
 }
 
 impl<'de> Deserialize<'de> for FinishReason {
-    // `deserialize_any` requires a self-describing format — it needs the
-    // wire data itself to say whether a string or a map follows, since
-    // `FinishReasonVisitor` handles both. The request-plane codec
-    // (`rmp_serde::to_vec_named`) is self-describing, so this holds today;
-    // a compact, non-self-describing encoding (plain `bincode`, for
-    // instance) would fail here even though the derived `Deserialize` this
-    // type replaced would have accepted it.
+    // `deserialize_any` needs a self-describing format, since the visitor
+    // decides from the wire data itself whether to expect a string or a
+    // map. The request-plane codec (`rmp_serde::to_vec_named`) is
+    // self-describing, so this holds today. A non-self-describing format
+    // (plain `bincode`, for instance) would fail here, even though the
+    // derived `Deserialize` this replaced would have accepted it.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -144,16 +141,14 @@ impl<'de> serde::de::Visitor<'de> for FinishReasonVisitor {
     where
         E: serde::de::Error,
     {
-        // `parse()` (`FromStr`) already carries the specific reason a string
-        // failed to match any known form. `E::custom` keeps that message
-        // instead of collapsing every parse failure into the generic
-        // `invalid_value` text.
+        // `parse()` carries the specific reason a string failed to match
+        // any known form. `E::custom` passes that message through instead
+        // of the generic `invalid_value` error.
         value.parse().map_err(E::custom)
     }
 
-    /// The externally tagged form that [`Serialize`] emits: exactly one entry,
-    /// which can only ever be `{"error": "<message>"}` — the unit variants
-    /// serialize as bare strings and arrive at [`Self::visit_str`].
+    /// Unit variants route to [`Self::visit_str`] instead; this method
+    /// handles only the `Error` map case.
     fn visit_map<A>(self, mut map: A) -> Result<FinishReason, A::Error>
     where
         A: serde::de::MapAccess<'de>,
