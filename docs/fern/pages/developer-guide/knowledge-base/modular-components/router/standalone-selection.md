@@ -317,12 +317,13 @@ reservation API does not accept or derive accounting from overlap fields.
 ```http
 POST /reservations/{selection_id}/prefill_complete
 POST /reservations/{selection_id}/output_block
+POST /reservations/{selection_id}/abort
 DELETE /reservations/{selection_id}
 ```
 
 `prefill_complete` clears active prefill load. `output_block` updates only the
 receiving selector's local decode-block accounting and accepts an optional
-`decay_fraction` in `[0.0, 1.0]`. `DELETE` frees the reservation.
+`decay_fraction` in `[0.0, 1.0]`. `DELETE` frees a successfully completed reservation and reports `Completed` to a queue-admission policy. If inference fails after booking, `POST /reservations/{selection_id}/abort` frees the reservation and reports `Aborted`. Both terminal operations return `404` when no routing partition owns the reservation.
 
 **NOTE:** Output-block updates are intentionally not replica-synchronized.
 They can occur at high frequency, and broadcasting them would consume

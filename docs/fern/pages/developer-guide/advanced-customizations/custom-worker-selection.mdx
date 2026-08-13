@@ -6,7 +6,7 @@ subtitle: Build Rust filters, scorers, and pickers for the Dynamo frontend or EP
 ---
 
 <Warning>
-**Experimental.** A custom worker-selection policy controls how Dynamo filters and scores eligible workers, then selects one. Dynamo still owns discovery, eligibility, queueing, reservations, accounting, and metrics.
+**Experimental.** A custom worker-selection policy controls how Dynamo filters and scores eligible workers, then selects one. It can also attach a queue-admission policy that defers and wakes host-owned requests. Dynamo still owns discovery, eligibility, queue storage, reservations, accounting, and metrics.
 </Warning>
 
 ## How It Works
@@ -204,6 +204,8 @@ use dynamo_kv_router::{WorkerFilter, WorkerScorer, WorkerSelectionPolicy};
 #[serde(deny_unknown_fields)]
 struct Parameters {
     min_device_overlap_blocks: f64,
+    #[serde(default)]
+    serialize_sessions: bool,
 }
 
 fn provider(
@@ -218,19 +220,25 @@ fn provider(
         ));
     }
     let minimum_blocks = parameters.min_device_overlap_blocks;
+    let serialize_sessions = parameters.serialize_sessions;
 
     Ok(Arc::new(move |config, worker_type, _partition| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
         ];
         let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
-        WorkerSelectionPolicy::new_with_filters(
+        let policy = WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type,
             filters,
             scorers,
             Box::new(LowestCostPicker),
-        )
+        );
+        if serialize_sessions {
+            policy.with_admission_policy(Box::new(SessionAdmissionPolicy::default()))
+        } else {
+            policy
+        }
     }))
 }
 ```
@@ -277,9 +285,32 @@ worker_selection:
       type: least-busy
       parameters:
         min_device_overlap_blocks: 0
+        serialize_sessions: true
 ```
 
 The `type` selects a registered provider. The `name` identifies one configured instance. `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides `worker_selection.default` by instance name. Set the override to `default` to select Dynamo's built-in policy.
+
+### Control Queue Admission
+
+Implement `QueueAdmissionPolicy` when a request must wait for policy state rather than only worker capacity. `admit` returns `Bypass`, `Ready`, or `Defer`. Dynamo retains deferred requests and serially delivers `Dispatched`, `Completed`, `Aborted`, and `Reconcile` events through `on_event`. Append a previously deferred `QueueAdmissionId` to the `ready` vector to make that request runnable.
+
+Attach one admission-policy instance to each factory-created worker-selection policy:
+
+```rust
+let policy = WorkerSelectionPolicy::new_with_filters(
+    config.clone(),
+    worker_type,
+    filters,
+    scorers,
+    Box::new(LowestCostPicker),
+);
+
+policy.with_admission_policy(Box::new(SessionAdmissionPolicy::default()))
+```
+
+The compile-checked [session admission example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/simple-filter-score-pick/src/admission.rs) allows one active request per `session_id`, defers later requests from the same session, and wakes the next request after either `Completed` or `Aborted`. Requests without session metadata bypass that example policy. The host still applies worker eligibility, overload checks, built-in queue ordering, and reservation accounting after the policy wakes a request.
+
+Use `POST /select_and_reserve` for standalone selection with queue admission. The two-step `POST /select` then `POST /reservations` flow cannot preserve admission ownership and is rejected when an admission policy is installed. Report successful requests with `DELETE /reservations/{selection_id}` and failed requests with `POST /reservations/{selection_id}/abort`.
 
 ### Check the Policy and Catalog
 
@@ -442,6 +473,8 @@ Standalone EPP supplies `select` as `worker_type` because it selects from one wo
 - Request only the signal groups that the component reads.
 - Keep blocking I/O and panics out of `keep`, `score`, and `pick`.
 - Keep policy state local to the factory-created policy unless cross-partition sharing is a deliberate requirement.
+- Treat every admitted request as a lifecycle: release policy state on both `Completed` and `Aborted`.
+- Retain only policy metadata. Dynamo owns queued requests and wakes deferred IDs supplied through `on_event`.
 - Build the policy against the same Dynamo revision as the frontend or EPP.
 - If a signal adds work, storage, allocation, or another scan, run the worker-selection benchmark.
 

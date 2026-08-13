@@ -28,7 +28,7 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
-The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`. An optional queue-admission policy admits one active request per session.
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Prefill and decode workers then use separate scorers and pickers.
 
@@ -77,6 +77,8 @@ The registry calls the provider once at startup for the selected policy instance
 #[serde(deny_unknown_fields)]
 struct Parameters {
     min_device_overlap_blocks: f64,
+    #[serde(default)]
+    serialize_sessions: bool,
 }
 
 fn provider(
@@ -91,6 +93,7 @@ fn provider(
         ));
     }
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
+    let serialize_sessions = parameters.serialize_sessions;
 
     Ok(Arc::new(move |config, worker_type, _partition| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
@@ -99,13 +102,18 @@ fn provider(
             }),
         ];
 
-        WorkerSelectionPolicy::new_with_filters(
+        let policy = WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type,
             filters,
             vec![Box::new(ActiveRequestsScorer)],
             Box::new(RequestAwarePicker),
-        )
+        );
+        if serialize_sessions {
+            policy.with_admission_policy(Box::new(SessionAdmissionPolicy::default()))
+        } else {
+            policy
+        }
     }))
 }
 ```
@@ -147,6 +155,7 @@ worker_selection:
       type: simple-filter-score-pick
       parameters:
         min_device_overlap_blocks: 0
+        serialize_sessions: true
     - name: filter-score-pick-cache-affinity
       type: simple-filter-score-pick
       parameters:
@@ -168,7 +177,7 @@ worker_selection:
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.
 
-The `min_device_overlap_blocks` parameter is a hard filter. A value of `0` keeps cold workers for a smoke test. If every worker is below a positive threshold, Dynamo returns HTTP 503.
+The `min_device_overlap_blocks` parameter is a hard filter. A value of `0` keeps cold workers for a smoke test. If every worker is below a positive threshold, Dynamo returns HTTP 503. Set `serialize_sessions: true` to attach the policy in [`admission.rs`](simple-filter-score-pick/src/admission.rs). It defers later requests with the same `session_id` until the active request completes or aborts; requests without a session bypass admission.
 
 ## 6. Build and Test
 
