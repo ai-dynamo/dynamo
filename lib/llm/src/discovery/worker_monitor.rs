@@ -742,7 +742,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let cancellation_token = component.drt().child_token();
         let lifecycle_token = self.lifecycle.child_token();
 
-        let decode_configs_rx = match runtime_config_watch(endpoint).await {
+        let decode_configs_rx = match runtime_config_watch(endpoint, lifecycle_token.clone()).await {
             Ok(rx) => rx,
             Err(error) => {
                 tracing::error!(
@@ -839,12 +839,41 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         break;
                     }
 
-                    // WorkerSet teardown. Breaking here drops the KV metrics subscriber,
-                    // the decode/prefill runtime-config watches and the instance watchers
-                    // this task owns; `runtime_config_watch`'s inner task then unwinds on
-                    // `tx.closed()`.
+                    // WorkerSet teardown. Breaking here drops the KV metrics subscriber
+                    // and the instance watchers this task owns; `runtime_config_watch`
+                    // now takes `lifecycle_token` directly, so its own tasks (the join
+                    // task and, beneath it, `base_runtime_config_watch`) exit on this
+                    // same cancellation rather than waiting to notice their receivers
+                    // are gone.
                     _ = lifecycle_token.cancelled() => {
                         tracing::debug!("Worker monitoring cancelled by WorkerSet teardown");
+                        // `select!` gives no ordering guarantee between this branch and
+                        // `config_change_future` above: a worker removal that discovery
+                        // already reported may still be sitting unprocessed in
+                        // `decode_configs_rx`/`prefill_configs_rx` if this branch wins
+                        // the race. Reconcile once more against the latest borrowed
+                        // snapshot (not `.changed()`, which only fires once) so that
+                        // worker's `cleanup_worker_metrics` still runs before this task
+                        // exits. Skipping it would leak that worker's gauges
+                        // indefinitely, since they are process-global and nothing else
+                        // ever cleans them up. This only clears workers discovery
+                        // already dropped, so it does not race a replacement generation
+                        // that reuses the same worker id under the next WorkerSet.
+                        let runtime_configs = merge_endpoint_runtime_configs(
+                            &decode_configs_rx,
+                            prefill_configs_rx.as_ref(),
+                        );
+                        for worker_id in known_worker_dp_ranks.keys() {
+                            if runtime_configs.contains_key(worker_id) {
+                                continue;
+                            }
+                            let dp_ranks: Vec<u32> = known_worker_dp_ranks[worker_id]
+                                .iter()
+                                .copied()
+                                .collect();
+                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_DECODE);
+                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
+                        }
                         break;
                     }
 
@@ -1184,7 +1213,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     None
                                 }
                             };
-                            prefill_configs_rx = match runtime_config_watch(&prefill_endpoint).await {
+                            prefill_configs_rx = match runtime_config_watch(&prefill_endpoint, lifecycle_token.clone()).await {
                                 Ok(rx) => Some(rx),
                                 Err(error) => {
                                     tracing::warn!(

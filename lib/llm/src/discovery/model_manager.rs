@@ -2262,7 +2262,9 @@ impl ModelManager {
         // Slow path: create the watch (spawns a background task).
         // If another caller raced us, the entry() below picks up the winner;
         // the loser's background task stops once its receivers are dropped.
-        let rx = runtime_config_watch(endpoint).await?;
+        // This registry is keyed by endpoint and outlives any one WorkerSet, so
+        // the watch is scoped to the process, not to a caller's own lifecycle.
+        let rx = runtime_config_watch(endpoint, endpoint.drt().primary_token()).await?;
         let result = match self.runtime_configs.entry(endpoint_id) {
             Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(e) => {

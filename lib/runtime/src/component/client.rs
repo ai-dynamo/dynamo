@@ -544,12 +544,46 @@ impl Client {
         Self::with_reconcile_interval(endpoint, *INHIBITED_DURATION).await
     }
 
+    /// Like [`Self::new`], but the `monitor_instance_source` background task
+    /// is bound to `cancel_token` instead of the process-wide primary token.
+    /// See [`Self::with_reconcile_interval_and_cancellation`] for why a
+    /// caller whose own scope is narrower than the process needs this.
+    pub(crate) async fn with_cancellation(
+        endpoint: Endpoint,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self> {
+        Self::with_reconcile_interval_and_cancellation(endpoint, *INHIBITED_DURATION, cancel_token)
+            .await
+    }
+
     /// Create a client with a custom reconcile interval.
     /// The reconcile interval controls how often `instance_avail` is reset to match
     /// `instance_source`, restoring any instances removed via `report_instance_down`.
     pub(crate) async fn with_reconcile_interval(
         endpoint: Endpoint,
         reconcile_interval: Duration,
+    ) -> Result<Self> {
+        let cancel_token = endpoint.drt().primary_token();
+        Self::with_reconcile_interval_and_cancellation(endpoint, reconcile_interval, cancel_token)
+            .await
+    }
+
+    /// Like [`Self::with_reconcile_interval`], but the `monitor_instance_source`
+    /// background task is bound to `cancel_token` rather than the process-wide
+    /// primary token.
+    ///
+    /// A caller that builds a `Client` scoped to something narrower than the
+    /// process — a monitor bound to one `WorkerSet`'s lifecycle, say — must use
+    /// this constructor. `Client` is `Clone`, and `monitor_instance_source`
+    /// captures its own clone before returning, so dropping every `Client`
+    /// handle the caller holds does not stop that task; only cancelling its
+    /// token does. Built through [`Self::new`] or [`Self::with_reconcile_interval`]
+    /// instead, that task runs until process shutdown regardless of how long
+    /// the caller actually keeps the `Client` around.
+    pub(crate) async fn with_reconcile_interval_and_cancellation(
+        endpoint: Endpoint,
+        reconcile_interval: Duration,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<Self> {
         tracing::trace!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
@@ -575,7 +609,7 @@ impl Client {
             routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval,
         };
-        client.monitor_instance_source();
+        client.monitor_instance_source_with_cancellation(cancel_token, true);
         Ok(client)
     }
 
@@ -798,11 +832,10 @@ impl Client {
     /// changed for `reconcile_interval`, we reset `instance_avail` to match
     /// `instance_source`. This ensures instances removed via `report_instance_down`
     /// are eventually restored even if the discovery source doesn't emit updates.
-    fn monitor_instance_source(&self) {
-        let cancel_token = self.endpoint.drt().primary_token();
-        self.monitor_instance_source_with_cancellation(cancel_token, true);
-    }
-
+    ///
+    /// The spawned task runs until `cancel_token` cancels. A caller that wants
+    /// this task to outlive nothing shorter than the process should pass
+    /// `self.endpoint.drt().primary_token()`, as [`Self::new`] does.
     fn monitor_instance_source_with_cancellation(
         &self,
         cancel_token: tokio_util::sync::CancellationToken,
@@ -1363,6 +1396,56 @@ mod tests {
         // Note: We need to check if changed() was signaled
         let current = watcher.borrow().clone();
         assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
+    }
+
+    /// Regression test: `monitor_instance_source_with_cancellation`'s task must
+    /// exit on its own `cancel_token`, not only at process shutdown.
+    ///
+    /// `Client::new` bound this task to the process-wide primary token
+    /// unconditionally. A caller building a `Client` scoped to something
+    /// narrower — a monitor bound to one `WorkerSet`'s lifecycle, say — had no
+    /// way to stop the task before then: dropping every `Client` handle does
+    /// not stop it, since it holds its own clone. Every WorkerSet rebuild
+    /// leaked one.
+    ///
+    /// The observable is the strong count of `routing_instances`: the spawned
+    /// task captures a clone of it, so the count returning to 1 proves the
+    /// task actually exited and dropped that capture.
+    #[tokio::test]
+    async fn monitor_instance_source_exits_on_its_own_cancellation_token() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_monitor_instance_source_cancellation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let client = Client::with_cancellation(endpoint.clone(), cancel_token.clone())
+            .await
+            .unwrap();
+
+        // Negative control, first: the task must still be alive, and still
+        // holding its capture, before cancellation.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            Arc::strong_count(&client.routing_instances) > 1,
+            "monitor task must be running (and holding its capture) before cancellation"
+        );
+
+        cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&client.routing_instances) > 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("monitor_instance_source task must exit when its cancel_token cancels");
 
         rt.shutdown();
     }

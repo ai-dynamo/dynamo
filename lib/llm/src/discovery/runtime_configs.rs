@@ -11,6 +11,7 @@ use dynamo_runtime::discovery::{
     DiscoveryEvent, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
 };
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
+use tokio_util::sync::CancellationToken;
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
@@ -19,14 +20,29 @@ use dynamo_kv_router::protocols::WorkerId;
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
 
+// `lifecycle` bounds this task directly rather than leaving it to notice its
+// receiver is gone. That receiver-drop signal only reaches this task via a
+// failed `tx.send`, and `tx.send` is only attempted when a discovery event
+// actually changes `configs` — so on a quiescent endpoint (no discovery
+// events, the case a retired WorkerSet is usually in) this task can sit in
+// `stream.next()` forever, past every consumer's exit, past `lifecycle`
+// cancelling. See the "WorkerSet churn" test below.
 fn base_runtime_config_watch(
     mut stream: DiscoveryStream,
+    lifecycle: CancellationToken,
 ) -> watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>> {
     let (tx, rx) = watch::channel(HashMap::new());
 
     tokio::spawn(async move {
         let mut configs = HashMap::new();
-        while let Some(result) = stream.next().await {
+        loop {
+            let result = tokio::select! {
+                _ = lifecycle.cancelled() => break,
+                event = stream.next() => match event {
+                    Some(result) => result,
+                    None => break,
+                },
+            };
             match result {
                 Ok(DiscoveryEvent::Added(instance)) => {
                     let DiscoveryInstanceId::Model(id) = instance.id() else {
@@ -91,12 +107,22 @@ fn base_runtime_config_watch(
 /// Only includes workers that have BOTH an instance registration AND a runtime config.
 /// Spawns a background task that recomputes the joined state whenever either source changes.
 /// The returned `watch::Receiver` always contains the latest joined snapshot.
-pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<RuntimeConfigWatch> {
+///
+/// `lifecycle` bounds every task and subscription this function creates, directly —
+/// the outer join task below, `Source 1`'s `Client` (and the `monitor_instance_source`
+/// task it owns), and `Source 2`'s `base_runtime_config_watch` task. A caller scoped to
+/// something narrower than the process, such as a monitor bound to one `WorkerSet`'s
+/// lifecycle, must pass that scope's own token, or these background tasks outlive every
+/// dropped reference the caller holds and leak until process shutdown.
+pub async fn runtime_config_watch(
+    endpoint: &Endpoint,
+    lifecycle: CancellationToken,
+) -> anyhow::Result<RuntimeConfigWatch> {
     let component = endpoint.component();
     let cancel_token = component.drt().primary_token();
 
     // Source 1: instance availability (watches DiscoveryQuery::Endpoint)
-    let client = endpoint.client().await?;
+    let client = endpoint.client_with_cancellation(lifecycle.clone()).await?;
     let mut instance_ids_rx = client.instance_avail_watcher();
 
     // Source 2: runtime configs from discovery (watches DiscoveryQuery::EndpointModels)
@@ -112,7 +138,7 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
             Some(cancel_token.clone()),
         )
         .await?;
-    let mut configs_rx = base_runtime_config_watch(stream);
+    let mut configs_rx = base_runtime_config_watch(stream, lifecycle.clone());
 
     let (tx, rx) = watch::channel(HashMap::new());
 
@@ -120,6 +146,7 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => break,
+                _ = lifecycle.cancelled() => break,
                 _ = tx.closed() => break,
                 result = instance_ids_rx.changed() => { if result.is_err() { break; } }
                 result = configs_rx.changed() => { if result.is_err() { break; } }
@@ -173,12 +200,43 @@ mod tests {
         }
     }
 
+    /// Regression test for the "WorkerSet churn" leak this fix closes:
+    /// `base_runtime_config_watch`'s task must exit when its `lifecycle` token
+    /// cancels, even on a quiescent stream that never emits an event again.
+    ///
+    /// Before this fix the task's only exit paths were the stream ending or a
+    /// failed `tx.send` — and `tx.send` runs only when a discovery event
+    /// changes `configs`, so on a quiescent endpoint (the state a retired
+    /// WorkerSet's discovery stream is normally left in) neither path ever
+    /// fires. The task then outlived every dropped reference to its receiver
+    /// and leaked until process shutdown.
+    #[tokio::test]
+    async fn base_runtime_config_watch_exits_on_lifecycle_cancellation_with_no_stream_activity() {
+        // `_tx` stays alive for the whole test, so the stream never ends on its
+        // own — the only way the task below can exit is `lifecycle` cancelling.
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream =
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+        let lifecycle = CancellationToken::new();
+        let mut configs = base_runtime_config_watch(stream, lifecycle.clone());
+
+        lifecycle.cancel();
+
+        // The task drops its `watch::Sender` when it exits — the one signal a
+        // caller outside this module can observe. `changed()` on the paired
+        // `Receiver` returns an error once every `Sender` is gone.
+        tokio::time::timeout(std::time::Duration::from_secs(5), configs.changed())
+            .await
+            .expect("base_runtime_config_watch's task must exit within the timeout")
+            .expect_err("the watch::Sender must be dropped once the task exits");
+    }
+
     #[tokio::test]
     async fn only_base_cards_define_runtime_config_expectations() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let stream: DiscoveryStream =
             Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
-        let mut configs = base_runtime_config_watch(stream);
+        let mut configs = base_runtime_config_watch(stream, CancellationToken::new());
         let mut base = ModelDeploymentCard::default();
         base.runtime_config.data_parallel_start_rank = 3;
         base.runtime_config.data_parallel_size = 2;
@@ -214,7 +272,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let stream: DiscoveryStream =
             Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
-        let mut configs = base_runtime_config_watch(stream);
+        let mut configs = base_runtime_config_watch(stream, CancellationToken::new());
         let mut base = ModelDeploymentCard::default();
         base.runtime_config.taints = HashSet::from(["old".to_string()]);
         let base_instance = model_instance(7, None, &base);
