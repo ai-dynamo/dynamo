@@ -556,6 +556,7 @@ fn raw_block_stored(
     medium: &str,
 ) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        source_kind: None,
         block_hashes: vec![BlockHashValue::Unsigned(block_hash)],
         parent_block_hash: parent_block_hash.map(BlockHashValue::Unsigned),
         token_ids,
