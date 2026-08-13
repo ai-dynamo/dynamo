@@ -32,7 +32,8 @@ use crate::{
         timing::{RequestPhase, RoutingData},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
+        AffinityAcquire, AffinityCoordinator, AffinityRoutingBinding, AffinityTarget, affinity_id,
+        explicit_target,
     },
 };
 
@@ -164,20 +165,17 @@ where
         }
     }
 
-    pub(crate) fn query_affinity_worker(
+    pub(crate) fn query_affinity_binding(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
-    ) -> Result<Option<WorkerWithDpRank>, Error> {
+    ) -> Result<Option<AffinityRoutingBinding>, Error> {
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok(None);
         };
         let Some(session_id) = affinity_id(request)? else {
             return Ok(None);
         };
-        let explicit = explicit_target(request, phase)?;
-        let target = affinity.query_target(&session_id, explicit)?;
-        Ok(target.and_then(affinity_worker))
+        affinity.query_binding(&session_id)
     }
 
     async fn select_request(
@@ -186,6 +184,7 @@ where
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<WorkerWithDpRank>,
+        fenced_affinity_target: Option<AffinityTarget>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
@@ -204,6 +203,7 @@ where
                 is_query_only,
                 SelectionOptions {
                     affinity_target,
+                    fenced_affinity_target,
                     policy_class,
                     session_context,
                 },
@@ -221,37 +221,109 @@ where
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((
-                self.select_request(request, phase, is_query_only, None)
+                self.select_request(request, phase, is_query_only, None, None)
                     .await?,
                 None,
             ));
         };
         let Some(session_id) = affinity_id(request)? else {
             return Ok((
-                self.select_request(request, phase, is_query_only, None)
+                self.select_request(request, phase, is_query_only, None, None)
                     .await?,
                 None,
             ));
         };
         let explicit = explicit_target(request, phase)?;
         if is_query_only {
-            let target = affinity.query_target(&session_id, explicit)?;
-            let affinity_target = target.and_then(affinity_worker);
+            let binding = affinity.query_binding(&session_id)?;
+            let affinity_target = binding
+                .filter(|binding| !binding.hard_constraint)
+                .and_then(|binding| affinity_worker(binding.target));
+            let fenced_affinity_target = binding
+                .filter(|binding| binding.hard_constraint)
+                .map(|binding| binding.target);
             return Ok((
-                self.select_request(request, phase, true, affinity_target)
-                    .await?,
+                self.select_request(
+                    request,
+                    phase,
+                    true,
+                    affinity_target,
+                    fenced_affinity_target,
+                )
+                .await?,
                 None,
             ));
         }
 
         let request_context = request.context();
-        let operation = affinity
+        let mut operation = affinity
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
-        let affinity_target = operation.target().and_then(affinity_worker);
+        let mut binding = operation.routing_binding();
+        if explicit.is_none()
+            && binding.is_some_and(|binding| {
+                binding.hard_constraint
+                    && self
+                        .chooser
+                        .affinity_target_is_definitively_unroutable(binding.target)
+            })
+        {
+            operation.invalidate();
+            operation = affinity
+                .acquire_with_context(&session_id, None, request_context.as_ref())
+                .await?;
+            binding = operation.routing_binding();
+        }
+        let affinity_target = binding
+            .filter(|binding| !binding.hard_constraint)
+            .and_then(|binding| affinity_worker(binding.target));
+        let fenced_affinity_target = binding
+            .filter(|binding| binding.hard_constraint)
+            .map(|binding| binding.target);
         let selection = self
-            .select_request(request, phase, false, affinity_target)
-            .await?;
+            .select_request(
+                request,
+                phase,
+                false,
+                affinity_target,
+                fenced_affinity_target,
+            )
+            .await;
+        let selection = match selection {
+            Ok(selection) => selection,
+            Err(_error)
+                if explicit.is_none()
+                    && binding.is_some_and(|binding| {
+                        binding.hard_constraint
+                            && self
+                                .chooser
+                                .affinity_target_is_definitively_unroutable(binding.target)
+                    }) =>
+            {
+                operation.invalidate();
+                let replacement = affinity
+                    .acquire_with_context(&session_id, None, request_context.as_ref())
+                    .await?;
+                let replacement_binding = replacement.routing_binding();
+                let replacement_affinity = replacement_binding
+                    .filter(|binding| !binding.hard_constraint)
+                    .and_then(|binding| affinity_worker(binding.target));
+                let replacement_fence = replacement_binding
+                    .filter(|binding| binding.hard_constraint)
+                    .map(|binding| binding.target);
+                let selection = self
+                    .select_request(
+                        request,
+                        phase,
+                        false,
+                        replacement_affinity,
+                        replacement_fence,
+                    )
+                    .await?;
+                return Ok((selection, Some(replacement)));
+            }
+            Err(error) => return Err(error),
+        };
         Ok((selection, Some(operation)))
     }
 
@@ -1106,7 +1178,7 @@ mod tests {
             Some(original_target)
         );
 
-        let AffinityAcquire::Bound { target, lease } = router
+        let AffinityAcquire::Bound { target, lease, .. } = router
             .affinity
             .as_ref()
             .unwrap()
@@ -1124,7 +1196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_affinity_worker_returns_existing_binding_without_reserving() {
+    async fn query_affinity_binding_returns_existing_binding_without_reserving() {
         let (router, runtime) = router(Some(Duration::from_secs(10))).await;
         let session_id = SessionAffinityId::new("query-existing-binding");
         let target = AffinityTarget {
@@ -1146,12 +1218,12 @@ mod tests {
         let mut request = Context::new(request());
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
 
-        assert_eq!(
-            router
-                .query_affinity_worker(&request, RequestPhase::Prefill)
-                .unwrap(),
-            Some(WorkerWithDpRank::new(7, 0))
-        );
+        let binding = router
+            .query_affinity_binding(&request)
+            .unwrap()
+            .expect("binding must exist");
+        assert_eq!(binding.target, target);
+        assert!(!binding.hard_constraint);
         assert_eq!(
             router
                 .affinity
@@ -1298,6 +1370,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selection.worker.worker_id, 7);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_affinity_fence_is_an_exact_kv_selection_constraint() {
+        let (router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7, 8]).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("legacy-fence");
+        let target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        affinity.apply_legacy_replica_for_test(session_id.as_str(), target, 99);
+
+        let mut input = request();
+        input.migration_state = Some(Default::default());
+        input
+            .migration_state
+            .as_ref()
+            .unwrap()
+            .record_failure(7, None);
+        let mut request = Context::new(input);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+        let (selection, operation) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .unwrap();
+        assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
+        router.chooser.free(request.id()).await.unwrap();
+        drop(operation);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dead_legacy_affinity_fence_is_invalidated_before_selection() {
+        let (router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7, 8]).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("dead-legacy-fence");
+        affinity.apply_legacy_replica_for_test(
+            session_id.as_str(),
+            AffinityTarget {
+                worker_id: 7,
+                dp_rank: Some(99),
+            },
+            99,
+        );
+
+        let mut request = Context::new(request());
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+        let (selection, operation) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .unwrap();
+
+        assert_ne!(selection.worker, WorkerWithDpRank::new(7, 99));
+        assert!(
+            operation
+                .as_ref()
+                .is_some_and(|operation| operation.target().is_none())
+        );
+        assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+        router.chooser.free(request.id()).await.unwrap();
+        drop(operation);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_runtime_config_preserves_legacy_affinity_fence() {
+        let (router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7, 8]).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("pending-config-legacy-fence");
+        let target = AffinityTarget {
+            worker_id: 99,
+            dp_rank: Some(0),
+        };
+        affinity.apply_legacy_replica_for_test(session_id.as_str(), target, 99);
+
+        let mut request = Context::new(request());
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+        assert!(
+            router
+                .select_with_affinity(&request, RequestPhase::Aggregated, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(target)
+        );
 
         drop(router);
         runtime.shutdown();

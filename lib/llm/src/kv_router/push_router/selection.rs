@@ -24,6 +24,7 @@ use crate::{
         TokenIdType,
         common::{preprocessor::RoutingHints, timing::RequestPhase},
     },
+    session_affinity::AffinityTarget,
 };
 
 pub(super) struct WorkerSelection {
@@ -53,6 +54,7 @@ impl<'a> RoutingRequestParts<'a> {
 
 pub(super) struct SelectionOptions {
     pub(super) affinity_target: Option<WorkerWithDpRank>,
+    pub(super) fenced_affinity_target: Option<AffinityTarget>,
     pub(super) policy_class: Option<String>,
     pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
 }
@@ -146,6 +148,14 @@ where
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let explicit_pin = pinned_worker_hint(phase, routing);
+        let SelectionOptions {
+            affinity_target,
+            fenced_affinity_target,
+            policy_class,
+            session_context,
+        } = options;
+        let selected_pin = explicit_pin
+            .or_else(|| fenced_affinity_target.map(|target| (target.worker_id, target.dp_rank)));
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
         let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = routing
@@ -164,7 +174,7 @@ where
             .as_ref()
             .map(|state| state.excluded_worker_ids())
             .unwrap_or_default();
-        if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
+        if selected_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
             let workers = self.chooser.workers_with_configs.borrow();
             let eligible =
                 allowed_worker_ids.get_or_insert_with(|| workers.keys().copied().collect());
@@ -184,12 +194,7 @@ where
         }
         let return_routing_hashes =
             !is_query_only && self.chooser.indexer().records_routing_decisions();
-        let SelectionOptions {
-            affinity_target,
-            policy_class,
-            session_context,
-        } = options;
-        let Some((pinned_worker_id, requested_dp_rank)) = explicit_pin else {
+        let Some((pinned_worker_id, requested_dp_rank)) = selected_pin else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
@@ -242,6 +247,11 @@ where
             affinity_target
                 .filter(|target| target.worker_id == pinned_worker_id)
                 .map(|target| target.dp_rank)
+                .or_else(|| {
+                    fenced_affinity_target
+                        .filter(|target| target.worker_id == pinned_worker_id)
+                        .and_then(|target| target.dp_rank)
+                })
                 .or_else(|| self.chooser.unique_dp_rank_for_worker(pinned_worker_id)),
         )?;
         {

@@ -301,8 +301,8 @@ where
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
 
-        let decode_affinity_target =
-            self.decode_session_affinity_target(session_affinity.as_deref())?;
+        let decode_affinity_binding =
+            self.decode_session_affinity_binding(session_affinity.as_deref())?;
 
         if self.conditional_disagg_policy.is_enabled() {
             match self
@@ -311,7 +311,7 @@ where
                     &request_id,
                     policy_class.clone(),
                     session_affinity.as_deref(),
-                    decode_affinity_target,
+                    decode_affinity_binding,
                 )
                 .await
             {
@@ -563,17 +563,17 @@ where
         let _ = self.decode_session_affinity.set(affinity);
     }
 
-    fn decode_session_affinity_target(
+    fn decode_session_affinity_binding(
         &self,
         session_affinity: Option<&SessionAffinityId>,
-    ) -> Result<Option<AffinityTarget>> {
+    ) -> Result<Option<crate::session_affinity::AffinityRoutingBinding>> {
         let Some(session_affinity) = session_affinity else {
             return Ok(None);
         };
         let Some(affinity) = self.decode_session_affinity.get() else {
             return Ok(None);
         };
-        affinity.query_target(session_affinity, None)
+        affinity.query_binding(session_affinity)
     }
 
     fn prepare_prefill_dispatch(

@@ -19,7 +19,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::coordinator::{AffinityCoordinatorInner, AffinityRevision, AffinityTarget};
+use super::{AffinityTarget, coordinator::AffinityCoordinatorInner, state::AffinityRevision};
 use crate::direct_zmq_fan_in::{
     ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in,
 };
@@ -33,9 +33,16 @@ pub(super) struct SessionAffinityUpdate {
     pub session_id: String,
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
+    /// Identifies the process that sent this update.
     pub router_id: u64,
+    // Compatibility with v1.2-v1.3 routers during v1.4-v1.5 rolling upgrades.
+    // TODO(v1.6): Remove the default when those routers leave the N-2 window.
     #[serde(default)]
     pub revision: u64,
+    /// Identifies the process that originally created `revision`.
+    // Default to the immediate sender for updates from v1.4 routers.
+    #[serde(default)]
+    pub revision_router_id: u64,
 }
 
 #[derive(Clone)]
@@ -52,6 +59,7 @@ impl ReplicaUpdateSender {
             dp_rank: target.dp_rank,
             router_id: self.router_id,
             revision: revision.sequence,
+            revision_router_id: revision.router_id,
         };
         if let Err(error) = self.tx.try_send(update) {
             tracing::trace!(
@@ -91,7 +99,11 @@ impl ReplicaUpdateApplier {
             target,
             AffinityRevision {
                 sequence: update.revision,
-                router_id: update.router_id,
+                router_id: if update.revision_router_id == 0 {
+                    update.router_id
+                } else {
+                    update.revision_router_id
+                },
             },
         );
         drop(coordinator);
@@ -119,7 +131,6 @@ impl ReplicaSyncRuntime {
         parent_cancel: &CancellationToken,
     ) -> Result<Self> {
         let endpoint = &client.endpoint;
-        let router_id = endpoint.drt().discovery().instance_id();
         let transport_kind = endpoint.drt().default_event_transport_kind();
         let publisher = EventPublisher::for_endpoint_with_transport(
             endpoint,
@@ -129,6 +140,7 @@ impl ReplicaSyncRuntime {
         .await
         .context("create session affinity event publisher")?;
         let publisher_id = publisher.publisher_id();
+        let router_id = publisher_id;
         let applier = ReplicaUpdateApplier {
             router_id,
             local_worker_ids: client.instance_avail_watcher(),
@@ -309,6 +321,15 @@ mod tests {
     };
     use std::time::Duration;
 
+    #[derive(Deserialize)]
+    struct LegacySessionAffinityUpdate {
+        session_id: String,
+        worker_id: u64,
+        dp_rank: Option<u32>,
+        router_id: u64,
+        revision: u64,
+    }
+
     fn update(router_id: u64, worker_id: u64) -> SessionAffinityUpdate {
         SessionAffinityUpdate {
             session_id: "session".to_string(),
@@ -316,6 +337,7 @@ mod tests {
             dp_rank: Some(0),
             router_id,
             revision: 1,
+            revision_router_id: router_id,
         }
     }
 
@@ -341,6 +363,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(update.revision, 0);
+        assert_eq!(update.revision_router_id, 0);
+    }
+
+    #[test]
+    fn legacy_reader_ignores_revision_origin() {
+        let update = update(7, 10);
+        let encoded = Codec::default().encode_payload(&update).unwrap();
+        let legacy: LegacySessionAffinityUpdate =
+            Codec::default().decode_payload(&encoded).unwrap();
+
+        assert_eq!(legacy.session_id, update.session_id);
+        assert_eq!(legacy.worker_id, update.worker_id);
+        assert_eq!(legacy.dp_rank, update.dp_rank);
+        assert_eq!(legacy.router_id, update.router_id);
+        assert_eq!(legacy.revision, update.revision);
     }
 
     #[tokio::test]
@@ -354,7 +391,7 @@ mod tests {
             },
             AffinityRevision {
                 sequence: 1,
-                router_id: 7,
+                router_id: 6,
             },
         );
         runtime.publish(
@@ -369,7 +406,10 @@ mod tests {
             },
         );
 
-        assert_eq!(rx.recv().await.unwrap().session_id, "first");
+        let update = rx.recv().await.unwrap();
+        assert_eq!(update.session_id, "first");
+        assert_eq!(update.router_id, 7);
+        assert_eq!(update.revision_router_id, 6);
         assert!(rx.try_recv().is_err());
     }
 

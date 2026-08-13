@@ -98,6 +98,22 @@ impl SessionAffinityPushRouter {
         })
     }
 
+    fn resolve_preferred_target(
+        explicit: Option<AffinityTarget>,
+        affinity: Option<AffinityTarget>,
+    ) -> Option<AffinityTarget> {
+        match (explicit, affinity) {
+            (Some(mut explicit), Some(affinity))
+                if explicit.worker_id == affinity.worker_id && explicit.dp_rank.is_none() =>
+            {
+                explicit.dp_rank = affinity.dp_rank;
+                Some(explicit)
+            }
+            (Some(explicit), _) => Some(explicit),
+            (None, affinity) => affinity,
+        }
+    }
+
     pub fn peek_next_worker(&self) -> Option<u64> {
         self.inner.peek_next_worker()
     }
@@ -120,6 +136,9 @@ impl SessionAffinityPushRouter {
         let operation = affinity
             .acquire_with_context(session_id, explicit, request_context)
             .await?;
+        if explicit.is_some() {
+            return Ok(operation);
+        }
         let Some(target) = operation.target() else {
             return Ok(operation);
         };
@@ -208,8 +227,8 @@ impl SessionAffinityPushRouter {
                 .affinity
                 .as_ref()
                 .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id, explicit)?
-                .or(explicit);
+                .query_target(&session_id, explicit)?;
+            let selected = Self::resolve_preferred_target(explicit, selected);
             return self
                 .select_and_dispatch_exact_target(request, selected, prepare)
                 .await;
@@ -219,7 +238,7 @@ impl SessionAffinityPushRouter {
         let operation = self
             .acquire_routable(&session_id, explicit, request_context.as_ref())
             .await?;
-        let selected = operation.target().or(explicit);
+        let selected = Self::resolve_preferred_target(explicit, operation.target());
         let rank = selected.and_then(|target| target.dp_rank);
         let dispatch = self
             .inner
@@ -239,7 +258,11 @@ impl SessionAffinityPushRouter {
         let ((metadata, tracker, target), stream) = match dispatch {
             Ok(result) => result,
             Err(error) => {
-                operation.invalidate();
+                if let Some(selected) = selected {
+                    operation.invalidate_selected(selected);
+                } else {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
@@ -297,8 +320,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
                 .affinity
                 .as_ref()
                 .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id, explicit)?
-                .or(explicit);
+                .query_target(&session_id, explicit)?;
+            let target = Self::resolve_preferred_target(explicit, target);
             let rank = target.and_then(|target| target.dp_rank);
             let ((tracker, target), stream) = self
                 .inner
@@ -327,7 +350,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         let operation = self
             .acquire_routable(&session_id, explicit, request_context.as_ref())
             .await?;
-        let selected = operation.target().or(explicit);
+        let selected = Self::resolve_preferred_target(explicit, operation.target());
         let rank = selected.and_then(|target| target.dp_rank);
         let dispatch = self
             .inner
@@ -349,7 +372,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         let ((tracker, target), stream) = match dispatch {
             Ok(result) => result,
             Err(error) => {
-                operation.invalidate();
+                if let Some(selected) = selected {
+                    operation.invalidate_selected(selected);
+                } else {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
@@ -433,6 +460,37 @@ mod tests {
         SessionAffinityPushRouter::record_target(prepared_tracker.as_deref(), target);
         assert_eq!(tracker.prefill_worker_id(), Some(8));
         assert_eq!(tracker.decode_worker_id(), Some(8));
+    }
+
+    #[test]
+    fn worker_only_explicit_target_preserves_a_compatible_affinity_rank() {
+        let affinity = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(3),
+        };
+        assert_eq!(
+            SessionAffinityPushRouter::resolve_preferred_target(
+                Some(AffinityTarget {
+                    worker_id: 7,
+                    dp_rank: None,
+                }),
+                Some(affinity),
+            ),
+            Some(affinity)
+        );
+        assert_eq!(
+            SessionAffinityPushRouter::resolve_preferred_target(
+                Some(AffinityTarget {
+                    worker_id: 8,
+                    dp_rank: None,
+                }),
+                Some(affinity),
+            ),
+            Some(AffinityTarget {
+                worker_id: 8,
+                dp_rank: None,
+            })
+        );
     }
 
     #[tokio::test]
@@ -732,6 +790,59 @@ mod tests {
         assert_eq!(
             affinity(&router).query_target(&session_id, None).unwrap(),
             None
+        );
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn failed_explicit_target_preserves_existing_affinity_binding() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("session_affinity_explicit_failure".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let live_worker = client.wait_for_instances().await.unwrap()[0].id();
+        let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let router =
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), false).unwrap();
+        let session_id = SessionAffinityId::new("adapter-session");
+        let AffinityAcquire::Initialize(initializer) =
+            affinity(&router).acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(
+            initializer
+                .commit(AffinityTarget {
+                    worker_id: live_worker,
+                    dp_rank: None,
+                })
+                .unwrap(),
+        );
+
+        assert!(
+            router
+                .generate(affinity_request(Some(u64::MAX), false))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            affinity(&router).query_target(&session_id, None).unwrap(),
+            Some(AffinityTarget {
+                worker_id: live_worker,
+                dp_rank: None,
+            })
         );
 
         runtime.shutdown();

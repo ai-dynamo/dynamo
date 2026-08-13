@@ -72,7 +72,7 @@ fn non_max_overlap_selection<C: WorkerConfigLike>(
     selected_worker: WorkerWithDpRank,
     selected_overlap_blocks: f64,
 ) -> Option<NonMaxOverlapSelection> {
-    if eligibility.pinned_worker().is_some() {
+    if eligibility.pinned_worker().is_some() || request.affinity_target == Some(selected_worker) {
         return None;
     }
 
@@ -1938,6 +1938,19 @@ mod tests {
         assert!(
             non_max_overlap_selection(&workers, &request, request.eligibility(), worker1, 2.0)
                 .is_none()
+        );
+
+        request.allowed_worker_ids = None;
+        request.affinity_target = Some(worker1);
+        assert!(
+            non_max_overlap_selection(&workers, &request, request.eligibility(), worker1, 2.0)
+                .is_none()
+        );
+
+        request.affinity_target = Some(worker0);
+        assert!(
+            non_max_overlap_selection(&workers, &request, request.eligibility(), worker1, 2.0)
+                .is_some()
         );
     }
 
