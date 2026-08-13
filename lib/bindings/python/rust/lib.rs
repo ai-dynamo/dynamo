@@ -281,6 +281,7 @@ pub(crate) fn worker_selection_policy_factory(
     }
 }
 
+#[cfg(feature = "select-service")]
 pub(crate) fn standalone_worker_selection_policy_factory(
     config: &KvRouterConfig,
 ) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
