@@ -67,7 +67,15 @@ RUN golangci-lint run --timeout=5m
 # =============================================================================
 FROM go-base AS tester
 
-RUN go test ./... -v
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    g++ \
+    libgtest-dev \
+    libprotobuf-dev \
+    pkg-config \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN go test ./... -v && make -C pagebroker test
 
 # =============================================================================
 # Stage: Builder - Build Go binaries

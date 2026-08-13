@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "checkpoint_transaction_descriptor.hpp"
-#include "pagebroker.pb.h"
+#include "pagebroker_types.hpp"
 #include "restore_transaction_descriptor.hpp"
 #include "transfer_engine.hpp"
 
