@@ -1,19 +1,18 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# kimi-k3 on vLLM via Dynamo, aggregated, 2x GB300 (TP=8) over MNNVL.
+# Kimi-K3 on vLLM via Dynamo, aggregated TP8 + DSpark DL7 on 2x GB300.
 
----
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: kimi-k3-compute-domain
+  name: kimi-k3-agg-compute-domain
 spec:
   numNodes: 0
   channel:
     allocationMode: Single
     resourceClaimTemplate:
-      name: kimi-k3-compute-domain-channel
+      name: kimi-k3-agg-compute-domain-channel
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -27,180 +26,152 @@ spec:
       replicas: 1
       podTemplate:
         spec:
+          imagePullSecrets:
+            - name: acr-token-secret
+            - name: nvcr-secret
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB300
+            dedicated: GoldenPrairie
+            nvidia.com/gpu.clique: "0e804531-7d0e-ce6f-a1f4-9a9854394a7f.1"
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: GoldenPrairie
+              effect: NoSchedule
+          volumes:
+            - name: models
+              hostPath:
+                path: /mnt/k8s-disks/0/models/model_weight
+                type: Directory
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              image: nvcr.io/nvstaging/nim/shreyasm:dynamo-main-bf7542-vllm-nightly-65b7662-arm64@sha256:ad7c8b13f1711086ba10daf048d254309296617e4aa04190bb1a78c14a4aa78a
               securityContext:
                 runAsUser: 0
-              command:
-                - python3
-                - -m
-                - dynamo.frontend
-              args:
-                - --dyn-chat-processor
-                - dynamo
-                - --router-mode
-                - kv
-                - --http-port
-                - "8000"
+              volumeMounts:
+                - name: models
+                  mountPath: /models
+              command: [python3, -m, dynamo.frontend]
+              args: [--dyn-chat-processor, dynamo, --router-mode, kv, --http-port, "8000"]
+              env:
+                - {name: HF_HUB_OFFLINE, value: "1"}
+                - {name: TRANSFORMERS_OFFLINE, value: "1"}
     - name: VllmDecodeWorker
       type: decode
-      replicas: 2          # 2 agg replicas (each 2-node TP8) for KV-aware routing
+      replicas: 1
       multinode:
         nodeCount: 2
       sharedMemorySize: 200Gi
       podTemplate:
         spec:
-          affinity:
-            nodeAffinity:
-              requiredDuringSchedulingIgnoredDuringExecution:
-                nodeSelectorTerms:
-                  - matchExpressions:
-                      - key: nvidia.com/gpu.product
-                        operator: In
-                        values:
-                          - NVIDIA-GB300
+          imagePullSecrets:
+            - name: acr-token-secret
+            - name: nvcr-secret
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB300
+            dedicated: GoldenPrairie
+            nvidia.com/gpu.clique: "0e804531-7d0e-ce6f-a1f4-9a9854394a7f.1"
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: GoldenPrairie
+              effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: kimi-k3-compute-domain-channel
+              resourceClaimTemplateName: kimi-k3-agg-compute-domain-channel
           volumes:
-            - name: model-cache
-              persistentVolumeClaim:
-                claimName: model-cache
+            - name: models
+              hostPath:
+                path: /mnt/k8s-disks/0/models/model_weight
+                type: Directory
+            - name: dspark-cache
+              emptyDir:
+                sizeLimit: 20Gi
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              image: nvcr.io/nvstaging/nim/shreyasm:dynamo-main-bf7542-vllm-nightly-65b7662-arm64@sha256:ad7c8b13f1711086ba10daf048d254309296617e4aa04190bb1a78c14a4aa78a
               securityContext:
                 runAsUser: 0
               resources:
                 limits:
-                  nvidia.com/gpu: "4"            # per node; 2 nodes x 4 = 8 GPUs in the TP group
+                  nvidia.com/gpu: "4"
                 requests:
                   nvidia.com/gpu: "4"
                 claims:
-                  - name: compute-domain-channel   # <-- the MNNVL NVLink channel
+                  - name: compute-domain-channel
               volumeMounts:
-                - name: model-cache
-                  mountPath: /model-cache
+                - {name: models, mountPath: /models}
+                - {name: dspark-cache, mountPath: /dspark}
               startupProbe:
-                httpGet:
-                  path: /health
-                  port: 9090
+                httpGet: {path: /health, port: 9090}
                 periodSeconds: 10
                 timeoutSeconds: 10
-                failureThreshold: 720    # 720 x 10s = 120 min (2 hr) startup budget
-              envFrom:
-                - secretRef:
-                    name: hf-token-secret
+                failureThreshold: 720
               env:
-                # --- k8s-specific: model id + cache + CNI networking + symm-mem off ---
-                # Weights come from the model-cache PVC populated by model-cache/model-download.yaml.
-                - name: HF_HOME
-                  value: /model-cache
-                - name: MODEL_ID
-                  value: moonshotai/Kimi-K3
-                - name: SERVED_MODEL_NAME
-                  value: moonshotai/Kimi-K3
-                - name: NCCL_SOCKET_IFNAME       # DGD pods use CNI pod networking -> eth0
-                  value: eth0
-                - name: GLOO_SOCKET_IFNAME
-                  value: eth0
-                - name: VLLM_USE_NCCL_SYMM_MEM   # required for this image
-                  value: "0"
-                - name: DYN_REQUEST_PLANE
-                  value: "tcp"
-                - name: ETCD_LEASE_TTL
-                  value: "120"
-                - name: VLLM_ENGINE_READY_TIMEOUT_S
-                  value: "3600"
-                - name: VLLM_RPC_TIMEOUT
-                  value: "600000"
-                - name: TILELANG_CLEANUP_TEMP_FILES
-                  value: "1"
-                # Kimi-K3 trtllm-gen MoE cubins + CUDA JIT toolchain bundled in the image.
-                - name: FLASHINFER_PRIVATE_CUBIN_DIR
-                  value: "/opt/flashinfer-local-cubins/20260617_v0613rc1_situ_v0611_barrierfix"
-                - name: CUDA_HOME
-                  value: "/usr/local/cuda"
-                - name: VLLM_SERVER_DEV_MODE       # enables POST /reset_prefix_cache for benchmarks
-                  value: "1"
-                - name: VLLM_DEEP_GEMM_WARMUP
-                  value: "skip"
-                - name: PYTORCH_ALLOC_CONF
-                  value: "expandable_segments:True"
-                - name: VLLM_FASTSAFETENSORS_QUEUE_SIZE
-                  value: "1"
-                - name: TORCHINDUCTOR_ENABLE_PDL
-                  value: "1"
-                - name: VLLM_USE_V2_MODEL_RUNNER
-                  value: "0"
-                - name: VLLM_USE_RUST_FRONTEND
-                  value: "0"
-                - name: VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION
-                  value: "1"
-                - name: VLLM_CONNECTOR_PREFETCH_DEPTH
-                  value: "8"
-                - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
-                  value: "0.65"
-                - name: DG_JIT_CACHE_DIR
-                  value: "/tmp/dg-cache"
-                - name: VLLM_DSV4_MEGA_FP8_COMBINE
-                  value: "1"
-                - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
-                  value: "1800"
-                - name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL
-                  value: "0"
-                - name: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
-                  value: "1024"
-                # Cross-node TP8 all-reduce over GB300 MNNVL via FlashInfer.
-                # Do NOT enable NCCL symmetric-memory knobs: they break CUDA-graph capture here.
-                - name: VLLM_ALLREDUCE_USE_FLASHINFER
-                  value: "1"
-                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
-                  value: "mnnvl"
-                - name: NCCL_DEBUG
-                  value: "WARN"
-                - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
-                  value: "1800"
-                - name: NCCL_TIMEOUT
-                  value: "1800"
-                - name: UCX_TLS
-                  value: "cuda_copy,cuda_ipc,tcp"
-                - name: UCX_CUDA_IPC_ENABLE_MNNVL
-                  value: "y"
-                - name: UCX_MEMTYPE_CACHE
-                  value: "n"
-                - name: UCX_MEMTYPE_REG_WHOLE
-                  value: "n"
-              command:
-                - /bin/sh
-                - -c
+                - {name: MODEL_PATH, value: /models}
+                - {name: SERVED_MODEL_NAME, value: moonshotai/Kimi-K3}
+                - {name: HF_HUB_OFFLINE, value: "1"}
+                - {name: TRANSFORMERS_OFFLINE, value: "1"}
+                - {name: NCCL_SOCKET_IFNAME, value: eth0}
+                - {name: GLOO_SOCKET_IFNAME, value: eth0}
+                - {name: VLLM_USE_NCCL_SYMM_MEM, value: "0"}
+                - {name: DYN_REQUEST_PLANE, value: tcp}
+                - {name: ETCD_LEASE_TTL, value: "120"}
+                - {name: VLLM_ENGINE_READY_TIMEOUT_S, value: "3600"}
+                - {name: VLLM_RPC_TIMEOUT, value: "600000"}
+                - {name: TILELANG_CLEANUP_TEMP_FILES, value: "1"}
+                - {name: FLASHINFER_PRIVATE_CUBIN_DIR, value: /opt/flashinfer-local-cubins/20260617_v0613rc1_situ_v0611_barrierfix}
+                - {name: CUDA_HOME, value: /usr/local/cuda}
+                - {name: VLLM_SERVER_DEV_MODE, value: "1"}
+                - {name: VLLM_DEEP_GEMM_WARMUP, value: skip}
+                - {name: PYTORCH_ALLOC_CONF, value: "expandable_segments:True"}
+                - {name: VLLM_FASTSAFETENSORS_QUEUE_SIZE, value: "1"}
+                - {name: TORCHINDUCTOR_ENABLE_PDL, value: "1"}
+                - {name: VLLM_USE_V2_MODEL_RUNNER, value: "1"}
+                - {name: VLLM_USE_RUST_FRONTEND, value: "0"}
+                - {name: VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION, value: "1"}
+                - {name: VLLM_CONNECTOR_PREFETCH_DEPTH, value: "8"}
+                - {name: VLLM_CONNECTOR_PREFETCH_KV_CAP, value: "0.65"}
+                - {name: DG_JIT_CACHE_DIR, value: /tmp/dg-cache-dsv4-agentx}
+                - {name: VLLM_DSV4_MEGA_FP8_COMBINE, value: "1"}
+                - {name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS, value: "1800"}
+                - {name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL, value: "0"}
+                - {name: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB, value: "1024"}
+                - {name: VLLM_ALLREDUCE_USE_FLASHINFER, value: "1"}
+                - {name: VLLM_FLASHINFER_ALLREDUCE_BACKEND, value: mnnvl}
+                - {name: NCCL_DEBUG, value: WARN}
+                - {name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC, value: "1800"}
+                - {name: NCCL_TIMEOUT, value: "1800"}
+                - {name: UCX_TLS, value: "cuda_copy,cuda_ipc,tcp"}
+                - {name: UCX_CUDA_IPC_ENABLE_MNNVL, value: "y"}
+                - {name: UCX_MEMTYPE_CACHE, value: "n"}
+                - {name: UCX_MEMTYPE_REG_WHOLE, value: "n"}
+              command: [/bin/sh, -c]
               args:
                 - |
-                  # --scheduler-cls forces vLLM's native AsyncScheduler: dynamo.vllm's
-                  # InstrumentedScheduler.schedule(self) is stale vs this image's vLLM
-                  # schedule(self, throttle_prefills=False), which TypeErrors at first request.
+                  set -eu
+                  HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_HOME=/dspark/.hf python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Inferact/Kimi-K3-DSpark', local_dir='/dspark')"
                   exec python3 -m dynamo.vllm \
-                    --model "${MODEL_ID}" \
+                    --model "${MODEL_PATH}" \
                     --served-model-name "${SERVED_MODEL_NAME}" \
                     --trust-remote-code \
                     --tensor-parallel-size 8 \
                     --distributed-executor-backend mp \
                     --load-format fastsafetensors \
                     --safetensors-load-strategy lazy \
-                    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE", "max_cudagraph_capture_size": 8192, "cudagraph_capture_sizes": [1, 2, 4, 8, 12, 16, 24, 32, 64, 128, 256, 512, 1024, 2048, 4096, 5120, 6144, 6656, 7168, 7680, 8192]}' \
+                    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048,4096,5120,6144,6656,7168,7680,8192]}' \
                     --gpu-memory-utilization 0.85 \
                     --max-num-batched-tokens 8192 \
                     --max-num-seqs 256 \
                     --enable-prefix-caching \
                     --enable-multimodal \
-                    --max-model-len 1048576 \
                     --no-enable-flashinfer-autotune \
                     --kv-cache-dtype fp8 \
-                    --attention-config '{"mla_prefill_backend": "TRTLLM_RAGGED", "use_prefill_query_quantization": true}' \
-                    --attention-backend FLASHINFER_MLA \
+                    --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
+                    --attention-backend TOKENSPEED_MLA \
                     --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
                     --dyn-tool-call-parser kimi_k3 \
                     --reasoning-parser kimi_k3 \
                     --dyn-reasoning-parser kimi_k3 \
-                    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+                    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' \
+                    --speculative-config '{"method":"dspark","model":"/dspark","num_speculative_tokens":7,"attention_backend":"TOKENSPEED_MLA","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":4.25846126489242}'
