@@ -1877,8 +1877,8 @@ impl KvRouter {
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        let kv_router_config = kv_router_config.inner();
         if let Some(instance) = kv_router_config
-            .inner()
             .selected_standalone_worker_selection_policy_instance()
             .map_err(to_pyerr)?
         {
@@ -1886,6 +1886,7 @@ impl KvRouter {
                 "worker-selection instance {instance:?} is configured, but python -m dynamo.router does not support linked worker-selection policies; use python -m dynamo.frontend or a custom EPP binary"
             )));
         }
+        crate::warn_if_standalone_ignores_stage_policies(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -1936,7 +1937,7 @@ impl KvRouter {
                 let kv_router = create_kv_router_from_endpoint(
                     endpoint,
                     block_size,
-                    Some(kv_router_config.inner()),
+                    Some(kv_router_config),
                     prefill_load_estimator,
                 )
                 .await?;

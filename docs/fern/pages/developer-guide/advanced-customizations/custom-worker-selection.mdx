@@ -285,7 +285,7 @@ worker_selection:
         min_device_overlap_blocks: 1
 ```
 
-The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.prefill` and `worker_selection.decode` select separate instances for those worker pools. Both stage selections fall back to `worker_selection.default` when omitted.
+The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.prefill` selects the disaggregated prefill pool. `worker_selection.decode` selects the disaggregated decode pool or the single worker pool in an aggregated deployment. Both stage selections fall back to `worker_selection.default` when omitted.
 
 The selection order for each stage is the stage CLI flag, the matching `DYN_ROUTER_PREFILL_POLICY` or `DYN_ROUTER_DECODE_POLICY` environment variable, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the YAML stage selection, the YAML default, and then Dynamo's built-in policy. Set any selection to `default` to use the built-in policy for that scope.
 
@@ -437,7 +437,7 @@ cd "$POLICY_DIR/epp"
 DYN_EPP_MODE=standalone DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
 ```
 
-Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. It uses `worker_selection.default`; the prefill and decode selections apply only to the embedded frontend.
+Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. It uses `worker_selection.default`; the prefill and decode selections apply only to the embedded frontend. A standalone EPP logs a startup warning when it ignores either stage-specific setting.
 
 </Tab>
 </Tabs>

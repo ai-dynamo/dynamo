@@ -1110,6 +1110,27 @@ impl KvRouterConfig {
         self.selected_standalone_worker_selection_policy_instance_from(selected)
     }
 
+    /// Return whether a stage-specific worker-selection setting was explicitly configured.
+    ///
+    /// Standalone hosts use this to warn that prefill and decode settings only apply to the
+    /// embedded frontend.
+    pub fn has_explicit_stage_worker_selection_policy(
+        &self,
+    ) -> Result<bool, WorkerSelectionPolicyConfigError> {
+        fn is_configured(value: Option<&str>) -> bool {
+            value.is_some_and(|name| !name.trim().is_empty())
+        }
+
+        let policy_config = self
+            .worker_selection_config()
+            .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
+        Ok(is_configured(self.router_prefill_policy.as_deref())
+            || is_configured(self.router_decode_policy.as_deref())
+            || policy_config.is_some_and(|config| {
+                config.prefill_instance().is_some() || config.decode_instance().is_some()
+            }))
+    }
+
     fn selected_standalone_worker_selection_policy_instance_from(
         &self,
         selected: Result<Option<String>, VarError>,
@@ -1847,6 +1868,7 @@ worker_selection:
                 .unwrap(),
             Some("global".to_string())
         );
+        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
 
         config.router_policy_config = None;
         assert_eq!(
@@ -1854,6 +1876,12 @@ worker_selection:
                 .selected_standalone_worker_selection_policy_instance_from(Ok(None))
                 .unwrap(),
             None
+        );
+        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
+        assert!(
+            !KvRouterConfig::default()
+                .has_explicit_stage_worker_selection_policy()
+                .unwrap()
         );
     }
 

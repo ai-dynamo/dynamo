@@ -281,10 +281,23 @@ pub(crate) fn worker_selection_policy_factory(
     }
 }
 
+pub(crate) fn warn_if_standalone_ignores_stage_policies(
+    config: &KvRouterConfig,
+) -> anyhow::Result<()> {
+    if config.has_explicit_stage_worker_selection_policy()? {
+        tracing::warn!(
+            "router_prefill_policy and router_decode_policy are frontend-only and are ignored by standalone selection hosts"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(feature = "select-service")]
 pub(crate) fn standalone_worker_selection_policy_factory(
     config: &KvRouterConfig,
 ) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    warn_if_standalone_ignores_stage_policies(config)?;
+
     #[cfg(feature = "custom-policy")]
     {
         Ok(WORKER_SELECTION_POLICY_REGISTRY

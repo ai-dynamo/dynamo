@@ -434,7 +434,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_PREFILL_POLICY",
             default=None,
             help=(
-                "KV Router: Named worker-selection instance for prefill workers. "
+                "KV Router: Frontend-only named worker-selection instance for "
+                "disaggregated prefill workers. "
                 "Overrides worker_selection.prefill from --router-policy-config. "
                 "Use 'default' for Dynamo's built-in worker selector."
             ),
@@ -446,7 +447,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_DECODE_POLICY",
             default=None,
             help=(
-                "KV Router: Named worker-selection instance for decode workers. "
+                "KV Router: Frontend-only named worker-selection instance for decode "
+                "workers and for the single worker pool in aggregated deployments. "
                 "Overrides worker_selection.decode from --router-policy-config. "
                 "Use 'default' for Dynamo's built-in worker selector."
             ),
