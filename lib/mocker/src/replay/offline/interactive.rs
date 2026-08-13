@@ -571,16 +571,17 @@ impl InteractiveCapture {
 
     pub(crate) fn register_pool(&mut self, pool_id: &str) {
         if self
-            .eligible_pool_ids
+            .default_placement
+            .eligible_pool_ids()
             .iter()
             .any(|candidate| candidate == pool_id)
         {
             return;
         }
-        let mut eligible_pool_ids = self.eligible_pool_ids.as_ref().clone();
+        let mut eligible_pool_ids = self.default_placement.eligible_pool_ids().to_vec();
         eligible_pool_ids.push(pool_id.to_string());
         eligible_pool_ids.sort();
-        self.eligible_pool_ids = Arc::new(eligible_pool_ids);
+        self.default_placement = InteractivePlacementObservation::pools_only(eligible_pool_ids);
     }
 
     pub(crate) fn register(&mut self, identity: InteractiveRequestIdentity) -> anyhow::Result<()> {
@@ -1893,6 +1894,20 @@ mod tests {
         capture.emit_routed(uuid, 0.0, Arc::clone(&completed))?;
         let routed = capture.drain_captured_events().pop().unwrap();
         assert!(Arc::ptr_eq(&routed.data().placement, &placement));
+
+        // Dynamic pool registration refreshes only the shared default
+        // observation used by non-placement events. The causally frozen route
+        // observation above remains untouched, and duplicate registration is
+        // idempotent.
+        capture.register_pool("pool-b");
+        capture.register_pool("pool-a");
+        capture.emit_queued(uuid, 1.0)?;
+        let queued = capture.drain_captured_events().pop().unwrap().into_owned();
+        let ReplayEvent::Queued(data) = queued else {
+            unreachable!()
+        };
+        assert_eq!(data.eligible_pool_ids, ["pool-a", "pool-b"]);
+        assert!(data.candidates.is_empty());
         Ok(())
     }
 
