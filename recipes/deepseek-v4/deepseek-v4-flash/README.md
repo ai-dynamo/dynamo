@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek-V4-Flash Recipe
 
-Serving recipes for **DeepSeek-V4-Flash** on Dynamo — a MoE model (284B total / 13B active) with hybrid CSA + HCA attention and a Blackwell FP4 indexer cache. B200 recipes serve the `nvidia/DeepSeek-V4-Flash-NVFP4` checkpoint; H200 serves the public `deepseek-ai/DeepSeek-V4-Flash` (see [`model-cache/model-download.yaml`](model-cache/model-download.yaml)). Two families today — see [Recipes](#recipes):
+Serving recipes for **DeepSeek-V4-Flash** on Dynamo — a MoE model (284B total / 13B active) with hybrid CSA + HCA attention and a Blackwell FP4 indexer cache. B200 recipes serve the `nvidia/DeepSeek-V4-Flash-NVFP4` checkpoint; H200 serves the public `deepseek-ai/DeepSeek-V4-Flash` (see [`model-cache/`](model-cache/)). Two families today — see [Recipes](#recipes):
 
 - **Agentic (vLLM)** — the benchmarked, workload-tuned picks (B200 & H200, AGG + disaggregated); numbers in [Performance](#performance).
 - **Day-0** — the original single-node aggregated recipes (B200/GB200, vLLM + SGLang).
@@ -102,27 +102,29 @@ kubectl create secret generic hf-token-secret \
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 ```
 
-Then download **the checkpoint your variant serves**. The download Job takes a single `MODEL_NAME`;
-its default is the public checkpoint, which 6 of the 8 variants request:
+Then download **the checkpoint your variant serves**. The PVC holds one checkpoint, not both, so
+there is one download Job per checkpoint. Apply the one your target SKU needs:
 
 ```bash
-# H200 agentic, GB200, Day-0 B200, and all SGLang variants — public checkpoint (the Job default):
-kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
+# H200 agentic, GB200, Day-0 B200, and all SGLang variants — public checkpoint (6 of the 8 variants):
+kubectl apply -f model-cache/model-download-fp8.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-fp8 -n ${NAMESPACE} --timeout=7200s
 ```
 
 ```bash
 # vllm/agg-b200-agentic and vllm/disagg-b200-agentic only — NVFP4:
-sed 's|value: deepseek-ai/DeepSeek-V4-Flash$|value: nvidia/DeepSeek-V4-Flash-NVFP4|' \
-  model-cache/model-download.yaml | kubectl apply -f - -n ${NAMESPACE}
-```
-
-```bash
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+kubectl apply -f model-cache/model-download-nvfp4.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-nvfp4 -n ${NAMESPACE} --timeout=7200s
 ```
 
 > [!IMPORTANT]
 > The workers mount the PVC read-only with `HF_HUB_OFFLINE=1`, so they cannot fetch a checkpoint the
 > Job did not download. Downloading the wrong one leaves the worker unable to start.
+
+> [!NOTE]
+> To switch a populated PVC to the other checkpoint: stop the workers, delete the PVC, re-apply
+> `model-cache/model-cache.yaml`, then apply the other Job. The two Jobs have distinct names, so
+> applying the second one does not collide with the first.
 
 ### Deploy
 
