@@ -132,6 +132,15 @@ WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
+COPY cmd/cuda-vmm-interpose/interpose.c ./cmd/cuda-vmm-interpose/interpose.c
+COPY cmd/cuda-vmm-interpose/coordinator.c ./cmd/cuda-vmm-interpose/coordinator.c
+COPY cmd/cuda-vmm-interpose/posix.c ./cmd/cuda-vmm-interpose/posix.c
+COPY cmd/cuda-vmm-interpose/posix.h ./cmd/cuda-vmm-interpose/posix.h
+COPY cmd/cuda-vmm-interpose/protocol.h ./cmd/cuda-vmm-interpose/protocol.h
+COPY cmd/cuda-vmm-interpose/util.c ./cmd/cuda-vmm-interpose/util.c
+COPY cmd/cuda-vmm-interpose/util.h ./cmd/cuda-vmm-interpose/util.h
+COPY cmd/cuda-vmm-interpose/Makefile ./cmd/cuda-vmm-interpose/Makefile
+COPY cmd/cuda-vmm-interpose/launch.sh ./cmd/cuda-vmm-interpose/launch.sh
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
@@ -140,6 +149,10 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     -lcuda
 
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
+
+RUN make -C ./cmd/cuda-vmm-interpose BUILD_DIR=/cuda-vmm-build \
+    && cp /cuda-vmm-build/libsnapshot_cuda_vmm.so /libsnapshot_cuda_vmm.so \
+    && cp /cuda-vmm-build/snapshot-cuda-vmm /snapshot-cuda-vmm
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -230,8 +243,9 @@ COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
+COPY --from=cuda-helper-builder /snapshot-cuda-vmm /usr/local/bin/snapshot-cuda-vmm
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
-             /usr/local/sbin/ns-bind-mount
+             /usr/local/sbin/ns-bind-mount /usr/local/bin/snapshot-cuda-vmm
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -448,6 +462,10 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
 #     volume mounts stay writable independently of the root filesystem.
 #
+# CUDA VMM interposition artifacts are installed below because they must exist
+# before the workload creates shared allocations. The remaining restore
+# toolchain is still injected from the agent bundle.
+#
 # cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
 # When used, the source workload image must have cuda-checkpoint at the same
 # path as it runs from — CRIU restores file-backed mappings by path, not via
@@ -472,3 +490,10 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
 # Checkpoint volume mount point. This is a storage concern — no restore tooling
 # is provisioned here; see the stage comment above.
 RUN mkdir -p /checkpoints
+
+COPY --from=cuda-helper-builder /snapshot-cuda-vmm /usr/local/bin/snapshot-cuda-vmm
+COPY --from=cuda-helper-builder /libsnapshot_cuda_vmm.so /usr/local/lib/snapshot/libsnapshot_cuda_vmm.so
+COPY --from=cuda-helper-builder /workspace/cmd/cuda-vmm-interpose/launch.sh /usr/local/bin/snapshot-cuda-vmm-launch
+RUN chmod 0755 /usr/local/bin/snapshot-cuda-vmm \
+    /usr/local/bin/snapshot-cuda-vmm-launch \
+    && chmod 0644 /usr/local/lib/snapshot/libsnapshot_cuda_vmm.so

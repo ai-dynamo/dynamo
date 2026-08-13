@@ -78,9 +78,17 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
-	cudaJobFile, err := cuda.StageJobFile(snapshotruntime.HostProcPath, state.CUDAHostPIDs, tmpDir, len(state.GPUUUIDs))
-	if err != nil {
-		return err
+	cudaJobFile := ""
+	if !state.CUDAVMMInterpose {
+		cudaJobFile, err = cuda.StageJobFile(
+			snapshotruntime.HostProcPath,
+			state.CUDAHostPIDs,
+			tmpDir,
+			len(state.GPUUUIDs),
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Phase 2: Configure CRIU options and build checkpoint manifest
@@ -193,6 +201,14 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if len(cudaHostPIDs) > 0 {
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
+	cudaVMMInterpose, err := cuda.DetectVMMInterpose(
+		snapshotruntime.HostProcPath,
+		cudaHostPIDs,
+		cudaNamespacePIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("detect CUDA VMM interposer: %w", err)
+	}
 	var gpuUUIDs []string
 	if len(cudaHostPIDs) > 0 {
 		gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
@@ -211,17 +227,18 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	}
 
 	return &types.CheckpointContainerSnapshot{
-		PID:            pid,
-		RootFS:         rootFS,
-		UpperDir:       upperDir,
-		OCISpec:        ociSpec,
-		Mounts:         mounts,
-		NetNSInode:     netNSInode,
-		StdioFDs:       stdioFDs,
-		HostCgroupPath: hostCgroupPath,
-		CUDAHostPIDs:   cudaHostPIDs,
-		CUDANSPIDs:     cudaNamespacePIDs,
-		GPUUUIDs:       gpuUUIDs,
+		PID:              pid,
+		RootFS:           rootFS,
+		UpperDir:         upperDir,
+		OCISpec:          ociSpec,
+		Mounts:           mounts,
+		NetNSInode:       netNSInode,
+		StdioFDs:         stdioFDs,
+		HostCgroupPath:   hostCgroupPath,
+		CUDAHostPIDs:     cudaHostPIDs,
+		CUDANSPIDs:       cudaNamespacePIDs,
+		GPUUUIDs:         gpuUUIDs,
+		CUDAVMMInterpose: cudaVMMInterpose,
 	}, nil
 }
 
@@ -259,6 +276,18 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
+		if state.CUDAVMMInterpose {
+			if err := cuda.PrepareVMM(
+				ctx,
+				checkpointDir,
+				snapshotruntime.HostProcPath,
+				state.CUDAHostPIDs,
+				state.CUDANSPIDs,
+				log,
+			); err != nil {
+				return nil, fmt.Errorf("prepare CUDA VMM checkpoint: %w", err)
+			}
+		}
 		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
