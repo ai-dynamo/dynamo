@@ -22,6 +22,18 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_vllm_placeholder:
+        description: 'Build and push vLLM snapshot placeholder image (required by Dynamo Snapshot checkpoint/restore). Set build_vllm=true to build a fresh runtime first, or supply placeholder_base_image to reuse an existing one.'
+        type: boolean
+        default: false
+      placeholder_base_image:
+        description: 'Optional existing ACR vllm-runtime image URI to build the placeholder FROM. When set, the vllm runtime is not rebuilt. Example: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-<sha>-vllm-runtime'
+        type: string
+        default: ''
+      build_snapshot_agent:
+        description: 'Build and push the snapshot-agent image (CRIU + cuda-checkpoint DaemonSet). Pair this with build_vllm_placeholder so the agent and the workload image come from the same tree.'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -186,6 +198,206 @@ jobs:
           done
 
   # ============================================================================
+  # SNAPSHOT PLACEHOLDER (build-only)
+  # ============================================================================
+
+  # The placeholder is a thin overlay ON TOP OF a vllm-runtime image: the
+  # `placeholder` stage in deploy/snapshot/Dockerfile is `FROM ${BASE_IMAGE}`
+  # and adds CRIU, cuda-checkpoint and nsrestore. Dynamo Snapshot needs those
+  # in the workload image, so checkpoint/restore pods must run the placeholder,
+  # not the plain runtime.
+  #
+  # Two modes:
+  #   (a) build_vllm=true + build_vllm_placeholder=true
+  #       -> chains vllm-build -> vllm-copy-to-acr -> here, exactly as pr.yaml's
+  #          snapshot-placeholder-vllm does, and uses the freshly copied ACR tag.
+  #   (b) placeholder_base_image=<existing ACR vllm-runtime URI>
+  #       -> skips the runtime build entirely and builds straight from that tag.
+  snapshot-placeholder-vllm:
+    name: vLLM Snapshot Placeholder
+    needs: [init, vllm-copy-to-acr]
+    # `always()` so mode (b) still runs while vllm-build/vllm-copy-to-acr are
+    # skipped. Mode (a) additionally requires the ACR copy to have succeeded,
+    # because BASE_IMAGE points at its output tag.
+    if: |
+      always() && !cancelled() && inputs.build_vllm_placeholder &&
+      (inputs.placeholder_base_image != '' ||
+       needs.vllm-copy-to-acr.result == 'success')
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Resolve BASE_IMAGE and the output tags. An explicit placeholder_base_image
+      # wins; otherwise use the ACR tag just produced by vllm-copy-to-acr.
+      # Tags mirror shared-copy.yml's "${DYNAMO_VERSION}-ci-${SOURCE_TAG}" shape.
+      - name: Resolve placeholder image references
+        id: refs
+        shell: bash
+        env:
+          EXPLICIT_BASE: ${{ inputs.placeholder_base_image }}
+          COPIED_BASE: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+          RUNTIME_VERSION: ${{ needs.vllm-copy-to-acr.outputs.runtime_version }}
+          ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          SANITIZED_REF: ${{ needs.init.outputs.sanitized_ref_name }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ACR_IMAGE_BASE="${ACR_HOSTNAME}/ai-dynamo/dynamo"
+
+          if [[ -n "${EXPLICIT_BASE}" ]]; then
+            BASE_IMAGE="${EXPLICIT_BASE}"
+            # Reuse the base tag's own version prefix so the placeholder sits
+            # next to the runtime it was built from. Falls back to the
+            # workspace version when the tag is not in <ver>-ci-<sha>- form.
+            BASE_TAG="${BASE_IMAGE##*:}"
+            VERSION="${BASE_TAG%%-ci-*}"
+            if [[ "${VERSION}" == "${BASE_TAG}" ]]; then
+              VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' pyproject.toml | head -1)
+              VERSION="${VERSION%%[-+]*}"
+            fi
+          else
+            if [[ -z "${COPIED_BASE}" ]]; then
+              echo "::error::vllm-copy-to-acr produced no image_tag; set placeholder_base_image or build_vllm=true"
+              exit 1
+            fi
+            BASE_IMAGE="${ACR_IMAGE_BASE}:${COPIED_BASE}"
+            VERSION="${RUNTIME_VERSION}"
+          fi
+
+          # <sha>-vllm-placeholder is the primary (ECR) tag, matching pr.yaml's
+          # image_tag. The ACR extra tags add the versioned CI tag and a
+          # branch-name tag for convenience, like the operator job does.
+          echo "base_image=${BASE_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${GIT_SHA}-vllm-placeholder" >> "$GITHUB_OUTPUT"
+          echo "acr_ci_image=${ACR_IMAGE_BASE}:${VERSION}-ci-${GIT_SHA}-vllm-placeholder" >> "$GITHUB_OUTPUT"
+          echo "acr_sha_image=${ACR_IMAGE_BASE}:${GIT_SHA}-vllm-placeholder" >> "$GITHUB_OUTPUT"
+          echo "acr_branch_image=${ACR_IMAGE_BASE}:${SANITIZED_REF}-vllm-placeholder" >> "$GITHUB_OUTPUT"
+
+      # deploy/snapshot/Dockerfile's placeholder stage hard-errors on non-amd64
+      # (cuda-checkpoint ships no arm64 binary), and build-deploy-component
+      # already pins non-operator components to linux/amd64.
+      #
+      # Note: target=placeholder sets run_compliance=false in the action, so the
+      # `compliance` build context and the /legal stages are skipped. That is
+      # deliberate (the placeholder carries no /legal) and it also means this
+      # build does not pull docker.io/library/compliance through the ECR
+      # dockerhub proxy.
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ steps.refs.outputs.image_tag }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ steps.refs.outputs.acr_ci_image }}
+            ${{ steps.refs.outputs.acr_sha_image }}
+            ${{ steps.refs.outputs.acr_branch_image }}
+          extra_build_args: |
+            BASE_IMAGE=${{ steps.refs.outputs.base_image }}
+
+      - name: Summarize placeholder images
+        shell: bash
+        env:
+          BASE_IMAGE: ${{ steps.refs.outputs.base_image }}
+          ACR_CI_IMAGE: ${{ steps.refs.outputs.acr_ci_image }}
+          ACR_SHA_IMAGE: ${{ steps.refs.outputs.acr_sha_image }}
+          ACR_BRANCH_IMAGE: ${{ steps.refs.outputs.acr_branch_image }}
+        run: |
+          {
+            echo "### vLLM Snapshot Placeholder"
+            echo ""
+            echo "Built FROM: \`${BASE_IMAGE}\`"
+            echo ""
+            echo "| Image URI |"
+            echo "|-----|"
+            echo "| \`${ACR_CI_IMAGE}\` |"
+            echo "| \`${ACR_SHA_IMAGE}\` |"
+            echo "| \`${ACR_BRANCH_IMAGE}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The snapshot-agent is the privileged node DaemonSet that drives
+  # cuda-checkpoint + CRIU. It must come from the SAME tree as the workload
+  # placeholder: an agent older than the workload can miss CUDA processes
+  # during discovery (cf. "enter PID namespace for GPU probe"), which surfaces
+  # as a capture-side CRIU/cuda_plugin failure rather than anything to do with
+  # the workload. Build it alongside the placeholder.
+  snapshot-agent:
+    name: Snapshot Agent
+    needs: [init]
+    if: inputs.build_snapshot_agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve snapshot agent image references
+        id: refs
+        shell: bash
+        env:
+          ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          SANITIZED_REF: ${{ needs.init.outputs.sanitized_ref_name }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ACR_IMAGE_BASE="${ACR_HOSTNAME}/ai-dynamo/dynamo"
+          DYNAMO_VERSION=$(sed -n \
+            '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"/\1/p' \
+            Cargo.toml)
+          DYNAMO_VERSION=${DYNAMO_VERSION%%[-+]*}
+          # <sha>-snapshot-agent matches pr.yaml's snapshot-agent tag.
+          echo "image_tag=${GIT_SHA}-snapshot-agent" >> "$GITHUB_OUTPUT"
+          echo "acr_ci_image=${ACR_IMAGE_BASE}:${DYNAMO_VERSION}-ci-${GIT_SHA}-snapshot-agent" >> "$GITHUB_OUTPUT"
+          echo "acr_sha_image=${ACR_IMAGE_BASE}:${GIT_SHA}-snapshot-agent" >> "$GITHUB_OUTPUT"
+          echo "acr_branch_image=${ACR_IMAGE_BASE}:${SANITIZED_REF}-snapshot-agent" >> "$GITHUB_OUTPUT"
+
+      # No `target:` — build-deploy-component defaults snapshot to the `agent`
+      # stage and enables inline compliance for it (action.yml:127-140), which
+      # also supplies the `compliance` build context.
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ steps.refs.outputs.image_tag }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ steps.refs.outputs.acr_ci_image }}
+            ${{ steps.refs.outputs.acr_sha_image }}
+            ${{ steps.refs.outputs.acr_branch_image }}
+
+      - name: Summarize snapshot agent images
+        shell: bash
+        env:
+          ACR_CI_IMAGE: ${{ steps.refs.outputs.acr_ci_image }}
+          ACR_SHA_IMAGE: ${{ steps.refs.outputs.acr_sha_image }}
+          ACR_BRANCH_IMAGE: ${{ steps.refs.outputs.acr_branch_image }}
+        run: |
+          {
+            echo "### Snapshot Agent"
+            echo ""
+            echo "| Image URI |"
+            echo "|-----|"
+            echo "| \`${ACR_CI_IMAGE}\` |"
+            echo "| \`${ACR_SHA_IMAGE}\` |"
+            echo "| \`${ACR_BRANCH_IMAGE}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
 
@@ -193,7 +405,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder-vllm, snapshot-agent]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
