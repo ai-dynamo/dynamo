@@ -7,7 +7,7 @@ subtitle: Choose the right Dynamo documentation surface and authoring guide.
 
 Use this page to decide where content belongs and which focused authoring guide to follow. For prose,
 frontmatter, links, terminology, and validation requirements that apply to every page, see the
-[Documentation Style Guide](../pages/community/contributing/documentation/documentation-style-guide.md).
+[Documentation Style Guide](../../pages/community/contributing/documentation/documentation-style-guide.md).
 
 ## Choose an Authoring Guide
 
@@ -20,7 +20,8 @@ Give each page one primary reader goal.
 | Reference | Look up an exact field, flag, API, environment variable, or contract | Reference | [Writing Reference Pages](reference-pages.md) |
 | Home page | Understand what Dynamo is and choose the next action | Home | [Designing the Home Page](home-page.md) |
 | Blog post | Read a dated technical or project article | Blog | [Writing Blog Posts](blog-posts.md) |
-| Recipe or feature benchmark | Deploy a validated configuration or review measured evidence | Recipes | [Recipe and Feature Benchmark Authoring](../pages/recipes/_catalog/README.md) |
+| Kubernetes manifest collection | Find and adapt ready-to-apply manifests | Recipes | [Kubernetes deployment template](../recipes/kubernetes-templates.mdx) |
+| Recipe or feature benchmark | Deploy a validated configuration or review measured evidence | Recipes | [Recipe and Feature Benchmark Authoring](../../pages/recipes/_catalog/README.md) |
 
 For custom layouts and styling, see [Site Design and Styling](site-design.md). For translated pages,
 see [Maintaining Translations](translations.md).

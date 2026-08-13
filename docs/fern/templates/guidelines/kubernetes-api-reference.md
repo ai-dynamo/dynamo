@@ -7,12 +7,12 @@ subtitle: Generate the full CRD schema and maintain curated DGD, DGDR, and DCD f
 
 Dynamo has two Kubernetes API reference surfaces:
 
-- The [full Kubernetes API reference](../pages/reference/kubernetes-api/full-api-reference.mdx) is
+- The [full Kubernetes API reference](../../pages/reference/kubernetes-api/full-api-reference.mdx) is
   generated and exhaustive. It covers all API versions, custom resources, nested types, validation,
   and operator configuration.
-- The curated [DGD](../pages/reference/kubernetes-api/dynamo-graph-deployment.mdx),
-  [DGDR](../pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx), and
-  [DCD](../pages/reference/kubernetes-api/dynamo-component-deployment.mdx) pages are manually
+- The curated [DGD](../../pages/reference/kubernetes-api/dynamo-graph-deployment.mdx),
+  [DGDR](../../pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx), and
+  [DCD](../../pages/reference/kubernetes-api/dynamo-component-deployment.mdx) pages are manually
   maintained user-facing views of the supported `nvidia.com/v1beta1` resources.
 
 The curated pages use the full reference as a schema inventory, but they are **not mechanically
@@ -20,7 +20,7 @@ extracted from it**. The Kubernetes generator writes only `full-api-reference.md
 page manually when the resource it documents changes.
 
 For the page skeleton, start from the
-[Kubernetes API reference template](reference/kubernetes-api-reference.mdx).
+[Kubernetes API reference template](../reference/kubernetes-api-reference.mdx).
 
 ## Source of Truth
 

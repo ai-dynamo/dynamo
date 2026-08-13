@@ -12,7 +12,7 @@ installation, or tutorial.
 For guidance on choosing between user-facing, knowledge-base, and reference content, see the
 [Documentation Content Guidelines](docs-guidelines.md). For prose, formatting, links, terminology,
 and validation requirements, see the
-[Documentation Style Guide](../pages/community/contributing/documentation/documentation-style-guide.md).
+[Documentation Style Guide](../../pages/community/contributing/documentation/documentation-style-guide.md).
 
 ## Choose the Owning Tab
 
@@ -20,13 +20,44 @@ Choose the tab based on the reader's goal and execution environment.
 
 | Tab | Use it for |
 |---|---|
-| Kubernetes Guide | Core Dynamo workflows performed with Kubernetes resources, DGD or DGDR specifications, Helm, and `kubectl` |
+| Kubernetes Guide | Core Dynamo workflows performed with Kubernetes resources, DynamoGraphDeployment (DGD) or DynamoGraphDeploymentRequest (DGDR) specifications, Helm, and `kubectl` |
 | CLI Guide | Core Dynamo workflows performed with local Python processes, containers, shell commands, or repository scripts |
 | Use Cases | Features and applications that build on the core Kubernetes or CLI deployment workflows |
 
 Put foundational installation and model-deployment workflows in the Kubernetes or CLI Guide. Put a
 workflow in Use Cases when its primary purpose is applying Dynamo to a feature or application, such
 as tool calling, multimodal inference, or observability.
+
+### Kubernetes Guide
+
+- Show configuration in the Kubernetes-native surface readers must edit, such as a DGD or DGDR
+  specification or Helm values. Do not show only a worker flag or environment variable and leave
+  readers to determine how to pass it through Kubernetes.
+- Make commands copy-ready by defining reusable values such as versions, image tags, and namespaces
+  as shell variables. Avoid bracketed placeholders when a variable can make the sequence directly
+  executable.
+- Keep local-process examples in the CLI Guide unless they are necessary to explain or debug the
+  Kubernetes workflow.
+
+### CLI Guide
+
+- Use local Python processes, containers, shell commands, or repository scripts as appropriate for
+  the workflow.
+- When a launch script demonstrates the workflow, show the core command that it runs and explain the
+  arguments readers need to understand. Link to or embed the script as supporting material rather
+  than presenting it as a black box.
+- Keep operator-specific resources and commands in the Kubernetes Guide.
+
+### Use Cases
+
+- State at the beginning whether the feature supports Kubernetes, CLI, or both. Make every
+  copy-ready example match the supported execution path.
+- Use tabs when the Kubernetes and CLI paths follow the same sequence. Use separate sections or
+  pages when their procedures differ materially.
+- Center the guide on the feature or application. Link to foundational Kubernetes or CLI setup
+  instead of repeating it.
+- For a multi-page use case, use the section landing page as the overview and organize distinct
+  workflows or subtopics as child pages.
 
 ## Choose a Guide Type
 
@@ -81,22 +112,6 @@ Describe a reusable workflow rather than one narrowly tailored deployment. Keep 
 and copy-ready. Use tabs when readers follow the same sequence with different backends, deployment
 modes, providers, or environments.
 
-## Keep Environment-Specific Instructions Separate
-
-Match commands and configuration to the owning tab:
-
-- Kubernetes guides use DGD, DGDR, Helm, and `kubectl` where applicable.
-- CLI guides use local Python, container, shell, or repository-script commands.
-- Use-case guides center the feature or application. Link to foundational Kubernetes or CLI setup
-  instead of repeating it.
-- At the start of a use-case guide, state whether the workflow supports Kubernetes, CLI, or both.
-  Make every copy-ready example match the stated path. Use tabs when both paths follow the same
-  sequence; use separate sections or pages when the procedures differ materially.
-- When a guide relies on a launch script, show the command that invokes it and the arguments readers
-  must understand instead of presenting the script as a black box.
-- Do not place operator-specific examples in a CLI guide or local-process examples in a Kubernetes
-  guide.
-
 ## Start from a Template
 
 Keep shared authoring guidance in this page rather than copying it into each environment directory.
@@ -105,8 +120,8 @@ execution environment.
 
 | Page type | Kubernetes | CLI |
 |---|---|---|
-| Installation | [Kubernetes installation template](kubernetes/installation.mdx) | [CLI installation template](cli/installation.mdx) |
-| Tutorial | [Kubernetes tutorial template](kubernetes/tutorial.mdx) | [CLI tutorial template](cli/tutorial.mdx) |
+| Installation | [Kubernetes installation template](../kubernetes/installation.mdx) | [CLI installation template](../cli/installation.mdx) |
+| Tutorial | [Kubernetes tutorial template](../kubernetes/tutorial.mdx) | [CLI tutorial template](../cli/tutorial.mdx) |
 
 For a Use Cases page, start with the Kubernetes or CLI tutorial template that matches the primary
 execution path, then adapt the framing around the feature or application. Add a dedicated use-case

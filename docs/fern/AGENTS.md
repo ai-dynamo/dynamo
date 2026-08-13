@@ -39,7 +39,7 @@ its generator, never the page.
 The curated DGD, DGDR, and DCD pages under `pages/reference/kubernetes-api/` are manually maintained
 user-facing references, not generator outputs. Keep them aligned with the Go API types and generated
 full reference by following
-[`templates/kubernetes-api-reference.md`](templates/kubernetes-api-reference.md).
+[`templates/guidelines/kubernetes-api-reference.md`](templates/guidelines/kubernetes-api-reference.md).
 
 Python and Rust are one hop: `gen_python_api.py` and `gen_rust_api.py` read docstrings through
 griffe.

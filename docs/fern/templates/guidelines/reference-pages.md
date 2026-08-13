@@ -37,13 +37,13 @@ variables when appropriate. Keep examples short and illustrative, and link to a
 
 ## Start from the API Template
 
-Use the [code API reference template](reference/api-reference.mdx) for a manually authored
+Use the [code API reference template](../reference/api-reference.mdx) for a manually authored
 module, package, crate, class, function group, or protocol surface. Its reusable unit is a public
 symbol or operation: signature, parameters, return value, errors, example, and source link. Repeat
 the symbol block when one page documents a related API group, and remove class-only sections for
 functions or other smaller surfaces.
 
-Use the [Kubernetes API reference template](reference/kubernetes-api-reference.mdx) for a curated
+Use the [Kubernetes API reference template](../reference/kubernetes-api-reference.mdx) for a curated
 custom-resource page. Kubernetes resources need a separate structure for desired state under Spec,
 controller-observed state under Status, reusable nested types, and `kubectl` inspection. Follow
 [Writing Kubernetes API References](kubernetes-api-reference.md) for the generation pipeline,
@@ -63,4 +63,4 @@ Generate reference content when the source contract can produce it reliably. Do 
 that carry a generated-file marker. Update the source and rerun the corresponding generator instead.
 
 The Python and Rust API pages and the full Kubernetes API reference are generated. Their workflows
-are documented in [`docs/fern/AGENTS.md`](../AGENTS.md).
+are documented in [`docs/fern/AGENTS.md`](../../AGENTS.md).
