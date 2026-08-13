@@ -6,9 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
 pub use dynamo_kv_router::kv_hints::{
-    KV_HINT_PROTOCOL_VERSION, KV_HINT_TRANSFER_CAPABILITY_KEY, KV_SOURCE_LOCATIONS_ACTION_TYPE,
-    KV_SOURCE_LOCATIONS_ACTION_VERSION, KvHintAction, KvHintProtocolVersion, KvHints,
-    KvSourceLocationsActionVersion, KvSourceLocationsPayload,
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHintAction, KvHints, KvSourceLocationsPayload,
 };
 use dynamo_kv_router::{
     config::RouterConfigOverride,
@@ -538,9 +536,9 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap();
-        let hints = KvHints::with_message_id(
+        let hints = KvHints::new(
             "msg-123",
-            vec![KvHintAction::source_locations_with_id(
+            vec![KvHintAction::source_locations(
                 "a1",
                 KvSourceLocationsPayload {
                     source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
@@ -553,22 +551,10 @@ mod tests {
         );
 
         req.attach_kv_hints(hints.clone());
-        assert_eq!(req.kv_hints, Some(hints));
+        assert_eq!(req.kv_hints, Some(hints.clone()));
         assert_eq!(
             serde_json::to_value(&req).unwrap()["kv_hints"],
-            serde_json::json!({
-                "protocol_version": "0.1",
-                "message_id": "msg-123",
-                "actions": [{
-                    "action_id": "a1",
-                    "action_type": "kv.source_locations",
-                    "action_version": "1.0",
-                    "payload": {
-                        "source_control_endpoint": "tcp://127.0.0.1:23280",
-                        "block_hashes": [11, 22],
-                    },
-                }]
-            })
+            serde_json::to_value(&hints).unwrap()
         );
     }
 

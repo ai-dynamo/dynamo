@@ -46,11 +46,6 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
-from dynamo.common.constants import (
-    KV_HINT_PROTOCOL_VERSION,
-    KV_SOURCE_LOCATIONS_ACTION_TYPE,
-    KV_SOURCE_LOCATIONS_ACTION_VERSION,
-)
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -126,6 +121,9 @@ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+_KV_HINT_PROTOCOL_VERSION: Final = "0.1"
+_KV_SOURCE_LOCATIONS_ACTION_TYPE: Final = "kv.source_locations"
+_KV_SOURCE_LOCATIONS_ACTION_VERSION: Final = "1.0"
 # Request payload key under extra_args.kv_transfer_params. This intentionally
 # matches the runtime capability string, but it lives in a different namespace.
 _ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
@@ -866,7 +864,7 @@ def _apply_kv_hints(sampling_params: SamplingParams, kv_hints: Any) -> None:
     """Lower each supported action from the Dynamo KV hint envelope."""
     if (
         not isinstance(kv_hints, Mapping)
-        or kv_hints.get("protocol_version") != KV_HINT_PROTOCOL_VERSION
+        or kv_hints.get("protocol_version") != _KV_HINT_PROTOCOL_VERSION
     ):
         return
 
@@ -877,8 +875,8 @@ def _apply_kv_hints(sampling_params: SamplingParams, kv_hints: Any) -> None:
     for action in actions:
         if (
             not isinstance(action, Mapping)
-            or action.get("action_type") != KV_SOURCE_LOCATIONS_ACTION_TYPE
-            or action.get("action_version") != KV_SOURCE_LOCATIONS_ACTION_VERSION
+            or action.get("action_type") != _KV_SOURCE_LOCATIONS_ACTION_TYPE
+            or action.get("action_version") != _KV_SOURCE_LOCATIONS_ACTION_VERSION
         ):
             continue
         payload = action.get("payload")
