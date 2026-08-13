@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AWS dev-01 GB200 runner smoke
+
+on:
+  push:
+    branches:
+      - "test/aws-dev-01-runner-smoke"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-dev-01-gb200-smoke
+  cancel-in-progress: true
+
+jobs:
+  functional-smoke:
+    name: Functional smoke
+    runs-on: aws-dev-01-tester-arm-gpu-v2
+    timeout-minutes: 15
+    container:
+      image: nvcr.io/nvidia/cuda@sha256:1ca86773be1716af6cfff3d2eb8cd10d4d9cac181931d1ee9be792d3e33c7322
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    steps:
+      - name: Validate architecture, GPUs, and mounts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(uname -m)" = "aarch64"
+
+          mapfile -t gpu_names < <(nvidia-smi --query-gpu=name --format=csv,noheader)
+          test "${#gpu_names[@]}" -eq 2
+          printf 'Allocated GPUs:\n%s\n' "${gpu_names[*]}"
+
+          test -d /models
+          test -d /scratch
+          test -d /dev/shm
+
+          scratch_probe="/scratch/aws-dev-01-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          work_probe="${GITHUB_WORKSPACE}/.aws-dev-01-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          touch "${scratch_probe}" "${work_probe}"
+          rm -f "${scratch_probe}" "${work_probe}"
+
+          shm_bytes="$(df --output=size -B1 /dev/shm | tail -1 | tr -d ' ')"
+          test "${shm_bytes}" -ge $((18 * 1024 * 1024 * 1024))
+
+          df -h /models /scratch /dev/shm "${GITHUB_WORKSPACE}"
+
+  capacity-smoke:
+    name: Capacity slot ${{ matrix.slot }}
+    needs: functional-smoke
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        slot: [1, 2, 3, 4, 5]
+    runs-on: aws-dev-01-tester-arm-gpu-v2
+    timeout-minutes: 15
+    container:
+      image: nvcr.io/nvidia/cuda@sha256:1ca86773be1716af6cfff3d2eb8cd10d4d9cac181931d1ee9be792d3e33c7322
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    steps:
+      - name: Hold two GPUs for capacity validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d ' ')"
+          test "${gpu_count}" -eq 2
+          echo "Capacity slot ${{ matrix.slot }} has ${gpu_count} GPUs"
+          sleep 180
