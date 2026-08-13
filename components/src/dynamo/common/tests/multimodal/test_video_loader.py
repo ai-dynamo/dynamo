@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.video_loader as video_loader_module
-from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -28,8 +29,28 @@ async def test_load_video_rejects_http_by_default():
     """
     loader = VideoLoader(url_policy=UrlValidationPolicy())
 
-    with pytest.raises(ValueError, match="not allowed"):
+    with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_video("http://example.com/x.mp4")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.mp4"),
+    ],
+)
+async def test_load_video_preserves_client_error(client_error):
+    loader = VideoLoader()
+    loader._load_video_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=client_error
+    )
+
+    with pytest.raises(type(client_error)) as exc_info:
+        await loader.load_video("https://example.com/x.mp4")
+
+    assert exc_info.value is client_error
 
 
 @pytest.mark.asyncio
@@ -84,6 +105,27 @@ async def test_load_video_batch_rejects_decoded_variant_without_frontend_decodin
 
     with pytest.raises(ValueError, match="enable_frontend_decoding=False"):
         await loader.load_video_batch([{"Decoded": {"shape": [1, 2, 2, 3]}}])
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_prioritizes_typed_client_error():
+    loader = VideoLoader()
+    client_error = HttpStatusError(
+        415, "Unsupported Media Type", "https://example.com/bad.mp4"
+    )
+    loader.load_video = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("decode failed"), client_error]
+    )
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_video_batch(
+            [
+                {"Url": "https://example.com/bad.mp4"},
+                {"Url": "https://example.com/unsupported.mp4"},
+            ]
+        )
+
+    assert exc_info.value is client_error
 
 
 @pytest.mark.asyncio
