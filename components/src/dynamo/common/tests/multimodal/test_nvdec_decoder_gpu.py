@@ -42,7 +42,14 @@ _WORKER_SKIP = 77
 _WORKER_TIMEOUT_S = 60
 
 
+def _readable_output(output: str | bytes | None) -> str:
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output or ""
+
+
 def _decode_and_assert(codec: str) -> int:
+    """Decode one fixture; local imports keep parent pytest free of CUDA/NVDEC."""
     import numpy as np
 
     from dynamo.common.multimodal import nvdec_decoder as nd
@@ -101,8 +108,8 @@ def test_nvdec_decodes_real_clips():
     except subprocess.TimeoutExpired as exc:
         pytest.fail(
             f"NVDEC worker timed out after {_WORKER_TIMEOUT_S}s\n"
-            f"--- stdout ---\n{exc.stdout or ''}\n"
-            f"--- stderr ---\n{exc.stderr or ''}"
+            f"--- stdout ---\n{_readable_output(exc.stdout)}\n"
+            f"--- stderr ---\n{_readable_output(exc.stderr)}"
         )
 
     if result.returncode == _WORKER_SKIP:
