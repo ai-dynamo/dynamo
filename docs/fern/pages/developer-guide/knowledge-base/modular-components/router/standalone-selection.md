@@ -236,7 +236,9 @@ and can select another eligible worker.
 
 The selection service does not resolve, persist, replicate, or expire affinity
 targets. An external controller must supply the current target on each request
-and update its binding after a successful selection or dispatch.
+and update its binding only after downstream dispatch succeeds. Selection or
+reservation success alone is insufficient. Preserve the existing binding when
+dispatch fails.
 
 ## Ray Select-Then-Reserve Flow
 

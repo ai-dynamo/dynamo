@@ -345,7 +345,7 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 
 Session affinity is a preference, not an eligibility constraint. Dynamo keeps all host-eligible workers in the policy candidate table. The affinity target can be absent when the worker is unavailable, overloaded, disallowed, or rejected by a filter.
 
-Dynamo's built-in policy selects an eligible affinity target. A custom filter, scorer, or picker can retain or replace it. The frontend rebinds the session only after it dispatches successfully to a different worker.
+Dynamo's built-in policy selects an eligible affinity target. A custom filter can reject it, a scorer can change its cost, and a picker can select another eligible worker. The frontend rebinds the session only after it dispatches successfully to a different worker.
 
 An explicit target is different. Dynamo validates and reserves that exact worker without calling custom filters, scorers, or pickers.
 
