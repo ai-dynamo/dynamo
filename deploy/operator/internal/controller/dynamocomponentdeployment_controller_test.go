@@ -61,8 +61,8 @@ import (
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
-func staticContainerGPUCount(count int64) dynamo.ContainerGPUCount {
-	return func() (int64, error) { return count, nil }
+func noContainerGPUs() dynamo.ContainerGPUCount {
+	return func() (int64, error) { return 0, nil }
 }
 
 const (
@@ -891,7 +891,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		context.Background(),
 		dcd,
 		dynamo.RoleMain,
-		staticContainerGPUCount(0),
+		noContainerGPUs(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, commonconsts.ComponentTypeWorker, podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType])
@@ -1067,7 +1067,7 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		context.Background(),
 		dcd,
 		dynamo.RoleMain,
-		staticContainerGPUCount(0),
+		noContainerGPUs(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, commonconsts.ComponentTypePrefill, podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType])
@@ -1883,7 +1883,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
-			staticContainerGPUCount(0),
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -1944,7 +1944,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
-			staticContainerGPUCount(0),
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2024,7 +2024,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
-			staticContainerGPUCount(0),
+			noContainerGPUs(),
 		)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
@@ -2067,7 +2067,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
-			staticContainerGPUCount(0),
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2113,7 +2113,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
-			staticContainerGPUCount(0),
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2175,7 +2175,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
-			staticContainerGPUCount(0),
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2219,7 +2219,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
-			staticContainerGPUCount(0),
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -3594,7 +3594,7 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 		context.Background(),
 		dcd,
 		map[string]string{"app": "demo"},
-		staticContainerGPUCount(0),
+		noContainerGPUs(),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, got)

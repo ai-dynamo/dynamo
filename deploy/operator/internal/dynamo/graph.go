@@ -1550,6 +1550,8 @@ func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 // Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
 // Deployment-specific environment merging should be handled by the caller
 // containerGPUs lazily resolves the main container's scalar or DRA-backed GPU count.
+//
+//nolint:gocyclo
 func GenerateBasePodSpec(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
