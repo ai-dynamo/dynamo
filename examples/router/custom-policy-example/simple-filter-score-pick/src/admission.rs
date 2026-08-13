@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 
 use dynamo_kv_router::{
     QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
-    QueueAdmissionRequest, QueueAdmissionWorkerSnapshot,
+    QueueAdmissionRequest,
 };
 
 #[derive(Default)]
@@ -95,6 +95,8 @@ impl QueueAdmissionPolicy for SessionAdmissionPolicy {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::QueueAdmissionWorkerSnapshot;
+
     use super::*;
     use dynamo_kv_router::SessionContext;
 
