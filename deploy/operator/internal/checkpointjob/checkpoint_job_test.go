@@ -77,7 +77,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
 		t.Fatalf("unexpected job identity: %#v", job.ObjectMeta)
 	}
-	if job.Labels[CheckpointIDLabel] != "hash" {
+	if job.Labels[CheckpointIDLabel] != "hash" { //nolint:goconst
 		t.Fatalf("expected checkpoint hash label on job: %#v", job.Labels)
 	}
 	if job.Spec.Template.Labels[CheckpointSourceLabel] != "true" {
@@ -98,7 +98,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != SnapshotControlMountPath {
 		t.Fatalf("expected only %s mount at %s, got %#v", SnapshotControlVolumeName, SnapshotControlMountPath, main.VolumeMounts)
 	}
-	if main.VolumeMounts[0].SubPath != "main" {
+	if main.VolumeMounts[0].SubPath != "main" { //nolint:goconst
 		t.Fatalf("expected control mount subPath=main, got %#v", main.VolumeMounts[0])
 	}
 	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {

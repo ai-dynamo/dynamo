@@ -156,6 +156,8 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 }
 
 // ValidateRestorePodSpec verifies the target containers are restore-shaped.
+//
+//nolint:gocyclo
 func ValidateRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,

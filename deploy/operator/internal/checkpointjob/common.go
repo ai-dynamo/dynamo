@@ -60,6 +60,8 @@ const (
 	linkerdInjectDisabled        = "disabled"
 	istioSidecarInjectAnnotation = "sidecar.istio.io/inject"
 	istioSidecarInjectDisabled   = "false"
+
+	labelValueTrue = "true"
 )
 
 type Storage struct {
@@ -207,7 +209,7 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 		return
 	}
 
-	labels[RestoreTargetLabel] = "true"
+	labels[RestoreTargetLabel] = labelValueTrue
 	if checkpointID != "" {
 		labels[CheckpointIDLabel] = checkpointID
 	}
@@ -239,7 +241,7 @@ func applyCheckpointSourceMetadata(labels map[string]string, annotations map[str
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 
-	labels[CheckpointSourceLabel] = "true"
+	labels[CheckpointSourceLabel] = labelValueTrue
 	if checkpointID != "" {
 		labels[CheckpointIDLabel] = checkpointID
 	}

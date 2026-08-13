@@ -189,7 +189,7 @@ func TestApplyCheckpointStorageMetadata(t *testing.T) {
 	if annotations[CheckpointStorageTypeAnnotation] != StorageTypePVC {
 		t.Fatalf("expected storage type annotation, got %#v", annotations)
 	}
-	if annotations[CheckpointStorageBasePathAnnotation] != "/checkpoints" {
+	if annotations[CheckpointStorageBasePathAnnotation] != "/checkpoints" { //nolint:goconst
 		t.Fatalf("expected normalized storage base path annotation, got %#v", annotations)
 	}
 }

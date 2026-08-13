@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+//nolint:gocyclo
 func TestNewRestorePod(t *testing.T) {
 	readinessProbe := &corev1.Probe{PeriodSeconds: 7, TimeoutSeconds: 3}
 	livenessProbe := &corev1.Probe{InitialDelaySeconds: 11}

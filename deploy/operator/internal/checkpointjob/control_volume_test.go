@@ -43,7 +43,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		if got := ps.Containers[0].VolumeMounts[0].SubPath; got != "engine-0" {
 			t.Fatalf("engine-0 subPath=%q", got)
 		}
-		if got := ps.Containers[1].VolumeMounts[0].SubPath; got != "engine-1" {
+		if got := ps.Containers[1].VolumeMounts[0].SubPath; got != "engine-1" { //nolint:goconst
 			t.Fatalf("engine-1 subPath=%q", got)
 		}
 	})
