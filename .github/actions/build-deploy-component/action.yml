@@ -132,7 +132,7 @@ runs:
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in
           operator)
-            BASELINE_STEM="go@e86c88d0"
+            BASELINE_STEM="go@66dcc593"
             [[ -z "${{ inputs.target }}" ]] && RUN_COMPLIANCE="true" ;;
           snapshot)
             BASELINE_STEM="cuda-dl-base@8315e245"
