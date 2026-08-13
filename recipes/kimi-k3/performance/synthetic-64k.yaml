@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schemaVersion: "2.0"
+
+randomSeed: 42
+
+benchmark:
+  model: ${MODEL_NAME:moonshotai/Kimi-K3}
+  tokenizer:
+    name: ${TOKENIZER:moonshotai/Kimi-K3}
+    trustRemoteCode: true
+  endpoint:
+    url: ${INFERENCE_URL:http://127.0.0.1:8000/v1/chat/completions}
+    type: chat
+    streaming: true
+    useServerTokenCount: true
+    timeout: 600.0
+    resetKvCache: true
+    extra:
+      cache_salt: ${CACHE_SALT:kimi-k3-64k}
+      ignore_eos: true
+  dataset:
+    type: synthetic
+    entries: ${REQUESTS:6}
+    prompts:
+      isl: {mean: 6400, stddev: 0}
+      osl: {mean: 400, stddev: 0}
+    prefixPrompts:
+      sharedSystemLength: 57600
+  phases:
+    - name: profiling
+      type: concurrency
+      requests: ${REQUESTS:6}
+      concurrency: ${CONCURRENCY:2}
+  serverMetrics:
+    enabled: true
+    urls:
+      - ${SERVER_METRICS_URL:http://127.0.0.1:9090/metrics}
+    formats: [json]
+  artifacts:
+    dir: ${AIPERF_ARTIFACT_DIR:./artifacts/synthetic-64k}
+    summary: [json]
+    records: [jsonl]
+  runtime:
+    ui: none
+    workers: ${CONCURRENCY:2}

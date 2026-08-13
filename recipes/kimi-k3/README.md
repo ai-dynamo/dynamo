@@ -15,6 +15,9 @@ attention, shared experts, `lm_head`, and the vision tower stay BF16.
 
 Every profile spans multiple 4-GPU nodes over MNNVL — **TP8 across two nodes on GB300, TP16 across four on GB200** — so the tensor-parallel group crosses the node boundary on NVLink, which is why every worker pod set claims a DRA `ComputeDomain` channel.
 
+For GB300 performance measurement, including the coding-only SPEED-Bench acceptance-length step and
+the 64K/400 synthetic Pareto workload, see [Performance benchmarking](performance/README.md).
+
 ## Configurations
 
 Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
