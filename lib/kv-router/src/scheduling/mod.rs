@@ -39,7 +39,7 @@ pub use prefill_load::{
 };
 pub use queue_admission::{
     QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
-    QueueAdmissionRequest, QueueAdmissionWorker, RequestProgress, RequestProgressUpdater,
-    WorkerPlacement,
+    QueueAdmissionRequest, QueueAdmissionWorker, QueueAdmissionWorkerSnapshot, RequestProgress,
+    RequestProgressUpdater, WorkerPlacement,
 };
 pub use types::*;

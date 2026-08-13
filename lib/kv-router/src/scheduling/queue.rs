@@ -22,7 +22,7 @@ use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
     QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionWorker,
-    WorkerPlacement,
+    QueueAdmissionWorkerSnapshot, WorkerPlacement,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -140,6 +140,7 @@ enum AdmissionCommand {
     Update {
         worker: Option<WorkerWithDpRank>,
         finished: Option<(String, Option<WorkerWithDpRank>, AdmissionRequestOutcome)>,
+        reconcile_admission: bool,
         ack_tx: oneshot::Sender<bool>,
     },
     Cleanup,
@@ -246,8 +247,9 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
-    admission_workers: Vec<QueueAdmissionWorker>,
-    admission_workers_initialized: bool,
+    admission_worker_snapshot: QueueAdmissionWorkerSnapshot,
+    admission_overloaded_worker_ids: Option<Arc<HashSet<WorkerId>>>,
+    admission_available_worker_ids: Option<Arc<HashSet<WorkerId>>>,
     lifecycle_request_ids: HashSet<String>,
     managed_admission_request_ids: HashSet<String>,
     admission_bookings: HashMap<String, WorkerWithDpRank>,
@@ -431,8 +433,9 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider,
             available_worker_provider,
-            admission_workers: Vec::new(),
-            admission_workers_initialized: false,
+            admission_worker_snapshot: QueueAdmissionWorkerSnapshot::new(0, Vec::new()),
+            admission_overloaded_worker_ids: None,
+            admission_available_worker_ids: None,
             lifecycle_request_ids: HashSet::new(),
             managed_admission_request_ids: HashSet::new(),
             admission_bookings: HashMap::new(),
@@ -658,11 +661,11 @@ impl<
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
     pub async fn update(&self) {
-        let _ = self.update_after(None, None).await;
+        let _ = self.update_after(None, None, true).await;
     }
 
     pub(crate) async fn update_worker(&self, worker: WorkerWithDpRank) {
-        let _ = self.update_after(Some(worker), None).await;
+        let _ = self.update_after(Some(worker), None, false).await;
     }
 
     pub(crate) async fn complete_request(
@@ -678,6 +681,7 @@ impl<
                 expected_worker,
                 AdmissionRequestOutcome::Completed { context_tokens },
             )),
+            false,
         )
         .await
     }
@@ -694,6 +698,7 @@ impl<
                 expected_worker,
                 AdmissionRequestOutcome::Aborted,
             )),
+            false,
         )
         .await
     }
@@ -702,6 +707,7 @@ impl<
         &self,
         worker: Option<WorkerWithDpRank>,
         finished: Option<(String, Option<WorkerWithDpRank>, AdmissionRequestOutcome)>,
+        reconcile_admission: bool,
     ) -> bool {
         if !self.queueing_enabled {
             return false;
@@ -713,6 +719,7 @@ impl<
             .send(AdmissionCommand::Update {
                 worker,
                 finished,
+                reconcile_admission,
                 ack_tx,
             })
             .await
@@ -802,7 +809,7 @@ impl<
                     }
                     let made_ready = enqueue_ready | (drain_cleanup && self.drain_cleanup());
                     if made_ready {
-                        self.handle_update(None).await;
+                        self.handle_update(None, false).await;
                     }
                     let _ = ack_tx.send(lease);
                 }
@@ -813,6 +820,7 @@ impl<
                 AdmissionCommand::Update {
                     mut worker,
                     finished,
+                    reconcile_admission,
                     ack_tx,
                 } => {
                     let mut finished_handled = false;
@@ -824,15 +832,15 @@ impl<
                             finished_handled = true;
                         }
                     }
-                    self.handle_update(worker).await;
+                    self.handle_update(worker, reconcile_admission).await;
                     if drain_cleanup && self.drain_cleanup() {
-                        self.handle_update(None).await;
+                        self.handle_update(None, false).await;
                     }
                     let _ = ack_tx.send(finished_handled);
                 }
                 AdmissionCommand::Cleanup => {
                     if self.drain_cleanup() {
-                        self.handle_update(None).await;
+                        self.handle_update(None, false).await;
                     }
                 }
             }
@@ -902,7 +910,14 @@ impl<
         }
 
         let admission_decision = if lifecycle_request_id.is_some() {
-            self.refresh_admission_request_workers(&request);
+            self.refresh_admission_worker_snapshot();
+            let workers = self.workers_with_configs.borrow();
+            let routing_eligibility = request.eligibility();
+            let is_worker_eligible = |worker| {
+                routing_eligibility
+                    .validate_worker_rank(&workers, worker)
+                    .is_ok()
+            };
             self.pending.admit_with_admission_policy(
                 request
                     .mode
@@ -910,7 +925,11 @@ impl<
                     .expect("lifecycle request is tracked"),
                 request.isl_tokens,
                 request.session_context.as_ref(),
-                &self.admission_workers,
+                &self.admission_worker_snapshot,
+                request.pinned_worker,
+                request.allowed_worker_ids.as_ref(),
+                request.routing_constraints.has_hard_constraints(),
+                &is_worker_eligible,
             )
         } else {
             None
@@ -1014,12 +1033,46 @@ impl<
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
-    fn refresh_admission_workers(&mut self) {
-        let rebuild = !self.admission_workers_initialized
+    fn refresh_admission_worker_snapshot(&mut self) {
+        let topology_changed = self.admission_worker_snapshot.generation() == 0
             || self.workers_with_configs.has_changed().unwrap_or(false);
-        if rebuild {
+        let overloaded_worker_ids = self
+            .overloaded_worker_provider
+            .as_ref()
+            .and_then(|provider| provider());
+        let available_worker_ids = self
+            .available_worker_provider
+            .as_ref()
+            .and_then(|provider| provider());
+        let overloaded_unchanged = match (
+            self.admission_overloaded_worker_ids.as_ref(),
+            overloaded_worker_ids.as_ref(),
+        ) {
+            (Some(previous), Some(current)) => {
+                Arc::ptr_eq(previous, current) || previous.as_ref() == current.as_ref()
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        let available_unchanged = match (
+            self.admission_available_worker_ids.as_ref(),
+            available_worker_ids.as_ref(),
+        ) {
+            (Some(previous), Some(current)) => {
+                Arc::ptr_eq(previous, current) || previous.as_ref() == current.as_ref()
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        let availability_changed = !overloaded_unchanged || !available_unchanged;
+
+        if !topology_changed && !availability_changed {
+            return;
+        }
+
+        let mut admission_workers = if topology_changed {
             let workers = self.workers_with_configs.borrow_and_update();
-            self.admission_workers.clear();
+            let mut admission_workers = Vec::new();
             for (&worker_id, config) in workers.iter() {
                 let capacity_tokens =
                     config
@@ -1036,28 +1089,19 @@ impl<
                 let start = config.data_parallel_start_rank();
                 let end = start.saturating_add(config.data_parallel_size());
                 for dp_rank in start..end {
-                    self.admission_workers.push(QueueAdmissionWorker::new(
+                    admission_workers.push(QueueAdmissionWorker::new(
                         WorkerWithDpRank::new(worker_id, dp_rank),
                         capacity_tokens,
-                        true,
                         true,
                     ));
                 }
             }
-            self.admission_workers
-                .sort_unstable_by_key(QueueAdmissionWorker::worker);
-            self.admission_workers_initialized = true;
-        }
+            admission_workers
+        } else {
+            self.admission_worker_snapshot.workers().to_vec()
+        };
 
-        let overloaded_worker_ids = self
-            .overloaded_worker_provider
-            .as_ref()
-            .and_then(|provider| provider());
-        let available_worker_ids = self
-            .available_worker_provider
-            .as_ref()
-            .and_then(|provider| provider());
-        for worker in &mut self.admission_workers {
+        for worker in &mut admission_workers {
             let worker_id = worker.worker().worker_id;
             let available = available_worker_ids
                 .as_ref()
@@ -1065,26 +1109,19 @@ impl<
                 && overloaded_worker_ids
                     .as_ref()
                     .is_none_or(|workers| !workers.contains(&worker_id));
-            worker.set_available(available);
-            worker.set_eligible(true);
+            *worker =
+                QueueAdmissionWorker::new(worker.worker(), worker.capacity_tokens(), available);
         }
-    }
 
-    fn refresh_admission_request_workers(&mut self, request: &SchedulingRequest) {
-        self.refresh_admission_workers();
-        let workers = self.workers_with_configs.borrow();
-        let eligibility = request.eligibility();
-        for worker in &mut self.admission_workers {
-            let worker_rank = worker.worker();
-            worker.set_eligible(
-                eligibility
-                    .pinned_worker()
-                    .is_none_or(|pinned| pinned == worker_rank)
-                    && eligibility
-                        .validate_worker_rank(&workers, worker_rank)
-                        .is_ok(),
-            );
-        }
+        let generation = self
+            .admission_worker_snapshot
+            .generation()
+            .wrapping_add(1)
+            .max(1);
+        self.admission_worker_snapshot =
+            QueueAdmissionWorkerSnapshot::new(generation, admission_workers);
+        self.admission_overloaded_worker_ids = overloaded_worker_ids;
+        self.admission_available_worker_ids = available_worker_ids;
     }
 
     fn drain_cleanup(&mut self) -> bool {
@@ -1200,12 +1237,12 @@ impl<
         self.subtract_class_counters(class_index, snapshot);
     }
 
-    async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
-        if self.pending.has_admission_policy() {
-            self.refresh_admission_workers();
+    async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>, reconcile_admission: bool) {
+        if reconcile_admission && self.pending.has_admission_policy() {
+            self.refresh_admission_worker_snapshot();
             self.pending
                 .admission_event(QueueAdmissionEvent::Reconcile {
-                    workers: &self.admission_workers,
+                    snapshot: &self.admission_worker_snapshot,
                 });
         }
         if !self.pending.has_ready() {
@@ -1321,7 +1358,7 @@ impl<
                 .as_ref()
                 .and_then(|provider| provider());
             let eligibility = request
-                .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
+                .eligibility_with_overloaded(overloaded_worker_ids.as_deref())
                 .with_available_workers(available_worker_ids.as_deref());
             self.selector
                 .select_worker(&workers, request, eligibility, self.block_size)
@@ -1779,6 +1816,7 @@ mod tests {
     struct AdmissionPolicyState {
         deferred: StdMutex<Option<QueueAdmissionId>>,
         dispatched: AtomicUsize,
+        reconciled: AtomicUsize,
         completed: AtomicUsize,
         completed_context_tokens: AtomicUsize,
     }
@@ -1797,6 +1835,7 @@ mod tests {
         fn on_event(&mut self, event: QueueAdmissionEvent<'_>, ready: &mut Vec<QueueAdmissionId>) {
             match event {
                 QueueAdmissionEvent::Reconcile { .. } => {
+                    self.state.reconciled.fetch_add(1, Ordering::Relaxed);
                     if let Some(id) = self.state.deferred.lock().unwrap().take() {
                         ready.push(id);
                     }
@@ -1846,15 +1885,11 @@ mod tests {
     impl QueueAdmissionPolicy for EligibilityPolicy {
         fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
             assert_eq!(request.workers().len(), 2);
-            assert_eq!(
-                request
-                    .workers()
-                    .iter()
-                    .filter(|worker| worker.is_eligible())
-                    .map(QueueAdmissionWorker::worker)
-                    .collect::<Vec<_>>(),
-                vec![WorkerWithDpRank::new(1, 0)]
-            );
+            let mut eligible_workers = Vec::new();
+            request.for_each_eligible_worker(|worker| {
+                eligible_workers.push(worker.worker());
+            });
+            assert_eq!(eligible_workers, vec![WorkerWithDpRank::new(1, 0)]);
             self.observed.store(true, Ordering::Relaxed);
             QueueAdmissionDecision::Bypass
         }
@@ -2423,6 +2458,7 @@ mod tests {
             .unwrap();
         lease.as_mut().unwrap().disarm();
         assert_eq!(state.dispatched.load(Ordering::Relaxed), 1);
+        let reconciled_before_completion = state.reconciled.load(Ordering::Relaxed);
 
         slots
             .free(&"policy-request".to_owned(), Instant::now())
@@ -2432,6 +2468,11 @@ mod tests {
             .await;
         assert_eq!(state.completed.load(Ordering::Relaxed), 1);
         assert_eq!(state.completed_context_tokens.load(Ordering::Relaxed), 48);
+        assert_eq!(
+            state.reconciled.load(Ordering::Relaxed),
+            reconciled_before_completion,
+            "completion must not trigger a full policy reconciliation"
+        );
     }
 
     #[tokio::test]
@@ -3469,7 +3510,7 @@ policy_classes:
     #[tokio::test(flavor = "multi_thread")]
     async fn test_overloaded_provider_filters_at_admission() {
         let overloaded_worker_provider: OverloadedWorkerProvider =
-            Arc::new(|| Some(HashSet::from([0])));
+            Arc::new(|| Some(Arc::new(HashSet::from([0]))));
         let (queue, _slots) =
             make_queue_with_providers(1, 16, 256, Some(overloaded_worker_provider), None);
 

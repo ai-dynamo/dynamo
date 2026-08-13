@@ -483,7 +483,7 @@ where
         });
         let client_for_overload = client.clone();
         let overloaded_worker_provider: OverloadedWorkerProvider =
-            Arc::new(move || client_for_overload.overloaded_instance_ids());
+            Arc::new(move || client_for_overload.overloaded_instance_ids_snapshot());
 
         let client_for_availability = client.clone();
         let available_worker_provider: WorkerAvailabilityProvider =
