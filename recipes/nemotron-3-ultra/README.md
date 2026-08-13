@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Recipes for **nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4** — a ~550B hybrid Mamba/Attention/MoE model (~55B active).
 
-We ship Dynamo + vLLM deployment profiles across B200 and H200, with aggregated and disaggregated serving modes.
+We ship Dynamo + vLLM deployment profiles across B200, GB200, and H200, with aggregated and disaggregated serving modes. The original Day-0 profiles remain available alongside the newer Refresh profiles.
 
-Runtime image:
+Day-0 runtime image:
 
 ```text
 nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1
@@ -18,6 +18,8 @@ nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1
 The recipes pin `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and pass `--no-enable-flashinfer-autotune` on vLLM workers. These settings select the non-FlashInfer FP8 linear kernel path used for the B200 benchmark rows and avoid the measured vLLM 0.22 FlashInfer FP8 regression.
 
 ## Configurations
+
+### Day-0 Profiles (256K)
 
 |                          | B200 chat | H200 chat | B200 agentic | H200 agentic | B200 disaggregated agentic |
 |--------------------------|-----------|-----------|--------------|--------------|-----------------------------|
@@ -33,9 +35,28 @@ The recipes pin `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and pa
 | **Max batched tokens**   | 32768 | 32768 | 32768 | 32768 | 32768 |
 | **Block size**           | 64 | 64 | 64 | 64 | 64 |
 | **Reference concurrency** | 18 | 10 | 20 | 8 | 32 |
-| **Manifest**             | `vllm/agg-b200-chat-mtp/deploy.yaml` | `vllm/agg-h200-chat-mtp/deploy.yaml` | `vllm/agg-b200-agentic-mtp/deploy.yaml` | `vllm/agg-h200-agentic-mtp/deploy.yaml` | `vllm/disagg-b200-agentic/deploy.yaml` |
+| **Manifest**             | `vllm/agg-b200-chat-256k-mtp/deploy.yaml` | `vllm/agg-h200-chat-256k-mtp/deploy.yaml` | `vllm/agg-b200-agentic-256k-mtp/deploy.yaml` | `vllm/agg-h200-agentic-256k-mtp/deploy.yaml` | `vllm/disagg-b200-agentic-256k/deploy.yaml` |
 
-Aggregated no-MTP fallback manifests are also included under `vllm/agg-*-nomtp/deploy.yaml`.
+Aggregated no-MTP fallback manifests are also included under `vllm/agg-*-256k-nomtp/deploy.yaml`.
+
+### Refresh Profiles
+
+Refresh profiles add 256K and 1M aggregated agentic configurations for B200, GB200, and H200. They use the following runtime image:
+
+```text
+nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+```
+
+| GPU | Context | Worker shape | MTP | Max sequences | Max batched tokens | Reference concurrency | Manifest |
+|---|---:|---:|---:|---:|---:|---:|---|
+| B200 | 256K | 2 × TP4 | 5 tokens | 64 | 32768 | 94 | `vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml` |
+| B200 | 1M | 2 × TP4 | disabled | 32 | 49152 | 46 | `vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml` |
+| GB200 | 256K | 2 × TP4 | 5 tokens | 64 | 32768 | 96 | `vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml` |
+| GB200 | 1M | 2 × TP4 | disabled | 32 | 49152 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
+| H200 | 256K | 2 × TP8 | 5 tokens | 48 | 24576 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
+| H200 | 1M | 2 × TP8 | disabled | 32 | 24576 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
+
+The Refresh manifests enable KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and hybrid KV cache management. Expert Parallelism is disabled.
 
 ## Supported Features
 
@@ -87,9 +108,10 @@ Pick the SKU, use-case, and speculative decoding mode for an aggregated recipe:
 ```bash
 SKU=b200       # or h200
 USECASE=chat   # or agentic
+CONTEXT=256k
 SPEC=mtp       # or nomtp
 
-kubectl apply -f vllm/agg-${SKU}-${USECASE}-${SPEC}/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg-${SKU}-${USECASE}-${CONTEXT}-${SPEC}/deploy.yaml -n ${NAMESPACE}
 ```
 
 The DGD name includes the `-nomtp` suffix only for no-MTP recipes:
@@ -102,8 +124,22 @@ kubectl get dgd ${DGD} -n ${NAMESPACE} -w
 Disaggregated recipes are currently agentic b200, no-MTP only.
 
 ```bash
-kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-b200-agentic-256k/deploy.yaml -n ${NAMESPACE}
 ```
+
+#### Deploy a Refresh Profile
+
+Select a GPU and context length from the Refresh table:
+
+```bash
+GPU=h200       # b200, gb200, or h200
+CONTEXT=256k   # 256k or 1m
+PROFILE=agg-${GPU}-agentic-${CONTEXT}-2w-kv
+
+kubectl apply -f vllm/${PROFILE}/deploy.yaml -n ${NAMESPACE}
+```
+
+The DGD name is `nemotron-ultra-refresh-<gpu>-<context>-agg-2w-kv`.
 
 ### 3. Smoke Test
 
@@ -123,7 +159,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### 4. Benchmark
 
-See [`perf/README.md`](perf/README.md) for the full benchmark workflow — staging Moontrace-format traces on the PVC, running the AIPerf trace-replay Job ([`perf/perf.yaml`](perf/perf.yaml)), running a concurrency sweep, and fetching artifacts.
+See [`perf/README.md`](perf/README.md) for the full benchmark workflow. Day-0 profiles use [`perf/perf.yaml`](perf/perf.yaml); all six Refresh profiles share [`perf/refresh-perf.yaml`](perf/refresh-perf.yaml) and [`perf/refresh-runner.configmap.yaml`](perf/refresh-runner.configmap.yaml).
 
 ## Benchmark Results
 
@@ -133,15 +169,15 @@ The B200 rows below point at the actual recipe manifests in this tree. `User out
 
 | Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | System output tok/s/GPU |
 |--------|-----|----------|----------|-----|-------------|-------------------|-------------------------|
-| `vllm/agg-b200-agentic-mtp/deploy.yaml` | B200 | AGG | agentic | yes | 20 | 80.6 | 310.8 |
-| `vllm/agg-b200-agentic-nomtp/deploy.yaml` | B200 | AGG | agentic | no | 8 | 99.5 | 175.9 |
-| `vllm/agg-b200-chat-mtp/deploy.yaml` | B200 | AGG | chat | yes | 18 | 52.0 | 201.4 |
-| `vllm/agg-b200-chat-nomtp/deploy.yaml` | B200 | AGG | chat | no | 16 | 51.0 | 181.3 |
-| `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P1D | agentic | no | 32 | 61.6 | 231.1 |
-| `vllm/agg-h200-agentic-mtp/deploy.yaml` | H200 | AGG | agentic | yes | 8 | 53.2 | 27.4 |
-| `vllm/agg-h200-agentic-nomtp/deploy.yaml` | H200 | AGG | agentic | no | 8 | 52.3 | 26.5 |
-| `vllm/agg-h200-chat-mtp/deploy.yaml` | H200 | AGG | chat | yes | 10 | 58.7 | 46.8 |
-| `vllm/agg-h200-chat-nomtp/deploy.yaml` | H200 | AGG | chat | no | 8 | 54.2 | 43.0 |
+| `vllm/agg-b200-agentic-256k-mtp/deploy.yaml` | B200 | AGG | agentic | yes | 20 | 80.6 | 310.8 |
+| `vllm/agg-b200-agentic-256k-nomtp/deploy.yaml` | B200 | AGG | agentic | no | 8 | 99.5 | 175.9 |
+| `vllm/agg-b200-chat-256k-mtp/deploy.yaml` | B200 | AGG | chat | yes | 18 | 52.0 | 201.4 |
+| `vllm/agg-b200-chat-256k-nomtp/deploy.yaml` | B200 | AGG | chat | no | 16 | 51.0 | 181.3 |
+| `vllm/disagg-b200-agentic-256k/deploy.yaml` | B200 | 1P1D | agentic | no | 32 | 61.6 | 231.1 |
+| `vllm/agg-h200-agentic-256k-mtp/deploy.yaml` | H200 | AGG | agentic | yes | 8 | 53.2 | 27.4 |
+| `vllm/agg-h200-agentic-256k-nomtp/deploy.yaml` | H200 | AGG | agentic | no | 8 | 52.3 | 26.5 |
+| `vllm/agg-h200-chat-256k-mtp/deploy.yaml` | H200 | AGG | chat | yes | 10 | 58.7 | 46.8 |
+| `vllm/agg-h200-chat-256k-nomtp/deploy.yaml` | H200 | AGG | chat | no | 8 | 54.2 | 43.0 |
 
 
 ## Reasoning Controls
@@ -187,17 +223,25 @@ recipes/nemotron-3-ultra/
     model-download.yaml       # Job: populate patched Ultra model view
     model-validate.yaml       # Job: validate model/tokenizer/parser files
   vllm/
-    agg-b200-chat-mtp/deploy.yaml
-    agg-b200-chat-nomtp/deploy.yaml
-    agg-b200-agentic-mtp/deploy.yaml
-    agg-b200-agentic-nomtp/deploy.yaml
-    agg-h200-chat-mtp/deploy.yaml
-    agg-h200-chat-nomtp/deploy.yaml
-    agg-h200-agentic-mtp/deploy.yaml
-    agg-h200-agentic-nomtp/deploy.yaml
-    disagg-b200-agentic/deploy.yaml
+    agg-b200-chat-256k-mtp/deploy.yaml
+    agg-b200-chat-256k-nomtp/deploy.yaml
+    agg-b200-agentic-256k-mtp/deploy.yaml
+    agg-b200-agentic-256k-nomtp/deploy.yaml
+    agg-h200-chat-256k-mtp/deploy.yaml
+    agg-h200-chat-256k-nomtp/deploy.yaml
+    agg-h200-agentic-256k-mtp/deploy.yaml
+    agg-h200-agentic-256k-nomtp/deploy.yaml
+    disagg-b200-agentic-256k/deploy.yaml
+    agg-b200-agentic-256k-2w-kv/deploy.yaml
+    agg-b200-agentic-1m-2w-kv/deploy.yaml
+    agg-gb200-agentic-256k-2w-kv/deploy.yaml
+    agg-gb200-agentic-1m-2w-kv/deploy.yaml
+    agg-h200-agentic-256k-2w-kv/deploy.yaml
+    agg-h200-agentic-1m-2w-kv/deploy.yaml
   perf/
     README.md                 # benchmark workflow
-    perf.yaml                 # AIPerf trace-replay Job
+    perf.yaml                 # Day-0 AIPerf trace-replay Job
+    refresh-perf.yaml         # shared Refresh AIPerf Job
+    refresh-runner.configmap.yaml
     traces/                   # 15%, 30%, and full Moontrace JSONL assets
 ```

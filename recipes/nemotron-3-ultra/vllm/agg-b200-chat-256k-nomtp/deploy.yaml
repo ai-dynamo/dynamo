@@ -3,13 +3,14 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: ultra-agg-b200-agentic-nomtp
+  name: ultra-agg-b200-chat-nomtp
   labels:
-    app.kubernetes.io/name: ultra-agg-b200-agentic-nomtp
+    app.kubernetes.io/name: ultra-agg-b200-chat-nomtp
     app.kubernetes.io/part-of: nemotron-ultra
     nemotron-ultra.nvidia.com/backend: vllm
     nemotron-ultra.nvidia.com/topology: agg1-tp4-nomtp
-    nemotron-ultra.nvidia.com/workload: agentic
+    nemotron-ultra.nvidia.com/workload: chat
+    nemotron-ultra.nvidia.com/context: 256k
 spec:
   backendFramework: vllm
   env:
@@ -71,7 +72,7 @@ spec:
         metadata:
           labels:
             nemotron-ultra.nvidia.com/role: frontend
-            nemotron-ultra.nvidia.com/workload: agentic
+            nemotron-ultra.nvidia.com/workload: chat
         spec:
           imagePullSecrets:
             - name: nvcr-secret
@@ -89,7 +90,7 @@ spec:
                   frontend_args=(
                     --router-mode kv
                     --router-kv-events
-                    --kv-cache-block-size 64
+                    --kv-cache-block-size 32
                     --http-host 0.0.0.0
                     --http-port 8000
                   )
@@ -137,7 +138,7 @@ spec:
         metadata:
           labels:
             nemotron-ultra.nvidia.com/role: aggregate-worker
-            nemotron-ultra.nvidia.com/workload: agentic
+            nemotron-ultra.nvidia.com/workload: chat
         spec:
           imagePullSecrets:
             - name: nvcr-secret
@@ -162,28 +163,28 @@ spec:
                   set -Eeuo pipefail
                   test -r "${MODEL_PATH}/config.json" || { echo "MODEL_PREFLIGHT_FAIL class=model_config_missing path=${MODEL_PATH}/config.json"; exit 42; }
                   test -r "${MODEL_PATH}/ultra_v3_reasoning_parser.py" || { echo "MODEL_PREFLIGHT_FAIL class=reasoning_parser_missing path=${MODEL_PATH}/ultra_v3_reasoning_parser.py"; exit 43; }
-                  echo "PRESTART_GPU_GUARD_BEGIN role=agg workload=agentic ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  echo "PRESTART_GPU_GUARD_BEGIN role=agg workload=chat ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                   nvidia-smi -L
                   nvidia-smi --query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu --format=csv,noheader,nounits
                   visible_count="$(nvidia-smi -L | grep -c '^GPU ')"
                   if [ "${visible_count}" -ne 4 ]; then
-                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_visibility_count_mismatch role=agg workload=agentic visible_count=${visible_count}"
+                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_visibility_count_mismatch role=agg workload=chat visible_count=${visible_count}"
                     exit 96
                   fi
                   mem_rows="$(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu --format=csv,noheader,nounits)"
                   echo "${mem_rows}"
                   dirty_count="$(printf '%s\n' "${mem_rows}" | awk -F',' '{gsub(/ /,"",$3); if (($3+0)>1024) c++} END{print c+0}')"
                   if [ "${dirty_count}" -ne 0 ]; then
-                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_memory_dirty role=agg workload=agentic dirty_count=${dirty_count}"
+                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_memory_dirty role=agg workload=chat dirty_count=${dirty_count}"
                     exit 97
                   fi
                   compute_apps="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits || true)"
                   if [ -n "${compute_apps}" ]; then
                     printf '%s\n' "${compute_apps}"
-                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_compute_apps_visible role=agg workload=agentic"
+                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_compute_apps_visible role=agg workload=chat"
                     exit 98
                   fi
-                  echo "PRESTART_GPU_GUARD_PASS role=agg workload=agentic"
+                  echo "PRESTART_GPU_GUARD_PASS role=agg workload=chat"
                   ulimit -l unlimited
                   exec python3 -m dynamo.vllm \
                     --model "${MODEL_PATH}" \
@@ -191,11 +192,11 @@ spec:
                     --tensor-parallel-size 4 \
                     --trust-remote-code \
                     --max-model-len 262144 \
-                    --max-num-seqs 32 \
-                    --max-num-batched-tokens 65536 \
+                    --max-num-seqs 40 \
+                    --max-num-batched-tokens 32768 \
                     --gpu-memory-utilization 0.9 \
                     --no-enable-flashinfer-autotune \
-                    --block-size 64 \
+                    --block-size 32 \
                     --enable-expert-parallel \
                     --mamba-cache-mode align \
                     --enable-prefix-caching \
