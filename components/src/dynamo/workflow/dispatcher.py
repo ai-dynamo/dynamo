@@ -306,9 +306,7 @@ class StageDispatcher:
         target_stage: str,
         target_port: str,
         value: Any,
-        tensor_exports: dict[
-            ValueRef, asyncio.Task[Mapping[str, Mapping[str, Any]]]
-        ],
+        tensor_exports: dict[ValueRef, asyncio.Task[Mapping[str, Mapping[str, Any]]]],
     ) -> Any:
         """Materialize one compiled graph edge for its target placement."""
 
