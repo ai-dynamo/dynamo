@@ -6,6 +6,7 @@
 import asyncio
 import gc
 import logging
+import os
 import time
 from typing import Any
 
@@ -114,6 +115,8 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
 
 async def prepare_snapshot_engine(
     server_args,
+    *,
+    enable_gms_v1: bool = False,
 ) -> EngineSnapshotController[sgl.Engine] | None:
     """Single entry point for Dynamo Snapshot integration.
 
@@ -129,24 +132,33 @@ async def prepare_snapshot_engine(
         process with status 0.
     """
     snapshot_config = SnapshotConfig.from_env()
+    # SGLang loads plugins independently in each scheduler process.
+    os.environ["DYN_SGL_ENABLE_GMS_V1"] = str(enable_gms_v1).lower()
+    if enable_gms_v1 and server_args.load_format == "gms":
+        raise ValueError("--enable-gms-v1 cannot be combined with --load-format gms")
+    if enable_gms_v1 and snapshot_config is None:
+        raise ValueError(
+            "--enable-gms-v1 requires Dynamo Snapshot (DYN_SNAPSHOT_CONTROL_DIR)"
+        )
     if snapshot_config is None:
         return None
 
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
 
-    # Enable memory_saver so GPU memory can be released for CRIU.
-    # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
-    # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
-    server_args.enable_memory_saver = True
-    try:
-        from gpu_memory_service.integrations.sglang import is_gms_active
+    if not enable_gms_v1:
+        # Enable memory_saver so GPU memory can be released for CRIU.
+        # GMS-managed weights use VA-stable unmap/remap without CPU backup.
+        # The default Snapshot path keeps SGLang's ordinary TMS CPU backup.
+        server_args.enable_memory_saver = True
+        try:
+            from gpu_memory_service.integrations.sglang import is_gms_active
 
-        _using_gms = is_gms_active()
-    except ImportError:
-        _using_gms = False
-    if not _using_gms:
-        server_args.enable_weights_cpu_backup = True
+            _using_gms = is_gms_active()
+        except ImportError:
+            _using_gms = False
+        if not _using_gms:
+            server_args.enable_weights_cpu_backup = True
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)

@@ -321,10 +321,33 @@ func EnsureIntraPodGPUMemoryService(
 	targetContainers []*corev1.Container,
 	extraClientContainerNames []string,
 ) {
+	ensureIntraPodGPUMemoryService(podSpec, targetContainers, extraClientContainerNames, false)
+}
+
+// EnsureIntraPodGPUMemoryServiceV1 wires the V1 server for clients already
+// configured to use the V1 protocol.
+func EnsureIntraPodGPUMemoryServiceV1(
+	podSpec *corev1.PodSpec,
+	targetContainers []*corev1.Container,
+	extraClientContainerNames []string,
+) {
+	ensureIntraPodGPUMemoryService(podSpec, targetContainers, extraClientContainerNames, true)
+}
+
+func ensureIntraPodGPUMemoryService(
+	podSpec *corev1.PodSpec,
+	targetContainers []*corev1.Container,
+	extraClientContainerNames []string,
+	useV1 bool,
+) {
 	if len(targetContainers) == 0 {
 		return
 	}
-	gms.EnsureServerSidecar(podSpec, targetContainers[0])
+	if useV1 {
+		gms.EnsureV1ServerSidecar(podSpec, targetContainers[0])
+	} else {
+		gms.EnsureServerSidecar(podSpec, targetContainers[0])
+	}
 	for _, container := range targetContainers {
 		gms.EnsureClient(podSpec, container)
 	}

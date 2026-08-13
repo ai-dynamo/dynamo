@@ -1783,7 +1783,11 @@ func GenerateBasePodSpec(
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
-		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		if backendFramework == BackendFrameworkSGLang && usesSGLangSnapshotGMSV1(component) {
+			gms.EnsureV1ServerSidecar(&podSpec, &podSpec.Containers[0])
+		} else {
+			gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		}
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
