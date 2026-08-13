@@ -117,6 +117,45 @@ impl
     }
 }
 
+#[derive(Default)]
+struct FirstAudioGateEngine {
+    started: Arc<tokio::sync::Notify>,
+    cancelled: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for FirstAudioGateEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let cancelled = self.cancelled.clone();
+        let cancellation_ctx = ctx.clone();
+        tokio::spawn(async move {
+            cancellation_ctx.stopped().await;
+            cancelled.notify_one();
+        });
+
+        let started = self.started.clone();
+        let stream = stream! {
+            started.notify_one();
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            yield Annotated::from_data(NvAudioSpeechResponse::empty());
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
 // Add a new long-running test engine
 struct LongRunningEngine {
     delay_ms: u64,
@@ -1746,6 +1785,62 @@ async fn test_audio_speech_streams_worker_chunks() {
         .unwrap();
     assert_eq!(second, "second");
     assert!(chunks.next().await.is_none());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_speech_disconnect_before_first_chunk_cancels_engine() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let engine = Arc::new(FirstAudioGateEngine::default());
+    let card = ModelDeploymentCard::with_name_only("audio-model");
+    manager
+        .add_audios_model("audio-model", card.mdcsum(), engine.clone())
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let mut request = Box::pin(
+        client
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": "audio-model",
+                "input": "hello",
+                "response_format": "pcm"
+            }))
+            .send(),
+    );
+
+    timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut request => {
+                panic!("request completed before first audio: {result:?}");
+            }
+            _ = engine.started.notified() => {}
+        }
+    })
+    .await
+    .expect("audio engine should have started");
+    drop(request);
+
+    timeout(
+        std::time::Duration::from_secs(2),
+        engine.cancelled.notified(),
+    )
+    .await
+    .expect("disconnect before first audio must cancel the engine context");
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();

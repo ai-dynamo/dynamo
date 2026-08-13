@@ -4684,7 +4684,25 @@ async fn audio_speech(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    let stream = engine.generate(request).await.map_err(|e| {
+    let ctx = request.context();
+    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+        ctx.clone(),
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Audios.to_string(),
+            request_type: if streaming { "stream" } else { "unary" }.to_string(),
+        },
+    )
+    .await;
+
+    // Arm the request handle only while awaiting backend work. Disarming it
+    // before handling a result keeps ordinary errors out of disconnect metrics.
+    inflight.mark_error(ErrorType::Cancelled);
+    connection_handle.arm();
+    let stream_result = engine.generate(request).await;
+    connection_handle.disarm();
+    let stream = stream_result.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
@@ -4695,18 +4713,18 @@ async fn audio_speech(
         err_response
     })?;
 
-    let ctx = stream.context();
-    let stream = check_for_backend_error(stream, None)
-        .await
-        .inspect_err(|error_response| {
-            let error_type = match error_response.0 {
-                // Worker-side InvalidArgument messages are not guaranteed to use
-                // the "Validation:" prefix expected by the shared classifier.
-                StatusCode::BAD_REQUEST => ErrorType::Validation,
-                _ => extract_error_type_from_response(error_response),
-            };
-            inflight.mark_error(error_type);
-        })?;
+    connection_handle.arm();
+    let stream_result = check_for_backend_error(stream, None).await;
+    connection_handle.disarm();
+    let stream = stream_result.inspect_err(|error_response| {
+        let error_type = match error_response.0 {
+            // Worker-side InvalidArgument messages are not guaranteed to use
+            // the "Validation:" prefix expected by the shared classifier.
+            StatusCode::BAD_REQUEST => ErrorType::Validation,
+            _ => extract_error_type_from_response(error_response),
+        };
+        inflight.mark_error(error_type);
+    })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -4720,7 +4738,10 @@ async fn audio_speech(
     if streaming {
         let mut stream = Box::pin(stream);
         let first_response = loop {
-            let Some(annotated) = stream.next().await else {
+            connection_handle.arm();
+            let next = stream.next().await;
+            connection_handle.disarm();
+            let Some(annotated) = next else {
                 let err_response = ErrorMessage::internal_server_error(
                     "Audio stream ended without producing data",
                 );
@@ -4765,27 +4786,18 @@ async fn audio_speech(
             return Err(err_response);
         }
 
-        let (mut connection_handle, mut stream_handle) = create_connection_monitor(
-            ctx.clone(),
-            Some(state.metrics_clone()),
-            CancellationLabels {
-                model: model.clone(),
-                endpoint: Endpoint::Audios.to_string(),
-                request_type: "stream".to_string(),
-            },
-        )
-        .await;
-        connection_handle.disarm();
         stream_handle.arm();
-        inflight.mark_error(ErrorType::Cancelled);
 
         let body_stream = async_stream::stream! {
             for chunk in first_chunks {
                 yield Ok::<Bytes, std::io::Error>(chunk);
             }
 
+            let stopped = ctx.stopped();
+            tokio::pin!(stopped);
             loop {
                 tokio::select! {
+                    biased;
                     item = stream.next() => {
                         let Some(annotated) = item else {
                             inflight.mark_ok();
@@ -4826,7 +4838,7 @@ async fn audio_speech(
                             }
                         }
                     }
-                    _ = ctx.stopped() => {
+                    _ = &mut stopped => {
                         inflight.mark_error(ErrorType::Cancelled);
                         stream_handle.disarm();
                         break;
@@ -4846,14 +4858,15 @@ async fn audio_speech(
             });
     }
 
-    let response = NvAudioSpeechResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            let err_response =
-                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    connection_handle.arm();
+    let response_result = NvAudioSpeechResponse::from_annotated_stream(stream).await;
+    connection_handle.disarm();
+    let response = response_result.map_err(|e| {
+        let err_response =
+            ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Check for failure before marking success
     if response.status == "failed" {
