@@ -680,7 +680,14 @@ class DynamoVllmConfig(ConfigBase):
                     "--custom-encoder-routing-mode=frontend is incompatible "
                     "with --frontend-decoding"
                 )
-            if not getattr(self.engine_args, "enable_prompt_embeds", False):
+            # ``Config.validate()`` runs before vLLM's unknown CLI arguments
+            # are parsed and attached as ``engine_args``.  Validate here only
+            # for callers that already supplied engine_args; parse_args() does
+            # the unconditional cross-config check once AsyncEngineArgs exists.
+            engine_args = getattr(self, "engine_args", None)
+            if engine_args is not None and not getattr(
+                engine_args, "enable_prompt_embeds", False
+            ):
                 raise ValueError(
                     "--custom-encoder-routing-mode=frontend requires "
                     "--enable-prompt-embeds"

@@ -458,6 +458,17 @@ class TestValidateCustomEncoder:
 
         config._validate_custom_encoder()
 
+    def test_frontend_defers_prompt_embeds_check_until_engine_args_exist(self):
+        config = create_config()
+        del config.engine_args
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+
+        # Config.validate() runs before vLLM's AsyncEngineArgs are attached.
+        config._validate_custom_encoder()
+
     def test_frontend_pd_has_no_custom_encoder_class(self):
         config = create_config()
         config.custom_encoder_class = None

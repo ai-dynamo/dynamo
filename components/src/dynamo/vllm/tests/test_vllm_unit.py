@@ -163,6 +163,29 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
     )
 
 
+def test_frontend_custom_encoder_prompt_embeds_cross_validation(mock_vllm_cli):
+    common = (
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--enable-multimodal",
+        "--disaggregation-mode",
+        "encode",
+        "--custom-encoder-routing-mode",
+        "frontend",
+        "--custom-encoder-class",
+        "my_pkg.MyEncoder",
+        "--embedding-transfer-mode",
+        "nixl-write",
+    )
+    mock_vllm_cli(*common)
+    with pytest.raises(ValueError, match="enable-prompt-embeds"):
+        parse_args()
+
+    mock_vllm_cli(*common, "--enable-prompt-embeds")
+    config = parse_args()
+    assert config.engine_args.enable_prompt_embeds is True
+
+
 # --endpoint flag tests
 
 
