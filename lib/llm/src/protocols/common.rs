@@ -44,7 +44,23 @@ pub trait OutputOptionsProvider {
     fn extract_output_options(&self) -> Result<OutputOptions>;
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// Why an engine stopped producing tokens for a request.
+///
+/// # Wire contract
+///
+/// Serializes as a bare string for the unit variants (`"stop"`, etc.) and a
+/// single-key map for [`FinishReason::Error`] (`{"error": "<message>"}`) —
+/// the form every Rust producer emits and every frontend expects.
+///
+/// Deserialization also accepts the [`Display`] form, `"error: <message>"`,
+/// since Python engine adapters (e.g. `dynamo.vllm`'s custom-encoder path)
+/// report failures that way. A bare `"error"` with no message stays
+/// rejected on purpose — producers should raise
+/// `dynamo._core.InvalidArgument` instead, which yields a 400 carrying the
+/// real message.
+///
+/// [`Display`]: std::fmt::Display
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     #[serde(rename = "eos")]
     EoS,
@@ -87,9 +103,68 @@ impl std::str::FromStr for FinishReason {
             "length" => Ok(FinishReason::Length),
             "stop" => Ok(FinishReason::Stop),
             "cancelled" | "abort" => Ok(FinishReason::Cancelled),
+            "content_filter" => Ok(FinishReason::ContentFilter),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for FinishReason {
+    // `deserialize_any` needs a self-describing format, since the visitor
+    // decides from the wire data itself whether to expect a string or a
+    // map. The request-plane codec (`rmp_serde::to_vec_named`) is
+    // self-describing, so this holds today. A non-self-describing format
+    // (plain `bincode`, for instance) would fail here, even though the
+    // derived `Deserialize` this replaced would have accepted it.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(FinishReasonVisitor)
+    }
+}
+
+struct FinishReasonVisitor;
+
+impl<'de> serde::de::Visitor<'de> for FinishReasonVisitor {
+    type Value = FinishReason;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            r#"a finish reason: "eos", "length", "stop", "cancelled", "abort", "content_filter", "error: <message>", or {"error": "<message>"}"#,
+        )
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<FinishReason, E>
+    where
+        E: serde::de::Error,
+    {
+        // `parse()` carries the specific reason a string failed to match
+        // any known form. `E::custom` passes that message through instead
+        // of the generic `invalid_value` error.
+        value.parse().map_err(E::custom)
+    }
+
+    /// Unit variants route to [`Self::visit_str`] instead; this method
+    /// handles only the `Error` map case.
+    fn visit_map<A>(self, mut map: A) -> Result<FinishReason, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let Some(tag) = map.next_key::<String>()? else {
+            return Err(serde::de::Error::invalid_length(0, &self));
+        };
+        if tag != "error" {
+            return Err(serde::de::Error::unknown_variant(&tag, &["error"]));
+        }
+        let reason = FinishReason::Error(map.next_value()?);
+        if map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom(
+                "expected a finish reason map with a single key",
+            ));
+        }
+        Ok(reason)
     }
 }
 
@@ -722,6 +797,134 @@ impl From<CompletionContext> for PromptType {
 mod tests {
 
     use super::*;
+
+    fn all_finish_reasons() -> Vec<FinishReason> {
+        vec![
+            FinishReason::EoS,
+            FinishReason::Length,
+            FinishReason::Stop,
+            FinishReason::Cancelled,
+            FinishReason::ContentFilter,
+            FinishReason::Error("boom".to_string()),
+            FinishReason::Error(String::new()),
+        ]
+    }
+
+    /// The wire form Rust producers emit must not drift: every frontend in the
+    /// N-2 compatibility window still has to read it.
+    #[test]
+    fn test_finish_reason_serializes_to_the_external_tag_form() {
+        let cases = [
+            (FinishReason::EoS, r#""eos""#),
+            (FinishReason::Length, r#""length""#),
+            (FinishReason::Stop, r#""stop""#),
+            (FinishReason::Cancelled, r#""cancelled""#),
+            (FinishReason::ContentFilter, r#""content_filter""#),
+            (
+                FinishReason::Error("boom".to_string()),
+                r#"{"error":"boom"}"#,
+            ),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(serde_json::to_string(&reason).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn test_finish_reason_deserializes_every_producer_form() {
+        let cases = [
+            (r#""eos""#, FinishReason::EoS),
+            (r#""length""#, FinishReason::Length),
+            (r#""stop""#, FinishReason::Stop),
+            (r#""cancelled""#, FinishReason::Cancelled),
+            (r#""abort""#, FinishReason::Cancelled),
+            (r#""content_filter""#, FinishReason::ContentFilter),
+            // Rust producers (the `Serialize` form).
+            (r#"{"error":"boom"}"#, FinishReason::Error("boom".into())),
+            // Python engine adapters (the `Display` form).
+            (r#""error: boom""#, FinishReason::Error("boom".into())),
+            // A message that itself contains "error: " must survive intact.
+            (
+                r#""error: CustomEncoder failed: error: nested""#,
+                FinishReason::Error("CustomEncoder failed: error: nested".into()),
+            ),
+        ];
+        for (json, expected) in cases {
+            assert_eq!(
+                serde_json::from_str::<FinishReason>(json).unwrap(),
+                expected,
+                "deserializing {json}"
+            );
+        }
+    }
+
+    /// The defect this guards: a backend's request-level message reaching the
+    /// frontend inside a terminal chunk rather than failing the whole response.
+    #[test]
+    fn test_engine_output_carries_string_form_error_message() {
+        use dynamo_runtime::protocols::maybe_error::MaybeError;
+
+        let chunk = r#"{"token_ids":[],"finish_reason":"error: CustomEncoder failed: placeholder tokens (0) != image tensors (1)"}"#;
+        let output: llm_backend::LLMEngineOutput = serde_json::from_str(chunk).unwrap();
+        let err = output.err().expect("error finish reason must surface");
+        assert!(
+            err.to_string().contains("placeholder tokens (0)"),
+            "message was dropped: {err}"
+        );
+    }
+
+    /// A bare `"error"` stays rejected on purpose. Producers emitting it are
+    /// discarding a message they hold; accepting it here would paper over that
+    /// with invented text instead of leaving the defect visible.
+    #[test]
+    fn test_finish_reason_rejects_unknown_forms() {
+        for json in [
+            r#""error""#,
+            r#""nonsense""#,
+            r#"{"nonsense":"boom"}"#,
+            r#"{"error":"a","stop":"b"}"#,
+            "{}",
+            "17",
+        ] {
+            assert!(
+                serde_json::from_str::<FinishReason>(json).is_err(),
+                "{json} should not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn test_finish_reason_round_trips_through_json_and_msgpack() {
+        for reason in all_finish_reasons() {
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(
+                serde_json::from_str::<FinishReason>(&json).unwrap(),
+                reason,
+                "json round trip"
+            );
+
+            let msgpack = rmp_serde::to_vec_named(&reason).unwrap();
+            assert_eq!(
+                rmp_serde::from_slice::<FinishReason>(&msgpack).unwrap(),
+                reason,
+                "msgpack round trip"
+            );
+        }
+    }
+
+    /// `Display` and `FromStr` are the string convention; keeping them mutually
+    /// inverse is what lets the tolerant reader defer to `FromStr`.
+    #[test]
+    fn test_finish_reason_display_round_trips_through_from_str() {
+        for reason in all_finish_reasons() {
+            let rendered = reason.to_string();
+            assert_eq!(
+                rendered.parse::<FinishReason>().unwrap(),
+                reason,
+                "{rendered} did not round trip"
+            );
+        }
+    }
 
     #[test]
     fn test_completion_context_new() {
