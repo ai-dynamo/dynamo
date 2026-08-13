@@ -28,6 +28,7 @@ dynamo-runtime = { workspace = true, optional = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-truthy = { workspace = true }
+dynamo-router-policy = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }

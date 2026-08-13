@@ -87,13 +87,19 @@ impl RoutingOccupancyState {
         candidates: CandidateView<'_>,
         context: RouteContext,
     ) -> Option<(RouteDecision, Option<Arc<AtomicU64>>)> {
+        self.with_selection_lock(|| {
+            let decision = picker.select(candidates, context, |id| self.load(id))?;
+            let counter = match decision.admission {
+                AdmissionKind::None => None,
+                AdmissionKind::Occupancy => Some(self.increment(decision.target.worker_id)),
+            };
+            Some((decision, counter))
+        })
+    }
+
+    pub(crate) fn with_selection_lock<R>(&self, select: impl FnOnce() -> R) -> R {
         let _guard = self.exact_selection_lock.lock();
-        let decision = picker.select(candidates, context, |id| self.load(id))?;
-        let counter = match decision.admission {
-            AdmissionKind::None => None,
-            AdmissionKind::Occupancy => Some(self.increment(decision.target.worker_id)),
-        };
-        Some((decision, counter))
+        select()
     }
 
     pub(crate) fn decrement_counter(counter: &AtomicU64) {

@@ -30,6 +30,7 @@ nvtx = ["dep:cudarc"]
 [dependencies]
 # repo
 dynamo-truthy = { workspace = true }
+dynamo-router-policy = { workspace = true }
 
 # Use workspace dependencies where available
 anyhow = { workspace = true }

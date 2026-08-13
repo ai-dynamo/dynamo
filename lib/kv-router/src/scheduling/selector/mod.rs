@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 mod default;
 mod policy;
+mod simple;
 
 pub use default::DefaultWorkerSelector;
 
@@ -15,6 +16,7 @@ pub use policy::{
     WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy,
 };
+pub use simple::{SimpleRoutingPolicy, SimpleWorkerPicker, SimpleWorkerScorer};
 
 use default::{pick_default_worker, selection_weights};
 use policy::{

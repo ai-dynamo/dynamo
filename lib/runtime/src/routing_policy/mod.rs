@@ -4,9 +4,9 @@
 mod picker;
 mod types;
 
+pub(crate) use dynamo_router_policy::{
+    AdmissionKind, RouteContext, RouteDevice, RoutingPolicy as RoutePolicy,
+};
 pub(crate) use picker::RoutePicker;
 pub use types::RouteTarget;
-pub(crate) use types::{
-    AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
-    RoutePolicy,
-};
+pub(crate) use types::{CandidateView, RouteCandidate, RouteDecision};

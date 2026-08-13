@@ -2592,6 +2592,7 @@ dependencies = [
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",
+ "dynamo-router-policy",
  "dynamo-runtime",
  "dynamo-tokens",
  "dynamo-truthy",
@@ -2909,6 +2910,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-router-policy"
+version = "1.4.0"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "dynamo-runtime"
 version = "1.4.0"
 dependencies = [
@@ -2930,6 +2938,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-router-policy",
  "dynamo-truthy",
  "educe",
  "either",
