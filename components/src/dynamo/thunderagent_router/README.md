@@ -11,7 +11,7 @@ requests. It wraps Dynamo's native KV router and adds a program-level scheduler
 with tool-boundary pause/resume, porting the scheduler from the ThunderAgent
 paper.
 
-**Conceptual docs live in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
+The [ThunderAgent Program Scheduler guide](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md) explains the scheduler model, tool-boundary pause/resume semantics, utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
 
 ## Install
 
@@ -60,7 +60,7 @@ bypass ThunderAgent lifecycle handling such as `x-dynamo-session-final`.
 
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are
-documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md#utilization-driven-control-loop).
+documented in the [ThunderAgent Program Scheduler guide](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md#utilization-driven-control-loop).
 All `KvRouter` flags from `dynamo.router` (`--router-temperature`,
 `--use-kv-events`, `--router-track-output-blocks`, …) are also accepted and
 forwarded.
@@ -74,6 +74,19 @@ request so it can group turns under the same program. Custom harnesses can send
 Requests without session identity are passed through as one-off (no program
 admission, no pause/resume). This is the safe fallback for non-agentic traffic
 sharing the same workers.
+
+### KV capacity and block accounting
+
+ThunderAgent calculates each worker's device retention budget from the physical
+KV pool: `kv_cache_block_size × total_kv_blocks`. It adds native offloading
+capacity when the backend publishes it. The scheduler uses each worker's own
+`kv_cache_block_size` for accounting and placement.
+
+Every in-flight REASONING program, new admission, returning admission, and
+resume reserves `ceil((token_total + buffer_per_program) / block_size)` blocks.
+For ACTING programs, the scheduler first applies the acting weight or idle
+decay, then adds `buffer_per_program` and rounds up to a full block. Thus, a
+partial hybrid KV block cannot disappear from utilization at a tool boundary.
 
 ### SGLang HiCache retention budget
 
