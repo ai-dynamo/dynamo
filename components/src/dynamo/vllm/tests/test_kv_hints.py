@@ -7,11 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from dynamo.common.constants import (
-    KV_HINT_TRANSFER_CAPABILITY_KEY,
-    KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
-)
 from dynamo.llm import WorkerType
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
@@ -44,13 +39,13 @@ def test_publish_kv_hint_capabilities_publishes_transfer_endpoint():
     publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_any_call(
-        KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
+        "kv_hint.transfer.v1", json.dumps(True)
     )
     runtime_config.set_engine_specific.assert_any_call(
-        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, json.dumps("prefill")
+        "kv_hint_transfer_worker_type", json.dumps("prefill")
     )
     runtime_config.set_engine_specific.assert_any_call(
-        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        "kv_hint_transfer_source_control_endpoints",
         json.dumps({"0": "tcp://127.0.0.1:23280"}),
     )
 
@@ -84,7 +79,7 @@ def test_publish_kv_hint_capabilities_publishes_transfer_worker_type(
     publish_kv_hint_capabilities(runtime_config, engine_args, worker_type)
 
     runtime_config.set_engine_specific.assert_any_call(
-        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, json.dumps(expected_runtime_value)
+        "kv_hint_transfer_worker_type", json.dumps(expected_runtime_value)
     )
 
 
@@ -111,7 +106,7 @@ def test_publish_kv_hint_capabilities_publishes_transfer_dp_rank_endpoints():
     )
 
     runtime_config.set_engine_specific.assert_any_call(
-        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        "kv_hint_transfer_source_control_endpoints",
         json.dumps({"4": "tcp://worker-a:23280", "5": "tcp://worker-a:23281"}),
     )
 
@@ -136,7 +131,7 @@ def test_publish_kv_hint_capabilities_brackets_transfer_ipv6_endpoint():
     publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_any_call(
-        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        "kv_hint_transfer_source_control_endpoints",
         json.dumps({"0": "tcp://[2001:db8::1]:23280"}),
     )
 

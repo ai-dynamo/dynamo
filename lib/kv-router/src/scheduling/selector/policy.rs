@@ -667,7 +667,7 @@ mod tests {
     use super::super::test_support::*;
     use super::super::{DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector};
     use super::*;
-    use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
+    use crate::scheduling::WorkerSelectionInputTrigger;
 
     #[test]
     fn default_policy_matches_default_selector() {
@@ -808,7 +808,6 @@ mod tests {
                 assert_eq!(session.session_id(), "session-1");
                 assert_eq!(session.parent_session_id(), Some("root"));
                 assert_eq!(session.session_final(), Some(false));
-                assert!(session.kv_hints().expect("KV hints").evict_session());
                 assert_eq!(
                     session.input_trigger(),
                     Some(WorkerSelectionInputTrigger::ToolResult)
@@ -826,7 +825,6 @@ mod tests {
             "session-1".into(),
             Some("root".into()),
             Some(false),
-            Some(WorkerSelectionKvHints::new(true)),
             Some(WorkerSelectionInputTrigger::ToolResult),
         ));
         request.expected_output_tokens = Some(128);

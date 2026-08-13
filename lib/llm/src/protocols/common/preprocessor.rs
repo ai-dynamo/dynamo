@@ -462,10 +462,6 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
-    pub fn attach_kv_hints(&mut self, hints: KvHints) {
-        self.kv_hints = (!hints.is_empty()).then_some(hints);
-    }
-
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
@@ -520,43 +516,6 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn attach_kv_hints_sets_typed_envelope() {
-        use dynamo_kv_router::{
-            kv_hints::{KvHintAction, KvHints, KvSourceLocationsPayload},
-            protocols::ExternalSequenceBlockHash,
-        };
-
-        let mut req = PreprocessedRequest::builder()
-            .model("t".to_string())
-            .token_ids(vec![1])
-            .stop_conditions(StopConditions::default())
-            .sampling_options(SamplingOptions::default())
-            .output_options(OutputOptions::default())
-            .build()
-            .unwrap();
-        let hints = KvHints::new(
-            "msg-123",
-            vec![KvHintAction::source_locations(
-                "a1",
-                KvSourceLocationsPayload {
-                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(11),
-                        ExternalSequenceBlockHash(22),
-                    ],
-                },
-            )],
-        );
-
-        req.attach_kv_hints(hints.clone());
-        assert_eq!(req.kv_hints, Some(hints.clone()));
-        assert_eq!(
-            serde_json::to_value(&req).unwrap()["kv_hints"],
-            serde_json::to_value(&hints).unwrap()
-        );
-    }
 
     #[test]
     fn bootstrap_info_carries_only_stable_handoff_identity() {
