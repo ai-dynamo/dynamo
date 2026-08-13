@@ -823,7 +823,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         request_id: &RequestId,
         worker: WorkerWithDpRank,
         decay_now: Instant,
-    ) -> Result<(), SequenceError> {
+    ) -> Result<bool, SequenceError> {
         let lora_name = self.request_index.lora_for(request_id);
         match self.mutate_request_worker_prompt_state_local(
             worker,
@@ -835,7 +835,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             Ok(()) | Err(SequenceError::RequestNotFound { .. }) => {}
             Err(err) => return Err(err),
         }
-        self.request_index
+        let released = self
+            .request_index
             .remove_request_if_worker(request_id, worker);
         self.enqueue_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
@@ -844,7 +845,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             router_id: self.router_id,
             lora_name,
         });
-        Ok(())
+        Ok(released)
     }
 
     /// Mark prefill as completed for a request.
@@ -1980,15 +1981,24 @@ mod tests {
             )
             .unwrap();
 
-        sequences
+        let released = sequences
             .free_if_worker(&"req-1".to_string(), WorkerWithDpRank::new(1, 0), decay_now)
             .unwrap();
 
+        assert!(!released);
         assert_eq!(active_request_count(&sequences, booked_worker), 1);
         assert_eq!(
             sequences.request_worker(&"req-1".to_string()),
             Some(booked_worker)
         );
+
+        assert!(
+            sequences
+                .free_if_worker(&"req-1".to_string(), booked_worker, decay_now)
+                .unwrap()
+        );
+        assert_eq!(active_request_count(&sequences, booked_worker), 0);
+        assert_eq!(sequences.request_worker(&"req-1".to_string()), None);
     }
 
     #[test]

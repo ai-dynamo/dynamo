@@ -621,26 +621,22 @@ where
         outcome: RequestOutcome,
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
-        let owned = self.slots.request_worker(&request_id) == Some(worker);
+        let released = self
+            .slots
+            .free_if_worker(&request_id, worker, Instant::now())?;
         if !self.queue.has_admission_policy() {
-            let slot_result = self
-                .slots
-                .free_if_worker(&request_id, worker, Instant::now());
-            if owned {
+            if released {
                 self.queue.update_worker(worker).await;
             }
-            return slot_result;
+            return Ok(());
         }
-        let slot_result = self
-            .slots
-            .free_if_worker(&request_id, worker, Instant::now());
         match outcome {
             RequestOutcome::Completed(context_tokens) => {
                 let _ = self
                     .queue
                     .complete_request(
                         &request_id,
-                        owned.then_some(worker),
+                        released.then_some(worker),
                         Some(worker),
                         context_tokens,
                     )
@@ -649,11 +645,11 @@ where
             RequestOutcome::Aborted => {
                 let _ = self
                     .queue
-                    .abort_request(&request_id, owned.then_some(worker), Some(worker))
+                    .abort_request(&request_id, released.then_some(worker), Some(worker))
                     .await;
             }
         }
-        slot_result
+        Ok(())
     }
 
     pub fn pending_count(&self) -> usize {
