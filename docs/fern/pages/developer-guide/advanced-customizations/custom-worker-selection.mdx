@@ -274,6 +274,7 @@ worker_selection:
   aggregated: least-busy
   prefill: prefill-least-busy
   decode: least-busy
+  encode: least-busy
   instances:
     - name: least-busy
       type: least-busy
@@ -285,11 +286,11 @@ worker_selection:
         min_device_overlap_blocks: 1
 ```
 
-The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.aggregated` selects full-request and public-surface encode worker pools. `worker_selection.prefill` and `worker_selection.decode` select the matching disaggregated worker pools. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
+The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select the matching worker pools. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
 
-For compatibility with v1.4 policy files, deprecated `worker_selection.default` fills every role that has no explicit selection. Do not combine it with `worker_selection.aggregated`. New policy files should name each intended role explicitly.
+For compatibility with v1.4 policy files, deprecated `worker_selection.default` fills every worker type that has no explicit selection. Do not combine it with `worker_selection.aggregated`. New policy files should name each intended worker type explicitly.
 
-For prefill and decode, the selection order is the role-specific CLI or environment override, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then Dynamo's built-in policy. For aggregated and public-surface encode pools, the order is `DYN_ROUTER_WORKER_SELECTION_POLICY`, `worker_selection.aggregated`, and then the built-in policy. Set any selection to `default` to use the built-in policy for that scope.
+For prefill and decode, the selection order is the role-specific CLI or environment override, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then Dynamo's built-in policy. For aggregated and encode, the order is `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then the built-in policy. Set any selection to `default` to use the built-in policy for that scope.
 
 <Note>
   Role selections are startup settings. Configure them in the worker-selection YAML, with the CLI flags or environment variables above, or through the Python `KvRouterConfig` constructor. They are not part of serialized `KvRouterConfig` JSON, and `KvRouterConfig.from_json` rejects those keys.
@@ -445,7 +446,7 @@ cd "$POLICY_DIR/epp"
 DYN_EPP_MODE=standalone DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
 ```
 
-Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. It uses `worker_selection.aggregated` and logs a startup warning when it ignores a prefill or decode selection.
+Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. It uses `worker_selection.aggregated` and logs a startup warning when it ignores a prefill, decode, or encode selection.
 
 </Tab>
 </Tabs>

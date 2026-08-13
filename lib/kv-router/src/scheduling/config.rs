@@ -42,6 +42,7 @@ pub(crate) struct WorkerSelectionPolicySelections {
     pub(crate) aggregated: Option<String>,
     pub(crate) prefill: Option<String>,
     pub(crate) decode: Option<String>,
+    pub(crate) encode: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1093,7 +1094,11 @@ impl KvRouterConfig {
             Err(source) => Err(source),
         };
         let selected = self.selected_worker_selection_policy_instances_from(selected)?;
-        Ok(selected.aggregated.or(selected.prefill).or(selected.decode))
+        Ok(selected
+            .aggregated
+            .or(selected.prefill)
+            .or(selected.decode)
+            .or(selected.encode))
     }
 
     /// Return the custom worker-selection instance selected for one explicit worker role.
@@ -1108,16 +1113,17 @@ impl KvRouterConfig {
         };
         let selected = self.selected_worker_selection_policy_instances_from(selected)?;
         Ok(match worker_type {
-            WorkerType::Aggregated | WorkerType::Encode => selected.aggregated,
+            WorkerType::Aggregated => selected.aggregated,
             WorkerType::Prefill => selected.prefill,
             WorkerType::Decode => selected.decode,
+            WorkerType::Encode => selected.encode,
         })
     }
 
     /// Return whether a stage-specific worker-selection setting was explicitly configured.
     ///
-    /// Standalone hosts use this to warn that prefill and decode settings only apply to the
-    /// embedded frontend.
+    /// Standalone hosts use this to warn that prefill, decode, and encode settings only apply to
+    /// typed worker pools in the embedded frontend.
     pub fn has_explicit_stage_worker_selection_policy(
         &self,
     ) -> Result<bool, WorkerSelectionPolicyConfigError> {
@@ -1139,7 +1145,11 @@ impl KvRouterConfig {
         selected: Result<Option<String>, VarError>,
     ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
         let selected = self.selected_worker_selection_policy_instances_from(selected)?;
-        Ok(selected.aggregated.or(selected.prefill).or(selected.decode))
+        Ok(selected
+            .aggregated
+            .or(selected.prefill)
+            .or(selected.decode)
+            .or(selected.encode))
     }
 
     #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
@@ -1187,17 +1197,23 @@ impl KvRouterConfig {
                     .map(str::to_owned)
             });
         let decode = normalized(self.router_decode_policy.as_deref())
-            .or(global)
+            .or_else(|| global.clone())
             .or_else(|| {
                 policy_config
                     .and_then(|config| config.decode_instance())
                     .map(str::to_owned)
             });
+        let encode = global.or_else(|| {
+            policy_config
+                .and_then(|config| config.encode_instance())
+                .map(str::to_owned)
+        });
 
         Ok(WorkerSelectionPolicySelections {
             aggregated: custom_only(aggregated),
             prefill: custom_only(prefill),
             decode: custom_only(decode),
+            encode: custom_only(encode),
         })
     }
 
@@ -1774,6 +1790,7 @@ worker_selection:
                 aggregated: Some("custom".to_string()),
                 prefill: None,
                 decode: None,
+                encode: None,
             }
         );
 
@@ -1819,12 +1836,15 @@ worker_selection:
   aggregated: yaml-aggregated
   prefill: yaml-prefill
   decode: yaml-decode
+  encode: yaml-encode
   instances:
     - name: yaml-aggregated
       type: acme
     - name: yaml-prefill
       type: acme
     - name: yaml-decode
+      type: acme
+    - name: yaml-encode
       type: acme
     - name: global
       type: acme
@@ -1846,6 +1866,7 @@ worker_selection:
                 aggregated: Some("yaml-aggregated".to_string()),
                 prefill: Some("yaml-prefill".to_string()),
                 decode: Some("yaml-decode".to_string()),
+                encode: Some("yaml-encode".to_string()),
             }
         );
 
@@ -1859,6 +1880,7 @@ worker_selection:
                 aggregated: Some("global".to_string()),
                 prefill: Some("cli-prefill".to_string()),
                 decode: None,
+                encode: Some("global".to_string()),
             }
         );
 
@@ -1868,7 +1890,7 @@ worker_selection:
             config
                 .selected_worker_selection_policy_instance_for(WorkerType::Encode)
                 .unwrap(),
-            Some("yaml-aggregated".to_string())
+            Some("yaml-encode".to_string())
         );
 
         config.router_policy_config = None;

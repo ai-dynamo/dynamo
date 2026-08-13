@@ -146,6 +146,7 @@ worker_selection:
   aggregated: simple-filter-score-pick
   prefill: disagg-prefill
   decode: disagg-decode
+  encode: simple-filter-score-pick
   instances:
     - name: simple-filter-score-pick
       type: simple-filter-score-pick
@@ -170,12 +171,11 @@ worker_selection:
 
 - `type` selects a registered provider.
 - `name` identifies one configured instance.
-- `worker_selection.aggregated` selects the instance for full-request and public-surface encode worker pools.
-- `worker_selection.prefill` and `worker_selection.decode` select separate instances for the embedded frontend's worker pools.
+- `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select separate instances for their matching worker pools.
 - Deprecated `worker_selection.default` fills roles without an explicit selection for compatibility with v1.4 policy files. Do not combine it with `worker_selection.aggregated`.
 - `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections.
 - `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.
-- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every role-specific YAML selection.
+- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every worker-type YAML selection.
 - The override value `default` selects Dynamo's built-in policy.
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.

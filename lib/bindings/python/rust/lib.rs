@@ -287,7 +287,7 @@ pub(crate) fn warn_if_standalone_ignores_stage_policies(
 ) -> anyhow::Result<()> {
     if config.has_explicit_stage_worker_selection_policy()? {
         tracing::warn!(
-            "prefill and decode worker-selection policies are ignored by aggregated standalone selection hosts"
+            "prefill, decode, and encode worker-selection policies are ignored by aggregated standalone selection hosts"
         );
     }
     Ok(())

@@ -15,6 +15,7 @@ pub struct WorkerSelectionConfig {
     aggregated: Option<String>,
     prefill: Option<String>,
     decode: Option<String>,
+    encode: Option<String>,
     has_explicit_stage_selection: bool,
     instances: HashMap<String, WorkerSelectionInstance>,
 }
@@ -31,6 +32,10 @@ impl WorkerSelectionConfig {
 
     pub(crate) fn decode_instance(&self) -> Option<&str> {
         self.decode.as_deref()
+    }
+
+    pub(crate) fn encode_instance(&self) -> Option<&str> {
+        self.encode.as_deref()
     }
 
     pub(crate) fn has_explicit_stage_selection(&self) -> bool {
@@ -83,6 +88,8 @@ pub(super) struct RawWorkerSelectionConfig {
     #[serde(default)]
     decode: Option<String>,
     #[serde(default)]
+    encode: Option<String>,
+    #[serde(default)]
     instances: Vec<RawWorkerSelectionInstance>,
 }
 
@@ -93,9 +100,10 @@ impl RawWorkerSelectionConfig {
             && self.aggregated.is_none()
             && self.prefill.is_none()
             && self.decode.is_none()
+            && self.encode.is_none()
         {
             return Err(RouterPolicyConfigError::Validation(
-                "worker_selection must define an instance or a default, aggregated, prefill, or decode selection"
+                "worker_selection must define an instance or a default, aggregated, prefill, decode, or encode selection"
                     .to_string(),
             ));
         }
@@ -139,6 +147,7 @@ impl RawWorkerSelectionConfig {
             ("aggregated", self.aggregated.as_deref()),
             ("prefill", self.prefill.as_deref()),
             ("decode", self.decode.as_deref()),
+            ("encode", self.encode.as_deref()),
         ] {
             if let Some(selected) = selected
                 && selected != "default"
@@ -152,19 +161,22 @@ impl RawWorkerSelectionConfig {
 
         if self.legacy_default.is_some() {
             tracing::warn!(
-                "worker_selection.default is deprecated; use explicit worker_selection.aggregated, worker_selection.prefill, and worker_selection.decode selections"
+                "worker_selection.default is deprecated; use explicit worker_selection.aggregated, worker_selection.prefill, worker_selection.decode, and worker_selection.encode selections"
             );
         }
 
-        let has_explicit_stage_selection = self.prefill.is_some() || self.decode.is_some();
+        let has_explicit_stage_selection =
+            self.prefill.is_some() || self.decode.is_some() || self.encode.is_some();
         let aggregated = self.aggregated.or_else(|| self.legacy_default.clone());
         let prefill = self.prefill.or_else(|| self.legacy_default.clone());
-        let decode = self.decode.or(self.legacy_default);
+        let decode = self.decode.or_else(|| self.legacy_default.clone());
+        let encode = self.encode.or(self.legacy_default);
 
         Ok(WorkerSelectionConfig {
             aggregated,
             prefill,
             decode,
+            encode,
             has_explicit_stage_selection,
             instances,
         })

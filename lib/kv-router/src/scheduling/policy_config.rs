@@ -631,15 +631,19 @@ worker_selection:
     }
 
     #[test]
-    fn worker_selection_accepts_separate_prefill_and_decode_instances() {
+    fn worker_selection_accepts_every_worker_type() {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
   prefill: prefill-policy
   decode: default
+  encode: encode-policy
   instances:
     - name: prefill-policy
       type: cache-aware
+      parameters: {}
+    - name: encode-policy
+      type: media-aware
       parameters: {}
 "#,
         )
@@ -649,6 +653,7 @@ worker_selection:
         assert_eq!(selection.aggregated_instance(), None);
         assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
         assert_eq!(selection.decode_instance(), Some("default"));
+        assert_eq!(selection.encode_instance(), Some("encode-policy"));
     }
 
     #[test]
@@ -671,6 +676,7 @@ worker_selection:
         assert_eq!(selection.aggregated_instance(), Some("legacy-policy"));
         assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
         assert_eq!(selection.decode_instance(), Some("legacy-policy"));
+        assert_eq!(selection.encode_instance(), Some("legacy-policy"));
     }
 
     #[test]
@@ -696,6 +702,13 @@ worker_selection:
             r#"
 worker_selection:
   decode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  encode: missing
   instances:
     - name: present
       type: alpha

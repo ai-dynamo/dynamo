@@ -143,16 +143,19 @@ impl WorkerSelectionPolicyRegistry {
         )?;
         let decode =
             self.resolve_selected_cached(policy_config, selected.decode.as_deref(), &mut resolved)?;
+        let encode =
+            self.resolve_selected_cached(policy_config, selected.encode.as_deref(), &mut resolved)?;
 
-        if aggregated.is_none() && prefill.is_none() && decode.is_none() {
+        if aggregated.is_none() && prefill.is_none() && decode.is_none() && encode.is_none() {
             return Ok(None);
         }
 
         Ok(Some(Arc::new(move |config, worker_type, partition| {
             let selected = match worker_type {
-                WorkerType::Aggregated | WorkerType::Encode => aggregated.as_ref(),
+                WorkerType::Aggregated => aggregated.as_ref(),
                 WorkerType::Prefill => prefill.as_ref(),
                 WorkerType::Decode => decode.as_ref(),
+                WorkerType::Encode => encode.as_ref(),
             };
             match selected {
                 Some(factory) => factory(config, worker_type, partition),
@@ -311,6 +314,7 @@ mod tests {
             r#"
 worker_selection:
   aggregated: first
+  encode: second
   instances:
     - name: first
       type: alpha
@@ -380,6 +384,7 @@ worker_selection:
                     aggregated: Some("first".to_string()),
                     prefill: Some("first".to_string()),
                     decode: Some("second".to_string()),
+                    encode: Some("second".to_string()),
                 },
             )
             .unwrap()
@@ -399,7 +404,7 @@ worker_selection:
                 (1, "prefill".to_string()),
                 (2, "decode".to_string()),
                 (1, "aggregated".to_string()),
-                (1, "encode".to_string()),
+                (2, "encode".to_string()),
             ]
         );
     }
