@@ -46,6 +46,7 @@ class _FakeBackend(VisionEncoderBackend):
         self.close_calls = 0
         self.model_id = None
         self.forward_threads: list[int] = []
+        self.forward_batches: list[list[str]] = []
 
     def build(self, model_id):
         self.build_thread = threading.get_ident()
@@ -58,6 +59,7 @@ class _FakeBackend(VisionEncoderBackend):
 
     def forward_batch(self, items, target_bucket=None):
         self.forward_threads.append(threading.get_ident())
+        self.forward_batches.append(list(items))
         return [torch.full((2, 4), float(len(str(it)))) for it in items]
 
     def close(self):
@@ -73,6 +75,23 @@ async def test_encode_returns_one_tensor_per_raw():
         out = await enc.encode(["a", "bb", "ccc"])
         assert len(out) == 3
         assert all(t.shape == (2, 4) for t in out)
+    finally:
+        enc.shutdown()
+
+
+async def test_encode_partitions_preprocessed_compatibility_keys(monkeypatch):
+    be = _FakeBackend()
+    monkeypatch.setattr(
+        be,
+        "preprocess",
+        lambda raw: Preprocessed(item=raw, cost=1, bucket_key=raw[0]),
+    )
+    enc = AsyncVisionEncoder(be)
+    enc.load("m")
+    try:
+        out = await enc.encode(["a", "bbbb", "aa"])
+        assert be.forward_batches == [["a", "aa"], ["bbbb"]]
+        assert [float(tensor[0, 0]) for tensor in out] == [1.0, 4.0, 2.0]
     finally:
         enc.shutdown()
 
