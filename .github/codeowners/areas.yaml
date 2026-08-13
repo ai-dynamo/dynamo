@@ -67,6 +67,7 @@ areas:
   - tests/router/
   - tests/router/configs/
   - lib/router-plugins/
+  - lib/router-policy/
   - examples/router/policy-class-queues.yaml
   - examples/router/custom-policy-example/
 - label: backend-vllm

@@ -41,7 +41,8 @@ use tokio_stream::StreamExt;
 use tracing::Instrument;
 
 pub use dynamo_router_policy::{
-    PolicyDecision as RoutePolicyDecision, RouteContext as RoutePolicyContext,
+    AdmissionKind as RouteAdmissionKind, PolicyDecision as RoutePolicyDecision,
+    RouteContext as RoutePolicyContext,
 };
 
 /// Check if an error chain indicates the worker should be reported as down.
@@ -102,18 +103,36 @@ impl RouteReservation {
         self.target
     }
 
-    fn retarget(&mut self, target: RouteTarget) {
+    /// Transfer this reservation to a target resolved before request preparation.
+    pub fn retarget(&mut self, target: RouteTarget) {
         if let Some(permit) = self.permit.as_mut() {
             permit.retarget(target.worker_id);
         }
         self.target = target;
     }
 
-    fn into_tracked_stream<U: Data + MaybeError>(self, stream: ManyOut<U>) -> ManyOut<U> {
+    /// Transfer the reservation lifetime to the dispatched response stream.
+    pub fn into_tracked_stream<U: Data + MaybeError>(self, stream: ManyOut<U>) -> ManyOut<U> {
         match self.permit {
             Some(permit) => permit.into_tracked_stream(stream),
             None => stream,
         }
+    }
+}
+
+/// A worker target fixed before target-specific request preparation.
+///
+/// Dispatch re-resolves the latest transport for this same worker. It never
+/// falls back after request preparation has begun.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedRoute {
+    target: RouteTarget,
+}
+
+impl ResolvedRoute {
+    /// Return the worker selected for this route.
+    pub fn target(self) -> RouteTarget {
+        self.target
     }
 }
 
@@ -272,6 +291,26 @@ pub enum RouteFallback<'a> {
 pub struct RoutePolicyCandidates<'a> {
     candidates: CandidateView<'a>,
     occupancy: Option<&'a RoutingOccupancyState>,
+}
+
+impl RoutePolicyCandidates<'_> {
+    /// Return the number of host-validated candidates.
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// Return whether the host candidate table is empty.
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+
+    /// Return the stable worker ID at `index`.
+    #[inline(always)]
+    pub fn worker_id(&self, index: usize) -> u64 {
+        self.candidates.target(index).worker_id
+    }
 }
 
 impl dynamo_router_policy::RouteCandidates for RoutePolicyCandidates<'_> {
@@ -727,6 +766,17 @@ where
         Ok(router)
     }
 
+    /// Enable frontend-local occupancy for an injected cache-unaware policy.
+    ///
+    /// Built-in static policies leave this disabled and retain their
+    /// allocation-free, lock-free selection path.
+    pub async fn enable_policy_occupancy(&mut self) {
+        if self.occupancy_state.is_none() {
+            self.occupancy_state =
+                Some(get_or_create_routing_occupancy_state(&self.client.endpoint).await);
+        }
+    }
+
     /// Like the other constructors but with a caller-supplied [`StreamingDispatch`]
     /// as the final hop. Fault detection is on, so the dispatch's `ErrorType`
     /// mapping drives report-down / overload / migration as usual.
@@ -1009,8 +1059,87 @@ where
     /// Callers that own admission can use this before request preparation to
     /// rebook under that owner before conditionally releasing the old target.
     pub fn validate_exact_target(&self, target: RouteTarget) -> anyhow::Result<()> {
-        self.resolve_transport(target.worker_id, RouteFallback::Deny)?;
-        Ok(())
+        if self.client.has_instance(target.worker_id) {
+            return Ok(());
+        }
+        Err(self.missing_instance_error(target.worker_id))
+    }
+
+    /// Resolve the worker that will own target-specific request preparation.
+    ///
+    /// Transport fallback is allowed only here, before the caller mutates the
+    /// request for a worker. [`Self::dispatch_resolved`] later refreshes the
+    /// transport for this same worker and fails if it disappeared.
+    pub fn resolve_route(
+        &self,
+        instance_id: u64,
+        fallback: RouteFallback<'_>,
+    ) -> anyhow::Result<ResolvedRoute> {
+        let resolved_id = if self.client.has_instance(instance_id) {
+            instance_id
+        } else {
+            let allowed = match fallback {
+                RouteFallback::Allow => None,
+                RouteFallback::Deny => return Err(self.missing_instance_error(instance_id)),
+                RouteFallback::Within(allowed) => Some(allowed),
+            };
+            let routing_instances = self.client.routing_instances();
+            let replacement = routing_instances.free_ids().iter().copied().find(|&id| {
+                id != instance_id && allowed.is_none_or(|allowed| allowed.contains(&id))
+            });
+            replacement.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                )
+            })?
+        };
+        self.check_workers_available(resolved_id, "")?;
+        Ok(ResolvedRoute {
+            target: RouteTarget::worker(resolved_id),
+        })
+    }
+
+    /// Dispatch a request prepared for one fixed worker.
+    ///
+    /// The transport snapshot is refreshed after preparation, but the worker
+    /// ID cannot change at this boundary.
+    pub async fn dispatch_resolved(
+        &self,
+        request: SingleIn<T>,
+        route: ResolvedRoute,
+    ) -> anyhow::Result<ManyOut<U>> {
+        let route_start = Instant::now();
+        let request_id = request.id().to_string();
+        let instance_id = route.target.worker_id;
+        let route_span = if matches!(self.router_mode, RouterMode::KV) {
+            tracing::Span::none()
+        } else {
+            tracing::info_span!(
+                "router.route_request",
+                request_id = %request_id,
+                worker_id = instance_id,
+                router_mode = ?self.router_mode,
+            )
+        };
+        let (resolved_id, address, transport_kind, instance) =
+            self.resolve_transport(instance_id, RouteFallback::Deny)?;
+        debug_assert_eq!(resolved_id, instance_id);
+        self.check_workers_available(instance_id, &request_id)?;
+        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
+
+        STAGE_DURATION_SECONDS
+            .with_label_values(&[STAGE_ROUTE])
+            .observe(route_start.elapsed().as_secs_f64());
+
+        let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
+        let stream = self
+            .addressed
+            .generate(request)
+            .instrument(route_span)
+            .await;
+        self.wrap_with_fault_detection(stream, instance_id)
     }
 
     /// Select and book one worker, prepare the request for that exact worker,
@@ -1035,7 +1164,7 @@ where
     /// occupancy to the replacement before it releases the original charge.
     pub async fn dispatch_reserved_prepared<M, F>(
         &self,
-        request: SingleIn<T>,
+        mut request: SingleIn<T>,
         mut reservation: RouteReservation,
         fallback: RouteFallback<'_>,
         prepare: F,
@@ -1043,18 +1172,10 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let instance_id = reservation.target.worker_id;
-        let (metadata, stream) = self
-            .generate_with_fault_detection_prepared(
-                instance_id,
-                request,
-                fallback,
-                |request, resolved_instance_id| {
-                    reservation.retarget(RouteTarget::worker(resolved_instance_id));
-                    prepare(request, resolved_instance_id)
-                },
-            )
-            .await?;
+        let route = self.resolve_route(reservation.target.worker_id, fallback)?;
+        reservation.retarget(route.target());
+        let metadata = prepare(&mut request, route.target.worker_id)?;
+        let stream = self.dispatch_resolved(request, route).await?;
         Ok((metadata, reservation.into_tracked_stream(stream)))
     }
 
@@ -1595,7 +1716,10 @@ where
         select: F,
     ) -> anyhow::Result<RouteReservation>
     where
-        F: FnOnce(&RoutePolicyCandidates<'_>, RoutePolicyContext) -> Option<RoutePolicyDecision>,
+        F: FnOnce(
+            &RoutePolicyCandidates<'_>,
+            RoutePolicyContext,
+        ) -> anyhow::Result<Option<RoutePolicyDecision>>,
     {
         if let Some(instance_id) = pinned_worker {
             return self
@@ -1622,7 +1746,11 @@ where
         }
 
         let occupancy = self.occupancy_state.as_deref();
-        let choose = || self.select_policy_candidate(request, instance_ids, occupancy, select);
+        let device = (self.router_mode == RouterMode::DeviceAwareWeighted)
+            .then(|| self.device_aware_candidates(request, instance_ids));
+        let choose = || {
+            self.select_policy_candidate_prepared(instance_ids, occupancy, device.as_ref(), select)
+        };
         let (decision, counter) = match occupancy {
             Some(state) => state.with_selection_lock(|| {
                 let decision = choose()?;
@@ -1746,7 +1874,10 @@ where
         select: F,
     ) -> anyhow::Result<RouteTarget>
     where
-        F: FnOnce(&RoutePolicyCandidates<'_>, RoutePolicyContext) -> Option<RoutePolicyDecision>,
+        F: FnOnce(
+            &RoutePolicyCandidates<'_>,
+            RoutePolicyContext,
+        ) -> anyhow::Result<Option<RoutePolicyDecision>>,
     {
         if let Some(instance_id) = pinned_worker {
             return self.peek_within(request, Some(instance_id), allowed);
@@ -1786,21 +1917,41 @@ where
         select: F,
     ) -> anyhow::Result<RouteDecision>
     where
-        F: FnOnce(&RoutePolicyCandidates<'_>, RoutePolicyContext) -> Option<RoutePolicyDecision>,
+        F: FnOnce(
+            &RoutePolicyCandidates<'_>,
+            RoutePolicyContext,
+        ) -> anyhow::Result<Option<RoutePolicyDecision>>,
     {
-        let policy_decision = if self.router_mode == RouterMode::DeviceAwareWeighted {
-            let device = self.device_aware_candidates(request, instance_ids);
+        let device = (self.router_mode == RouterMode::DeviceAwareWeighted)
+            .then(|| self.device_aware_candidates(request, instance_ids));
+        self.select_policy_candidate_prepared(instance_ids, occupancy, device.as_ref(), select)
+    }
+
+    fn select_policy_candidate_prepared<F>(
+        &self,
+        instance_ids: &[u64],
+        occupancy: Option<&RoutingOccupancyState>,
+        device: Option<&DeviceAwareCandidates>,
+        select: F,
+    ) -> anyhow::Result<RouteDecision>
+    where
+        F: FnOnce(
+            &RoutePolicyCandidates<'_>,
+            RoutePolicyContext,
+        ) -> anyhow::Result<Option<RoutePolicyDecision>>,
+    {
+        let policy_decision = if let Some(device) = device {
             let candidates = RoutePolicyCandidates {
                 candidates: CandidateView::DeviceAware(&device.candidates),
                 occupancy,
             };
-            select(&candidates, device.context)
+            select(&candidates, device.context)?
         } else {
             let candidates = RoutePolicyCandidates {
                 candidates: CandidateView::Workers(instance_ids),
                 occupancy,
             };
-            select(&candidates, RoutePolicyContext::default())
+            select(&candidates, RoutePolicyContext::default())?
         }
         .ok_or_else(|| anyhow::anyhow!("routing policy returned no worker"))?;
 
@@ -1874,14 +2025,29 @@ where
             )
         };
 
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, fallback)?;
-        self.check_workers_available(instance_id, &request_id)?;
-
-        let metadata = prepare(&mut request, instance_id)?;
-        // Preparation can await or update routing-visible state. Revalidate the
-        // committed target at the final dispatch boundary.
-        self.check_workers_available(instance_id, &request_id)?;
+        let (instance_id, address, transport_kind, instance, metadata) = match fallback {
+            RouteFallback::Deny => {
+                // Preserve transport-error precedence without cloning the transport snapshot.
+                self.validate_exact_target(RouteTarget::worker(instance_id))?;
+                self.check_workers_available(instance_id, &request_id)?;
+                let metadata = prepare(&mut request, instance_id)?;
+                // Exact dispatch resolves discovery after preparation. This keeps request
+                // metadata and the captured transport on the same worker incarnation.
+                let (resolved_id, address, transport_kind, instance) =
+                    self.resolve_transport(instance_id, RouteFallback::Deny)?;
+                debug_assert_eq!(resolved_id, instance_id);
+                self.check_workers_available(resolved_id, &request_id)?;
+                (resolved_id, address, transport_kind, instance, metadata)
+            }
+            fallback => {
+                let (resolved_id, address, transport_kind, instance) =
+                    self.resolve_transport(instance_id, fallback)?;
+                self.check_workers_available(resolved_id, &request_id)?;
+                let metadata = prepare(&mut request, resolved_id)?;
+                self.check_workers_available(resolved_id, &request_id)?;
+                (resolved_id, address, transport_kind, instance, metadata)
+            }
+        };
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
@@ -1954,19 +2120,15 @@ where
         use crate::component::TransportType;
 
         let lookup = |id: u64| {
-            self.client
-                .instances()
-                .iter()
-                .find(|i| i.instance_id == id)
-                .map(|instance| {
-                    let (addr, kind) = match &instance.transport {
-                        TransportType::Tcp(tcp_endpoint) => {
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
-                    };
-                    (addr, kind, instance.clone())
-                })
+            self.client.find_instance(id).map(|instance| {
+                let (addr, kind) = match &instance.transport {
+                    TransportType::Tcp(tcp_endpoint) => {
+                        (tcp_endpoint.clone(), "transport.tcp.request")
+                    }
+                    TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                };
+                (addr, kind, instance)
+            })
         };
 
         if let Some((addr, kind, inst)) = lookup(instance_id) {
@@ -1975,14 +2137,7 @@ where
         let allowed_fallback = match fallback {
             RouteFallback::Allow => None,
             RouteFallback::Deny => {
-                return Err(DynamoError::builder()
-                    .error_type(ErrorType::CannotConnect)
-                    .message(format!(
-                        "instance_id={instance_id} not found for endpoint {}",
-                        self.client.endpoint.id()
-                    ))
-                    .build()
-                    .into());
+                return Err(self.missing_instance_error(instance_id));
             }
             RouteFallback::Within(allowed) => Some(allowed),
         };
@@ -2019,6 +2174,17 @@ where
                 self.client.endpoint.id()
             )),
         }
+    }
+
+    fn missing_instance_error(&self, instance_id: u64) -> anyhow::Error {
+        DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message(format!(
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
+            ))
+            .build()
+            .into()
     }
 
     /// Wrap a dispatched stream with fault detection + inactivity timeout.
@@ -2931,6 +3097,59 @@ mod tests {
             0,
             "validation failure must release the selected worker"
         );
+        rt.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_dispatch_resolves_transport_after_preparation() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_exact_transport_revalidation".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::LeastLoaded)
+                .await
+                .unwrap();
+        let state = router.occupancy_state.clone().unwrap();
+        let endpoint_for_prepare = endpoint.clone();
+        let client_for_prepare = client.clone();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            router.select_and_dispatch_exact(SingleIn::new(42), Some(worker_id), move |_, _| {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        endpoint_for_prepare
+                            .unregister_endpoint_instance()
+                            .await
+                            .unwrap();
+                        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                            while client_for_prepare.instance_ids().contains(&worker_id) {
+                                tokio::task::yield_now().await;
+                            }
+                        })
+                        .await
+                        .expect("discovery removal must reach the client");
+                    });
+                });
+                Ok(())
+            }),
+        )
+        .await
+        .expect("exact dispatch must not use the removed transport")
+        .unwrap_err();
+
+        assert_cannot_connect(&result);
+        assert_eq!(state.load(worker_id), 0);
         rt.shutdown();
     }
 

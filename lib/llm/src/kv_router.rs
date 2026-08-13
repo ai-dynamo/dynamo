@@ -21,6 +21,7 @@ use dynamo_kv_router::{
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
+    selector::CacheUnawareWorkerSelectionPolicy,
 };
 use dynamo_runtime::{
     CancellationToken,
@@ -78,6 +79,16 @@ use route_lookup::{
 
 pub(crate) type WorkerSelectorFactory<Sel> = Arc<
     dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
+>;
+
+pub(crate) type CacheUnawarePolicyFactory = Arc<
+    dyn for<'a> Fn(
+            &KvRouterConfig,
+            &'static str,
+            RoutingPartitionRef<'a>,
+        ) -> anyhow::Result<Arc<CacheUnawareWorkerSelectionPolicy>>
+        + Send
+        + Sync,
 >;
 
 pub(crate) fn to_worker_selection_session_context(

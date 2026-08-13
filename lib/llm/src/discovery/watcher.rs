@@ -30,7 +30,7 @@ use crate::{
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{EncoderRouter, PrefillRouter, WorkerSelectorFactory},
+    kv_router::{CacheUnawarePolicyFactory, EncoderRouter, PrefillRouter, WorkerSelectorFactory},
     local_model::runtime_config::{
         ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     },
@@ -230,6 +230,7 @@ where
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    cache_unaware_policy_factory: Option<CacheUnawarePolicyFactory>,
 }
 
 pub(crate) struct PreparedWorkerSet {
@@ -321,6 +322,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
             Arc::new(|config, worker_type, _partition| {
                 DefaultWorkerSelector::new(Some(config.clone()), worker_type)
             }),
+            None,
         )
     }
 }
@@ -340,6 +342,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
+        cache_unaware_policy_factory: Option<CacheUnawarePolicyFactory>,
     ) -> Self {
         Self {
             manager: model_manager,
@@ -358,6 +361,7 @@ where
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
+            cache_unaware_policy_factory,
         }
     }
 
@@ -672,6 +676,34 @@ where
             worker_set.encoder_router = encoder_chooser.clone();
 
             let preprocessed_routing = if needs_preprocessed_routing {
+                let simple_policy = if router_config.router_mode == RouterMode::KV {
+                    None
+                } else {
+                    self.cache_unaware_policy_factory
+                        .as_ref()
+                        .map(|factory| {
+                            factory(
+                                &router_config.kv_router_config,
+                                WORKER_TYPE_DECODE,
+                                RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
+                            )
+                        })
+                        .transpose()?
+                };
+                let lora_simple_policy = if simple_policy.is_some() && self.manager.lora_enabled() {
+                    self.cache_unaware_policy_factory
+                        .as_ref()
+                        .map(|factory| {
+                            factory(
+                                &router_config.kv_router_config,
+                                WORKER_TYPE_DECODE,
+                                RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
                 Some(
                     entrypoint::input::build_preprocessed_routing_with_selector(
                         &client,
@@ -683,6 +715,8 @@ where
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
+                        simple_policy,
+                        lora_simple_policy,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

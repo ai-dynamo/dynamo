@@ -3,10 +3,15 @@
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-use dynamo_kv_router::{SimpleRoutingPolicy, SimpleWorkerPicker, SimpleWorkerScorer};
+use dynamo_kv_router::{
+    SimpleRoutingPolicy, SimpleWorkerPicker, SimpleWorkerScorer,
+    selector::{CacheUnawareRequestContext, CacheUnawareWorkerSelectionPolicy},
+};
+use dynamo_runtime::engine::AsyncEngineContextProvider;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::pipeline::{
-    AsyncEngine, Error, ManyOut, PushRouter, RouteFallback, RouteReservation, SingleIn,
+    AsyncEngine, Error, ManyOut, PushRouter, ResolvedRoute, RouteAdmissionKind, RouteFallback,
+    RoutePolicyCandidates, RoutePolicyDecision, RouteReservation, SingleIn,
     async_trait as pipeline_async_trait,
 };
 
@@ -30,16 +35,21 @@ pub(crate) struct SimpleAttempt {
     exact: bool,
     allowed_fallback: Option<HashSet<u64>>,
     load_guard: Option<LoadGuard>,
+    route: Option<ResolvedRoute>,
+    tracker: Option<Arc<RequestTracker>>,
 }
 
 struct LoraConstraint {
     filter: Arc<LoraFilter>,
     load_estimator: Arc<LoadEstimator>,
+    policy: Option<(SimpleWorkerScorer, SimpleWorkerPicker)>,
+    custom_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
 }
 
 pub struct SessionAffinityPushRouter {
     inner: PushRouter<PreprocessedRequest, LlmResponse>,
     policy: Option<(SimpleWorkerScorer, SimpleWorkerPicker)>,
+    custom_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
     affinity: Option<AffinityCoordinator>,
     direct: bool,
     lora: Option<LoraConstraint>,
@@ -84,6 +94,7 @@ impl SessionAffinityPushRouter {
         Self {
             inner,
             policy,
+            custom_policy: None,
             affinity,
             direct,
             lora: None,
@@ -95,16 +106,22 @@ impl SessionAffinityPushRouter {
         affinity: Option<AffinityCoordinator>,
         direct: bool,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
+        custom_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
+        lora_custom_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
     ) -> Self {
-        let policy = Self::policy_for(inner.router_mode());
+        let mode = inner.router_mode();
+        let policy = Self::policy_for(mode);
         Self {
             inner,
             policy,
+            custom_policy,
             affinity,
             direct,
             lora: lora.map(|(filter, load_estimator)| LoraConstraint {
                 filter,
                 load_estimator,
+                policy: Self::policy_for(mode),
+                custom_policy: lora_custom_policy,
             }),
         }
     }
@@ -168,6 +185,26 @@ impl SessionAffinityPushRouter {
             WORKER_TYPE_DECODE
         };
         tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
+    }
+
+    fn custom_policy_decision(
+        policy: &CacheUnawareWorkerSelectionPolicy,
+        request: &CacheUnawareRequestContext<'_>,
+        candidates: &RoutePolicyCandidates<'_>,
+    ) -> Result<Option<RoutePolicyDecision>, Error> {
+        let worker_id =
+            policy.pick_worker(request, candidates, |index| candidates.worker_id(index))?;
+        let index = (0..candidates.len())
+            .find(|&index| candidates.worker_id(index) == worker_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "custom policy selected worker {worker_id} outside the host candidate table"
+                )
+            })?;
+        Ok(Some(RoutePolicyDecision {
+            index,
+            admission: RouteAdmissionKind::Occupancy,
+        }))
     }
 
     #[cfg(test)]
@@ -237,33 +274,101 @@ impl AttemptBackend for SessionAffinityPushRouter {
         let pinned_worker = pinned_target.map(|target| target.worker_id);
         let (allowed_fallback, load_guard) = self.lora_candidates(request.content(), intent)?;
         let native_policy = if pinned_worker.is_none() {
-            self.policy.as_ref()
+            if allowed_fallback.is_some() {
+                self.lora
+                    .as_ref()
+                    .and_then(|constraint| constraint.policy.as_ref())
+            } else {
+                self.policy.as_ref()
+            }
         } else {
             None
         };
-        let (selected, reservation) = match (intent, native_policy) {
-            (SelectionIntent::Advisory, Some((scorer, picker))) => {
+        let custom_policy = if pinned_worker.is_some() {
+            None
+        } else if allowed_fallback.is_some() {
+            self.lora
+                .as_ref()
+                .and_then(|constraint| constraint.custom_policy.as_deref())
+        } else {
+            self.custom_policy.as_deref()
+        };
+        let custom_selection = if let Some(policy) = custom_policy {
+            let session_context = request
+                .agent_context
+                .as_ref()
+                .map(crate::kv_router::to_worker_selection_session_context);
+            let routing = request.routing.as_ref();
+            let engine_context = request.context();
+            let custom_context = CacheUnawareRequestContext::new(
+                engine_context.id(),
+                request.token_ids.len(),
+                intent == SelectionIntent::Advisory,
+            )
+            .with_session_context(session_context.as_ref())
+            .with_expected_output_tokens(routing.and_then(|routing| routing.expected_output_tokens))
+            .with_priority(
+                routing
+                    .and_then(|routing| routing.priority_jump)
+                    .unwrap_or(0.0),
+                routing
+                    .and_then(|routing| routing.strict_priority)
+                    .unwrap_or(0),
+            );
+            Some(match intent {
+                SelectionIntent::Advisory => {
+                    let target = self.inner.peek_within_policy(
+                        request.content(),
+                        None,
+                        allowed_fallback.as_ref(),
+                        |candidates, _context| {
+                            Self::custom_policy_decision(policy, &custom_context, candidates)
+                        },
+                    )?;
+                    (target, None)
+                }
+                SelectionIntent::Committed => {
+                    let reservation = self
+                        .inner
+                        .reserve_within_policy(
+                            request.content(),
+                            None,
+                            allowed_fallback.as_ref(),
+                            |candidates, _context| {
+                                Self::custom_policy_decision(policy, &custom_context, candidates)
+                            },
+                        )
+                        .await?;
+                    (reservation.target(), Some(reservation))
+                }
+            })
+        } else {
+            None
+        };
+        let (selected, reservation) = match (custom_selection, intent, native_policy) {
+            (Some(selection), _, _) => selection,
+            (None, SelectionIntent::Advisory, Some((scorer, picker))) => {
                 let target = self.inner.peek_within_policy(
                     request.content(),
                     None,
                     allowed_fallback.as_ref(),
-                    |candidates, context| picker.peek(scorer, candidates, context),
+                    |candidates, context| Ok(picker.peek(scorer, candidates, context)),
                 )?;
                 (target, None)
             }
-            (SelectionIntent::Committed, Some((scorer, picker))) => {
+            (None, SelectionIntent::Committed, Some((scorer, picker))) => {
                 let reservation = self
                     .inner
                     .reserve_within_policy(
                         request.content(),
                         None,
                         allowed_fallback.as_ref(),
-                        |candidates, context| picker.select(scorer, candidates, context),
+                        |candidates, context| Ok(picker.select(scorer, candidates, context)),
                     )
                     .await?;
                 (reservation.target(), Some(reservation))
             }
-            (SelectionIntent::Advisory, None) => {
+            (None, SelectionIntent::Advisory, None) => {
                 let target = self.inner.peek_within(
                     request.content(),
                     pinned_worker,
@@ -271,7 +376,7 @@ impl AttemptBackend for SessionAffinityPushRouter {
                 )?;
                 (target, None)
             }
-            (SelectionIntent::Committed, None) => {
+            (None, SelectionIntent::Committed, None) => {
                 let reservation = self
                     .inner
                     .reserve_within(request.content(), pinned_worker, allowed_fallback.as_ref())
@@ -288,6 +393,8 @@ impl AttemptBackend for SessionAffinityPushRouter {
             exact: pinned_target.is_some(),
             allowed_fallback,
             load_guard,
+            route: None,
+            tracker: None,
         })
     }
 
@@ -295,53 +402,81 @@ impl AttemptBackend for SessionAffinityPushRouter {
         Self::record_target(request.tracker.as_deref(), attempt.target);
     }
 
-    async fn dispatch<M, F>(
+    async fn begin_dispatch(
         &self,
-        request: SingleIn<PreprocessedRequest>,
-        attempt: Self::Attempt,
+        request: &mut SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
         kind: AttemptKind,
-        prepare: F,
-    ) -> Result<(M, AffinityTarget, ManyOut<LlmResponse>), Error>
-    where
-        M: Send,
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error> + Send,
-    {
-        let SimpleAttempt {
-            target,
-            reservation,
-            exact,
-            allowed_fallback,
-            load_guard,
-        } = attempt;
-        let reservation = reservation.expect("committed simple attempt has a reservation");
-        let fallback = if exact || kind == AttemptKind::Prefill {
+    ) -> Result<AffinityTarget, Error> {
+        let fallback = if attempt.exact || kind == AttemptKind::Prefill {
             RouteFallback::Deny
-        } else if let Some(allowed) = allowed_fallback.as_ref() {
+        } else if let Some(allowed) = attempt.allowed_fallback.as_ref() {
             RouteFallback::Within(allowed)
         } else {
             RouteFallback::Allow
         };
-        let ((metadata, tracker, actual_target), stream) = self
+        let route = self
             .inner
-            .dispatch_reserved_prepared(
-                request,
-                reservation,
-                fallback,
-                move |request, worker_id| {
-                    let dp_rank = target.dp_rank.filter(|_| worker_id == target.worker_id);
-                    request.routing_mut().dp_rank = dp_rank;
-                    let actual_target = AffinityTarget::new(worker_id, dp_rank);
-                    let metadata = prepare(request, actual_target)?;
-                    Ok((metadata, request.tracker.take(), actual_target))
-                },
-            )
-            .await?;
-        Self::record_target(tracker.as_deref(), actual_target);
-        let stream = match load_guard {
+            .resolve_route(attempt.target.worker_id, fallback)?;
+        attempt
+            .reservation
+            .as_mut()
+            .expect("committed simple attempt has a reservation")
+            .retarget(route.target());
+        let worker_id = route.target().worker_id;
+        let dp_rank = attempt
+            .target
+            .dp_rank
+            .filter(|_| worker_id == attempt.target.worker_id);
+        request.routing_mut().dp_rank = dp_rank;
+        let target = AffinityTarget::new(worker_id, dp_rank);
+        attempt.target = target;
+        attempt.route = Some(route);
+        Ok(target)
+    }
+
+    fn after_prepare(
+        &self,
+        request: &mut SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
+    ) {
+        attempt.tracker = request.tracker.take();
+    }
+
+    async fn dispatch_prepared(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
+        _kind: AttemptKind,
+    ) -> Result<ManyOut<LlmResponse>, Error> {
+        let route = attempt
+            .route
+            .take()
+            .expect("prepared simple attempt has a resolved route");
+        self.inner.dispatch_resolved(request, route).await
+    }
+
+    async fn abort(&self, attempt: &mut Self::Attempt) {
+        attempt.reservation.take();
+        attempt.load_guard.take();
+    }
+
+    fn finish_dispatch(
+        &self,
+        mut attempt: Self::Attempt,
+        target: AffinityTarget,
+        stream: ManyOut<LlmResponse>,
+    ) -> ManyOut<LlmResponse> {
+        Self::record_target(attempt.tracker.as_deref(), target);
+        let stream = attempt
+            .reservation
+            .take()
+            .expect("dispatched simple attempt has a reservation")
+            .into_tracked_stream(stream);
+        match attempt.load_guard.take() {
             Some(guard) => track_response(stream, guard),
             None => stream,
-        };
-        Ok((metadata, actual_target, stream))
+        }
     }
 }
 
@@ -361,7 +496,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
 mod tests {
     use std::time::Instant;
 
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_kv_router::{
+        KvRouterConfig, WorkerSelectionPolicyError,
+        protocols::WorkerWithDpRank,
+        selector::{WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy},
+    };
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::EventTransportKind,
@@ -649,6 +788,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn injected_policy_selects_non_kv_worker_and_owns_occupancy() {
+        struct HighestWorkerPicker;
+
+        impl WorkerPicker for HighestWorkerPicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, candidate)| candidate.worker().worker_id)
+                    .map(|(index, _)| index)
+                    .expect("candidate"))
+            }
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("custom_simple_policy".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let expected = client
+            .wait_for_instances()
+            .await
+            .unwrap()
+            .iter()
+            .map(|instance| instance.id())
+            .max()
+            .unwrap();
+        let mut inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        inner.enable_policy_occupancy().await;
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            Vec::new(),
+            Box::new(HighestWorkerPicker),
+        )
+        .into_cache_unaware()
+        .unwrap();
+        let router = SessionAffinityPushRouter::new_with_coordinator_and_lora(
+            inner,
+            None,
+            false,
+            None,
+            Some(Arc::new(policy)),
+            None,
+        );
+        let request = Context::new(request(None, false));
+
+        let committed = router
+            .select(
+                &request,
+                RequestPhase::Aggregated,
+                SelectionIntent::Committed,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.target.worker_id, expected);
+        assert_eq!(router.occupancy_for_test(expected), 1);
+        drop(committed);
+        assert_eq!(router.occupancy_for_test(expected), 0);
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn lora_constraint_uses_common_advisory_and_reservation_lifecycle() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
@@ -688,6 +908,8 @@ mod tests {
             None,
             false,
             Some((filter, estimator.clone())),
+            None,
+            None,
         );
         let mut content = request(None, false);
         content.routing_mut().lora_name = Some("adapter".to_string());
@@ -719,6 +941,96 @@ mod tests {
         assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
         drop(committed);
         assert!(estimator.get_inflight_counts().is_empty());
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn lora_round_robin_cursor_is_independent_from_base_requests() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("lora_round_robin_cursor".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let real_worker = client.wait_for_instances().await.unwrap()[0].id();
+        let workers = vec![
+            real_worker,
+            real_worker.wrapping_add(1),
+            real_worker.wrapping_add(2),
+        ];
+        client.override_discovered_instances(workers.clone());
+        let lora_workers = &workers[..2];
+
+        let table = LoraRoutingTable::new();
+        table.update_allocation(
+            "adapter".to_string(),
+            LoraReplicaConfig {
+                lora_name: "adapter".to_string(),
+                replica_factor: 2,
+                replica_set: lora_workers
+                    .iter()
+                    .map(|worker_id| WorkerWithDpRank::new(*worker_id, 0))
+                    .collect(),
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        let filter = Arc::new(LoraFilter::new(table, LoraStateTracker::new()));
+        let estimator = Arc::new(LoadEstimator::new());
+        let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let router = SessionAffinityPushRouter::new_with_coordinator_and_lora(
+            inner,
+            None,
+            false,
+            Some((filter, estimator)),
+            None,
+            None,
+        );
+        let base_request = Context::new(request(None, false));
+        let mut lora_content = request(None, false);
+        lora_content.routing_mut().lora_name = Some("adapter".to_string());
+        let lora_request = Context::new(lora_content);
+        let mut selected_lora_workers = Vec::new();
+
+        for _ in 0..2 {
+            let base = router
+                .select(
+                    &base_request,
+                    RequestPhase::Aggregated,
+                    SelectionIntent::Committed,
+                    None,
+                )
+                .await
+                .unwrap();
+            drop(base);
+
+            let lora = router
+                .select(
+                    &lora_request,
+                    RequestPhase::Aggregated,
+                    SelectionIntent::Committed,
+                    None,
+                )
+                .await
+                .unwrap();
+            selected_lora_workers.push(lora.target.worker_id);
+            drop(lora);
+        }
+
+        assert_ne!(
+            selected_lora_workers[0], selected_lora_workers[1],
+            "base requests must not pin the LoRA round-robin cursor to one replica"
+        );
 
         runtime.shutdown();
     }

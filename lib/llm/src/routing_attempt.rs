@@ -56,16 +56,34 @@ pub(crate) trait AttemptBackend: Send + Sync {
 
     fn observe_advisory(&self, request: &SingleIn<PreprocessedRequest>, attempt: &Self::Attempt);
 
-    async fn dispatch<M, F>(
+    async fn begin_dispatch(
+        &self,
+        request: &mut SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
+        kind: AttemptKind,
+    ) -> Result<AffinityTarget, Error>;
+
+    fn after_prepare(
+        &self,
+        request: &mut SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
+    );
+
+    async fn dispatch_prepared(
         &self,
         request: SingleIn<PreprocessedRequest>,
-        attempt: Self::Attempt,
+        attempt: &mut Self::Attempt,
         kind: AttemptKind,
-        prepare: F,
-    ) -> Result<(M, AffinityTarget, ManyOut<LlmResponse>), Error>
-    where
-        M: Send,
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error> + Send;
+    ) -> Result<ManyOut<LlmResponse>, Error>;
+
+    async fn abort(&self, attempt: &mut Self::Attempt);
+
+    fn finish_dispatch(
+        &self,
+        attempt: Self::Attempt,
+        target: AffinityTarget,
+        stream: ManyOut<LlmResponse>,
+    ) -> ManyOut<LlmResponse>;
 }
 
 fn phase(request: &PreprocessedRequest) -> RequestPhase {
@@ -181,6 +199,50 @@ fn advisory_response<B: AttemptBackend>(
     ResponseStream::new(Box::pin(stream::iter([response])), stream_context)
 }
 
+pub(crate) async fn dispatch_attempt<B, M, F>(
+    backend: &B,
+    mut request: SingleIn<PreprocessedRequest>,
+    mut attempt: B::Attempt,
+    kind: AttemptKind,
+    prepare: F,
+) -> Result<(M, AffinityTarget, ManyOut<LlmResponse>), Error>
+where
+    B: AttemptBackend,
+    M: Send,
+    F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error> + Send,
+{
+    let target = match backend
+        .begin_dispatch(&mut request, &mut attempt, kind)
+        .await
+    {
+        Ok(target) => target,
+        Err(error) => {
+            backend.abort(&mut attempt).await;
+            return Err(error);
+        }
+    };
+    let metadata = match prepare(&mut request, target) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            backend.abort(&mut attempt).await;
+            return Err(error);
+        }
+    };
+    backend.after_prepare(&mut request, &mut attempt);
+    let stream = match backend.dispatch_prepared(request, &mut attempt, kind).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            backend.abort(&mut attempt).await;
+            return Err(error);
+        }
+    };
+    Ok((
+        metadata,
+        target,
+        backend.finish_dispatch(attempt, target, stream),
+    ))
+}
+
 pub(crate) async fn generate<B: AttemptBackend>(
     backend: &B,
     request: SingleIn<PreprocessedRequest>,
@@ -199,9 +261,10 @@ pub(crate) async fn generate<B: AttemptBackend>(
     }
 
     drop(route_guard);
-    let dispatch = backend
-        .dispatch(request, attempt, AttemptKind::Generate, |_, _| Ok(()))
-        .await;
+    let dispatch = dispatch_attempt(backend, request, attempt, AttemptKind::Generate, |_, _| {
+        Ok(())
+    })
+    .await;
     let ((), target, stream) = match dispatch {
         Ok(result) => result,
         Err(error) => {
@@ -231,9 +294,7 @@ where
     let (attempt, mut operation) =
         select_with_affinity(backend, &request, phase, SelectionIntent::Committed).await?;
     drop(route_guard);
-    let dispatch = backend
-        .dispatch(request, attempt, AttemptKind::Prefill, prepare)
-        .await;
+    let dispatch = dispatch_attempt(backend, request, attempt, AttemptKind::Prefill, prepare).await;
     let (metadata, target, stream) = match dispatch {
         Ok(result) => result,
         Err(error) => {

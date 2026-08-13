@@ -36,7 +36,7 @@ use crate::{
 
 use dynamo_kv_router::{
     config::min_initial_workers_from_env,
-    selector::{DefaultWorkerSelector, WorkerSelector},
+    selector::{CacheUnawareWorkerSelectionPolicy, DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     DistributedRuntime,
@@ -159,6 +159,7 @@ fn validate_router_mode_for_lora(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preprocessed_backend_engine<Sel>(
     router: LlmPushRouter,
     router_mode: RouterMode,
@@ -166,6 +167,8 @@ fn preprocessed_backend_engine<Sel>(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    simple_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
+    lora_simple_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -202,6 +205,8 @@ where
                 affinity,
                 router_mode.is_direct_routing(),
                 lora,
+                simple_policy,
+                lora_simple_policy,
             ))
         }
     };
@@ -231,6 +236,8 @@ pub async fn build_preprocessed_routing(
         encoder_chooser,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
+        None,
+        None,
     )
     .await
 }
@@ -246,6 +253,8 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    simple_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
+    lora_simple_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -285,7 +294,7 @@ where
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
-    let router = LlmPushRouter::from_client_with_state(
+    let mut router = LlmPushRouter::from_client_with_state(
         router_client,
         router_mode,
         monitor_arc,
@@ -293,6 +302,9 @@ where
         cache_key_extractor,
     )
     .await?;
+    if simple_policy.is_some() {
+        router.enable_policy_occupancy().await;
+    }
 
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
@@ -319,6 +331,8 @@ where
         &model_manager,
         &endpoint_id,
         affinity,
+        simple_policy,
+        lora_simple_policy,
     )?;
     Ok(PreprocessedRouting {
         backend_engine,

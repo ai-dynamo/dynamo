@@ -12,9 +12,10 @@ pub use default::DefaultWorkerSelector;
 
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy,
+    CacheUnawareRequestContext, CacheUnawareWorkerSelectionPolicy, ScoredWorkerCandidate,
+    WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicy,
 };
 pub use simple::{SimpleRoutingPolicy, SimpleWorkerPicker, SimpleWorkerScorer};
 
@@ -87,7 +88,6 @@ impl<'a> WorkerSelectionInput<'a> {
             has_tier_overlap_blocks,
             use_default_cache_fallbacks: inputs.contains(WorkerInputs::DEFAULT_POLICY_CACHE),
             context: WorkerSelectionContext {
-                request,
                 request_id: request.mode.request_id().unwrap_or("-"),
                 request_blocks: request.request_blocks(block_size),
                 block_size,
@@ -98,6 +98,11 @@ impl<'a> WorkerSelectionInput<'a> {
                     .router_config_override
                     .as_ref()
                     .and_then(|config| config.router_temperature),
+                session_context: request.session_context.as_ref(),
+                expected_output_tokens: request.expected_output_tokens,
+                priority_jump: request.priority_jump,
+                strict_priority: request.strict_priority,
+                advisory: !request.mode.is_tracked(),
             },
         }
     }

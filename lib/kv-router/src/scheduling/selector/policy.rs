@@ -5,6 +5,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::BitOr;
 
+use dynamo_router_policy::RouteCandidates;
+use parking_lot::Mutex;
+
 use super::{
     DefaultWorkerPicker, LogitWeights, WorkerSelectionInput, WorkerSelector,
     select_worker_with_policy,
@@ -17,7 +20,6 @@ use crate::scheduling::types::{
 };
 
 pub struct WorkerSelectionContext<'a> {
-    pub(super) request: &'a SchedulingRequest,
     pub(super) request_id: &'a str,
     pub(super) request_blocks: u64,
     pub(super) block_size: u32,
@@ -25,6 +27,11 @@ pub struct WorkerSelectionContext<'a> {
     pub(super) weights: LogitWeights,
     pub(super) min_active_prefill_tokens: usize,
     pub(super) router_temperature_override: Option<f64>,
+    pub(super) session_context: Option<&'a SessionContext>,
+    pub(super) expected_output_tokens: Option<u32>,
+    pub(super) priority_jump: f64,
+    pub(super) strict_priority: u32,
+    pub(super) advisory: bool,
 }
 
 pub struct WorkerCandidate {
@@ -148,6 +155,19 @@ pub trait WorkerPicker: Send {
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError>;
+
+    /// Return one row without committing picker-local state.
+    ///
+    /// Custom policies used by advisory routing must implement this method.
+    fn peek(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        Err(WorkerSelectionPolicyError::failed(
+            "this picker does not support advisory selection",
+        ))
+    }
 }
 
 impl WorkerSelectionContext<'_> {
@@ -165,23 +185,28 @@ impl WorkerSelectionContext<'_> {
 
     /// Return the session metadata available to worker selection.
     pub fn session_context(&self) -> Option<&SessionContext> {
-        self.request.session_context.as_ref()
+        self.session_context
     }
 
     pub fn expected_output_tokens(&self) -> Option<u32> {
-        self.request.expected_output_tokens
+        self.expected_output_tokens
     }
 
     pub fn priority_jump(&self) -> f64 {
-        self.request.priority_jump
+        self.priority_jump
     }
 
     pub fn strict_priority(&self) -> u32 {
-        self.request.strict_priority
+        self.strict_priority
     }
 
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
+    }
+
+    /// Return whether this is a read-only advisory selection.
+    pub fn is_advisory(&self) -> bool {
+        self.advisory
     }
 }
 
@@ -346,6 +371,53 @@ pub struct WorkerSelectionPolicy {
     state: WorkerSelectionPolicyState,
 }
 
+/// Request metadata exposed to a custom cache-unaware worker policy.
+pub struct CacheUnawareRequestContext<'a> {
+    request_id: &'a str,
+    request_tokens: usize,
+    session_context: Option<&'a SessionContext>,
+    expected_output_tokens: Option<u32>,
+    priority_jump: f64,
+    strict_priority: u32,
+    advisory: bool,
+}
+
+impl<'a> CacheUnawareRequestContext<'a> {
+    pub fn new(request_id: &'a str, request_tokens: usize, advisory: bool) -> Self {
+        Self {
+            request_id,
+            request_tokens,
+            session_context: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            advisory,
+        }
+    }
+
+    pub fn with_session_context(mut self, session_context: Option<&'a SessionContext>) -> Self {
+        self.session_context = session_context;
+        self
+    }
+
+    pub fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
+        self.expected_output_tokens = expected_output_tokens;
+        self
+    }
+
+    pub fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
+        self.priority_jump = priority_jump;
+        self.strict_priority = strict_priority;
+        self
+    }
+}
+
+/// Thread-safe host adapter for custom filters, scorers, and pickers in
+/// cache-unaware routing modes.
+pub struct CacheUnawareWorkerSelectionPolicy {
+    state: Mutex<CustomWorkerSelectionState>,
+}
+
 impl WorkerSelectionPolicy {
     pub fn new(
         kv_router_config: KvRouterConfig,
@@ -397,6 +469,152 @@ impl WorkerSelectionPolicy {
             worker_type,
             state: WorkerSelectionPolicyState::Default(picker),
         }
+    }
+
+    /// Consume a custom KV policy and host it in a cache-unaware router.
+    pub fn into_cache_unaware(
+        self,
+    ) -> Result<CacheUnawareWorkerSelectionPolicy, WorkerSelectionPolicyError> {
+        match self.state {
+            WorkerSelectionPolicyState::Custom(state) => Ok(CacheUnawareWorkerSelectionPolicy {
+                state: Mutex::new(state.into_inner()),
+            }),
+            WorkerSelectionPolicyState::Default(_) => Err(WorkerSelectionPolicyError::failed(
+                "only custom filter/scorer/picker policies can be adapted to cache-unaware routing",
+            )),
+        }
+    }
+}
+
+impl CacheUnawareWorkerSelectionPolicy {
+    /// Run the custom policy over a borrowed runtime candidate table.
+    ///
+    /// Cache-unaware routing supplies worker identity and active-request load.
+    /// Policies requesting KV-cache or routing-taint columns are rejected.
+    pub fn pick_worker<C, F>(
+        &self,
+        request: &CacheUnawareRequestContext<'_>,
+        candidates_source: &C,
+        worker_id: F,
+    ) -> Result<u64, WorkerSelectionPolicyError>
+    where
+        C: RouteCandidates + ?Sized,
+        F: Fn(usize) -> u64,
+    {
+        let mut state = self.state.lock();
+        let required_inputs = state.filter_inputs | state.scorer_picker_inputs;
+        if required_inputs.without(WorkerInputs::LOAD) != WorkerInputs::NONE {
+            return Err(WorkerSelectionPolicyError::failed(
+                "cache-unaware routing supports only worker identity and active-request load inputs",
+            ));
+        }
+        let context = WorkerSelectionContext {
+            request_id: request.request_id,
+            request_blocks: request.request_tokens as u64,
+            block_size: 1,
+            track_prefill_tokens: false,
+            weights: LogitWeights {
+                overlap_score_credit: 0.0,
+                overlap_score_credit_decay: 0.0,
+                prefill_load_scale: 0.0,
+                shared_cache_multiplier: 0.0,
+            },
+            min_active_prefill_tokens: 0,
+            router_temperature_override: None,
+            session_context: request.session_context,
+            expected_output_tokens: request.expected_output_tokens,
+            priority_jump: request.priority_jump,
+            strict_priority: request.strict_priority,
+            advisory: request.advisory,
+        };
+        let CustomWorkerSelectionState {
+            filters,
+            scorers,
+            picker,
+            filter_inputs,
+            scorer_picker_inputs,
+            picker_inputs,
+            unscored_candidates,
+            candidates,
+            cache_inputs,
+            load_inputs,
+            routing_inputs,
+        } = &mut *state;
+        unscored_candidates.clear();
+        candidates.clear();
+        cache_inputs.clear();
+        load_inputs.clear();
+        routing_inputs.clear();
+
+        for index in 0..candidates_source.len() {
+            let candidate_for = |inputs| WorkerCandidate {
+                worker: WorkerWithDpRank::new(worker_id(index), 0),
+                inputs,
+                cache: WorkerCacheInput::default(),
+                load: WorkerLoadInput {
+                    active_requests: candidates_source.load(index) as usize,
+                    ..Default::default()
+                },
+                routing: WorkerRoutingInput::default(),
+            };
+            let filter_candidate = candidate_for(*filter_inputs);
+            let mut keep = true;
+            for filter in filters.iter_mut() {
+                if !filter.keep(&context, &filter_candidate)? {
+                    keep = false;
+                    break;
+                }
+            }
+            if keep {
+                unscored_candidates.push(candidate_for(*scorer_picker_inputs));
+            }
+        }
+
+        for candidate in unscored_candidates.iter() {
+            let mut cost = 0.0;
+            for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
+                let contribution = scorer.score(&context, candidate)?;
+                cost += contribution;
+                if !contribution.is_finite() || !cost.is_finite() {
+                    return Err(WorkerSelectionPolicyError::NonFiniteCost {
+                        scorer_index,
+                        row: candidates.len(),
+                    });
+                }
+            }
+            candidates.push(ScoredWorkerCandidate {
+                worker: candidate.worker,
+                cost,
+            });
+            if picker_inputs.contains(WorkerInputs::LOAD) {
+                load_inputs.push(candidate.load);
+            }
+        }
+        if candidates.is_empty() {
+            return Err(WorkerSelectionPolicyError::failed(
+                "all eligible workers were rejected by policy filters",
+            ));
+        }
+        let input = WorkerInputView {
+            candidates,
+            cache: None,
+            load: picker_inputs
+                .contains(WorkerInputs::LOAD)
+                .then_some(load_inputs.as_slice()),
+            routing: None,
+        };
+        let row = if request.advisory {
+            picker.peek(&context, input)?
+        } else {
+            picker.pick(&context, input)?
+        };
+        candidates
+            .get(row)
+            .map(|candidate| candidate.worker.worker_id)
+            .ok_or(WorkerSelectionPolicyError::InvalidPickerRow {
+                row,
+                candidate_count: candidates.len(),
+            })
     }
 }
 
@@ -974,5 +1192,65 @@ mod tests {
             panic!("expected custom policy state");
         };
         assert!(state.borrow().unscored_candidates.is_empty());
+    }
+
+    struct CacheUnawareRows(Vec<u64>);
+
+    impl RouteCandidates for CacheUnawareRows {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn load(&self, index: usize) -> u64 {
+            self.0[index]
+        }
+    }
+
+    #[test]
+    fn cache_unaware_adapter_runs_custom_scorer_and_picker() {
+        use crate::scheduling::selector::{
+            SimpleRoutingPolicy, SimpleWorkerPicker, SimpleWorkerScorer,
+        };
+
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            vec![Box::new(SimpleWorkerScorer::new(
+                SimpleRoutingPolicy::LeastLoaded,
+            ))],
+            Box::new(SimpleWorkerPicker::new(SimpleRoutingPolicy::LeastLoaded)),
+        )
+        .into_cache_unaware()
+        .unwrap();
+        let rows = CacheUnawareRows(vec![9, 2, 6]);
+        let request = CacheUnawareRequestContext::new("request", 32, false);
+
+        let selected = policy
+            .pick_worker(&request, &rows, |index| [41, 42, 43][index])
+            .unwrap();
+        assert_eq!(selected, 42);
+    }
+
+    #[test]
+    fn cache_unaware_advisory_does_not_advance_picker_state() {
+        use crate::scheduling::selector::{SimpleRoutingPolicy, SimpleWorkerPicker};
+
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            Vec::new(),
+            Box::new(SimpleWorkerPicker::new(SimpleRoutingPolicy::RoundRobin)),
+        )
+        .into_cache_unaware()
+        .unwrap();
+        let rows = CacheUnawareRows(vec![0, 0]);
+        let advisory = CacheUnawareRequestContext::new("query", 8, true);
+        let committed = CacheUnawareRequestContext::new("request", 8, false);
+        let worker_id = |index| [7, 8][index];
+
+        assert_eq!(policy.pick_worker(&advisory, &rows, worker_id).unwrap(), 7);
+        assert_eq!(policy.pick_worker(&advisory, &rows, worker_id).unwrap(), 7);
+        assert_eq!(policy.pick_worker(&committed, &rows, worker_id).unwrap(), 7);
+        assert_eq!(policy.pick_worker(&committed, &rows, worker_id).unwrap(), 8);
     }
 }

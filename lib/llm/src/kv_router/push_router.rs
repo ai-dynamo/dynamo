@@ -13,7 +13,7 @@ use dynamo_runtime::{
     error::DynamoError,
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn, async_trait,
+        ResolvedRoute, ResponseStream, RouteFallback, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
@@ -134,6 +134,7 @@ where
     selection: WorkerSelection,
     guard: Option<RequestGuard<Sel>>,
     exact: bool,
+    route: Option<ResolvedRoute>,
 }
 
 impl<Sel> KvPushRouter<Sel>
@@ -372,127 +373,6 @@ where
         Ok(guard)
     }
 
-    async fn dispatch_selection<M, F>(
-        &self,
-        mut request: SingleIn<PreprocessedRequest>,
-        selection: WorkerSelection,
-        mut guard: RequestGuard<Sel>,
-        exact: bool,
-        prepare: F,
-    ) -> Result<(M, AffinityTarget, ManyOut<Annotated<LLMEngineOutput>>), Error>
-    where
-        M: Send,
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error> + Send,
-    {
-        let context_id = request.context().id().to_string();
-        let request_context = request.context().clone();
-        let phase = request
-            .tracker
-            .as_ref()
-            .map(|tracker| tracker.phase())
-            .unwrap_or(RequestPhase::Aggregated);
-        let phase_label = phase.to_string();
-        guard.start_dispatch(&phase_label);
-        self.warn_if_output_replay_annotation_ignored(&request, &selection);
-
-        request.routing_mut().dp_rank = Some(selection.worker.dp_rank);
-        let _ = request
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|args| args.get_mut("kv_transfer_params"))
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|params| params.remove("router_hint"));
-        if let Some(router_hint) = selection.router_hint.as_ref()
-            && let Err(error) = request.attach_router_hint(router_hint)
-        {
-            tracing::warn!(
-                request_id = %context_id,
-                worker_id = selection.worker.worker_id,
-                error = %error,
-                "Failed to attach router_hint to backend request"
-            );
-        }
-        let selected_target = route_target(selection.worker);
-        let metadata = match prepare(&mut request, selected_target) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                guard.abort().await;
-                return Err(error);
-            }
-        };
-        let (backend_input, context) = request.into_parts();
-        let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start();
-
-        let dispatch = async {
-            if exact {
-                self.inner
-                    .dispatch_exact(updated_request, selection.worker.worker_id)
-                    .await
-                    .map(|stream| (selection.worker.worker_id, stream))
-            } else {
-                self.inner
-                    .direct_within_prepared(
-                        updated_request,
-                        selection.worker.worker_id,
-                        selection.fallback_worker_ids.as_ref(),
-                        |request, worker_id| {
-                            if worker_id != selection.worker.worker_id {
-                                request.routing_mut().dp_rank = None;
-                            }
-                            Ok(worker_id)
-                        },
-                    )
-                    .await
-            }
-        };
-        let dispatch_result = cancel_on_stop(
-            request_context.as_ref(),
-            dispatch.instrument(tracing::info_span!(
-                "kv_router.route_request",
-                request_id = %context_id,
-                worker_id = selection.worker.worker_id,
-                dp_rank = selection.worker.dp_rank,
-                overlap_blocks = selection.overlap_amount,
-                phase = ?phase,
-            )),
-        )
-        .await
-        .and_then(|result| result);
-        let (resolved_worker_id, response_stream) = match dispatch_result {
-            Ok(result) => result,
-            Err(error) => {
-                let typed_error = error
-                    .chain()
-                    .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
-                guard.record_migration_failure(typed_error);
-                guard.abort().await;
-                return Err(error);
-            }
-        };
-
-        let resolved_target = if resolved_worker_id == selection.worker.worker_id {
-            route_target(selection.worker)
-        } else {
-            guard.record_resolved_worker(resolved_worker_id, None);
-            AffinityTarget::new(resolved_worker_id, None)
-        };
-
-        guard.mark_dispatched();
-        let stream_context = response_stream.context();
-        let wrapped_stream = Box::pin(monitor_response_stream(
-            response_stream,
-            stream_context.clone(),
-            guard,
-        ));
-        Ok((
-            metadata,
-            resolved_target,
-            ResponseStream::new(wrapped_stream, stream_context),
-        ))
-    }
-
     fn warn_if_output_replay_annotation_ignored(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -573,6 +453,7 @@ where
             selection,
             guard,
             exact: pinned_target.is_some(),
+            route: None,
         })
     }
 
@@ -600,76 +481,160 @@ where
             .observe(request.token_ids.len() as f64);
     }
 
-    async fn dispatch<M, F>(
+    async fn begin_dispatch(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
-        attempt: Self::Attempt,
+        request: &mut SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
         kind: AttemptKind,
-        prepare: F,
-    ) -> Result<(M, AffinityTarget, ManyOut<Annotated<LLMEngineOutput>>), Error>
-    where
-        M: Send,
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error> + Send,
-    {
-        let mut attempt = attempt;
+    ) -> Result<AffinityTarget, Error> {
         let exact = kind == AttemptKind::Prefill || attempt.exact;
-        // Migration-disabled requests keep the original single transport lookup at dispatch.
-        // Prevalidation exists only to atomically acquire a replacement booking before a
-        // migration attempt releases the failed one.
-        if !exact && request.migration_state.is_some() {
-            loop {
-                let selected_worker = attempt.selection.worker.worker_id;
-                debug_assert!(
-                    attempt
-                        .selection
-                        .fallback_worker_ids
-                        .as_ref()
-                        .is_none_or(|workers| workers.contains(&selected_worker))
-                );
-                let Err(error) = self
-                    .inner
-                    .validate_exact_target(route_target(attempt.selection.worker))
-                else {
-                    break;
-                };
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        let route = loop {
+            let selected_worker = attempt.selection.worker.worker_id;
+            match self
+                .inner
+                .resolve_route(selected_worker, RouteFallback::Deny)
+            {
+                Ok(route) => break route,
+                Err(error) if exact => return Err(error),
+                Err(error) => {
+                    let typed_error = error
+                        .chain()
+                        .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
+                    request
+                        .migration_state
+                        .get_or_insert_with(Default::default)
+                        .record_failure(selected_worker, typed_error);
+                    if let Some(mut guard) = attempt.guard.take() {
+                        guard.abort().await;
+                    }
+                    *attempt = self
+                        .select(request, phase, SelectionIntent::Committed, None)
+                        .await?;
+                }
+            }
+        };
 
+        let context_id = request.context().id().to_string();
+        let phase_label = phase.to_string();
+        attempt
+            .guard
+            .as_mut()
+            .expect("committed KV attempt has a request guard")
+            .start_dispatch(&phase_label);
+        self.warn_if_output_replay_annotation_ignored(request, &attempt.selection);
+        request.routing_mut().dp_rank = Some(attempt.selection.worker.dp_rank);
+        let _ = request
+            .extra_args
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|args| args.get_mut("kv_transfer_params"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|params| params.remove("router_hint"));
+        if let Some(router_hint) = attempt.selection.router_hint.as_ref()
+            && let Err(error) = request.attach_router_hint(router_hint)
+        {
+            tracing::warn!(
+                request_id = %context_id,
+                worker_id = attempt.selection.worker.worker_id,
+                error = %error,
+                "Failed to attach router_hint to backend request"
+            );
+        }
+        let target = route_target(attempt.selection.worker);
+        attempt.route = Some(route);
+        Ok(target)
+    }
+
+    fn after_prepare(
+        &self,
+        _request: &mut SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
+    ) {
+        attempt
+            .guard
+            .as_mut()
+            .expect("prepared KV attempt has a request guard")
+            .record_prefill_start();
+    }
+
+    async fn dispatch_prepared(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        attempt: &mut Self::Attempt,
+        _kind: AttemptKind,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let context_id = request.context().id().to_string();
+        let request_context = request.context().clone();
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        let worker = attempt.selection.worker;
+        let overlap_blocks = attempt.selection.overlap_amount;
+        let route = attempt
+            .route
+            .take()
+            .expect("prepared KV attempt has a resolved route");
+        let (backend_input, context) = request.into_parts();
+        let updated_request = context.map(|_| backend_input);
+        let dispatch = self.inner.dispatch_resolved(updated_request, route);
+        let result = cancel_on_stop(
+            request_context.as_ref(),
+            dispatch.instrument(tracing::info_span!(
+                "kv_router.route_request",
+                request_id = %context_id,
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                overlap_blocks,
+                phase = ?phase,
+            )),
+        )
+        .await
+        .and_then(|result| result);
+        match result {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
                 let typed_error = error
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
-                request
-                    .migration_state
-                    .get_or_insert_with(Default::default)
-                    .record_failure(selected_worker, typed_error);
-                let phase = request
-                    .tracker
-                    .as_ref()
-                    .map(|tracker| tracker.phase())
-                    .unwrap_or(RequestPhase::Aggregated);
-                let replacement = self
-                    .select(&request, phase, SelectionIntent::Committed, None)
-                    .await;
-                // The scheduler owns both bookings. Acquire the replacement before
-                // conditionally freeing the old worker so there is no unbooked gap.
-                attempt
-                    .guard
-                    .as_mut()
-                    .expect("committed KV attempt has a request guard")
-                    .abort()
-                    .await;
-                attempt = replacement?;
+                if let Some(guard) = attempt.guard.as_mut() {
+                    guard.record_migration_failure(typed_error);
+                }
+                Err(error)
             }
         }
+    }
 
-        let KvAttempt {
-            selection,
+    async fn abort(&self, attempt: &mut Self::Attempt) {
+        if let Some(mut guard) = attempt.guard.take() {
+            guard.abort().await;
+        }
+    }
+
+    fn finish_dispatch(
+        &self,
+        mut attempt: Self::Attempt,
+        _target: AffinityTarget,
+        stream: ManyOut<Annotated<LLMEngineOutput>>,
+    ) -> ManyOut<Annotated<LLMEngineOutput>> {
+        let mut guard = attempt
+            .guard
+            .take()
+            .expect("dispatched KV attempt has a request guard");
+        guard.mark_dispatched();
+        let stream_context = stream.context();
+        let wrapped = Box::pin(monitor_response_stream(
+            stream,
+            stream_context.clone(),
             guard,
-            exact: _,
-        } = attempt;
-        let guard = guard.expect("committed KV attempt has a request guard");
-        let (metadata, target, stream) = self
-            .dispatch_selection(request, selection, guard, true, prepare)
-            .await?;
-        Ok((metadata, target, stream))
+        ));
+        ResponseStream::new(wrapped, stream_context)
     }
 }
 
@@ -1061,28 +1026,12 @@ mod tests {
         failed_input.migration_state = Some(Default::default());
         let migration_state = failed_input.migration_state.clone().unwrap();
         let failed_request = Context::new(failed_input);
-        let (mut failed_selection, _) = router
-            .select_with_affinity(&failed_request, RequestPhase::Aggregated, false)
-            .await
-            .unwrap();
-        let failed_worker = failed_selection.worker.worker_id;
-        let failed_dispatch_guard = router
-            .track_selection(&failed_request, &mut failed_selection, false)
-            .await
-            .unwrap();
         assert!(
-            router
-                .dispatch_selection(
-                    failed_request,
-                    failed_selection,
-                    failed_dispatch_guard,
-                    false,
-                    |_, _| Ok(()),
-                )
+            crate::routing_attempt::generate(&router, failed_request)
                 .await
                 .is_err()
         );
-        assert_eq!(migration_state.excluded_worker_ids(), vec![failed_worker]);
+        assert_eq!(migration_state.excluded_worker_ids().len(), 1);
         assert_eq!(metrics.requests_started_total().get(), started_before + 2);
         assert_eq!(metrics.requests_total.get(), completed_before);
 
@@ -1382,9 +1331,18 @@ mod tests {
         runtime.shutdown();
     }
 
-    #[derive(Default)]
     struct RejectFirstDispatch {
         attempts: Mutex<Vec<(u64, Vec<u64>)>>,
+        reject_next: AtomicBool,
+    }
+
+    impl Default for RejectFirstDispatch {
+        fn default() -> Self {
+            Self {
+                attempts: Mutex::new(Vec::new()),
+                reject_next: AtomicBool::new(true),
+            }
+        }
     }
 
     #[async_trait]
@@ -1401,13 +1359,12 @@ mod tests {
                 .as_ref()
                 .map(|state| state.excluded_worker_ids())
                 .unwrap_or_default();
-            let attempt = {
+            {
                 let mut attempts = self.attempts.lock().unwrap();
                 attempts.push((worker_id, excluded_worker_ids));
-                attempts.len()
-            };
+            }
 
-            if attempt == 1 {
+            if self.reject_next.swap(false, Ordering::AcqRel) {
                 let output = Annotated {
                     data: None,
                     id: None,
@@ -1546,6 +1503,67 @@ mod tests {
                 .unwrap();
         let chooser = Arc::new(chooser);
         let kv_router = Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap());
+
+        let mut stale_input = request();
+        stale_input.migration_state = Some(Default::default());
+        let stale_request = Context::new(stale_input);
+        let stale_attempt = kv_router
+            .select(
+                &stale_request,
+                RequestPhase::Aggregated,
+                SelectionIntent::Committed,
+                None,
+            )
+            .await
+            .unwrap();
+        let stale_worker = stale_attempt.selection.worker.worker_id;
+        let stale_endpoint = if first_worker_drt.connection_id() == stale_worker {
+            first_worker_endpoint.clone()
+        } else {
+            assert_eq!(second_worker_drt.connection_id(), stale_worker);
+            second_worker_endpoint.clone()
+        };
+        stale_endpoint.unregister_endpoint_instance().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.instance_ids().contains(&stale_worker) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removed worker must leave discovery");
+
+        // This attempt exercises the pre-dispatch worker-loss path: the old scheduler booking
+        // must be released before the same request ID is admitted on its replacement.
+        dispatch.reject_next.store(false, Ordering::Release);
+        let ((), replacement, replacement_stream) = crate::routing_attempt::dispatch_attempt(
+            kv_router.as_ref(),
+            stale_request,
+            stale_attempt,
+            AttemptKind::Generate,
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_ne!(replacement.worker_id, stale_worker);
+        let replacement_responses = replacement_stream.collect::<Vec<_>>().await;
+        assert_eq!(replacement_responses.len(), 1);
+        assert!(replacement_responses[0].error.is_none());
+        let prevalidation_attempts = dispatch.attempts.lock().unwrap().clone();
+        assert_eq!(prevalidation_attempts.len(), 1);
+        assert_eq!(prevalidation_attempts[0].0, replacement.worker_id);
+        assert_eq!(prevalidation_attempts[0].1, vec![stale_worker]);
+        dispatch.attempts.lock().unwrap().clear();
+        dispatch.reject_next.store(true, Ordering::Release);
+
+        stale_endpoint.register_endpoint_instance().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.instance_ids().len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restored worker must return to discovery");
+
         let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             kv_router;
         let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));

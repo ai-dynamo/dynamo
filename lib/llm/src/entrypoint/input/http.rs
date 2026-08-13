@@ -13,7 +13,7 @@ use crate::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
     },
-    kv_router::WorkerSelectorFactory,
+    kv_router::{CacheUnawarePolicyFactory, WorkerSelectorFactory},
     local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
     namespace::NamespaceFilter,
     types::openai::{
@@ -83,11 +83,18 @@ impl HttpFrontend {
 
         match self.worker_selection_policy_factory {
             Some(factory) => {
+                let cache_unaware_source = factory.clone();
+                let cache_unaware_factory: CacheUnawarePolicyFactory =
+                    Arc::new(move |config, worker_type, partition| {
+                        let policy = cache_unaware_source(config, worker_type, partition);
+                        Ok(Arc::new(policy.into_cache_unaware()?))
+                    });
                 run_with_worker_selector_factory(
                     distributed_runtime,
                     engine_config,
                     self.frontend_route_extensions,
                     factory,
+                    Some(cache_unaware_factory),
                 )
                 .await
             }
@@ -99,6 +106,7 @@ impl HttpFrontend {
                     Arc::new(|config, worker_type, _partition| {
                         DefaultWorkerSelector::new(Some(config.clone()), worker_type)
                     }),
+                    None,
                 )
                 .await
             }
@@ -133,6 +141,7 @@ async fn run_with_worker_selector_factory<Sel>(
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    cache_unaware_policy_factory: Option<CacheUnawarePolicyFactory>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -224,6 +233,7 @@ where
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
                 worker_selector_factory.clone(),
+                cache_unaware_policy_factory,
             )
             .await?;
             http_service
@@ -311,6 +321,7 @@ async fn run_watcher<Sel>(
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    cache_unaware_policy_factory: Option<CacheUnawarePolicyFactory>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -333,6 +344,7 @@ where
         prefill_load_estimator,
         metrics.clone(),
         worker_selector_factory,
+        cache_unaware_policy_factory,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);

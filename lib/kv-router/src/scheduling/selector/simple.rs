@@ -167,6 +167,22 @@ impl WorkerPicker for SimpleWorkerPicker {
             .map(|decision| decision.index)
             .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible workers"))
     }
+
+    fn peek(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        if self.policy() == RoutingPolicy::DeviceAwareWeighted {
+            return Err(WorkerSelectionPolicyError::failed(
+                "device-aware routing requires runtime-owned device and embedding-cache inputs",
+            ));
+        }
+        self.inner
+            .peek(&NativeRows { input }, RouteContext::default())
+            .map(|decision| decision.index)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible workers"))
+    }
 }
 
 #[cfg(test)]

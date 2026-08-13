@@ -590,6 +590,23 @@ impl Client {
         self.instance_source.borrow().clone()
     }
 
+    /// Clone one discovered instance without cloning the full discovery snapshot.
+    pub fn find_instance(&self, instance_id: u64) -> Option<Instance> {
+        self.instance_source
+            .borrow()
+            .iter()
+            .find(|instance| instance.id() == instance_id)
+            .cloned()
+    }
+
+    /// Check the current discovery snapshot without cloning it.
+    pub fn has_instance(&self, instance_id: u64) -> bool {
+        self.instance_source
+            .borrow()
+            .iter()
+            .any(|instance| instance.id() == instance_id)
+    }
+
     pub fn instance_ids(&self) -> Vec<u64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
