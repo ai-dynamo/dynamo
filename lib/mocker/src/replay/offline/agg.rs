@@ -52,9 +52,8 @@ use crate::loadgen::{
 };
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
-use crate::replay::{
-    ReplayRequestPool, ReplayTerminalStatus, ReplayWorkerLifecycleStatus, TraceCollector,
-};
+use crate::replay::collector::{DecodeWorkerAccountingHandle, TraceCollector};
+use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, ReplayWorkerLifecycleStatus};
 use anyhow::bail;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -227,6 +226,9 @@ pub(in crate::replay) struct AggRuntimeImpl<
     /// Dense engine worker index to authored pool/worker identity. Pool
     /// membership is explicit and never inferred from numeric ID ranges.
     interactive_worker_targets: Vec<WorkerTarget>,
+    /// Dense, append-only engine worker index to the collector's accounting
+    /// arena. Entries outlive engine tombstones and are never reused.
+    decode_worker_accounting_handles: Vec<DecodeWorkerAccountingHandle>,
     interactive_workers: Vec<ResolvedPoolWorker>,
     interactive_pool_ids: Vec<String>,
     stepping_started: bool,
@@ -567,15 +569,18 @@ where
         // pools; record the validated uniform GPUs/worker for global GPU-hours.
         let mut collector = TraceCollector::default();
         collector.set_gpus_per_worker(0, gpus_per_worker);
-        for worker in &workers {
-            collector.register_decode_worker(
-                worker.target.pool_id.clone(),
-                worker.target.worker_id,
-                worker.target.dp_rank,
-                worker.lifecycle_status(),
-                gpus_per_worker,
-            );
-        }
+        let decode_worker_accounting_handles = workers
+            .iter()
+            .map(|worker| {
+                collector.register_decode_worker(
+                    worker.target.pool_id.clone(),
+                    worker.target.worker_id,
+                    worker.target.dp_rank,
+                    worker.lifecycle_status(),
+                    gpus_per_worker,
+                )
+            })
+            .collect();
 
         Ok(Self {
             now_ms: 0.0,
@@ -602,6 +607,7 @@ where
             collect_fpm: false,
             interactive: None,
             interactive_worker_targets,
+            decode_worker_accounting_handles,
             interactive_workers: workers,
             interactive_pool_ids,
             stepping_started: false,
@@ -1803,13 +1809,15 @@ where
         engine_worker_id: usize,
         lifecycle_status: ReplayWorkerLifecycleStatus,
     ) {
-        let target = self.accounting_target(engine_worker_id);
-        self.collector.set_decode_worker_lifecycle_status(
-            &target.pool_id,
-            target.worker_id,
-            target.dp_rank,
-            lifecycle_status,
-        );
+        let handle = self
+            .decode_worker_accounting_handles
+            .get(engine_worker_id)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!("offline replay worker {engine_worker_id} has no accounting handle")
+            });
+        self.collector
+            .set_decode_worker_lifecycle_status(handle, lifecycle_status);
     }
 
     /// Advance the sim clock to `new_now_ms`, integrating provisioned
@@ -1821,14 +1829,13 @@ where
         let dt_ms = (new_now_ms - self.now_ms).max(0.0);
         if dt_ms > 0.0 {
             let worker_seconds = dt_ms / 1000.0;
+            let handles = &self.decode_worker_accounting_handles;
+            let collector = &mut self.collector;
             for engine_worker_id in self.engine.provisioned_group_ids() {
-                let target = self.accounting_target(engine_worker_id);
-                self.collector.add_decode_worker_seconds(
-                    &target.pool_id,
-                    target.worker_id,
-                    target.dp_rank,
-                    worker_seconds,
-                );
+                let handle = handles.get(engine_worker_id).copied().unwrap_or_else(|| {
+                    panic!("offline replay worker {engine_worker_id} has no accounting handle")
+                });
+                collector.add_decode_worker_seconds(handle, worker_seconds);
             }
         }
         self.now_ms = new_now_ms;
@@ -1879,7 +1886,7 @@ where
 
         for &id in &delta.added {
             let target = self.accounting_target(id);
-            self.collector.register_decode_worker(
+            let handle = self.collector.register_decode_worker(
                 target.pool_id,
                 target.worker_id,
                 target.dp_rank,
@@ -1890,6 +1897,12 @@ where
                 },
                 self.decode_gpus_per_worker,
             );
+            anyhow::ensure!(
+                id == self.decode_worker_accounting_handles.len(),
+                "offline replay accounting handle sequence diverged: new engine worker {id}, next accounting slot {}",
+                self.decode_worker_accounting_handles.len()
+            );
+            self.decode_worker_accounting_handles.push(handle);
         }
         for &id in &delta.cancelled_startups {
             self.set_worker_accounting_status(id, ReplayWorkerLifecycleStatus::Removed);
@@ -2944,6 +2957,22 @@ mod tests {
             one_shot_report.throughput.prefill_worker_seconds,
             stepped_report.throughput.prefill_worker_seconds
         );
+        let one_shot_accounting = one_shot_report
+            .topology_accounting
+            .as_ref()
+            .expect("aggregated replay registers worker accounting");
+        let stepped_accounting = stepped_report
+            .topology_accounting
+            .as_ref()
+            .expect("stepped replay registers worker accounting");
+        assert_eq!(one_shot_accounting, stepped_accounting);
+        assert_eq!(one_shot_accounting.workers.len(), 2);
+        for worker in &one_shot_accounting.workers {
+            assert_eq!(
+                worker.worker_seconds,
+                one_shot_report.throughput.duration_ms / 1000.0
+            );
+        }
 
         let canonical = |report: &crate::replay::TraceSimulationReport| {
             let mut value = serde_json::to_value(report).unwrap();
@@ -5018,6 +5047,73 @@ mod tests {
             report.throughput.decode_worker_seconds
         );
         assert_eq!(report.throughput.prefill_worker_seconds, 0.0); // agg: decode role only
+    }
+
+    #[test]
+    fn accounting_handles_follow_dynamic_lifecycle_without_reuse() {
+        let args = startup_args(5.0);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            simple_requests(1, 0.0),
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        rt.advance_now_ms(1000.0);
+        rt.apply_scaling(3).unwrap();
+        assert_eq!(rt.engine.starting_group_ids(), vec![2]);
+        rt.advance_now_ms(2000.0);
+
+        // Cancel the startup and drain/remove the idle highest active worker.
+        rt.apply_scaling(1).unwrap();
+        assert_eq!(rt.engine.active_group_ids(), vec![0]);
+        assert_eq!(rt.total_worker_count(), 1);
+        rt.advance_now_ms(3000.0);
+
+        // A later scale-up receives a new stable engine ID and a new collector
+        // handle; neither the cancelled startup nor removed worker is reused.
+        rt.apply_scaling(2).unwrap();
+        assert_eq!(rt.engine.starting_group_ids(), vec![3]);
+        assert_eq!(rt.decode_worker_accounting_handles.len(), 4);
+        assert_ne!(
+            rt.decode_worker_accounting_handles[2],
+            rt.decode_worker_accounting_handles[3]
+        );
+
+        rt.advance_now_ms(6000.0);
+        assert!(!rt.apply_worker_ready_events().unwrap()); // cancelled worker 2
+        rt.advance_now_ms(8000.0);
+        assert!(rt.apply_worker_ready_events().unwrap()); // new worker 3
+        assert_eq!(rt.engine.active_group_ids(), vec![0, 3]);
+        rt.apply_scaling(1).unwrap();
+        assert_eq!(rt.engine.active_group_ids(), vec![0]);
+        rt.advance_now_ms(9000.0);
+
+        let report = rt.finalize_report();
+        assert_eq!(report.throughput.decode_worker_seconds, 17.0);
+        let accounting = report.topology_accounting.unwrap();
+        assert_eq!(
+            accounting
+                .workers
+                .iter()
+                .map(|worker| (
+                    worker.worker_id,
+                    worker.lifecycle_status,
+                    worker.worker_seconds
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, ReplayWorkerLifecycleStatus::Active, 9.0),
+                (1, ReplayWorkerLifecycleStatus::Removed, 2.0),
+                (2, ReplayWorkerLifecycleStatus::Removed, 1.0),
+                (3, ReplayWorkerLifecycleStatus::Removed, 5.0),
+            ]
+        );
+        assert!(accounting.reconciliation.all_reconciled());
     }
 
     #[test]

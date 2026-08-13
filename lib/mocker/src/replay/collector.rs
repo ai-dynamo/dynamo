@@ -947,9 +947,19 @@ pub(crate) struct TraceCollector {
     prefill_gpus_per_worker: usize,
     decode_gpus_per_worker: usize,
     /// Registered static/dynamic aggregated workers keyed by authored identity.
-    /// A `BTreeMap` makes final report ordering independent of insertion order.
-    worker_accounting: BTreeMap<TraceWorkerAccountingKey, TraceWorkerAccountingState>,
+    /// The `BTreeMap` is used only for registration and deterministic final
+    /// ordering. Runtime accrual and lifecycle updates use the stable handles
+    /// stored in `worker_accounting_states`, avoiding identity allocation and
+    /// tree lookup at every simulated timestamp.
+    worker_accounting: BTreeMap<TraceWorkerAccountingKey, DecodeWorkerAccountingHandle>,
+    worker_accounting_states: Vec<Option<TraceWorkerAccountingState>>,
 }
+
+/// Stable, opaque index into one collector's aggregated-worker accounting
+/// arena. Handles are append-only and never reused, matching replay engine
+/// worker IDs across scale-down tombstones and later scale-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodeWorkerAccountingHandle(usize);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct TraceWorkerAccountingKey {
@@ -1103,42 +1113,44 @@ impl TraceCollector {
         dp_rank: usize,
         lifecycle_status: ReplayWorkerLifecycleStatus,
         gpus_per_worker: usize,
-    ) {
+    ) -> DecodeWorkerAccountingHandle {
         let key = TraceWorkerAccountingKey {
             pool_id,
             worker_id,
             dp_rank,
         };
-        self.worker_accounting
-            .entry(key)
-            .and_modify(|state| {
-                state.lifecycle_status = lifecycle_status;
-                state.gpus_per_worker = gpus_per_worker;
-            })
-            .or_insert(TraceWorkerAccountingState {
+        if let Some(&handle) = self.worker_accounting.get(&key) {
+            let state = self.worker_accounting_states[handle.0]
+                .as_mut()
+                .expect("registered decode worker accounting handle must remain live");
+            state.lifecycle_status = lifecycle_status;
+            state.gpus_per_worker = gpus_per_worker;
+            return handle;
+        }
+
+        let handle = DecodeWorkerAccountingHandle(self.worker_accounting_states.len());
+        self.worker_accounting_states
+            .push(Some(TraceWorkerAccountingState {
                 lifecycle_status,
                 worker_seconds: 0.0,
                 gpus_per_worker,
-            });
+            }));
+        self.worker_accounting.insert(key, handle);
+        handle
     }
 
     pub(crate) fn set_decode_worker_lifecycle_status(
         &mut self,
-        pool_id: &str,
-        worker_id: usize,
-        dp_rank: usize,
+        handle: DecodeWorkerAccountingHandle,
         lifecycle_status: ReplayWorkerLifecycleStatus,
     ) {
-        let key = TraceWorkerAccountingKey {
-            pool_id: pool_id.to_string(),
-            worker_id,
-            dp_rank,
-        };
-        let state = self.worker_accounting.get_mut(&key).unwrap_or_else(|| {
-            panic!(
-                "offline replay updated lifecycle for unregistered worker ({pool_id:?}, {worker_id}, {dp_rank})"
-            )
-        });
+        let state = self
+            .worker_accounting_states
+            .get_mut(handle.0)
+            .and_then(Option::as_mut)
+            .unwrap_or_else(|| {
+                panic!("offline replay updated lifecycle through invalid {handle:?}")
+            });
         state.lifecycle_status = lifecycle_status;
     }
 
@@ -1147,21 +1159,14 @@ impl TraceCollector {
     /// final reconciliation has a single accounting source.
     pub(crate) fn add_decode_worker_seconds(
         &mut self,
-        pool_id: &str,
-        worker_id: usize,
-        dp_rank: usize,
+        handle: DecodeWorkerAccountingHandle,
         worker_seconds: f64,
     ) {
-        let key = TraceWorkerAccountingKey {
-            pool_id: pool_id.to_string(),
-            worker_id,
-            dp_rank,
-        };
-        let state = self.worker_accounting.get_mut(&key).unwrap_or_else(|| {
-            panic!(
-                "offline replay accrued time for unregistered worker ({pool_id:?}, {worker_id}, {dp_rank})"
-            )
-        });
+        let state = self
+            .worker_accounting_states
+            .get_mut(handle.0)
+            .and_then(Option::as_mut)
+            .unwrap_or_else(|| panic!("offline replay accrued time through invalid {handle:?}"));
         state.worker_seconds += worker_seconds;
         self.decode_worker_seconds += worker_seconds;
     }
@@ -2003,7 +2008,18 @@ impl TraceCollector {
         let accumulated_decode_worker_seconds = self.decode_worker_seconds;
         let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
         let decode_gpus_per_worker = self.decode_gpus_per_worker;
-        let worker_accounting = std::mem::take(&mut self.worker_accounting);
+        let worker_accounting_handles = std::mem::take(&mut self.worker_accounting);
+        let mut worker_accounting_states = std::mem::take(&mut self.worker_accounting_states);
+        let worker_accounting = worker_accounting_handles
+            .into_iter()
+            .map(|(key, handle)| {
+                let state = worker_accounting_states
+                    .get_mut(handle.0)
+                    .and_then(Option::take)
+                    .expect("registered decode worker accounting handle must remain live");
+                (key, state)
+            })
+            .collect();
         let itl_distribution = self.itl_distribution.finish();
         let output_token_throughput_per_user = self.output_token_throughput_per_user.finish();
         let requests = self.requests;
@@ -2864,22 +2880,22 @@ mod tests {
         collector.set_gpus_per_worker(0, 4);
         // Register out of order to prove report ordering comes from authored
         // identity rather than constructor order.
-        collector.register_decode_worker(
+        let pool_b = collector.register_decode_worker(
             "pool-b".to_string(),
             7,
             0,
             ReplayWorkerLifecycleStatus::StaticInactive,
             4,
         );
-        collector.register_decode_worker(
+        let pool_a = collector.register_decode_worker(
             "pool-a".to_string(),
             3,
             0,
             ReplayWorkerLifecycleStatus::Active,
             4,
         );
-        collector.add_decode_worker_seconds("pool-a", 3, 0, 2.0);
-        collector.add_decode_worker_seconds("pool-b", 7, 0, 2.0);
+        collector.add_decode_worker_seconds(pool_a, 2.0);
+        collector.add_decode_worker_seconds(pool_b, 2.0);
 
         let completed = Uuid::from_u128(401);
         collector.on_arrival(completed, 0.0, 8, 1);

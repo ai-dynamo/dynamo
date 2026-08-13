@@ -25,12 +25,13 @@ use dynamo_mocker::replay::{
     ReplayRoutingConstraints as RsReplayRoutingConstraints, ReplayScalingDecision,
     ReplayScalingPolicy, ReplayScalingSnapshot, ReplaySessionOptions as RsReplaySessionOptions,
     ReplaySessionRouter as RsReplaySessionRouter, ReplayTerminalStatus as RsReplayTerminalStatus,
-    WorkerSpec as RsWorkerSpec, WorkerTarget as RsWorkerTarget,
+    ReplayStepStatus as RsReplayStepStatus, WorkerSpec as RsWorkerSpec,
+    WorkerTarget as RsWorkerTarget,
 };
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
-    types::{PyDict, PyList},
+    types::{PyDict, PyList, PyString},
 };
 use pythonize::{depythonize, pythonize};
 use serde::{Deserialize, Serialize};
@@ -1232,6 +1233,59 @@ where
     })
 }
 
+fn has_exact_worker_target_fields(value: &Bound<'_, PyDict>) -> PyResult<bool> {
+    let mut has_worker_id = false;
+    for (key, _) in value.iter() {
+        let Ok(key) = key.downcast::<PyString>() else {
+            return Ok(false);
+        };
+        match key.to_str()? {
+            "pool_id" | "dp_rank" => {}
+            "worker_id" => has_worker_id = true,
+            _ => return Ok(false),
+        }
+    }
+    Ok(has_worker_id)
+}
+
+/// Parse the high-volume assignment target without constructing a generic
+/// Serde map. Invalid/non-dict inputs deliberately take the existing generic
+/// path so its exception type and detailed message remain byte-for-byte
+/// compatible. PyO3 integer extraction also preserves Serde's current Python
+/// behavior for `bool` and `__index__` values.
+fn parse_interactive_worker_target(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<InteractiveWorkerTarget> {
+    if let Ok(value) = value.downcast::<PyDict>()
+        && has_exact_worker_target_fields(value).unwrap_or(false)
+    {
+        let pool_id = value.get_item(pyo3::intern!(value.py(), "pool_id"))?;
+        let worker_id = value
+            .get_item(pyo3::intern!(value.py(), "worker_id"))?
+            .expect("validated worker target contains worker_id");
+        let dp_rank = value.get_item(pyo3::intern!(value.py(), "dp_rank"))?;
+        let direct = (|| -> PyResult<InteractiveWorkerTarget> {
+            Ok(InteractiveWorkerTarget {
+                pool_id: pool_id
+                    .as_ref()
+                    .map(Bound::extract)
+                    .transpose()?
+                    .unwrap_or_else(default_interactive_pool_id),
+                worker_id: worker_id.extract()?,
+                dp_rank: dp_rank
+                    .as_ref()
+                    .map(Bound::extract)
+                    .transpose()?
+                    .unwrap_or_default(),
+            })();
+        if let Ok(target) = direct {
+            return Ok(target);
+        }
+    }
+
+    depythonize_interactive(value, "worker target")
+}
+
 fn pythonize_interactive<T>(py: Python<'_>, value: &T) -> PyResult<PyObject>
 where
     T: Serialize,
@@ -1249,6 +1303,26 @@ fn replay_terminal_status_name(status: RsReplayTerminalStatus) -> &'static str {
         RsReplayTerminalStatus::Canceled => "canceled",
         RsReplayTerminalStatus::Failed => "failed",
     }
+}
+
+fn replay_step_status_parts(status: RsReplayStepStatus) -> (&'static str, f64) {
+    match status {
+        RsReplayStepStatus::Advanced { now_ms } => ("advanced", now_ms),
+        RsReplayStepStatus::Quiescent { now_ms } => ("quiescent", now_ms),
+        RsReplayStepStatus::Drained { now_ms } => ("drained", now_ms),
+    }
+}
+
+fn replay_step_status_to_python(
+    py: Python<'_>,
+    status: RsReplayStepStatus,
+) -> PyResult<PyObject> {
+    let (status, now_ms) = replay_step_status_parts(status);
+    let value = PyDict::new(py);
+    // Preserve the internally-tagged Serde declaration order exactly.
+    value.set_item(pyo3::intern!(py, "status"), status)?;
+    value.set_item(pyo3::intern!(py, "now_ms"), now_ms)?;
+    Ok(value.into_any().unbind())
 }
 
 fn replay_worker_target_to_python<'py>(
@@ -1620,17 +1694,17 @@ impl PyOfflineReplaySession {
 
     fn advance_next(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let status = self.inner.advance_next().map_err(to_pyerr)?;
-        pythonize_interactive(py, &status)
+        replay_step_status_to_python(py, status)
     }
 
     fn advance_to(&mut self, py: Python<'_>, target_ms: f64) -> PyResult<PyObject> {
         let status = self.inner.advance_to(target_ms).map_err(to_pyerr)?;
-        pythonize_interactive(py, &status)
+        replay_step_status_to_python(py, status)
     }
 
     fn settle_current_time(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let status = self.inner.settle_current_time().map_err(to_pyerr)?;
-        pythonize_interactive(py, &status)
+        replay_step_status_to_python(py, status)
     }
 
     fn drain_events(&mut self, py: Python<'_>) -> PyResult<PyObject> {
@@ -1644,7 +1718,7 @@ impl PyOfflineReplaySession {
     }
 
     fn assign(&mut self, logical_request_id: &str, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        let target: InteractiveWorkerTarget = depythonize_interactive(target, "worker target")?;
+        let target = parse_interactive_worker_target(target)?;
         self.inner
             .assign(logical_request_id, target.into())
             .map_err(to_pyerr)
@@ -2542,9 +2616,10 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 mod tests {
     use super::{
         RsReplayEvent, RsReplayEventData, RsReplayPendingPlacement, RsReplayPlacementCandidate,
-        RsReplayRoutingConstraints, RsReplayTerminalStatus, RsWorkerTarget,
+        RsReplayRoutingConstraints, RsReplayStepStatus, RsReplayTerminalStatus, RsWorkerTarget,
         build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
-        replay_event_parts, replay_terminal_status_name, validate_disagg_replay_mode,
+        replay_event_parts, replay_step_status_parts, replay_terminal_status_name,
+        validate_disagg_replay_mode,
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
     use dynamo_mocker::loadgen::ArrivalSpec;
@@ -2860,6 +2935,25 @@ mod tests {
             direct_pending,
             serde_json::to_value(&pending).expect("generic pending-placement serialization")
         );
+    }
+
+    #[test]
+    fn direct_step_status_schema_matches_generic_serde_for_every_variant() {
+        for status in [
+            RsReplayStepStatus::Advanced { now_ms: 1.25 },
+            RsReplayStepStatus::Quiescent { now_ms: 2.5 },
+            RsReplayStepStatus::Drained { now_ms: 3.75 },
+        ] {
+            let (status_name, now_ms) = replay_step_status_parts(status);
+            let direct = json!({
+                "status": status_name,
+                "now_ms": now_ms,
+            });
+            assert_eq!(
+                direct,
+                serde_json::to_value(status).expect("generic step-status serialization")
+            );
+        }
     }
 
     #[test]

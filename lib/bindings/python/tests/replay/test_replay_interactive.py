@@ -182,6 +182,99 @@ def test_interactive_lifecycle_correlation_and_final_report_conversion():
         session.now_ms()
 
 
+@pytest.mark.parametrize(
+    ("target", "error"),
+    [
+        ({"pool_id": "default", "dp_rank": 0}, "missing field.*worker_id"),
+        (
+            {"worker_id": 0, "recorded_queue_ms": 12},
+            "unknown field.*recorded_queue_ms",
+        ),
+        ({"pool_id": 7, "worker_id": 0}, "invalid type.*integer.*string"),
+        ({"worker_id": "0"}, "invalid type.*string.*usize"),
+        ({"worker_id": 0, "dp_rank": "0"}, "invalid type.*string.*usize"),
+    ],
+)
+def test_interactive_assign_target_direct_parser_preserves_schema_errors(
+    target: dict, error: str
+):
+    session = OfflineReplaySession(
+        _engine_args(),
+        trace_block_size=4,
+        num_workers=1,
+        router="external",
+    )
+    session.submit(_request("target-schema", 0))
+    session.settle_current_time()
+    assert [event["event_type"] for event in session.drain_events()] == [
+        "placement_needed"
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=rf"invalid interactive replay worker target: .*{error}",
+    ):
+        session.assign("target-schema", target)
+
+    assert [item["logical_request_id"] for item in session.pending_placements()] == [
+        "target-schema"
+    ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"worker_id": 0},
+        {"worker_id": 0, "pool_id": "default"},
+        {"worker_id": 0, "dp_rank": 0},
+        # Preserve pythonize/Serde's historical PyLong behavior: bool is a
+        # valid integer input and maps to worker 0 here.
+        {"worker_id": False, "dp_rank": False},
+    ],
+)
+def test_interactive_assign_target_direct_parser_preserves_defaults_and_bool(target: dict):
+    session = OfflineReplaySession(
+        _engine_args(),
+        trace_block_size=4,
+        num_workers=1,
+        router="external",
+    )
+    session.submit(_request("target-defaults", 0))
+    session.settle_current_time()
+    assert [event["event_type"] for event in session.drain_events()] == [
+        "placement_needed"
+    ]
+
+    session.assign("target-defaults", target)
+
+    routed = session.drain_events()
+    assert next(
+        event["event"] for event in routed if event["event_type"] == "routed"
+    )["pool_id"] == "default"
+
+
+def test_interactive_step_status_direct_converter_schema_is_exact_for_all_variants():
+    session = OfflineReplaySession(
+        _engine_args(),
+        trace_block_size=4,
+        num_workers=1,
+        router="external",
+    )
+
+    advanced = session.advance_to(5.0)
+    quiescent = session.settle_current_time()
+    session.close_admission()
+    drained = session.settle_current_time()
+
+    assert advanced == {"status": "advanced", "now_ms": 5.0}
+    assert quiescent == {"status": "quiescent", "now_ms": 5.0}
+    assert drained == {"status": "drained", "now_ms": 5.0}
+    assert all(
+        list(status) == ["status", "now_ms"]
+        for status in [advanced, quiescent, drained]
+    )
+
+
 def test_interactive_event_and_pending_python_schema_is_exact():
     event_keys = [
         "logical_request_id",

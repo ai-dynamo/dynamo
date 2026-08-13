@@ -597,12 +597,13 @@ where
 
     /// Stable IDs of every currently provisioned logical worker, including
     /// active, starting, draining, and static-inactive workers.
-    pub(in crate::replay::offline) fn provisioned_group_ids(&self) -> Vec<usize> {
+    pub(in crate::replay::offline) fn provisioned_group_ids(
+        &self,
+    ) -> impl Iterator<Item = usize> + '_ {
         self.worker_groups
             .iter()
             .enumerate()
             .filter_map(|(worker_id, group)| group.as_ref().map(|_| worker_id))
-            .collect()
     }
 
     pub(in crate::replay::offline) fn dp_size(&self) -> u32 {
@@ -1700,7 +1701,10 @@ mod tests {
         engine.mark_static_inactive(1);
 
         assert_eq!(engine.worker_count(), 2);
-        assert_eq!(engine.provisioned_group_ids(), vec![0, 1]);
+        assert_eq!(
+            engine.provisioned_group_ids().collect::<Vec<_>>(),
+            vec![0, 1]
+        );
         assert_eq!(engine.active_group_ids(), vec![0]);
         assert_eq!(engine.static_inactive_group_ids(), vec![1]);
         assert!(engine.starting_group_ids().is_empty());
