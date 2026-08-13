@@ -653,6 +653,12 @@ where
                 prefill_config.router_track_active_blocks = false;
                 let prefill_enable_eagle = false;
 
+                // This decode set's mode is passed as the *fallback* for the
+                // prefill hop, not as its mode. A prefill worker that declares
+                // its own `router_config` overrides it at activation time (see
+                // `resolve_advertisement_from_cards`), which is what allows a
+                // KV-routed prefill tier in front of a round-robin decode tier.
+
                 Some(PrefillRouter::new_with_selector_factory(
                     None,
                     self.manager.clone(),

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
 
 use dynamo_kv_router::{
@@ -36,21 +36,93 @@ use crate::{
     session_affinity::create_affinity_coordinator,
 };
 
+/// What the prefill worker set advertises about how it wants to be routed to,
+/// resolved from its own model deployment cards at activation time.
+#[derive(Debug)]
+struct PrefillAdvertisement {
+    /// Mode for the prefill hop: the card's own if it declared one, otherwise
+    /// the decode set's mode.
+    router_mode: RouterMode,
+    /// KV tuning that came with an advertised `router_config`. `None` means the
+    /// card declared nothing and the decode set's prefill tuning applies.
+    kv_router_config: Option<KvRouterConfig>,
+    is_eagle: bool,
+    /// Whether the card actually declared a `router_config`, as opposed to
+    /// inheriting. Logged so an ignored override is diagnosable.
+    advertised: bool,
+}
+
+/// Resolve how the prefill hop should be routed from the prefill worker set's
+/// own model deployment cards.
+///
+/// A prefill worker may declare its own `router_config` through
+/// `register_model`. When it does, that mode governs this hop, which is what
+/// lets a deployment run (say) KV-routed prefill in front of round-robin decode.
+/// A worker that declares nothing inherits `decode_router_mode`, preserving the
+/// behavior of every deployment that predates the override.
+fn resolve_advertisement_from_cards(
+    cards: &[ModelDeploymentCard],
+    decode_router_mode: RouterMode,
+) -> Result<PrefillAdvertisement> {
+    let mode_of = |card: &ModelDeploymentCard| {
+        card.router_config
+            .as_ref()
+            .map_or(decode_router_mode, |config| config.router_mode)
+    };
+
+    let Some(first) = cards.first() else {
+        anyhow::bail!("no readable prefill model card; cannot resolve prefill routing");
+    };
+
+    let advertisement = PrefillAdvertisement {
+        router_mode: mode_of(first),
+        kv_router_config: first
+            .router_config
+            .as_ref()
+            .map(|config| config.kv_router_config.clone()),
+        is_eagle: first.runtime_config.enable_eagle,
+        advertised: first.router_config.is_some(),
+    };
+
+    // A prefill fleet mid-rolling-update can disagree about its mode. The first
+    // card wins and the binding is rebuilt whenever the target moves, so this
+    // converges — but a silent split is worth surfacing, since half the fleet is
+    // then being routed on the other half's terms.
+    let disagreeing = cards
+        .iter()
+        .skip(1)
+        .filter(|card| mode_of(card) != advertisement.router_mode)
+        .count();
+    if disagreeing > 0 {
+        tracing::warn!(
+            resolved_mode = ?advertisement.router_mode,
+            disagreeing,
+            total = cards.len(),
+            "Prefill workers advertise conflicting router modes; using the first"
+        );
+    }
+
+    Ok(advertisement)
+}
+
 impl PrefillRouter<DefaultWorkerSelector> {
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
         model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
+        decode_router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
-        Self::disabled_with_selector(model_manager, router_mode, session_affinity_ttl_secs)
+        Self::disabled_with_selector(model_manager, decode_router_mode, session_affinity_ttl_secs)
     }
 
+    /// `decode_router_mode` is the owning decode worker set's mode. It governs
+    /// decode-side decisions and is the fallback for the prefill hop; a prefill
+    /// worker that advertises its own `router_config` overrides the latter.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
+        decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         decode_router: Option<Arc<KvRouter>>,
@@ -64,7 +136,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
         Self::new_with_selector_factory(
             Some(activation_rx),
             model_manager,
-            router_mode,
+            decode_router_mode,
             kv_cache_block_size,
             kv_router_config,
             decode_router,
@@ -91,7 +163,7 @@ where
 {
     pub(crate) fn disabled_with_selector(
         model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
+        decode_router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -103,7 +175,7 @@ where
             decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
-            router_mode,
+            decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy: make_conditional_disagg_policy(None),
             conditional_disagg_prefill_busy_threshold: None,
@@ -123,7 +195,7 @@ where
     pub(crate) fn new_with_selector_factory(
         activation_rx: Option<oneshot::Receiver<Endpoint>>,
         model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
+        decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         decode_router: Option<Arc<KvRouter<Sel>>>,
@@ -156,7 +228,7 @@ where
             decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
-            router_mode,
+            decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy,
             conditional_disagg_prefill_busy_threshold,
@@ -223,11 +295,6 @@ where
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> Result<(PrefillBinding<Sel>, Client)> {
-        tracing::info!(
-            router_mode = ?context.router_mode,
-            "Activating prefill router"
-        );
-
         let endpoint_id = endpoint.id();
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
@@ -237,27 +304,32 @@ where
             .get_or_create_runtime_config_watcher(&endpoint)
             .await?;
 
-        let inner_router = if context.router_mode.is_kv_routing() {
-            let discovered_cards = endpoint
-                .component()
-                .drt()
-                .discovery()
-                .list(DiscoveryQuery::EndpointModels {
-                    namespace: endpoint_id.namespace.clone(),
-                    component: endpoint_id.component.clone(),
-                    endpoint: endpoint_id.name.clone(),
-                })
-                .await;
-            let is_eagle = match discovered_cards {
-                Ok(instances) => instances
-                    .into_iter()
-                    .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
-                    .map_or(context.is_eagle, |card| card.runtime_config.enable_eagle),
-                Err(error) => {
-                    tracing::warn!(%error, "Failed to read prefill model card; using configured EAGLE mode");
-                    context.is_eagle
-                }
-            };
+        let advertisement = Self::resolve_prefill_advertisement(context, &endpoint).await?;
+        let prefill_router_mode = advertisement.router_mode;
+
+        tracing::info!(
+            ?prefill_router_mode,
+            decode_router_mode = ?context.decode_router_mode,
+            advertised = advertisement.advertised,
+            resolved_is_eagle = advertisement.is_eagle,
+            configured_is_eagle = context.is_eagle,
+            "Activating prefill router"
+        );
+
+        // A prefill card that declares a mode may declare KV tuning alongside it;
+        // honoring only half of its `RouterConfig` would be a trap. Whichever
+        // config wins, `router_track_active_blocks` stays off: prefill routing is
+        // prompt-side, and crediting decode blocks here would double-count load.
+        let kv_router_config = match advertisement.kv_router_config {
+            Some(mut advertised) => {
+                advertised.router_track_active_blocks = false;
+                Some(advertised)
+            }
+            None => kv_router_config,
+        };
+
+        let inner_router = if prefill_router_mode.is_kv_routing() {
+            let is_eagle = advertisement.is_eagle;
 
             // Create KV chooser using the endpoint (this is a prefill router)
             let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
@@ -311,12 +383,12 @@ where
                 create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
             let prefill_client = client.clone();
 
-            // Create simple push router with the frontend's router mode
+            // Create simple push router with the resolved prefill router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
                 client,
-                context.router_mode,
+                prefill_router_mode,
                 None, // worker_monitor
             )
             .await?;
@@ -326,7 +398,7 @@ where
                     crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
                         push_router,
                         affinity,
-                        context.router_mode.is_direct_routing(),
+                        prefill_router_mode.is_direct_routing(),
                     ),
                 )),
                 prefill_client,
@@ -337,9 +409,44 @@ where
             PrefillBinding {
                 endpoint_id,
                 router: inner_router.0,
+                prefill_router_mode,
             },
             inner_router.1,
         ))
+    }
+
+    /// Fetch the prefill worker set's own cards and resolve how the prefill hop
+    /// should be routed.
+    ///
+    /// Returns `Err` rather than silently inheriting when the cards cannot be
+    /// read. `drive_target` retries activation with backoff, and a delayed
+    /// activation is far cheaper than routing an entire deployment with the
+    /// wrong strategy because of one transient discovery miss — a downgrade that
+    /// would persist until the binding was rebuilt.
+    async fn resolve_prefill_advertisement(
+        context: &PrefillBuildContext<Sel>,
+        endpoint: &Endpoint,
+    ) -> Result<PrefillAdvertisement> {
+        let endpoint_id = endpoint.id();
+        let instances = endpoint
+            .component()
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+            })
+            .await
+            .with_context(|| format!("listing prefill model cards for {endpoint_id}"))?;
+
+        let cards: Vec<ModelDeploymentCard> = instances
+            .into_iter()
+            .filter_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
+            .collect();
+
+        resolve_advertisement_from_cards(&cards, context.decode_router_mode)
+            .with_context(|| format!("resolving prefill routing for {endpoint_id}"))
     }
 
     /// Attach the freshly-created prefill `Client` to this WorkerSet's monitor (handed in
@@ -400,7 +507,7 @@ where
             }
             let build_context = PrefillBuildContext {
                 model_manager: router_ref.model_manager.clone(),
-                router_mode: router_ref.router_mode,
+                decode_router_mode: router_ref.decode_router_mode,
                 worker_selector_factory: router_ref
                     .worker_selector_factory
                     .clone()
@@ -519,5 +626,86 @@ where
     #[cfg(test)]
     pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
         self.target.lock().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entrypoint::RouterConfig;
+    use dynamo_kv_router::config::KvRouterConfig;
+
+    fn card(router_config: Option<RouterConfig>) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.router_config = router_config;
+        card
+    }
+
+    #[test]
+    fn inherits_decode_mode_when_card_advertises_nothing() {
+        // The pre-override behavior: a prefill worker that says nothing is
+        // routed exactly as the decode set is. Every deployment predating this
+        // feature lands here, so it must not shift.
+        let cards = vec![card(None)];
+        let resolved =
+            resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
+        assert_eq!(resolved.router_mode, RouterMode::RoundRobin);
+        assert!(!resolved.advertised);
+        assert!(resolved.kv_router_config.is_none());
+    }
+
+    #[test]
+    fn card_router_config_overrides_decode_mode() {
+        // The headline case: KV-routed prefill in front of round-robin decode.
+        let cards = vec![card(Some(RouterConfig::new(
+            RouterMode::KV,
+            KvRouterConfig::default(),
+        )))];
+        let resolved =
+            resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
+        assert_eq!(resolved.router_mode, RouterMode::KV);
+        assert!(resolved.advertised);
+        assert!(resolved.kv_router_config.is_some());
+    }
+
+    #[test]
+    fn card_can_downgrade_prefill_below_a_kv_decode_set() {
+        // The reverse pairing must work too: round-robin prefill in front of a
+        // KV decode set. Nothing about the override is KV-specific.
+        let cards = vec![card(Some(RouterConfig::new(
+            RouterMode::RoundRobin,
+            KvRouterConfig::default(),
+        )))];
+        let resolved = resolve_advertisement_from_cards(&cards, RouterMode::KV).expect("resolves");
+        assert_eq!(resolved.router_mode, RouterMode::RoundRobin);
+    }
+
+    #[test]
+    fn first_card_wins_when_the_fleet_disagrees() {
+        // A rolling update can leave old (inheriting) and new (advertising)
+        // prefill workers side by side. Resolution must stay deterministic
+        // rather than depending on which card happened to be read.
+        let cards = vec![
+            card(Some(RouterConfig::new(
+                RouterMode::KV,
+                KvRouterConfig::default(),
+            ))),
+            card(None),
+        ];
+        let resolved =
+            resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
+        assert_eq!(resolved.router_mode, RouterMode::KV);
+    }
+
+    #[test]
+    fn no_readable_card_is_an_error_not_a_silent_inherit() {
+        // Activation must fail and be retried rather than quietly routing the
+        // whole deployment with the decode set's mode.
+        let error = resolve_advertisement_from_cards(&[], RouterMode::KV)
+            .expect_err("empty card list must not resolve");
+        assert!(
+            error.to_string().contains("no readable prefill model card"),
+            "unexpected error: {error}"
+        );
     }
 }
