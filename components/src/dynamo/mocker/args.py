@@ -15,6 +15,18 @@ DYN_NAMESPACE = get_worker_namespace()
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
+# CLI spelling -> `dynamo.llm.RouterMode` attribute name. Mirrors the frontend's
+# --router-mode vocabulary so a mocker advertises the same set of modes.
+ROUTER_MODE_MAP = {
+    "round-robin": "RoundRobin",
+    "random": "Random",
+    "power-of-two": "PowerOfTwoChoices",
+    "kv": "KV",
+    "direct": "Direct",
+    "least-loaded": "LeastLoaded",
+    "device-aware-weighted": "DeviceAwareWeighted",
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -688,6 +700,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["nats", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
+    )
+    parser.add_argument(
+        "--router-mode",
+        type=str,
+        choices=sorted(ROUTER_MODE_MAP),
+        default=None,
+        help=(
+            "Advertise a router mode in this worker's model deployment card, "
+            "overriding the frontend's global --router-mode for this worker set "
+            "only. Omit to inherit the frontend's mode. Set it separately on "
+            "prefill and decode mockers to give the two tiers different "
+            "strategies, e.g. --router-mode kv on prefill in front of "
+            "--router-mode round-robin decode."
+        ),
     )
     parser.add_argument(
         "--event-plane",
