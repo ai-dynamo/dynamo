@@ -695,6 +695,9 @@ class VllmProcessor:
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
                     stream_response=bool(request.get("stream", False)),
+                    uses_dynamo_json_tool_call_fallback=(
+                        pre.uses_dynamo_json_tool_call_fallback
+                    ),
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so

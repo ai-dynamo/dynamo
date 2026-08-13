@@ -168,6 +168,15 @@ fn sse_keep_alive_from_env() -> Option<Duration> {
     parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
 }
 
+const DEFERRED_RESPONSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+fn effective_sse_keep_alive(
+    configured: Option<Duration>,
+    response_can_defer_all_output: bool,
+) -> Option<Duration> {
+    configured.or(response_can_defer_all_output.then_some(DEFERRED_RESPONSE_KEEP_ALIVE))
+}
+
 /// Lifecycle stage for the HTTP frontend.
 ///
 /// The stage gates readiness and request admission separately from the runtime
@@ -523,6 +532,17 @@ impl State {
     /// `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS`.
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         self.sse_keep_alive
+    }
+
+    /// Interval for a response that can intentionally suppress all generated
+    /// data frames while it waits to decide which output field owns the text.
+    /// Keep the configured interval when present; otherwise use Axum's standard
+    /// 15-second heartbeat so proxies and clients do not see an idle connection.
+    pub fn sse_keep_alive_for_response(
+        &self,
+        response_can_defer_all_output: bool,
+    ) -> Option<Duration> {
+        effective_sse_keep_alive(self.sse_keep_alive, response_can_defer_all_output)
     }
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
@@ -2016,6 +2036,26 @@ mod tests {
             .checked_add(interval)
             .map(|_| interval);
         assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
+    }
+
+    #[test]
+    fn test_sse_keep_alive_for_deferred_response() {
+        let configured = Duration::from_millis(5000);
+        assert_eq!(
+            effective_sse_keep_alive(Some(configured), true),
+            Some(configured),
+            "an explicit interval must win"
+        );
+        assert_eq!(
+            effective_sse_keep_alive(None, true),
+            Some(Duration::from_secs(15)),
+            "a response that can suppress every data frame needs a heartbeat"
+        );
+        assert_eq!(
+            effective_sse_keep_alive(None, false),
+            None,
+            "ordinary responses keep the opt-in behavior"
+        );
     }
 
     #[test]

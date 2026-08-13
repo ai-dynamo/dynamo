@@ -285,7 +285,7 @@ The rolling update progress is tracked in `.status.rollingUpdate` with the follo
 The status also tracks:
 - `startTime` — When the rolling update began.
 - `endTime` — When the rolling update completed.
-- `updatedServices` — List of worker services that have completed the transition.
+- `updatedComponents` - List of worker components that have completed the transition.
 
 ### Configuring maxSurge and maxUnavailable
 
