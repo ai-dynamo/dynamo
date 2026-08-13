@@ -30,7 +30,9 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 
 The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
-The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Prefill and decode workers then use separate scorers and pickers.
+The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
+
+The frontend supplies `prefill` or `decode` after discovery scopes the worker pool. A standalone EPP supplies `select`, which explicitly reuses the prefill builder. An unsupported stage stops instead of silently using the prefill policy.
 
 The `simple-stacked-score-pick` policy has no custom filter. It adds active-request and uncached-request costs before its picker selects the lowest total.
 

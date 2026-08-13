@@ -16,14 +16,14 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{
-    KvRouterConfig, WorkerFilter, WorkerPicker, WorkerScorer, WorkerSelectionPolicy,
-};
+use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy};
 use filter::MinimumDeviceOverlapFilter;
 use picker::{DecodePicker, PrefillPicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};
 
+const PREFILL_WORKER_TYPE: &str = "prefill";
 const DECODE_WORKER_TYPE: &str = "decode";
+const SELECT_WORKER_TYPE: &str = "select";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +42,62 @@ fn validate_min_device_overlap_blocks(
     Ok(())
 }
 
+/// Builds the complete policy used by prefill and standalone selection routes.
+fn create_prefill_policy(
+    config: &KvRouterConfig,
+    worker_type: &'static str,
+    min_device_overlap_blocks: f64,
+) -> WorkerSelectionPolicy {
+    let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
+        min_device_overlap_blocks,
+    })];
+
+    WorkerSelectionPolicy::new_with_filters(
+        config.clone(),
+        worker_type,
+        filters,
+        vec![Box::new(PrefillLoadScorer)],
+        Box::new(PrefillPicker),
+    )
+}
+
+/// Builds the complete policy used by decode routes.
+fn create_decode_policy(
+    config: &KvRouterConfig,
+    min_device_overlap_blocks: f64,
+) -> WorkerSelectionPolicy {
+    let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
+        min_device_overlap_blocks,
+    })];
+
+    WorkerSelectionPolicy::new_with_filters(
+        config.clone(),
+        DECODE_WORKER_TYPE,
+        filters,
+        vec![Box::new(DecodeLoadScorer)],
+        Box::new(DecodePicker),
+    )
+}
+
+/// Selects a policy from the routing stage supplied by the frontend or EPP.
+///
+/// Discovery has already scoped the worker pool before the factory receives this stage.
+fn create_policy(
+    config: &KvRouterConfig,
+    worker_type: &'static str,
+    min_device_overlap_blocks: f64,
+) -> WorkerSelectionPolicy {
+    match worker_type {
+        PREFILL_WORKER_TYPE | SELECT_WORKER_TYPE => {
+            create_prefill_policy(config, worker_type, min_device_overlap_blocks)
+        }
+        DECODE_WORKER_TYPE => create_decode_policy(config, min_device_overlap_blocks),
+        unsupported => panic!(
+            "disagg-filter-score-pick does not support worker type {unsupported:?}; expected prefill, decode, or select"
+        ),
+    }
+}
+
 fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
@@ -49,27 +105,9 @@ fn provider(
     validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
-            let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
-                min_device_overlap_blocks,
-            })];
-            let (scorers, picker): (Vec<Box<dyn WorkerScorer>>, Box<dyn WorkerPicker>) =
-                if worker_type == DECODE_WORKER_TYPE {
-                    (vec![Box::new(DecodeLoadScorer)], Box::new(DecodePicker))
-                } else {
-                    (vec![Box::new(PrefillLoadScorer)], Box::new(PrefillPicker))
-                };
-
-            WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
-                worker_type,
-                filters,
-                scorers,
-                picker,
-            )
-        },
-    ))
+    Ok(Arc::new(move |config, worker_type, _partition| {
+        create_policy(config, worker_type, min_device_overlap_blocks)
+    }))
 }
 
 pub fn register(
@@ -88,5 +126,19 @@ mod tests {
         assert!(validate_min_device_overlap_blocks(8.0).is_ok());
         assert!(validate_min_device_overlap_blocks(-1.0).is_err());
         assert!(validate_min_device_overlap_blocks(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn creates_each_supported_worker_policy() {
+        let config = KvRouterConfig::default();
+        create_policy(&config, PREFILL_WORKER_TYPE, 0.0);
+        create_policy(&config, DECODE_WORKER_TYPE, 0.0);
+        create_policy(&config, SELECT_WORKER_TYPE, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not support worker type \"unknown\"")]
+    fn rejects_unknown_worker_type() {
+        create_policy(&KvRouterConfig::default(), "unknown", 0.0);
     }
 }
