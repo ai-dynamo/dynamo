@@ -272,19 +272,22 @@ kind: DynamoGraphDeployment
 metadata:
   name: my-elastic-ep-deployment
 spec:
-  services:
-    VllmDecodeWorker:
-      # ... your component spec
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: worker
+    type: worker
+    # ... your component spec
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+          - python3
+          - -m
+          - dynamo.vllm
           args:
-            - --data-parallel-backend
-            - ray
-            - --enable-elastic-ep
+          - --data-parallel-backend
+          - ray
+          - --enable-elastic-ep
 ```
 
 > [!IMPORTANT]

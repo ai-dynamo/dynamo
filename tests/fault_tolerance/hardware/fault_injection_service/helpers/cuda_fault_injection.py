@@ -133,7 +133,8 @@ class CUDAFaultInjector:
             containers = pod_spec.get("containers", [])
 
             for container in containers:
-                if container.get("name") in ["vllm-worker", "worker"]:
+                # Accept the pre-rename name when checking older deployments.
+                if container.get("name") in ["worker", "vllm-worker"]:
                     env = container.get("env", [])
                     for env_var in env:
                         if env_var.get("name") == "LD_PRELOAD":
