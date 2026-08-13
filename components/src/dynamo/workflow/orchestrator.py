@@ -29,11 +29,15 @@ class WorkflowOrchestrator:
         cls,
         plan: ExecutionPlan,
         *,
+        runtime: Any = None,
         inline_runners: Mapping[str, StageRunner] = MappingProxyType({}),
     ) -> "WorkflowOrchestrator":
         """Bind initialized resources to an immutable execution plan."""
 
-        return cls(plan, StageDispatcher(plan, inline_runners))
+        dispatcher = await StageDispatcher.bind(
+            plan, runtime=runtime, inline_runners=inline_runners
+        )
+        return cls(plan, dispatcher)
 
     @property
     def plan(self) -> ExecutionPlan:

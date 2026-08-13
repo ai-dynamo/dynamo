@@ -9,7 +9,6 @@ import pytest
 
 from dynamo.workflow import (
     DeploymentSpec,
-    RemoteBinding,
     StageContext,
     StageContract,
     StageRunner,
