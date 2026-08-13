@@ -49,30 +49,18 @@ pub trait OutputOptionsProvider {
 ///
 /// # Wire contract
 ///
-/// We serialize the externally tagged derive form: a bare string for the unit
-/// variants (`"stop"`) and a single-key map for [`FinishReason::Error`]
-/// (`{"error": "<message>"}`). That is what every Rust producer has always
-/// emitted, and changing it would break every frontend in the N-2
-/// compatibility window, so it stays fixed.
+/// Serializes as a bare string for the unit variants (`"stop"`, etc.) and a
+/// single-key map for [`FinishReason::Error`] (`{"error": "<message>"}`) —
+/// the form every Rust producer emits and every frontend expects.
 ///
-/// Deserialization additionally accepts the [`Display`] form,
-/// `"error: <message>"`, because Python engine adapters report request-level
-/// failures that way — `dynamo.vllm`'s custom-encoder path, among others. That
-/// is not a producer mistake: `Display` and [`FromStr`] define exactly that
-/// convention, so a producer matching this type's own string rendering lands on
-/// it. Rejecting it costs the caller the one thing that makes the failure
-/// actionable, since a terminal chunk the reader cannot parse fails the whole
-/// request-plane response and the backend's message is dropped for an
-/// unattributed 500.
-///
-/// Note the deliberate limit: a bare `"error"` carrying no message is *not*
-/// accepted. That form discards information at the producer, and inventing a
-/// stand-in message here would mask the bug rather than surface it. Producers
-/// should report request-level failures out of band instead — raising
-/// `dynamo._core.InvalidArgument` yields a 400 carrying the real message.
+/// Deserialization also accepts the [`Display`] form, `"error: <message>"`,
+/// since Python engine adapters (e.g. `dynamo.vllm`'s custom-encoder path)
+/// report failures that way. A bare `"error"` with no message stays
+/// rejected on purpose — producers should raise
+/// `dynamo._core.InvalidArgument` instead, which yields a 400 carrying the
+/// real message.
 ///
 /// [`Display`]: std::fmt::Display
-/// [`FromStr`]: std::str::FromStr
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     #[serde(rename = "eos")]
@@ -126,6 +114,13 @@ impl std::str::FromStr for FinishReason {
 }
 
 impl<'de> Deserialize<'de> for FinishReason {
+    // `deserialize_any` requires a self-describing format — it needs the
+    // wire data itself to say whether a string or a map follows, since
+    // `FinishReasonVisitor` handles both. The request-plane codec
+    // (`rmp_serde::to_vec_named`) is self-describing, so this holds today;
+    // a compact, non-self-describing encoding (plain `bincode`, for
+    // instance) would fail here even though the derived `Deserialize` this
+    // type replaced would have accepted it.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -141,7 +136,7 @@ impl<'de> serde::de::Visitor<'de> for FinishReasonVisitor {
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            r#"a finish reason: "eos", "length", "stop", "cancelled", "content_filter", "error: <message>", or {"error": "<message>"}"#,
+            r#"a finish reason: "eos", "length", "stop", "cancelled", "abort", "content_filter", "error: <message>", or {"error": "<message>"}"#,
         )
     }
 
@@ -149,9 +144,11 @@ impl<'de> serde::de::Visitor<'de> for FinishReasonVisitor {
     where
         E: serde::de::Error,
     {
-        value
-            .parse()
-            .map_err(|_| E::invalid_value(serde::de::Unexpected::Str(value), &self))
+        // `parse()` (`FromStr`) already carries the specific reason a string
+        // failed to match any known form. `E::custom` keeps that message
+        // instead of collapsing every parse failure into the generic
+        // `invalid_value` text.
+        value.parse().map_err(E::custom)
     }
 
     /// The externally tagged form that [`Serialize`] emits: exactly one entry,
