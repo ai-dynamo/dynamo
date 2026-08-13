@@ -8,9 +8,9 @@ import subprocess
 import sys
 
 
-def run(*command):
+def run(*command, allowed_returncodes=(0,)):
     result = subprocess.run(command, text=True, capture_output=True)
-    if result.returncode:
+    if result.returncode not in allowed_returncodes:
         raise SystemExit(f"{' '.join(command)} failed: {result.stderr.strip()}")
     return result.stdout
 
@@ -63,7 +63,8 @@ if daemonset["status"].get("numberReady") != 1:
 
 auth = run(
     "kubectl", "auth", "can-i", "list", "pods", "--as",
-    f"system:serviceaccount:{args.namespace}:snapshot-agent", "--all-namespaces"
+    f"system:serviceaccount:{args.namespace}:snapshot-agent", "--all-namespaces",
+    allowed_returncodes=(0, 1),
 ).strip()
 if auth == "yes":
     failures.append("snapshot-agent service account can list pods cluster-wide")

@@ -20,23 +20,8 @@ git -C "$source_dir" remote add origin https://github.com/ai-dynamo/dynamo.git
 git -C "$source_dir" fetch --depth 1 origin "$dynamo_commit"
 git -C "$source_dir" checkout -q FETCH_HEAD
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$dynamo_commit"
-python3 - "$source_dir/deploy/snapshot/Dockerfile" "$cuda_checkpoint_source_commit" <<'PY'
-import pathlib, sys
-path = pathlib.Path(sys.argv[1])
-revision = sys.argv[2]
-old = "RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint"
-new = (
-    "RUN git init /tmp/cuda-checkpoint "
-    "&& cd /tmp/cuda-checkpoint "
-    "&& git remote add origin https://github.com/NVIDIA/cuda-checkpoint.git "
-    f"&& git fetch --depth 1 origin {revision} "
-    "&& git checkout FETCH_HEAD"
-)
-body = path.read_text()
-if body.count(old) != 1:
-    raise SystemExit("unexpected upstream cuda-checkpoint clone instruction")
-path.write_text(body.replace(old, new))
-PY
+"$project_dir/implementation/bin/patch-placeholder-dockerfile" \
+  "$source_dir/deploy/snapshot/Dockerfile" "$cuda_checkpoint_source_commit"
 
 tools_image="dynamo-snapshot-placeholder-tools:${dynamo_commit:0:12}"
 docker build --platform linux/amd64 \

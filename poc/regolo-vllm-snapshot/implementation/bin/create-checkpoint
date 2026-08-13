@@ -7,19 +7,37 @@ import sys
 import time
 
 
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "implementation/lib"))
+
+from snapshot_poc import checkpoint_id
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--snapshotctl", type=pathlib.Path, required=True)
 parser.add_argument("--manifest", type=pathlib.Path, required=True)
 parser.add_argument("--namespace", required=True)
+parser.add_argument("--compatibility-hash", required=True)
 parser.add_argument("--checkpoint-id", required=True)
 parser.add_argument("--output", type=pathlib.Path, required=True)
 args = parser.parse_args()
+
+try:
+    expected_checkpoint_id = checkpoint_id(args.compatibility_hash)
+except ValueError as error:
+    raise SystemExit(str(error)) from error
+if args.checkpoint_id != expected_checkpoint_id:
+    raise SystemExit(
+        "checkpoint_id does not match the deterministic Kubernetes-safe mapping "
+        "of compatibility_hash"
+    )
 
 started = time.monotonic()
 command = [
     str(args.snapshotctl), "checkpoint", "--manifest", str(args.manifest),
     "--container", "server", "--namespace", args.namespace,
-    "--checkpoint-id", args.checkpoint_id, "--timeout", "45m",
+    "--checkpoint-id", args.checkpoint_id,
+    "--disable-cuda-checkpoint-job-file", "--timeout", "45m",
 ]
 result = subprocess.run(command, text=True, capture_output=True)
 duration = time.monotonic() - started
@@ -48,6 +66,7 @@ size_bytes = None
 if size_result.returncode == 0:
     size_bytes = int(size_result.stdout.split()[0])
 metadata = {
+    "compatibility_hash": args.compatibility_hash,
     "checkpoint_id": args.checkpoint_id,
     "checkpoint_duration_s": duration,
     "checkpoint_size_bytes": size_bytes,

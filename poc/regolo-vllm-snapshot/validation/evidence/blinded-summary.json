@@ -1,0 +1,23 @@
+{
+  "arms": {
+    "A": {
+      "eligible_runs": 10,
+      "failed_runs": 0,
+      "median_first_token_s": 36.26655876636505,
+      "median_gpu_memory_mib": 38464.0,
+      "median_http_200_s": 28.479363679885864,
+      "median_ready_s": 27.5,
+      "valid_responses": 10
+    },
+    "B": {
+      "eligible_runs": 10,
+      "failed_runs": 0,
+      "median_first_token_s": 129.72930777072906,
+      "median_gpu_memory_mib": 38464.0,
+      "median_http_200_s": 128.2785360813141,
+      "median_ready_s": 127.0,
+      "valid_responses": 10
+    }
+  },
+  "sealed_before_unblinding": true
+}

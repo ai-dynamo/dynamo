@@ -9,6 +9,9 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "implementation/lib"))
+
+from snapshot_poc import checkpoint_id
 
 
 def checked(command, **kwargs):
@@ -30,8 +33,16 @@ campaign = json.loads(args.campaign.read_text())
 plan = json.loads(args.run_plan.read_text())
 key = json.loads(args.key.read_text())
 checkpoint = json.loads(args.checkpoint_metadata.read_text())
-if campaign.get("compatibility_hash") != checkpoint.get("checkpoint_id"):
-    raise SystemExit("campaign compatibility_hash does not match checkpoint_id")
+if campaign.get("compatibility_hash") != checkpoint.get("compatibility_hash"):
+    raise SystemExit("campaign compatibility_hash does not match checkpoint metadata")
+try:
+    expected_checkpoint_id = checkpoint_id(campaign.get("compatibility_hash"))
+except ValueError as error:
+    raise SystemExit(str(error)) from error
+if campaign.get("checkpoint_id") != expected_checkpoint_id:
+    raise SystemExit("campaign checkpoint_id is not the Kubernetes-safe compatibility mapping")
+if checkpoint.get("checkpoint_id") != expected_checkpoint_id:
+    raise SystemExit("checkpoint metadata checkpoint_id is not the Kubernetes-safe compatibility mapping")
 args.output_dir.mkdir(parents=True, exist_ok=True)
 events_dir = args.output_dir / "events"
 manifests_dir = args.output_dir / "manifests"

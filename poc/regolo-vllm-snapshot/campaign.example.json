@@ -7,6 +7,7 @@
   "model_id": "replace-with-model-id",
   "model_revision": "replace-with-model-commit",
   "compatibility_hash": "replace-with-64-hex-compatibility-hash",
+  "checkpoint_id": "h-replace-with-first-61-hex-of-compatibility-hash",
   "original_command": [
     "vllm",
     "serve",

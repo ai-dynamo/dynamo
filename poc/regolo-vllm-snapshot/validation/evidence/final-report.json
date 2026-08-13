@@ -1,0 +1,15 @@
+{
+  "break_even_restores": 4.583027610968287,
+  "checkpoint_duration_median_s": 428.34235928399903,
+  "checkpoint_size_median_bytes": 43886233878,
+  "cold_median_first_token_s": 129.72930777072906,
+  "decision": "Go",
+  "eligible_runs": 20,
+  "max_paired_gpu_memory_relative_delta": 0.0,
+  "median_speedup": 3.577105525960319,
+  "protocol_version": "V0.1",
+  "restore_median_first_token_s": 36.26655876636505,
+  "restore_success_rate": 1.0,
+  "restore_successes": 10,
+  "valid_responses": 20
+}

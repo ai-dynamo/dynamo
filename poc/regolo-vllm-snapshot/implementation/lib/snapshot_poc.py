@@ -43,6 +43,15 @@ def compatibility_hash(identity):
     return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
 
 
+def checkpoint_id(compatibility_hash_value):
+    """Map a full SHA-256 identity to Dynamo's Kubernetes-label-safe locator."""
+    if not isinstance(compatibility_hash_value, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", compatibility_hash_value
+    ):
+        raise ValueError("compatibility_hash must be exactly 64 lowercase hexadecimal characters")
+    return "h-" + compatibility_hash_value[:61]
+
+
 def make_run_plan(seed, paired_blocks=10):
     if paired_blocks != 10:
         raise ValueError("V0.1 freezes exactly 10 paired blocks")

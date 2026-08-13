@@ -1,0 +1,122 @@
+[
+  {
+    "block": 1,
+    "opaque_arm": "B",
+    "run_id": "v1-01-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 1,
+    "opaque_arm": "A",
+    "run_id": "v1-01-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 2,
+    "opaque_arm": "A",
+    "run_id": "v1-02-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 2,
+    "opaque_arm": "B",
+    "run_id": "v1-02-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 3,
+    "opaque_arm": "B",
+    "run_id": "v1-03-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 3,
+    "opaque_arm": "A",
+    "run_id": "v1-03-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 4,
+    "opaque_arm": "A",
+    "run_id": "v1-04-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 4,
+    "opaque_arm": "B",
+    "run_id": "v1-04-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 5,
+    "opaque_arm": "A",
+    "run_id": "v1-05-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 5,
+    "opaque_arm": "B",
+    "run_id": "v1-05-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 6,
+    "opaque_arm": "B",
+    "run_id": "v1-06-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 6,
+    "opaque_arm": "A",
+    "run_id": "v1-06-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 7,
+    "opaque_arm": "A",
+    "run_id": "v1-07-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 7,
+    "opaque_arm": "B",
+    "run_id": "v1-07-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 8,
+    "opaque_arm": "A",
+    "run_id": "v1-08-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 8,
+    "opaque_arm": "B",
+    "run_id": "v1-08-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 9,
+    "opaque_arm": "B",
+    "run_id": "v1-09-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 9,
+    "opaque_arm": "A",
+    "run_id": "v1-09-02",
+    "sequence_in_block": 2
+  },
+  {
+    "block": 10,
+    "opaque_arm": "A",
+    "run_id": "v1-10-01",
+    "sequence_in_block": 1
+  },
+  {
+    "block": 10,
+    "opaque_arm": "B",
+    "run_id": "v1-10-02",
+    "sequence_in_block": 2
+  }
+]

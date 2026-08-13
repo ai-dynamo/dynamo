@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Apply the pinned Jammy/cuda-checkpoint edits to Dynamo's upstream Dockerfile."""
+
+import pathlib
+import re
+import sys
+
+
+if len(sys.argv) != 3:
+    raise SystemExit(f"usage: {sys.argv[0]} <Dockerfile> <cuda-checkpoint-commit>")
+path = pathlib.Path(sys.argv[1])
+revision = sys.argv[2]
+if not re.fullmatch(r"[0-9a-f]{40}", revision):
+    raise SystemExit("cuda-checkpoint commit must be 40 lowercase hexadecimal characters")
+
+body = path.read_text()
+clone = "RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint"
+if body.count(clone) != 1:
+    raise SystemExit("unexpected upstream cuda-checkpoint clone instruction")
+body = body.replace(
+    clone,
+    "RUN git init /tmp/cuda-checkpoint "
+    "&& cd /tmp/cuda-checkpoint "
+    "&& git remote add origin https://github.com/NVIDIA/cuda-checkpoint.git "
+    f"&& git fetch --depth 1 origin {revision} "
+    "&& git checkout FETCH_HEAD",
+)
+
+criu_builder = "FROM ubuntu:24.04 AS criu-builder"
+if body.count(criu_builder) != 1:
+    raise SystemExit("unexpected upstream CRIU builder base")
+body = body.replace(criu_builder, "FROM ${BASE_IMAGE} AS criu-builder")
+
+install = "&& make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin"
+if body.count(install) != 1:
+    raise SystemExit("unexpected upstream CRIU install command")
+body = body.replace(
+    install,
+    "&& PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python "
+    "make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin",
+)
+
+placeholder = "FROM ${BASE_IMAGE} AS placeholder"
+if body.count(placeholder) != 1:
+    raise SystemExit("unexpected upstream placeholder stage")
+before, after = body.split(placeholder, 1)
+if after.count("libgnutls30t64") != 1:
+    raise SystemExit("unexpected placeholder GnuTLS runtime dependency")
+after = after.replace("libgnutls30t64", "libgnutls30", 1)
+path.write_text(before + placeholder + after)
