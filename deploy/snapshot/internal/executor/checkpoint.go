@@ -204,6 +204,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	cudaVMMInterpose, err := cuda.DetectVMMInterpose(
 		snapshotruntime.HostProcPath,
 		cudaHostPIDs,
+		cudaNamespacePIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("detect CUDA VMM interposer: %w", err)
