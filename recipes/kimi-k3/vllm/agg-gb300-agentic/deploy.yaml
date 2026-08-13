@@ -174,4 +174,4 @@ spec:
                     --reasoning-parser kimi_k3 \
                     --dyn-reasoning-parser kimi_k3 \
                     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' \
-                    --speculative-config '{"method":"dspark","model":"/dspark","num_speculative_tokens":7,"attention_backend":"TOKENSPEED_MLA","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":4.25846126489242}'
+                    --speculative-config '{"method":"dspark","model":"/dspark","num_speculative_tokens":7,"attention_backend":"TOKENSPEED_MLA","draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
