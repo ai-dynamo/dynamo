@@ -24,6 +24,8 @@ const (
 	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"
 
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
+	PageBrokerAnnotation                = "nvidia.com/pagebroker"
+	PageBrokerAnnotationEnabled         = "enabled"
 
 	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the
 	// object so the per-node agent's cache can label-select work for its node.

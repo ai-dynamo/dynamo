@@ -17,22 +17,26 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
+const pageBrokerAbortTimeout = 5 * time.Second
+
 // CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID        string
-	ContainerName      string
-	CheckpointID       string
-	CheckpointLocation string
-	StartedAt          time.Time
-	NodeName           string
-	PodName            string
-	PodNamespace       string
-	PodIP              string
-	Clientset          kubernetes.Interface
+	ContainerID         string
+	ContainerName       string
+	CheckpointID        string
+	CheckpointLocation  string
+	StartedAt           time.Time
+	NodeName            string
+	PodName             string
+	PodNamespace        string
+	PodIP               string
+	Clientset           kubernetes.Interface
+	PageBrokerRequested bool
 }
 
 type checkpointPhaseTimings struct {
@@ -46,9 +50,8 @@ type checkpointPhaseTimings struct {
 // Checkpoint performs a CRIU dump of a container.
 // The operation has three phases: inspect, configure, capture.
 //
-// The checkpoint directory is staged under tmp/<uuid> during the operation.
-// On success, the previous checkpoint is removed and the staged directory is
-// renamed into place at the base path root.
+// PageBroker uses its tmpfs staging directory when both the Pod and deployment enable it;
+// otherwise the existing tmp/<uuid> staging and rename path is unchanged.
 func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	phaseTimings := checkpointPhaseTimings{}
@@ -63,15 +66,36 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	finalDir := req.CheckpointLocation
-	tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
-	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
+	tmpDir := ""
+	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
+	transactionID := uuid.NewString()
+	var broker pagebroker.Client
+	committed := false
+	if brokered {
+		broker = pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
+		defer func() {
+			if !committed {
+				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+				defer cancel()
+				_ = broker.Abort(abortCtx, transactionID)
+			}
+		}()
+		var err error
+		tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+		if err != nil {
+			return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		}
+	} else {
+		tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
+		if err := os.MkdirAll(tmpRoot, 0700); err != nil {
+			return fmt.Errorf("failed to create checkpoint staging root: %w", err)
+		}
+		tmpDir = filepath.Join(tmpRoot, transactionID)
+		if err := os.Mkdir(tmpDir, 0700); err != nil {
+			return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
+		}
+		defer os.RemoveAll(tmpDir)
 	}
-	tmpDir := filepath.Join(tmpRoot, uuid.NewString())
-	if err := os.Mkdir(tmpDir, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
 
 	// Phase 1: Inspect container state
 	state, err := inspectContainer(ctx, rt, log, req)
@@ -95,14 +119,21 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
 	phaseTimings.OverlayCaptureDuration = captureTimings.OverlayCaptureDuration
 
-	// Remove any previous checkpoint with the same identity hash, then
-	// promote the staged checkpoint directory into place.
 	finalizeStart := time.Now()
-	if err := os.RemoveAll(finalDir); err != nil {
-		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
-	}
-	if err := os.Rename(tmpDir, finalDir); err != nil {
-		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
+	if brokered {
+		if err := broker.Commit(ctx, transactionID); err != nil {
+			return fmt.Errorf("commit PageBroker checkpoint: %w", err)
+		}
+		committed = true
+	} else {
+		// Remove any previous checkpoint with the same identity hash, then
+		// promote the staged checkpoint directory into place.
+		if err := os.RemoveAll(finalDir); err != nil {
+			return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
+		}
+		if err := os.Rename(tmpDir, finalDir); err != nil {
+			return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
+		}
 	}
 	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
 

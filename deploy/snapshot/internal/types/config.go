@@ -15,6 +15,7 @@ type AgentConfig struct {
 	RestrictedNamespace string          `yaml:"-"`
 	Storage             StorageSpec     `yaml:"storage"`
 	Overlay             OverlaySettings `yaml:"overlay"`
+	PageBroker          PageBrokerSpec  `yaml:"pageBroker"`
 	Restore             RestoreSpec     `yaml:"restore"`
 	CRIU                CRIUSettings    `yaml:"criu"`
 }
@@ -88,6 +89,11 @@ type StorageSpec struct {
 	Type       string `yaml:"type"`
 	BasePath   string `yaml:"basePath"`
 	AccessMode string `yaml:"accessMode"`
+}
+
+type PageBrokerSpec struct {
+	Enabled           bool   `yaml:"enabled"`
+	ControlSocketPath string `yaml:"controlSocketPath"`
 }
 
 // RestoreSpec holds settings for the CRIU restore process.
