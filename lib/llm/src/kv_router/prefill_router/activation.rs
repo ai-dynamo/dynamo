@@ -77,6 +77,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             namespace,
             is_eagle,
             worker_monitor,
+            None,
         )
     }
 }
@@ -108,6 +109,7 @@ where
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
+            task_guard: None,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
             #[cfg(test)]
             activation_task_state: Arc::new(()),
@@ -129,6 +131,7 @@ where
         namespace: String,
         is_eagle: bool,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let (target_tx, target_rx) = watch::channel(None);
@@ -159,6 +162,7 @@ where
             model_name,
             namespace,
             is_eagle,
+            task_guard: task_guard.clone(),
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
             #[cfg(test)]
             activation_task_state: Arc::new(()),
@@ -166,9 +170,11 @@ where
 
         let router_weak = Arc::downgrade(&router);
         let drive_cancel_token = cancel_token.clone();
+        let drive_task_guard = task_guard.clone();
         #[cfg(test)]
         let drive_task_state = router.activation_task_state.clone();
         tokio::spawn(async move {
+            let _drive_task_guard = drive_task_guard;
             #[cfg(test)]
             let _drive_task_state = drive_task_state;
             Self::drive_target(
@@ -183,6 +189,7 @@ where
         });
         if let Some(activation_rx) = activation_rx {
             let router = Arc::downgrade(&router);
+            let activation_task_guard = task_guard;
             #[cfg(test)]
             let activation_task_state = router
                 .upgrade()
@@ -190,6 +197,7 @@ where
                 .activation_task_state
                 .clone();
             tokio::spawn(async move {
+                let _activation_task_guard = activation_task_guard;
                 #[cfg(test)]
                 let _activation_task_state = activation_task_state;
                 tokio::select! {

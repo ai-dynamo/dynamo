@@ -574,6 +574,7 @@ pub struct KvWorkerMonitor {
 
 struct MonitorLifecycle {
     cancellation_token: CancellationToken,
+    task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
 }
 
 impl Drop for MonitorLifecycle {
@@ -598,6 +599,22 @@ impl KvWorkerMonitor {
     /// prefill-pool overload publishing and TTFT metric cleanup when prefill workers
     /// are removed.
     pub fn new(client: Client, config: LoadThresholdConfig) -> Self {
+        Self::new_inner(client, config, None)
+    }
+
+    pub(crate) fn new_with_task_guard(
+        client: Client,
+        config: LoadThresholdConfig,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) -> Self {
+        Self::new_inner(client, config, Some(task_guard))
+    }
+
+    fn new_inner(
+        client: Client,
+        config: LoadThresholdConfig,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    ) -> Self {
         let cancellation_token = client.endpoint.drt().child_token();
         Self {
             client,
@@ -607,7 +624,10 @@ impl KvWorkerMonitor {
             thresholds: Arc::new(RwLock::new(config)),
             started: Arc::new(AtomicBool::new(false)),
             start_lock: Arc::new(tokio::sync::Mutex::new(())),
-            lifecycle: Arc::new(MonitorLifecycle { cancellation_token }),
+            lifecycle: Arc::new(MonitorLifecycle {
+                cancellation_token,
+                task_guard,
+            }),
         }
     }
 
@@ -770,10 +790,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let prefill_client_notify = self.prefill_client_notify.clone();
         let thresholds = self.thresholds.clone();
         let started = self.started.clone();
+        let task_guard = self.lifecycle.task_guard.clone();
 
         // Spawn background monitoring task
         self.started.store(true, Ordering::Release);
         tokio::spawn(async move {
+            let _task_guard = task_guard;
             struct StartedGuard(Arc<AtomicBool>);
 
             impl Drop for StartedGuard {

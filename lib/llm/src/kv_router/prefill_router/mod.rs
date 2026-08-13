@@ -207,6 +207,7 @@ where
     /// Namespace (used for logging / lifecycle messages).
     namespace: String,
     is_eagle: bool,
+    task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
     #[cfg(test)]
@@ -416,7 +417,9 @@ where
                 }
             } else {
                 drop(prefill_phase_barrier);
-                let completion = Self::consume_prefill_stream(prefill_stream, tracker).await?;
+                let completion =
+                    Self::consume_prefill_stream(prefill_stream, tracker, self.task_guard.clone())
+                        .await?;
 
                 match completion {
                     PrefillCompletion::Handoff {

@@ -235,6 +235,16 @@ pub(crate) struct PreparedWorkerSet {
     card: ModelDeploymentCard,
 }
 
+impl PreparedWorkerSet {
+    fn new(mut worker_set: WorkerSet, card: ModelDeploymentCard) -> Self {
+        worker_set.enable_allocator_trim_on_teardown();
+        Self {
+            worker_set: Some(worker_set),
+            card,
+        }
+    }
+}
+
 const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Chat,
     ModelType::Completions,
@@ -467,6 +477,7 @@ where
         let namespace = mcid.namespace.clone();
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
+        let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation);
         worker_set.set_topology_endpoint(endpoint.clone());
         worker_set.set_instance_watcher(instance_watcher);
@@ -483,10 +494,7 @@ where
                     card.model_input.as_str()
                 );
             }
-            return Ok(PreparedWorkerSet {
-                worker_set: Some(worker_set),
-                card: card.clone(),
-            });
+            return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
         // worker_type-driven short circuit for Prefill.
@@ -520,10 +528,7 @@ where
                 "Prefill worker detected, registering and activating prefill router"
             );
 
-            return Ok(PreparedWorkerSet {
-                worker_set: Some(worker_set),
-                card: card.clone(),
-            });
+            return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
         if card.model_input == ModelInput::Tokens
@@ -570,22 +575,25 @@ where
                         WORKER_TYPE_DECODE,
                         RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
                     );
-                    Some(
-                        self.manager
-                            .kv_chooser_for_with_selector_and_client(
-                                &endpoint,
-                                client.clone(),
-                                card.kv_cache_block_size,
-                                selector,
-                                Some(router_config.kv_router_config.clone()),
-                                self.prefill_load_estimator.clone(),
-                                card.worker_type,
-                                WORKER_TYPE_DECODE, // This is the decode router
-                                Some(card.display_name.clone()),
-                                card.runtime_config.enable_eagle,
-                            )
-                            .await?,
-                    )
+                    let mut chooser = self
+                        .manager
+                        .kv_chooser_for_with_selector_and_client(
+                            &endpoint,
+                            client.clone(),
+                            card.kv_cache_block_size,
+                            selector,
+                            Some(router_config.kv_router_config.clone()),
+                            self.prefill_load_estimator.clone(),
+                            card.worker_type,
+                            WORKER_TYPE_DECODE, // This is the decode router
+                            Some(card.display_name.clone()),
+                            card.runtime_config.enable_eagle,
+                        )
+                        .await?;
+                    Arc::get_mut(&mut chooser)
+                        .expect("new KV chooser must have one owner")
+                        .set_teardown_task_guard(allocator_trim.clone());
+                    Some(chooser)
                 } else {
                     None
                 };
@@ -608,9 +616,10 @@ where
                     .as_ref()
                     .map(|chooser| chooser.client().clone())
                     .unwrap_or_else(|| client.clone());
-                Some(KvWorkerMonitor::new(
+                Some(KvWorkerMonitor::new_with_task_guard(
                     monitor_client,
                     router_config.load_threshold_config.clone(),
+                    allocator_trim.clone(),
                 ))
             } else {
                 None
@@ -641,13 +650,18 @@ where
                     namespace.clone(),
                     prefill_enable_eagle,
                     worker_monitor.clone(),
+                    Some(allocator_trim.clone()),
                 ))
             } else {
                 None
             };
 
             let encoder_chooser = if needs_preprocessed_routing {
-                Some(EncoderRouter::new(model_name.clone(), namespace.clone()))
+                Some(EncoderRouter::new_with_task_guard(
+                    model_name.clone(),
+                    namespace.clone(),
+                    allocator_trim.clone(),
+                ))
             } else {
                 None
             };
@@ -979,10 +993,7 @@ where
             );
         }
 
-        Ok(PreparedWorkerSet {
-            worker_set: Some(worker_set),
-            card: card.clone(),
-        })
+        Ok(PreparedWorkerSet::new(worker_set, card.clone()))
     }
 
     fn emit_update(&self, update: ModelUpdate) {
@@ -990,13 +1001,6 @@ where
             let _ = dispatch.send(update);
         }
     }
-}
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn trim_allocator_after_lora_removal() {
-    // SAFETY: malloc_trim is process-wide and internally synchronizes glibc arenas.
-    let released_pages = unsafe { libc::malloc_trim(0) != 0 };
-    tracing::debug!(released_pages, "Trimmed allocator after LoRA removal");
 }
 
 #[async_trait]
@@ -1163,18 +1167,12 @@ where
                 self.emit_update(ModelUpdate::Added(card.clone()));
             }
         }
-        let mut removed_lora = false;
         for (name, card) in previous {
             if was_available.get(&name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(&name).is_none()
             {
                 self.emit_update(ModelUpdate::Removed(card));
-                removed_lora = true;
             }
-        }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if removed_lora {
-            trim_allocator_after_lora_removal();
         }
         Ok(())
     }
@@ -1183,7 +1181,6 @@ where
         let Some(removed) = self.manager.remove_discovery_group(&key.id()) else {
             return;
         };
-        let removed_lora = removed.cards.iter().any(|card| card.lora.is_some());
         let removed_members = removed.cards.len();
         let mut removed_adapter_names = HashSet::new();
         for removed_card in &removed.cards {
@@ -1200,10 +1197,6 @@ where
         let card = removed.representative;
         for removed_card in removed_model_cards(&self.manager, &card) {
             self.emit_update(ModelUpdate::Removed(removed_card));
-        }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if removed_lora {
-            trim_allocator_after_lora_removal();
         }
         tracing::info!(
             model_name = card.name(),
