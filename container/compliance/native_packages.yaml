@@ -185,3 +185,12 @@ packages:
     source: https://github.com/ai-dynamo/dynamo
     images:
       - snapshot-agent
+
+  - name: pagebroker
+    # First-party C++ daemon built from deploy/snapshot/pagebroker and copied
+    # into the snapshot-agent image.
+    version: 1.0
+    license: Apache-2.0
+    source: https://github.com/ai-dynamo/dynamo
+    images:
+      - snapshot-agent
