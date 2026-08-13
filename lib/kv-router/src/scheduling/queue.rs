@@ -139,8 +139,8 @@ enum AdmissionCommand {
     },
     Update {
         worker: Option<WorkerWithDpRank>,
-        finished: Option<(String, WorkerWithDpRank, AdmissionRequestOutcome)>,
-        ack_tx: oneshot::Sender<()>,
+        finished: Option<(String, Option<WorkerWithDpRank>, AdmissionRequestOutcome)>,
+        ack_tx: oneshot::Sender<bool>,
     },
     Cleanup,
 }
@@ -654,49 +654,53 @@ impl<
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
     pub async fn update(&self) {
-        self.update_after(None, None).await;
+        let _ = self.update_after(None, None).await;
     }
 
     pub(crate) async fn update_worker(&self, worker: WorkerWithDpRank) {
-        self.update_after(Some(worker), None).await;
+        let _ = self.update_after(Some(worker), None).await;
     }
 
     pub(crate) async fn complete_request(
         &self,
         request_id: &str,
-        worker: WorkerWithDpRank,
+        expected_worker: Option<WorkerWithDpRank>,
         context_tokens: Option<usize>,
-    ) {
+    ) -> bool {
         self.update_after(
-            Some(worker),
+            expected_worker,
             Some((
                 request_id.to_owned(),
-                worker,
+                expected_worker,
                 AdmissionRequestOutcome::Completed { context_tokens },
             )),
         )
-        .await;
+        .await
     }
 
-    pub(crate) async fn abort_request(&self, request_id: &str, worker: WorkerWithDpRank) {
+    pub(crate) async fn abort_request(
+        &self,
+        request_id: &str,
+        expected_worker: Option<WorkerWithDpRank>,
+    ) -> bool {
         self.update_after(
-            Some(worker),
+            expected_worker,
             Some((
                 request_id.to_owned(),
-                worker,
+                expected_worker,
                 AdmissionRequestOutcome::Aborted,
             )),
         )
-        .await;
+        .await
     }
 
     async fn update_after(
         &self,
         worker: Option<WorkerWithDpRank>,
-        finished: Option<(String, WorkerWithDpRank, AdmissionRequestOutcome)>,
-    ) {
+        finished: Option<(String, Option<WorkerWithDpRank>, AdmissionRequestOutcome)>,
+    ) -> bool {
         if !self.queueing_enabled {
-            return;
+            return false;
         }
 
         let (ack_tx, ack_rx) = oneshot::channel();
@@ -710,8 +714,9 @@ impl<
             .await
             .is_ok()
         {
-            let _ = ack_rx.await;
+            return ack_rx.await.unwrap_or(false);
         }
+        false
     }
 
     /// Number of requests currently parked in the pending queue (lock-free).
@@ -802,18 +807,23 @@ impl<
                     let _ = resp_tx.send(result);
                 }
                 AdmissionCommand::Update {
-                    worker,
+                    mut worker,
                     finished,
                     ack_tx,
                 } => {
-                    if let Some((request_id, worker, outcome)) = finished {
-                        self.handle_admission_finished(&request_id, worker, outcome);
+                    let mut finished_handled = false;
+                    if let Some((request_id, expected_worker, outcome)) = finished
+                        && let Some(booked_worker) =
+                            self.handle_admission_finished(&request_id, expected_worker, outcome)
+                    {
+                        worker = worker.or(Some(booked_worker));
+                        finished_handled = true;
                     }
                     self.handle_update(worker).await;
                     if drain_cleanup && self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
-                    let _ = ack_tx.send(());
+                    let _ = ack_tx.send(finished_handled);
                 }
                 AdmissionCommand::Cleanup => {
                     if self.drain_cleanup() {
@@ -1097,11 +1107,12 @@ impl<
     fn handle_admission_finished(
         &mut self,
         request_id: &str,
-        worker: WorkerWithDpRank,
+        expected_worker: Option<WorkerWithDpRank>,
         outcome: AdmissionRequestOutcome,
-    ) -> bool {
-        if self.admission_bookings.get(request_id).copied() != Some(worker) {
-            return false;
+    ) -> Option<WorkerWithDpRank> {
+        let worker = self.admission_bookings.get(request_id).copied()?;
+        if expected_worker.is_some_and(|expected| expected != worker) {
+            return None;
         }
         self.admission_bookings.remove(request_id);
         let event = match outcome {
@@ -1113,7 +1124,8 @@ impl<
             }
             AdmissionRequestOutcome::Aborted => QueueAdmissionEvent::Aborted { request_id },
         };
-        self.pending.admission_event(event)
+        self.pending.admission_event(event);
+        Some(worker)
     }
 
     fn has_dispatchable_ready_head(&self) -> bool {
@@ -2372,7 +2384,7 @@ mod tests {
             .free(&"policy-request".to_owned(), Instant::now())
             .unwrap();
         queue
-            .complete_request("policy-request", response.best_worker, Some(48))
+            .complete_request("policy-request", Some(response.best_worker), Some(48))
             .await;
         assert_eq!(state.completed.load(Ordering::Relaxed), 1);
         assert_eq!(state.completed_context_tokens.load(Ordering::Relaxed), 48);

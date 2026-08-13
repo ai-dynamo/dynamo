@@ -6,12 +6,14 @@
 //! The policy filters workers by device cache overlap, then ranks the remaining
 //! workers by active requests.
 
+mod admission;
 mod filter;
 mod picker;
 mod scorer;
 
 use std::sync::Arc;
 
+use admission::SessionAdmissionPolicy;
 use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
@@ -26,6 +28,8 @@ use scorer::ActiveRequestsScorer;
 #[serde(deny_unknown_fields)]
 struct Parameters {
     min_device_overlap_blocks: f64,
+    #[serde(default)]
+    serialize_sessions: bool,
 }
 
 fn validate_min_device_overlap_blocks(
@@ -45,19 +49,25 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
+    let serialize_sessions = parameters.serialize_sessions;
 
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
             let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
                 min_device_overlap_blocks,
             })];
-            WorkerSelectionPolicy::new_with_filters(
+            let policy = WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
                 worker_type.as_str(),
                 filters,
                 vec![Box::new(ActiveRequestsScorer)],
                 Box::new(RequestAwarePicker),
-            )
+            );
+            if serialize_sessions {
+                policy.with_admission_policy(Box::new(SessionAdmissionPolicy::default()))
+            } else {
+                policy
+            }
         },
     ))
 }

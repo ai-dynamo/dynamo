@@ -29,7 +29,8 @@ use crate::scheduling::selector::{
     WorkerSelectionContext, WorkerSelectionPolicy,
 };
 use crate::scheduling::{
-    QueueAdmissionDecision, QueueAdmissionPolicy, QueueAdmissionRequest, WorkerSelectionPolicyError,
+    QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionPolicy, QueueAdmissionRequest,
+    WorkerSelectionPolicyError,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -136,6 +137,40 @@ impl QueueAdmissionPolicy for CountingAdmissionPolicy {
     }
 }
 
+#[derive(Default)]
+struct AdmissionLifecycleCounts {
+    admissions: AtomicUsize,
+    completed: AtomicUsize,
+    aborted: AtomicUsize,
+}
+
+struct RecordingAdmissionPolicy {
+    counts: Arc<AdmissionLifecycleCounts>,
+}
+
+impl QueueAdmissionPolicy for RecordingAdmissionPolicy {
+    fn admit(&mut self, _request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
+        self.counts.admissions.fetch_add(1, Ordering::Relaxed);
+        QueueAdmissionDecision::Ready
+    }
+
+    fn on_event(
+        &mut self,
+        event: QueueAdmissionEvent<'_>,
+        _ready: &mut Vec<crate::scheduling::QueueAdmissionId>,
+    ) {
+        match event {
+            QueueAdmissionEvent::Completed { .. } => {
+                self.counts.completed.fetch_add(1, Ordering::Relaxed);
+            }
+            QueueAdmissionEvent::Aborted { .. } => {
+                self.counts.aborted.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
     let config = test_config();
     let context = TrackingHashContext::from_config(&config).unwrap();
@@ -205,6 +240,18 @@ async fn patch(app: Router, uri: &str, body: &str) -> Response {
             .uri(uri)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn delete(app: Router, uri: &str) -> Response {
+    app.oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
             .unwrap(),
     )
     .await
@@ -429,6 +476,126 @@ async fn admission_policy_supports_atomic_reservations_and_rejects_two_step_book
     .await;
     assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
     assert_eq!(admissions.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn admission_completion_survives_worker_removal() {
+    let counts = Arc::new(AdmissionLifecycleCounts::default());
+    let observed = Arc::clone(&counts);
+    let app = native_policy_app(move |config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type,
+            vec![Box::new(WorkerIdScorer)],
+            Box::new(LowestCostPicker),
+        )
+        .with_admission_policy(Box::new(RecordingAdmissionPolicy {
+            counts: Arc::clone(&observed),
+        }))
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"removed-worker","session_id":"session-a"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    assert_eq!(
+        delete(app.clone(), "/workers/1").await.status(),
+        StatusCode::OK
+    );
+
+    let released = delete(app, "/reservations/removed-worker").await;
+    assert_eq!(released.status(), StatusCode::OK);
+    assert_eq!(counts.admissions.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.completed.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.aborted.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn reservation_abort_reports_aborted_instead_of_completed() {
+    let counts = Arc::new(AdmissionLifecycleCounts::default());
+    let observed = Arc::clone(&counts);
+    let app = native_policy_app(move |config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type,
+            vec![Box::new(WorkerIdScorer)],
+            Box::new(LowestCostPicker),
+        )
+        .with_admission_policy(Box::new(RecordingAdmissionPolicy {
+            counts: Arc::clone(&observed),
+        }))
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"aborted-reservation","session_id":"session-a"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    let aborted = post(app, "/reservations/aborted-reservation/abort", "{}").await;
+    assert_eq!(aborted.status(), StatusCode::OK);
+    assert_eq!(counts.completed.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.aborted.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn reservation_release_skips_partitions_that_do_not_own_the_id() {
+    let counts = Arc::new(AdmissionLifecycleCounts::default());
+    let observed = Arc::clone(&counts);
+    let app = native_policy_app(move |config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type,
+            vec![Box::new(WorkerIdScorer)],
+            Box::new(LowestCostPicker),
+        )
+        .with_admission_policy(Box::new(RecordingAdmissionPolicy {
+            counts: Arc::clone(&observed),
+        }))
+    })
+    .await;
+    for (worker_id, routing_group) in [(1, "a-first"), (2, "z-owner")] {
+        let worker = serde_json::json!({
+            "worker_id": worker_id,
+            "model_name": "model",
+            "routing_group": routing_group,
+            "endpoint": format!("http://worker-{worker_id}:8000"),
+            "block_size": 4
+        });
+        assert_eq!(
+            post(app.clone(), "/workers", &worker.to_string())
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+    }
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","routing_group":"z-owner","token_ids":[1,2,3,4],"selection_id":"owned-by-z","session_id":"session-a"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    assert_eq!(
+        delete(app, "/reservations/owned-by-z").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(counts.completed.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
