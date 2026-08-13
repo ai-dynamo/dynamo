@@ -23,6 +23,7 @@ spec:
   - name: Epp
     type: epp
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     eppConfig:
       config:
         plugins:
@@ -81,6 +82,7 @@ spec:
   - name: VllmDecodeWorker
     type: decode
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     sharedMemorySize: 2Gi
     frontendSidecar: sidecar-frontend
     podTemplate:
@@ -127,6 +129,7 @@ spec:
   - name: VllmPrefillWorker
     type: prefill
     replicas: 1
+    runtimeVersionOverride: 1.4.0
     sharedMemorySize: 2Gi
     frontendSidecar: sidecar-frontend
     podTemplate:
