@@ -1542,6 +1542,74 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             async with self._scale_ep_lock:
                 self._scale_ep_in_progress = False
 
+    async def get_ep_capacity(self, body: dict) -> dict:
+        """Read-only elastic-EP capacity: current dp/tp and the idle GPUs to grow into.
+
+        The reconciler that drives ``scale_elastic_ep`` calls this to decide whether a
+        scale-up can actually place another rank -- it needs at least
+        ``tensor_parallel_size`` idle GPUs for one more data-parallel rank.
+
+        The response shape is backend-agnostic: ``data_parallel_size`` and
+        ``tensor_parallel_size`` always come from the engine config. The GPU totals are
+        backend-specific -- for the Ray DP backend they come from the Ray cluster; for
+        the external-LB backend (no Ray cluster to query) they are ``None`` and a caller
+        must source capacity another way. That keeps this endpoint usable once vLLM's
+        external-LB elastic EP (``data_parallel_external_lb``) lands.
+        """
+        parallel_config = self.engine_client.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        tp_size = parallel_config.tensor_parallel_size
+        external_lb = bool(getattr(parallel_config, "data_parallel_external_lb", False))
+
+        result: dict = {
+            "status": "ok",
+            "data_parallel_size": dp_size,
+            "tensor_parallel_size": tp_size,
+            "data_parallel_backend": "external_lb" if external_lb else "ray",
+            "total_gpus": None,
+            "available_gpus": None,
+            "used_gpus": None,
+            "nodes": None,
+        }
+
+        # GPU capacity is backend-specific. The external-LB backend runs no Ray
+        # cluster, so there is nothing to query here -- report dp/tp only and leave the
+        # GPU fields null. This is the seam for vLLM's external-LB elastic EP.
+        if external_lb:
+            return result
+
+        # Ray DP backend: per-node GPU totals from ray.nodes() and the cluster-wide
+        # idle count from ray.available_resources(). Imported lazily so ray is not
+        # required at module load in non-elastic-EP deployments.
+        try:
+            import ray
+
+            total_gpus = 0.0
+            nodes = []
+            for node in ray.nodes():
+                if not node.get("Alive", False):
+                    continue
+                node_gpus = float(node.get("Resources", {}).get("GPU", 0.0))
+                total_gpus += node_gpus
+                nodes.append(
+                    {
+                        "node_ip": node.get("NodeManagerAddress"),
+                        "total_gpus": node_gpus,
+                    }
+                )
+            available_gpus = float(ray.available_resources().get("GPU", 0.0))
+            result["total_gpus"] = total_gpus
+            result["available_gpus"] = available_gpus
+            result["used_gpus"] = total_gpus - available_gpus
+            result["nodes"] = nodes
+        except Exception as e:
+            # Mirror the other control handlers: report the failure in-band rather
+            # than crashing the route, keeping the dp/tp fields already populated.
+            logger.warning(f"[ElasticEP] capacity query failed: {e}")
+            result["status"] = "error"
+            result["message"] = f"GPU capacity query failed: {e}"
+        return result
+
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
