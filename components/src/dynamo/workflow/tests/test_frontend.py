@@ -48,14 +48,27 @@ class _Runner:
         }
 
 
-def _application(**overrides) -> WorkflowFrontendApplication:
+async def _application(
+    *, imperative: bool = False, **overrides
+) -> WorkflowFrontendApplication:
     workflow = Workflow("frontend-workflow")
-    request = workflow.input("request", type="json")
-    stage = workflow.stage("generate", CONTRACT, request=request)
-    workflow.output("chunk", stage.chunk)
-    executor = WorkflowExecutor(
+    if imperative:
+        stage = workflow.use("generate", CONTRACT)
+
+        @workflow.handler(
+            inputs={"request": ValueSpec(type="json")},
+            outputs={"chunk": ValueSpec(type="json")},
+        )
+        async def run(inputs, context):
+            return await context.call(stage, request=inputs["request"])
+
+    else:
+        request = workflow.input("request", type="json")
+        stage = workflow.stage("generate", CONTRACT, request=request)
+        workflow.output("chunk", stage.chunk)
+    executor = await WorkflowExecutor.bind(
         compile_workflow(workflow, DeploymentSpec.local(generate="generate")),
-        {"generate": _Runner()},
+        local_runners={"generate": _Runner()},
     )
     values = {"executor": executor, "model_path": "org/model"}
     values.update(overrides)
@@ -79,12 +92,15 @@ class _FutureContext(_Context):
         return asyncio.get_running_loop().create_future()
 
 
-async def test_token_engine_adapts_preprocessed_request_to_one_workflow_chunk() -> None:
+@pytest.mark.parametrize("imperative", [False, True], ids=["graph", "handler"])
+async def test_token_engine_adapts_preprocessed_request_to_one_workflow_chunk(
+    imperative,
+) -> None:
     chunks = [
         chunk
-        async for chunk in WorkflowTokenEngine(_application()).generate(
-            {"token_ids": [41]}, _Context()
-        )
+        async for chunk in WorkflowTokenEngine(
+            await _application(imperative=imperative)
+        ).generate({"token_ids": [41]}, _Context())
     ]
 
     assert chunks == [{"token_ids": [42], "index": 0, "finish_reason": "stop"}]
@@ -93,7 +109,7 @@ async def test_token_engine_adapts_preprocessed_request_to_one_workflow_chunk() 
 async def test_token_engine_accepts_future_shaped_rust_cancellation() -> None:
     chunks = [
         chunk
-        async for chunk in WorkflowTokenEngine(_application()).generate(
+        async for chunk in WorkflowTokenEngine(await _application()).generate(
             {"token_ids": [41]}, _FutureContext()
         )
     ]
@@ -102,7 +118,7 @@ async def test_token_engine_accepts_future_shaped_rust_cancellation() -> None:
 
 
 async def test_frontend_application_supports_explicit_boundary_adapters() -> None:
-    application = _application(
+    application = await _application(
         request_adapter=lambda request: {
             "request": {"token_ids": [request["token_ids"][-1]]}
         },
@@ -123,19 +139,21 @@ async def test_frontend_application_supports_explicit_boundary_adapters() -> Non
     assert chunks[0]["engine_data"] == {"source": "workflow"}
 
 
-def test_frontend_application_accepts_a_custom_chat_template_path() -> None:
-    application = _application(custom_template_path=Path("templates/vision.jinja"))
+async def test_frontend_application_accepts_a_custom_chat_template_path() -> None:
+    application = await _application(
+        custom_template_path=Path("templates/vision.jinja")
+    )
 
     assert application.custom_template_path == Path("templates/vision.jinja")
 
     with pytest.raises(TypeError, match="pathlib.Path"):
-        _application(custom_template_path="templates/vision.jinja")
+        await _application(custom_template_path="templates/vision.jinja")
 
 
 async def test_loader_invokes_trusted_async_provider_with_runtime_and_config(
     monkeypatch,
 ) -> None:
-    application = _application(model_name="served-workflow")
+    application = await _application(model_name="served-workflow")
     module = ModuleType("test_workflow_provider")
     seen = []
 
@@ -168,6 +186,7 @@ async def test_token_engine_cancels_workflow_when_frontend_context_stops() -> No
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
+                assert context.cancelled
                 cancelled.set()
                 raise
 
@@ -175,9 +194,9 @@ async def test_token_engine_cancels_workflow_when_frontend_context_stops() -> No
     request = workflow.input("request", type="json")
     stage = workflow.stage("generate", CONTRACT, request=request)
     workflow.output("chunk", stage.chunk)
-    executor = WorkflowExecutor(
+    executor = await WorkflowExecutor.bind(
         compile_workflow(workflow, DeploymentSpec.local(generate="generate")),
-        {"generate": BlockingRunner()},
+        local_runners={"generate": BlockingRunner()},
     )
     context = _Context()
 
