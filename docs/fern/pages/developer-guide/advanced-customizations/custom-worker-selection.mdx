@@ -437,7 +437,7 @@ cd "$POLICY_DIR/epp"
 DYN_EPP_MODE=standalone DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
 ```
 
-Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. It uses `worker_selection.default`; the prefill and decode selections apply only to the embedded frontend. A standalone EPP logs a startup warning when it ignores either stage-specific setting.
+Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. It uses `worker_selection.default`; the prefill and decode selections apply only to the embedded frontend. The EPP logs a startup warning in either mode when it ignores either stage-specific setting.
 
 </Tab>
 </Tabs>

@@ -145,14 +145,14 @@ fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()
             "worker-selection instance {instance:?} is configured, but this stock EPP has no linked worker-selection policy catalog; run a custom EPP binary that links the catalog"
         );
     }
-    warn_if_standalone_ignores_stage_policies(config)?;
+    warn_if_epp_ignores_stage_policies(config)?;
     Ok(())
 }
 
-fn warn_if_standalone_ignores_stage_policies(config: &KvRouterConfig) -> Result<()> {
+fn warn_if_epp_ignores_stage_policies(config: &KvRouterConfig) -> Result<()> {
     if config.has_explicit_stage_worker_selection_policy()? {
         tracing::warn!(
-            "worker_selection.prefill, worker_selection.decode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are frontend-only and are ignored by standalone EPP"
+            "worker_selection.prefill, worker_selection.decode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are frontend-only and are ignored by EPP"
         );
     }
     Ok(())
@@ -175,9 +175,7 @@ pub async fn run_with_worker_selection_policy_registry(
     init_tracing();
     let mode = EppMode::from_env()?;
     let kv_router_config = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-    if matches!(mode, EppMode::Standalone) {
-        warn_if_standalone_ignores_stage_policies(&kv_router_config)?;
-    }
+    warn_if_epp_ignores_stage_policies(&kv_router_config)?;
     let Some(factory) = registry.resolve_standalone(&kv_router_config)? else {
         return run_inner(mode, StandaloneSelectionService::Default).await;
     };
