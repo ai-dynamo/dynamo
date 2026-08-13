@@ -11,7 +11,14 @@ use thiserror::Error;
 
 use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
-pub use crate::scheduling::config::DYN_ROUTER_WORKER_SELECTION_POLICY;
+use crate::scheduling::config::WorkerSelectionPolicySelections;
+pub use crate::scheduling::config::{
+    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
+};
+use crate::scheduling::selector::WorkerSelectionPolicy;
+
+const PREFILL_WORKER_TYPE: &str = "prefill";
+const DECODE_WORKER_TYPE: &str = "decode";
 
 /// Parses one policy instance's YAML parameters and creates its partition factory.
 pub type WorkerSelectionPolicyProvider = Arc<
@@ -105,19 +112,76 @@ impl WorkerSelectionPolicyRegistry {
         Ok(())
     }
 
-    /// Resolve the configured policy instance once at process startup.
+    /// Resolve the configured policy instances once at process startup.
     ///
-    /// `DYN_ROUTER_WORKER_SELECTION_POLICY`, when set, overrides the YAML default and names an
-    /// instance. The reserved value `default` uses Dynamo's built-in selector.
+    /// Prefill and decode can select separate instances. The returned factory dispatches by the
+    /// worker type that the host supplies when it constructs each worker pool.
     pub fn resolve(
         &self,
         config: &KvRouterConfig,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        let selected = config.selected_worker_selection_policy_instance()?;
+        let selected = config.selected_worker_selection_policy_instances()?;
         let policy_config = config.worker_selection_config().map_err(|source| {
             crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
         })?;
-        self.resolve_selected(policy_config, selected.as_deref())
+        self.resolve_selections(policy_config, selected)
+    }
+
+    fn resolve_selections(
+        &self,
+        policy_config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        selected: WorkerSelectionPolicySelections,
+    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
+        let mut resolved = HashMap::new();
+        let fallback = self.resolve_selected_cached(
+            policy_config,
+            selected.fallback.as_deref(),
+            &mut resolved,
+        )?;
+        let prefill = self.resolve_selected_cached(
+            policy_config,
+            selected.prefill.as_deref(),
+            &mut resolved,
+        )?;
+        let decode =
+            self.resolve_selected_cached(policy_config, selected.decode.as_deref(), &mut resolved)?;
+
+        if fallback.is_none() && prefill.is_none() && decode.is_none() {
+            return Ok(None);
+        }
+
+        Ok(Some(Arc::new(move |config, worker_type, partition| {
+            let selected = match worker_type {
+                PREFILL_WORKER_TYPE => prefill.as_ref(),
+                DECODE_WORKER_TYPE => decode.as_ref(),
+                _ => fallback.as_ref(),
+            };
+            match selected {
+                Some(factory) => factory(config, worker_type, partition),
+                None => WorkerSelectionPolicy::default(config.clone(), worker_type),
+            }
+        })))
+    }
+
+    fn resolve_selected_cached(
+        &self,
+        config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        selected: Option<&str>,
+        resolved: &mut HashMap<String, WorkerSelectionPolicyFactory>,
+    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        if let Some(factory) = resolved.get(selected) {
+            return Ok(Some(factory.clone()));
+        }
+        let factory = self.resolve_selected(config, Some(selected))?;
+        if let Some(factory) = factory {
+            resolved.insert(selected.to_owned(), factory.clone());
+            Ok(Some(factory))
+        } else {
+            Ok(None)
+        }
     }
 
     fn resolve_selected(
@@ -171,8 +235,13 @@ impl WorkerSelectionPolicyRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WorkerSelectionPolicyError;
     use crate::identity::RoutingPartitionRef;
-    use crate::scheduling::selector::WorkerSelectionPolicy;
+    use crate::scheduling::selector::{
+        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+    };
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -198,6 +267,41 @@ mod tests {
             ));
         }
         Ok(Arc::new(policy))
+    }
+
+    struct NeverPicker;
+
+    impl WorkerPicker for NeverPicker {
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            unreachable!("registry tests only construct policies")
+        }
+    }
+
+    fn recording_provider(
+        provider_calls: Arc<AtomicUsize>,
+        factory_calls: Arc<Mutex<Vec<(usize, String)>>>,
+    ) -> WorkerSelectionPolicyProvider {
+        Arc::new(move |parameters| {
+            let parameters: Parameters = parameters.deserialize()?;
+            provider_calls.fetch_add(1, Ordering::Relaxed);
+            let factory_calls = factory_calls.clone();
+            Ok(Arc::new(move |config, worker_type, _partition| {
+                factory_calls
+                    .lock()
+                    .unwrap()
+                    .push((parameters.threshold, worker_type.to_string()));
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    worker_type,
+                    Vec::new(),
+                    Box::new(NeverPicker),
+                )
+            }))
+        })
     }
 
     fn config() -> crate::scheduling::WorkerSelectionConfig {
@@ -246,6 +350,53 @@ worker_selection:
                 .resolve_selected(Some(&config), Some("second"))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn resolved_factory_dispatches_prefill_and_decode_instances() {
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry
+            .register(
+                "alpha",
+                recording_provider(provider_calls.clone(), factory_calls.clone()),
+            )
+            .unwrap();
+        registry
+            .register(
+                "beta",
+                recording_provider(provider_calls.clone(), factory_calls.clone()),
+            )
+            .unwrap();
+        let config = config();
+        let factory = registry
+            .resolve_selections(
+                Some(&config),
+                WorkerSelectionPolicySelections {
+                    fallback: Some("first".to_string()),
+                    prefill: Some("first".to_string()),
+                    decode: Some("second".to_string()),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let router_config = KvRouterConfig::default();
+        let partition = RoutingPartitionRef::new("model", "default");
+
+        factory(&router_config, PREFILL_WORKER_TYPE, partition);
+        factory(&router_config, DECODE_WORKER_TYPE, partition);
+        factory(&router_config, "select", partition);
+
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *factory_calls.lock().unwrap(),
+            vec![
+                (1, "prefill".to_string()),
+                (2, "decode".to_string()),
+                (1, "select".to_string()),
+            ]
         );
     }
 

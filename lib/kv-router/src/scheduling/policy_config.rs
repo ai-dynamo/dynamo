@@ -631,6 +631,27 @@ worker_selection:
     }
 
     #[test]
+    fn worker_selection_accepts_separate_prefill_and_decode_instances() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  prefill: prefill-policy
+  decode: default
+  instances:
+    - name: prefill-policy
+      type: cache-aware
+      parameters: {}
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.default_instance(), None);
+        assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
+        assert_eq!(selection.decode_instance(), Some("default"));
+    }
+
+    #[test]
     fn rejects_invalid_worker_selection_config() {
         for yaml in [
             r#"
@@ -639,6 +660,20 @@ worker_selection: {}
             r#"
 worker_selection:
   default: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  prefill: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  decode: missing
   instances:
     - name: present
       type: alpha
