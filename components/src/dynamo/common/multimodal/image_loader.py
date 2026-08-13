@@ -28,6 +28,19 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+
+# Upper bound on decoded image size, in pixels. Decoding allocates roughly
+# width * height * 3 bytes, so a small but highly compressible upload can ask
+# for hundreds of megabytes: a solid-colour 14000x14000 PNG is 582 KB encoded
+# and 196M pixels decoded.
+#
+# DYN_MAX_IMAGE_PIXELS takes precedence; VLLM_MAX_IMAGE_PIXELS is honoured next
+# so a deployment can set one value and keep this loader and vLLM's own image
+# loader in agreement. The default matches Pillow's 2x decompression-bomb
+# threshold. Zero or negative disables the check, as in vLLM.
+MAX_IMAGE_PIXELS: Final = int(
+    os.getenv("DYN_MAX_IMAGE_PIXELS", os.getenv("VLLM_MAX_IMAGE_PIXELS", "178956970"))
+)
 UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 
 
@@ -100,6 +113,24 @@ class ImageLoader:
         image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
         if image.format not in ("JPEG", "PNG", "WEBP"):
             raise ValueError(f"Unsupported image format: {image.format}")
+        # Bound the decode before forcing it. .size is header metadata and does
+        # not allocate; convert() below does. Raise HttpStatusError rather than
+        # letting Pillow raise DecompressionBombError: _fetch_and_process
+        # re-raises HttpStatusError unchanged, so the caller still sees a client
+        # error, while a DecompressionBombError is caught by its trailing
+        # `except Exception`, flattened to a bare ValueError, and reported as a
+        # 500 by the batch caller.
+        if MAX_IMAGE_PIXELS > 0:
+            width, height = image.size
+            pixels = width * height
+            if pixels > MAX_IMAGE_PIXELS:
+                raise HttpStatusError(
+                    413,
+                    f"Image dimensions {width}x{height} ({pixels} pixels) exceed "
+                    f"the maximum of {MAX_IMAGE_PIXELS} pixels. Set "
+                    f"DYN_MAX_IMAGE_PIXELS to change this limit.",
+                    "",
+                )
         # Image.open() is lazy — convert() forces the actual pixel decode
         return image.convert("RGB")
 
@@ -148,6 +179,14 @@ class ImageLoader:
         except Image.UnidentifiedImageError as e:
             logger.error(f"Unsupported image format loading: '{image_url}'")
             raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+        except Image.DecompressionBombError as e:
+            # Pillow runs its own bomb check inside Image.open(), so it can fire
+            # before the explicit size check in _open_image_sync — whenever
+            # MAX_IMAGE_PIXELS is at or above Pillow's threshold. Map it to the
+            # same client error rather than letting the generic handler below
+            # flatten it into a ValueError that the batch caller reports as 500.
+            logger.error(f"Image too large loading: '{image_url}': {e}")
+            raise HttpStatusError(413, str(e), image_url) from e
         except UrlValidationError as e:
             # Keep the type (must precede ValueError, its base) so the batch
             # caller can still map this client error to a 4xx, not a 500.
