@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"sync"
 
 	"emperror.dev/errors"
@@ -36,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -296,13 +298,52 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		}
 	}
 
-	return &corev1.PodTemplateSpec{
+	podTemplate := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      podLabels,
 			Annotations: podAnnotations,
 		},
 		Spec: *podSpec,
-	}, nil
+	}
+	scopeWorkerTopologySpreadConstraints(podTemplate)
+	return podTemplate, nil
+}
+
+func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
+	podLabels := podTemplate.Labels
+	if !dynamo.IsWorkerComponent(podLabels[commonconsts.KubeLabelDynamoComponentType]) ||
+		podLabels[commonconsts.KubeLabelDynamoWorkerHash] == "" {
+		return
+	}
+
+	for i := range podTemplate.Spec.TopologySpreadConstraints {
+		constraint := &podTemplate.Spec.TopologySpreadConstraints[i]
+		if constraint.LabelSelector == nil {
+			continue
+		}
+		selector, err := metav1.LabelSelectorAsSelector(constraint.LabelSelector)
+		if err != nil || !selector.Matches(k8slabels.Set(podLabels)) ||
+			labelSelectorReferencesKey(constraint.LabelSelector, commonconsts.KubeLabelDynamoWorkerHash) ||
+			slices.Contains(constraint.MatchLabelKeys, commonconsts.KubeLabelDynamoWorkerHash) {
+			continue
+		}
+
+		// Old and new DCDs coexist during a rollout. Scope spread calculations
+		// to the incoming pod's generation so old pods cannot mask final skew.
+		constraint.MatchLabelKeys = append(constraint.MatchLabelKeys, commonconsts.KubeLabelDynamoWorkerHash)
+	}
+}
+
+func labelSelectorReferencesKey(selector *metav1.LabelSelector, key string) bool {
+	if _, exists := selector.MatchLabels[key]; exists {
+		return true
+	}
+	for _, expression := range selector.MatchExpressions {
+		if expression.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *dcdWorkloadRenderer) generateService(

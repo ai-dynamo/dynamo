@@ -910,6 +910,41 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 	require.Equal(t, commonconsts.ComponentTypeWorker, service.Spec.Selector[commonconsts.KubeLabelDynamoComponentType])
 }
 
+func TestScopeWorkerTopologySpreadConstraints(t *testing.T) {
+	podTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+			commonconsts.KubeLabelDynamoWorkerHash:    "db6b6891",
+		}},
+		Spec: corev1.PodSpec{TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+			{
+				MaxSkew:           1,
+				TopologyKey:       corev1.LabelHostname,
+				WhenUnsatisfiable: corev1.DoNotSchedule,
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+				}},
+			},
+			{
+				MaxSkew:           1,
+				TopologyKey:       corev1.LabelTopologyZone,
+				WhenUnsatisfiable: corev1.DoNotSchedule,
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"app.kubernetes.io/name": "another-workload",
+				}},
+			},
+		}},
+	}
+
+	scopeWorkerTopologySpreadConstraints(podTemplate)
+
+	require.Equal(t,
+		[]string{commonconsts.KubeLabelDynamoWorkerHash},
+		podTemplate.Spec.TopologySpreadConstraints[0].MatchLabelKeys,
+	)
+	require.Empty(t, podTemplate.Spec.TopologySpreadConstraints[1].MatchLabelKeys)
+}
+
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWithoutWorkerHash(t *testing.T) {
 	s := scheme.Scheme
 	require.NoError(t, v1beta1.AddToScheme(s))
