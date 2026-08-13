@@ -501,9 +501,9 @@ def _tensor_uint8_to_bytes(tensor: torch.Tensor) -> bytes:
 
 
 def _bytes_to_uint8_tensor(value: bytes, device: torch.device) -> torch.Tensor:
+    writable_value = bytearray(value)
     return (
-        torch.frombuffer(value, dtype=torch.uint8)
-        .clone()
+        torch.frombuffer(writable_value, dtype=torch.uint8)
         .to(device=device)
         .contiguous()
     )
