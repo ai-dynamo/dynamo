@@ -194,9 +194,12 @@ def test_interactive_lifecycle_correlation_and_final_report_conversion():
             {"worker_id": 0, "recorded_queue_ms": 12},
             "unknown field.*recorded_queue_ms",
         ),
-        ({"pool_id": 7, "worker_id": 0}, "invalid type.*integer.*string"),
-        ({"worker_id": "0"}, "invalid type.*string.*usize"),
-        ({"worker_id": 0, "dp_rank": "0"}, "invalid type.*string.*usize"),
+        ({"pool_id": 7, "worker_id": 0}, r"unexpected type.*int.*PyString"),
+        ({"worker_id": "0"}, r"TypeError.*str.*interpreted as an integer"),
+        (
+            {"worker_id": 0, "dp_rank": "0"},
+            r"TypeError.*str.*interpreted as an integer",
+        ),
     ],
 )
 def test_interactive_assign_target_direct_parser_preserves_schema_errors(
