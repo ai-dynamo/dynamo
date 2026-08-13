@@ -707,20 +707,20 @@ where
 
     fn kv_hints_for_selection(
         &self,
+        message_id: Option<&str>,
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
         transfer_candidates: Option<&KvTransferCandidates>,
     ) -> Option<KvHints> {
-        let actions = self
-            .source_locations_payload_for_selection(
-                target,
-                target_cached_prefix_blocks,
-                transfer_candidates,
-            )
-            .map(KvHintAction::source_locations)
-            .into_iter()
-            .collect::<Vec<_>>();
-        (!actions.is_empty()).then(|| KvHints::new(actions))
+        let payload = self.source_locations_payload_for_selection(
+            target,
+            target_cached_prefix_blocks,
+            transfer_candidates,
+        )?;
+        Some(KvHints::new(
+            message_id.unwrap_or_default(),
+            vec![KvHintAction::source_locations("a1", payload)],
+        ))
     }
 
     pub async fn record_routing_decision(
@@ -1127,6 +1127,7 @@ where
         };
         let kv_hints = if is_admitted_routing {
             self.kv_hints_for_selection(
+                context_id,
                 response.best_worker,
                 response.target_cached_prefix_blocks,
                 response.kv_transfer_candidates.as_ref(),
@@ -2226,35 +2227,29 @@ mod tests {
             owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 1), 2)],
         };
 
-        let hint = router.kv_hints_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+        let hint = router.kv_hints_for_selection(
+            Some("msg-123"),
+            WorkerWithDpRank::new(7, 0),
+            0,
+            Some(&candidates),
+        );
 
-        let hint = hint.expect("source locations action");
-        assert_eq!(hint.protocol_version, Default::default());
-        assert!(hint.message_id.starts_with("msg-"));
-        assert_eq!(hint.actions.len(), 1);
-        match &hint.actions[0] {
-            KvHintAction::SourceLocations {
-                action_id,
-                action_version,
-                payload,
-            } => {
-                assert!(action_id.starts_with("a-"));
-                assert_eq!(
-                    *action_version,
-                    dynamo_kv_router::kv_hints::KvSourceLocationsActionVersion::V1_0
-                );
-                assert_eq!(
-                    payload,
-                    &KvSourceLocationsPayload {
+        assert_eq!(
+            hint,
+            Some(KvHints::new(
+                "msg-123",
+                vec![KvHintAction::source_locations(
+                    "a1",
+                    KvSourceLocationsPayload {
                         source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
                         block_hashes: vec![
                             ExternalSequenceBlockHash(101),
                             ExternalSequenceBlockHash(102),
                         ],
-                    }
-                );
-            }
-        }
+                    },
+                )],
+            ))
+        );
     }
 
     #[tokio::test]

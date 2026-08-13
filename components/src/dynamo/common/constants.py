@@ -10,9 +10,6 @@ KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY = "kv_hint_transfer_worker_type"
 KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
     "kv_hint_transfer_source_control_endpoints"
 )
-KV_HINT_PROTOCOL_VERSION = "0.1"
-KV_SOURCE_LOCATIONS_ACTION_TYPE = "kv.source_locations"
-KV_SOURCE_LOCATIONS_ACTION_VERSION = "1.0"
 
 
 class DisaggregationMode(Enum):
