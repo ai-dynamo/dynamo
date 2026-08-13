@@ -49,6 +49,7 @@ class _TestWorkerHandler(BaseWorkerHandler):
 def _make_handler(
     tensor_parallel_size: int,
     prefill_context_parallel_size: int = 1,
+    data_parallel_size: int = 1,
 ) -> _TestWorkerHandler:
     handler = _TestWorkerHandler.__new__(_TestWorkerHandler)
     handler.engine_client = SimpleNamespace(
@@ -56,6 +57,9 @@ def _make_handler(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=tensor_parallel_size,
                 prefill_context_parallel_size=prefill_context_parallel_size,
+                # Captured up front by the rollback path before the grow; real
+                # vLLM engines always set it.
+                data_parallel_size=data_parallel_size,
             ),
         ),
         scale_elastic_ep=AsyncMock(),
