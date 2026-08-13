@@ -134,7 +134,7 @@ impl LightseekMmCounter {
 /// Resolve the image-placeholder token id by delegating to a per-model
 /// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-VL,
 /// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
-/// Kimi-K2.5) reads the right field of `config.json` (`image_token_id`,
+/// Kimi-K2.5, Kimi-K3) reads the right field of `config.json` (`image_token_id`,
 /// `image_token_index`, `media_placeholder_token_id`) and falls back to the
 /// tokenizer's vocab when only the placeholder string is known.
 ///
@@ -420,6 +420,7 @@ mod tests {
             ("Kimi-K2.6", "moonshotai/Kimi-K2.6-Instruct", "kimi_k2_6"),
             ("Qwen3.5", "Qwen/Qwen3.5-0.8B", "qwen3_5"),
             ("Qwen3.6", "Qwen/Qwen3.6-35B-A3B", "qwen3_6"),
+            ("Kimi-K3", "moonshotai/Kimi-K3", "kimi_k3"),
         ];
 
         let mut missing: Vec<&str> = Vec::new();
