@@ -51,6 +51,13 @@ Hardware-specific templates for Intel XPU GPUs using Kubernetes DRA.
 
 See [`xpu/README.md`](./xpu/README.md) for available templates, prerequisites, and usage.
 
+### 7. **Deployments with Google TPU** (see [`tpu/`](./tpu/))
+
+Hardware-specific template for Google TPU using Kubernetes DRA. Aggregated serving only —
+no disaggregated prefill/decode, KVBM, or GPU Memory Service support yet.
+
+See [`tpu/README.md`](./tpu/README.md) for available templates, prerequisites, and usage.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
