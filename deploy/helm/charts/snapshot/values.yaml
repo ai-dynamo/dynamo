@@ -80,6 +80,10 @@ storage:
 
 pageBroker:
   enabled: false
+  # Optional entrypoint override for a shared snapshot-agent/PageBroker image.
+  command: []
+  # Optional arguments override. Defaults to the PageBroker socket and staging path.
+  args: []
   # Optional maximum size for tmpfs staging, for example "100Gi".
   stagingSizeLimit: ""
   image:

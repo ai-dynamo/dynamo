@@ -101,9 +101,17 @@ spec:
         - name: pagebroker
           image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag }}"
           imagePullPolicy: {{ .Values.pageBroker.image.pullPolicy }}
+          {{- with .Values.pageBroker.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
+            {{- with .Values.pageBroker.args }}
+            {{- toYaml . | nindent 12 }}
+            {{- else }}
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
             - {{ $pageBrokerStagingPath | quote }}
+            {{- end }}
           volumeMounts:
             - name: pagebroker
               mountPath: /pagebroker
