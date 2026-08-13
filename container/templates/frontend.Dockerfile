@@ -70,8 +70,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
-# no new packages are added; versions are left unpinned so each rebuild picks
-# up the newest patch level.
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends --only-upgrade \

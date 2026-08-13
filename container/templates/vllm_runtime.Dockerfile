@@ -82,8 +82,8 @@ ENV PATH=/opt/uv/bin:${PATH}
 {% if device == "cuda" %}
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
-# no new packages are added; versions are left unpinned so each rebuild picks
-# up the newest patch level.
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
         dirmngr \
