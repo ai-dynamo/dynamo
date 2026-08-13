@@ -807,6 +807,10 @@ class SelectionService:
         """Free a finished reservation, releasing its tracked load."""
         ...
 
+    async def abort_reservation(self, selection_id: str) -> None:
+        """Abort a failed reservation, releasing its load and reporting failure."""
+        ...
+
     def loads(
         self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:

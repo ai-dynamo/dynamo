@@ -796,6 +796,21 @@ impl SelectionService {
         })
     }
 
+    /// Abort a failed reservation, releasing its load and reporting failure.
+    fn abort_reservation<'p>(
+        &self,
+        py: Python<'p>,
+        selection_id: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            core.abort_reservation(&selection_id)
+                .await
+                .map_err(selection_to_pyerr)?;
+            Ok(())
+        })
+    }
+
     /// Current per-model active load (pending counts + per-worker potential loads).
     #[pyo3(signature = (*, model_name = None, routing_group = None))]
     fn loads(
