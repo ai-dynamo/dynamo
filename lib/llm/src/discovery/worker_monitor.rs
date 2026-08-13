@@ -7,6 +7,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::ActiveLoad;
@@ -567,6 +568,18 @@ pub struct KvWorkerMonitor {
     thresholds: Arc<RwLock<LoadThresholdConfig>>,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
+    start_lock: Arc<tokio::sync::Mutex<()>>,
+    lifecycle: Arc<MonitorLifecycle>,
+}
+
+struct MonitorLifecycle {
+    cancellation_token: CancellationToken,
+}
+
+impl Drop for MonitorLifecycle {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
 }
 
 impl KvWorkerMonitor {
@@ -585,6 +598,7 @@ impl KvWorkerMonitor {
     /// prefill-pool overload publishing and TTFT metric cleanup when prefill workers
     /// are removed.
     pub fn new(client: Client, config: LoadThresholdConfig) -> Self {
+        let cancellation_token = client.endpoint.drt().child_token();
         Self {
             client,
             prefill_client: Arc::new(RwLock::new(None)),
@@ -592,6 +606,8 @@ impl KvWorkerMonitor {
             worker_load_states: Arc::new(DashMap::new()),
             thresholds: Arc::new(RwLock::new(config)),
             started: Arc::new(AtomicBool::new(false)),
+            start_lock: Arc::new(tokio::sync::Mutex::new(())),
+            lifecycle: Arc::new(MonitorLifecycle { cancellation_token }),
         }
     }
 
@@ -710,16 +726,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
     /// This is safe to call multiple times (e.g., from cloned monitors shared across
     /// pipelines) - only the first call spawns the background task.
     async fn start_monitoring(&self) -> anyhow::Result<()> {
-        // Guard: only start once across all clones
-        if self.started.swap(true, Ordering::SeqCst) {
+        let _start_guard = self.start_lock.lock().await;
+        if self.started.load(Ordering::Acquire) {
             tracing::debug!("Worker monitoring already started, skipping");
             return Ok(());
         }
 
         let endpoint = &self.client.endpoint;
-        let component = endpoint.component();
-
-        let cancellation_token = component.drt().child_token();
+        let cancellation_token = self.lifecycle.cancellation_token.child_token();
 
         let decode_configs_rx = match runtime_config_watch(endpoint).await {
             Ok(rx) => rx,
@@ -729,7 +743,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     %error,
                     "KvWorkerMonitor: failed to watch endpoint runtime configs"
                 );
-                self.started.store(false, Ordering::SeqCst);
                 return Err(error);
             }
         };
@@ -756,9 +769,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let prefill_client_holder = self.prefill_client.clone();
         let prefill_client_notify = self.prefill_client_notify.clone();
         let thresholds = self.thresholds.clone();
+        let started = self.started.clone();
 
         // Spawn background monitoring task
+        self.started.store(true, Ordering::Release);
         tokio::spawn(async move {
+            struct StartedGuard(Arc<AtomicBool>);
+
+            impl Drop for StartedGuard {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+
+            let _started_guard = StartedGuard(started);
             let mut kv_metrics_rx = kv_metrics_rx;
             let mut prefill_metrics_rx: Option<TypedEventSubscriber<ActiveLoad>> = None;
             let mut prefill_configs_rx: Option<RuntimeConfigWatch> = None;
@@ -1138,12 +1162,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             known_prefill_workers = rx.borrow().iter().copied().collect();
                             prefill_instances_rx = Some(rx);
 
-                            prefill_metrics_rx = match EventSubscriber::for_endpoint(
-                                &prefill_endpoint,
-                                KV_METRICS_SUBJECT,
-                            )
-                            .await
-                            {
+                            let metrics_result = tokio::select! {
+                                _ = cancellation_token.cancelled() => break,
+                                result = EventSubscriber::for_endpoint(
+                                    &prefill_endpoint,
+                                    KV_METRICS_SUBJECT,
+                                ) => result,
+                            };
+                            prefill_metrics_rx = match metrics_result {
                                 Ok(subscriber) => Some(subscriber.typed::<ActiveLoad>()),
                                 Err(error) => {
                                     tracing::warn!(
@@ -1154,7 +1180,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     None
                                 }
                             };
-                            prefill_configs_rx = match runtime_config_watch(&prefill_endpoint).await {
+                            let config_result = tokio::select! {
+                                _ = cancellation_token.cancelled() => break,
+                                result = runtime_config_watch(&prefill_endpoint) => result,
+                            };
+                            prefill_configs_rx = match config_result {
                                 Ok(rx) => Some(rx),
                                 Err(error) => {
                                     tracing::warn!(
@@ -1782,6 +1812,53 @@ mod tests {
             Some(HashSet::from([7])),
             "attach must seed the prefill client with the current overloaded set"
         );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn dropping_last_monitor_releases_task_state() {
+        use super::KvWorkerMonitor;
+        use dynamo_runtime::pipeline::WorkerLoadMonitor;
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::sync::Arc;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = drt
+            .namespace("test_monitor_lifecycle".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+        let monitor = KvWorkerMonitor::new(client, LoadThresholdConfig::default());
+        let monitor_clone = monitor.clone();
+        let worker_load_states = Arc::downgrade(&monitor.worker_load_states);
+
+        let (first_start, second_start) =
+            tokio::join!(monitor.start_monitoring(), monitor_clone.start_monitoring());
+        first_start.unwrap();
+        second_start.unwrap();
+        drop(monitor);
+        assert!(
+            !monitor_clone.lifecycle.cancellation_token.is_cancelled()
+                && worker_load_states.upgrade().is_some(),
+            "dropping one clone must not stop a shared monitor"
+        );
+        drop(monitor_clone);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while worker_load_states.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("monitor task retained state after its last owner was dropped");
 
         rt.shutdown();
     }

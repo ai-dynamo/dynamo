@@ -940,7 +940,7 @@ where
                 .link(service_backend)?
                 .link(backend.backward_edge())?
                 .link(preprocessor.backward_edge())?
-                .link(frontend)?;
+                .link_terminal(frontend)?;
 
             worker_set.embeddings_engine = Some(embedding_engine);
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
@@ -1393,6 +1393,188 @@ mod tests {
         assert!(model.has_chat_engine());
         assert!(model.has_classify_engine());
         assert!(model.has_pooling_engine());
+    }
+
+    #[tokio::test]
+    async fn repeated_lora_registration_releases_adapter_views_and_chat_pipeline() {
+        use dynamo_runtime::{
+            Runtime,
+            discovery::{DiscoveryEvent, DiscoveryInstanceId},
+            distributed::DistributedConfig,
+        };
+        use futures::StreamExt;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let watcher = Arc::new(ModelWatcher::new(
+            drt,
+            manager.clone(),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_lora_lifecycle_test".to_string(),
+            ))),
+        ));
+        let base_mcid = ModelCardInstanceId {
+            namespace: "lora-lifecycle-ns".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            model_suffix: None,
+        };
+        let adapter_mcid = ModelCardInstanceId {
+            model_suffix: Some("adapter".to_string()),
+            ..base_mcid.clone()
+        };
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut base_card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        base_card.set_name("lora-lifecycle-base");
+        base_card.model_input = ModelInput::Tokens;
+        base_card.model_type = ModelType::Chat;
+        base_card.worker_type = Some(WorkerType::Aggregated);
+        let mut adapter_card = base_card.clone();
+        adapter_card.set_name("lora-lifecycle-adapter");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: adapter_card.name().to_string(),
+            max_gpu_lora_count: Some(1),
+        });
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(&base_mcid),
+            base_card.model_type,
+            base_card.worker_type,
+        );
+        let instance =
+            |mcid: &ModelCardInstanceId, card: &ModelDeploymentCard| DiscoveryInstance::Model {
+                namespace: mcid.namespace.clone(),
+                component: mcid.component.clone(),
+                endpoint: mcid.endpoint.clone(),
+                instance_id: mcid.instance_id,
+                card_json: serde_json::to_value(card).unwrap(),
+                model_suffix: mcid.model_suffix.clone(),
+            };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream = futures::stream::unfold(event_rx, |mut receiver| async {
+            receiver.recv().await.map(|event| (event, receiver))
+        })
+        .boxed();
+        let watch_task = tokio::spawn(
+            watcher
+                .clone()
+                .watch(stream, NamespaceFilter::Exact(base_mcid.namespace.clone())),
+        );
+        event_tx
+            .send(Ok(DiscoveryEvent::Added(instance(&base_mcid, &base_card))))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.get_committed_model(base_card.name()).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("base model was not committed");
+        let base_engine = manager
+            .get_committed_model(base_card.name())
+            .and_then(|model| model.get_worker_set(&ws_key))
+            .and_then(|worker_set| worker_set.chat_engine.clone())
+            .expect("base chat pipeline was not committed");
+        let released_base_engine = Arc::downgrade(&base_engine);
+        drop(base_engine);
+
+        let mut released_adapter_views = Vec::new();
+        let mut released_adapter_engines = Vec::new();
+        for _ in 0..3 {
+            event_tx
+                .send(Ok(DiscoveryEvent::Added(instance(
+                    &adapter_mcid,
+                    &adapter_card,
+                ))))
+                .unwrap();
+            let adapter_view = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(worker_set) = manager
+                        .get_committed_model(adapter_card.name())
+                        .and_then(|model| model.get_worker_set(&ws_key))
+                    {
+                        break worker_set;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("LoRA adapter view was not committed");
+            let engine = adapter_view.chat_engine.clone().unwrap();
+            let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+                serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
+                    .unwrap();
+            let request = NvCreateChatCompletionRequest {
+                inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+                    .model(adapter_card.name())
+                    .messages(messages)
+                    .build()
+                    .unwrap(),
+                common: Default::default(),
+                nvext: None,
+                chat_template_args: None,
+                thinking: None,
+                media_io_kwargs: None,
+                return_tokens_as_token_ids: None,
+                unsupported_fields: Default::default(),
+            };
+            assert!(engine.generate(SingleIn::new(request)).await.is_err());
+            released_adapter_views.push(Arc::downgrade(&adapter_view));
+            released_adapter_engines.push(Arc::downgrade(&engine));
+            drop(engine);
+            drop(adapter_view);
+
+            event_tx
+                .send(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Model(
+                    adapter_mcid.clone(),
+                ))))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while manager.get_committed_model(adapter_card.name()).is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("LoRA adapter view was not removed");
+            assert_eq!(
+                released_adapter_views.last().unwrap().strong_count(),
+                0,
+                "removed LoRA adapter view remained strongly referenced"
+            );
+            assert_eq!(
+                released_adapter_engines.last().unwrap().strong_count(),
+                0,
+                "removed LoRA adapter engine remained strongly referenced"
+            );
+        }
+
+        event_tx
+            .send(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Model(
+                base_mcid,
+            ))))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.get_committed_model(base_card.name()).is_some()
+                || released_base_engine.strong_count() != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removed LoRA chat pipeline remained strongly referenced");
+
+        drop(event_tx);
+        watch_task.await.unwrap();
+        runtime.shutdown();
     }
 
     #[test]
