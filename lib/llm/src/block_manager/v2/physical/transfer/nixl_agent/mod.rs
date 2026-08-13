@@ -107,7 +107,7 @@ impl NixlAgent {
     /// - Any backend fails to initialize
     ///
     /// # Example
-    /// ```ignore
+    /// ```text
     /// // In production: require both UCX and GDS, fail if either is missing
     /// let agent = NixlAgent::require_backends("worker-0", &["UCX", "GDS_MT])?;
     /// ```
@@ -190,7 +190,7 @@ impl NixlAgent {
     /// Use this at the start of operations that need specific backends.
     ///
     /// # Example
-    /// ```ignore
+    /// ```text
     /// agent.require_backend("GDS_MT)?;
     /// // Proceed with GDS-specific operations
     /// ```

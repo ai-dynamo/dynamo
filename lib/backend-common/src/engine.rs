@@ -531,10 +531,10 @@ pub struct MetricsCtx<'a> {
     pub metrics: &'a crate::metrics::EngineMetrics,
 }
 
-/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// Invoked once with a freshly-built [`SnapshotPublisher`](crate::SnapshotPublisher); engine drives
 /// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
 ///
-/// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same
+/// Mirror of `OnPublisherReady` for the KV-event Push flavor — same
 /// "framework constructs, engine writes" handoff pattern.
 pub type OnSnapshotPublisherReady = Box<
     dyn FnOnce(Arc<crate::snapshot_publisher::SnapshotPublisher>) -> Result<(), DynamoError>

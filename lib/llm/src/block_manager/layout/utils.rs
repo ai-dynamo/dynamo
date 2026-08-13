@@ -197,7 +197,7 @@ impl WorkerLayoutVerifier {
     }
 }
 
-/// Validation function for Option<usize> to check if it's Some(power_of_2).
+/// Validation function for `Option<usize>` to check if it's Some(power_of_2).
 pub fn validate_power_of_2(alignment: usize) -> Result<(), ValidationError> {
     if !alignment.is_power_of_two() {
         // Return validation error if alignment is not a power of 2

@@ -25,7 +25,7 @@
 //! - To transition to the [`SlotState::Prefilling`] state, the slot must be in either the [`SlotState::Initialized`]
 //!   [`SlotState::NotScheduled`], or [`SlotState::OnboardStaged`] state.
 //!   - When in the [`SlotState::Prefilling`] state, store/save operations are allowed.
-//!   - Store/Save operations are determined when processing the [`SchedulerOutput`].
+//!   - Store/Save operations are determined when processing the `SchedulerOutput`.
 //!   - If a store operation is issued, the following will happen:
 //!     - Leader will trigger a message to the TransferEngine with the use StoreRequest and a ConnectorStoreRequest
 //!     - The presence of the ConnectorStoreRequest will trigger the TransferEngine to request a SchedulerStoreRequest,
@@ -49,9 +49,9 @@
 //!       - When the completion event is received, the atomic completion counter will be incremented.
 //!
 //!
-//! All transfer requests are triggered by the leader based on the details in the [`SchedulerOutput`].
+//! All transfer requests are triggered by the leader based on the details in the `SchedulerOutput`.
 //!
-//! [`SchedulerOutput`] is transform
+//! `SchedulerOutput` is transform
 
 use super::scheduler::{DISCONNECTED_WARNING, SchedulingDecision};
 use super::*;
@@ -152,7 +152,7 @@ pub struct WorkerTransferRequest {
 }
 
 /// Sent by Worker to Scheduler.
-/// Combines [`WorkerTransferRequest`] and [`WorkerRequestState`] and issues a [`WorkerSchedulerRequest`]
+/// Combines [`WorkerTransferRequest`] and `WorkerRequestState` and issues a [`WorkerSchedulerRequest`]
 ///
 /// This object has all the links to the worker to track completion and observe any cancellation signals.
 pub struct WorkerSchedulerRequest {
@@ -162,7 +162,7 @@ pub struct WorkerSchedulerRequest {
     pub cancel_token: CancellationToken,
 }
 
-/// One-time use object returned from [`Scheduler::schedule_transfer`]
+/// One-time use object returned from `Scheduler::schedule_transfer`
 /// This object carries with it the [`SchedulingDecision`] and is used to mark the transfer as complete.
 #[async_trait::async_trait]
 pub trait TransferCompletionHandle: Send {

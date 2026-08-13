@@ -89,7 +89,7 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     fn on_returned(&mut self, tick: u64);
 
     /// Resets the metadata to the default value
-    /// If called, the [BlockMetadata::is_reset()] should return true
+    /// If called, the `BlockMetadata::is_reset()` should return true
     fn reset_metadata(&mut self);
 
     /// The offload priority of the block. Higher priority blocks are offloaded first.
@@ -114,7 +114,7 @@ pub trait MaybeReturnableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata
     /// Try to take ownership of the block.
     ///
     /// This is an internal function guarded by the PrivateToken and is used to implement the public facing
-    /// [`super::pool::BlockPool::return_block`] and [`super::pool::BlockPool::return_block_blocking`] functions.
+    /// `super::pool::BlockPool::return_block` and `super::pool::BlockPool::return_block_blocking` functions.
     fn try_take_block(self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>>;
 }
 
@@ -278,7 +278,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
     /// Apply a [TokenBlock] to the block
     /// Requires the block to be in the [BlockState::Reset] state.
     ///
-    /// Additionally, the [TokenBlock] must match the [BlockLayout::page_size()]
+    /// Additionally, the [TokenBlock] must match the `BlockLayout::page_size()`
     /// Transitions the state to [BlockState::Complete]. Returns `Err` otherwise.
     pub fn apply_token_block(&mut self, token_block: TokenBlock) -> Result<()> {
         if self.page_size() != token_block.tokens().len() {
@@ -472,7 +472,7 @@ pub trait BlockExt {
     /// Apply a [TokenBlock] to the block
     /// Requires the block to be in the [BlockState::Reset] state.
     ///
-    /// Additionally, the [TokenBlock] must match the [BlockLayout::page_size()]
+    /// Additionally, the [TokenBlock] must match the `BlockLayout::page_size()`
     /// Transitions the state to [BlockState::Complete]. Returns `Err` otherwise.
     fn apply_token_block(&mut self, token_block: TokenBlock) -> Result<()>;
 
@@ -582,7 +582,7 @@ impl<L: BlockLayout + 'static, M: BlockMetadata> Blocks<L, M> {
         })
     }
 
-    /// Convert collection into Vec<Block> with default metadata/state
+    /// Convert collection into `Vec<Block>` with default metadata/state
     pub fn into_blocks(self) -> BlockResult<Vec<Block<L::StorageType, locality::Local, M>>> {
         // convert box to arc
         let layout: Arc<dyn BlockLayout<StorageType = L::StorageType>> = Arc::new(*self.layout);

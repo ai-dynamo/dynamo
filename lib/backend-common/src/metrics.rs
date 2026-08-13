@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! [`EngineMetrics`] — slim metrics-only handle for [`LLMEngine`] authors,
+//! [`EngineMetrics`] — slim metrics-only handle for `LLMEngine` authors,
 //! plus [`LifecycleGauges`] — framework-owned gauges emitted independently
 //! of engine opt-in (cleanup_time, drain_time, model_load_time).
 //!
 //! `Worker` constructs an `EngineMetrics` from the endpoint's
 //! [`MetricsHierarchy`] and hands it to the engine via
-//! [`LLMEngine::setup_metrics`]. Engines never see the full `Endpoint` —
+//! `LLMEngine::setup_metrics`. Engines never see the full `Endpoint` —
 //! only the surface needed to bridge a foreign registry into the runtime's
 //! `/metrics` output via [`EngineMetrics::add_expfmt_callback`].
 
@@ -21,7 +21,7 @@ use dynamo_runtime::metrics::{
 use crate::engine::EngineConfig;
 use crate::error::{BackendError, DynamoError, ErrorType};
 
-/// Metrics handle passed to [`LLMEngine::setup_metrics`].
+/// Metrics handle passed to `LLMEngine::setup_metrics`.
 /// Not `Clone` — engines should retain returned instruments, not this object.
 pub struct EngineMetrics {
     hierarchy: Arc<dyn MetricsHierarchy>,
