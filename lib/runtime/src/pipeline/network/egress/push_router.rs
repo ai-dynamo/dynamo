@@ -3164,14 +3164,6 @@ mod tests {
     /// keep receiving events, and the registry entry is released only when the
     /// last of them is dropped — so a later router re-arms a fresh watcher
     /// instead of inheriting a cancelled one.
-    ///
-    /// This replaces `watcher_dedup_guard_released_on_panic` and
-    /// `..._on_normal_exit`, which re-declared a private copy of the production
-    /// `GuardRelease` inside the test and exercised it against the static
-    /// directly. They asserted that a Drop impl written in the test body runs on
-    /// drop, which is a property of the language, not of this file: production
-    /// could stop registering watchers entirely and both would still pass.
-    /// Everything below goes through `PushRouter` construction and drop.
     #[tokio::test]
     async fn watcher_subscriptions_share_and_release_the_registry_entry() {
         let rt = Runtime::from_current().unwrap();
