@@ -1991,6 +1991,11 @@ where
             "offline replay dynamic worker target sequence diverged: new engine worker {engine_worker_id}, next target slot {}",
             self.interactive_worker_targets.len()
         );
+        anyhow::ensure!(
+            engine_worker_id == self.interactive_workers.len(),
+            "offline replay dynamic worker metadata sequence diverged: new engine worker {engine_worker_id}, next metadata slot {}",
+            self.interactive_workers.len()
+        );
         let used_ids = self
             .interactive_worker_targets
             .iter()
@@ -2008,6 +2013,26 @@ where
         }
         let target = WorkerTarget::default_pool(authored_worker_id, 0);
         self.interactive_worker_targets.push(target.clone());
+        self.interactive_workers.push(ResolvedPoolWorker {
+            target: target.clone(),
+            engine_args: self.engine.dynamic_worker_args(engine_worker_id),
+            tags: BTreeSet::new(),
+            taints: BTreeSet::new(),
+            capabilities: BTreeSet::new(),
+            active: true,
+            draining: false,
+        });
+        if !self
+            .interactive_pool_ids
+            .iter()
+            .any(|pool_id| pool_id == &target.pool_id)
+        {
+            self.interactive_pool_ids.push(target.pool_id.clone());
+            self.interactive_pool_ids.sort();
+            if let Some(capture) = self.interactive.as_mut() {
+                capture.register_pool(&target.pool_id);
+            }
+        }
         Ok(target)
     }
 

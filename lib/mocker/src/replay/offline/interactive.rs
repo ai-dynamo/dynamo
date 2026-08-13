@@ -569,6 +569,20 @@ impl InteractiveCapture {
         self.session_affinity
     }
 
+    pub(crate) fn register_pool(&mut self, pool_id: &str) {
+        if self
+            .eligible_pool_ids
+            .iter()
+            .any(|candidate| candidate == pool_id)
+        {
+            return;
+        }
+        let mut eligible_pool_ids = self.eligible_pool_ids.as_ref().clone();
+        eligible_pool_ids.push(pool_id.to_string());
+        eligible_pool_ids.sort();
+        self.eligible_pool_ids = Arc::new(eligible_pool_ids);
+    }
+
     pub(crate) fn register(&mut self, identity: InteractiveRequestIdentity) -> anyhow::Result<()> {
         let metadata = &identity.metadata;
         if metadata.logical_request_id.trim().is_empty() {
@@ -3544,6 +3558,100 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.pool_id.as_deref(), Some("trusted"));
         assert_eq!(recovered.worker_id, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_authored_ids_expose_and_route_a_collision_free_dynamic_worker() -> Result<()> {
+        let mut replay = OfflineReplaySession::new_pooled(
+            vec![PoolSpec {
+                pool_id: DEFAULT_REPLAY_POOL_ID.to_string(),
+                engine_args: replay_args(false),
+                workers: vec![WorkerSpec::active(2), WorkerSpec::active(7)],
+                router: PoolRouter::RoundRobin,
+            }],
+            TRACE_BLOCK_SIZE,
+        )?;
+        let InteractiveRuntime::External(runtime) = replay
+            .runtime
+            .as_mut()
+            .expect("new pooled session retains its runtime")
+        else {
+            unreachable!("pooled replay always uses external placement")
+        };
+        runtime.apply_scaling(3)?;
+
+        assert_eq!(
+            replay
+                .snapshot()?
+                .workers
+                .iter()
+                .map(|worker| (worker.pool_id.as_str(), worker.worker_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (DEFAULT_REPLAY_POOL_ID, 2),
+                (DEFAULT_REPLAY_POOL_ID, 7),
+                (DEFAULT_REPLAY_POOL_ID, 0),
+            ],
+            "dynamic engine slot 2 must expose authored worker 0, not collide with static worker 2"
+        );
+
+        replay.submit_request(request(
+            "dynamic-route",
+            "dynamic-route-session",
+            0,
+            4,
+            &[401],
+            1,
+        ))?;
+        let mut events = drive_to_pending_placement(&mut replay)?;
+        let placement = events
+            .iter()
+            .find_map(|event| match event {
+                ReplayEvent::PlacementNeeded(data)
+                    if data.logical_request_id == "dynamic-route" =>
+                {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .expect("dynamic request must publish a placement observation");
+        let observed_candidates = placement.candidates.clone();
+        let dynamic_target = observed_candidates
+            .iter()
+            .find(|candidate| candidate.target.worker_id == 0)
+            .expect("placement observation must retain the dynamic worker")
+            .target
+            .clone();
+        assert_eq!(dynamic_target.pool_id, DEFAULT_REPLAY_POOL_ID);
+        assert_eq!(dynamic_target.dp_rank, 0);
+        assert_eq!(
+            observed_candidates
+                .iter()
+                .map(|candidate| candidate.target.worker_id)
+                .collect::<Vec<_>>(),
+            vec![2, 7, 0]
+        );
+
+        replay.assign("dynamic-route", dynamic_target)?;
+        events.extend(replay.drain_events()?);
+        let routed = routed_event(&events, "dynamic-route");
+        assert_eq!(routed.pool_id.as_deref(), Some(DEFAULT_REPLAY_POOL_ID));
+        assert_eq!(routed.worker_id, Some(0));
+        assert_eq!(routed.dp_rank, Some(0));
+        assert_eq!(routed.candidates, observed_candidates);
+
+        replay.close_admission()?;
+        events.extend(drive_to_drained(&mut replay)?);
+        assert_eq!(terminal_count(&events), 1);
+        let report = replay.finalize()?;
+        assert_eq!(report.per_request[0].worker_id, Some(0));
+        assert!(
+            report
+                .topology_accounting
+                .as_ref()
+                .is_some_and(|accounting| accounting.reconciliation.all_reconciled())
+        );
         Ok(())
     }
 

@@ -216,6 +216,19 @@ where
         self.capture_raw = capture_raw;
     }
 
+    /// Return the exact engine arguments used to construct a dynamically
+    /// added logical worker.
+    pub(in crate::replay::offline) fn dynamic_worker_args(
+        &self,
+        worker_id: usize,
+    ) -> MockEngineArgs {
+        let mut worker_args = self.args.clone();
+        if let Some(&max_num_seqs) = self.args.worker_max_num_seqs.get(worker_id) {
+            worker_args.max_num_seqs = Some(max_num_seqs);
+        }
+        worker_args
+    }
+
     fn worker(&self, rank_id: usize) -> Option<&OfflineWorkerState> {
         self.workers.get(rank_id)?.as_ref()
     }
@@ -343,10 +356,7 @@ where
     /// the stable mocker worker ID.
     pub(in crate::replay::offline) fn add_worker(&mut self) -> usize {
         let worker_id = self.worker_groups.len();
-        let mut worker_args = self.args.clone();
-        if let Some(&max_num_seqs) = self.args.worker_max_num_seqs.get(worker_id) {
-            worker_args.max_num_seqs = Some(max_num_seqs);
-        }
+        let worker_args = self.dynamic_worker_args(worker_id);
         let mut rank_ids = Vec::with_capacity(self.args.dp_size.max(1) as usize);
         for dp_rank in 0..self.args.dp_size.max(1) {
             let rank_id = self.workers.len();
