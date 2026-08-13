@@ -84,6 +84,8 @@ pageBroker:
   command: []
   # Optional arguments override. Defaults to the PageBroker socket and staging path.
   args: []
+  # Maximum simultaneous PageBroker socket handlers.
+  maxConcurrency: 16
   # Optional maximum size for tmpfs staging, for example "100Gi".
   stagingSizeLimit: ""
   image:

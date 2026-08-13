@@ -281,7 +281,7 @@ WaitForHandlers(std::vector<std::future<void>>& handlers)
 }
 
 void
-Serve(FileDescriptor& listener, Broker& broker)
+Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrency)
 {
   std::vector<std::future<void>> handlers;
   while (!shutting_down) {
@@ -301,11 +301,16 @@ Serve(FileDescriptor& listener, Broker& broker)
         LogError("accept", {errno, std::generic_category()});
       continue;
     }
+    if (handlers.size() == max_concurrency) {
+      FileDescriptor descriptor(connection);
+      std::cerr << "connection limit reached\n";
+      continue;
+    }
     try {
       handlers.emplace_back(
           std::async(std::launch::async, [connection, &broker] { ServeConnection(connection, broker); }));
     }
-    catch (const std::system_error& error) {
+    catch (const std::exception& error) {
       FileDescriptor descriptor(connection);
       std::cerr << "start connection: " << error.what() << '\n';
     }
@@ -315,7 +320,7 @@ Serve(FileDescriptor& listener, Broker& broker)
 }  // namespace
 
 ExitCode
-RunDaemon(const fs::path& socket_path, const fs::path& staging_directory)
+RunDaemon(const fs::path& socket_path, const fs::path& staging_directory, size_t max_concurrency)
 {
   shutting_down = 0;
   if (const auto error = InstallSignalHandlers(); error)
@@ -331,6 +336,6 @@ RunDaemon(const fs::path& socket_path, const fs::path& staging_directory)
     return Fail("create listener", error);
 
   Broker broker(staging_directory);
-  Serve(listener, broker);
+  Serve(listener, broker, max_concurrency);
   return ExitCode::SUCCESS;
 }

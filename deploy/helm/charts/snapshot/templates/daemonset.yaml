@@ -113,6 +113,8 @@ spec:
             {{- else }}
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
             - {{ $pageBrokerStagingPath | quote }}
+            - --max-concurrency
+            - {{ .Values.pageBroker.maxConcurrency | quote }}
             {{- end }}
           volumeMounts:
             - name: pagebroker
