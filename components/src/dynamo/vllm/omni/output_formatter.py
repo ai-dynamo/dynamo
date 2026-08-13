@@ -55,6 +55,7 @@ class AudioAggregateState:
     chunks: list[np.ndarray] = field(default_factory=list)
     sample_rate: int | None = None
     emitted_chunks: int = 0
+    num_channels: int | None = None
 
 
 class TextFormatter:
@@ -333,8 +334,7 @@ class AudioFormatter:
                 self._append_audio_chunk(aggregate_state, audio_np, sample_rate)
                 return None
 
-            encode_fmt = ("wav" if output_format is None else output_format).lower()
-            assert encode_fmt is not None
+            encode_fmt = (output_format or "wav").lower()
             if stream_state is not None:
                 audio_bytes, media_type = await asyncio.to_thread(
                     self._encode_audio_chunk,
@@ -348,7 +348,7 @@ class AudioFormatter:
                     self._encode_audio, audio_np, sample_rate, encode_fmt, speed
                 )
 
-            logger.info(
+            logger.debug(
                 "Audio encoded for request %s: %d samples, sr=%d, %d bytes %s",
                 request_id,
                 audio_np.shape[-1],
@@ -407,32 +407,17 @@ class AudioFormatter:
         audio_np: np.ndarray,
         sample_rate: int,
     ) -> None:
-        if audio_np.ndim == 3:
-            if audio_np.shape[0] != 1:
-                raise ValueError(
-                    f"Expected one audio batch, got shape {audio_np.shape}"
-                )
-            audio_np = audio_np[0]
-        if audio_np.ndim == 1:
-            num_channels = 1
-        elif audio_np.ndim == 2 and audio_np.shape[0] in (1, 2):
-            num_channels = int(audio_np.shape[0])
-        else:
-            raise ValueError(
-                f"Expected mono or stereo audio, got shape {audio_np.shape}"
-            )
+        audio_np, num_channels = self._channel_first_audio(audio_np)
 
         if state.sample_rate is not None and state.sample_rate != sample_rate:
             raise ValueError(
                 f"Audio sample rate changed from {state.sample_rate} to {sample_rate}"
             )
-        if state.chunks:
-            first_chunk = state.chunks[0]
-            first_num_channels = 1 if first_chunk.ndim == 1 else first_chunk.shape[0]
-            if first_num_channels != num_channels:
-                raise ValueError("Audio channel count changed while generating")
+        if state.num_channels is not None and state.num_channels != num_channels:
+            raise ValueError("Audio channel count changed while generating")
 
         state.sample_rate = sample_rate
+        state.num_channels = num_channels
         state.chunks.append(audio_np)
 
     def _extract_audio_tensor(
@@ -480,16 +465,16 @@ class AudioFormatter:
         fmt: str,
         stream_state: AudioStreamState,
     ) -> tuple[bytes, str]:
-        _, num_channels = self._normalize_audio_layout(audio_np)
-        pcm_bytes, _ = self._encode_audio(audio_np, sample_rate, "pcm")
+        audio_np, num_channels = self._normalize_audio_layout(audio_np)
+        pcm_bytes, _ = self._write_audio(audio_np, sample_rate, "pcm")
         if fmt == "wav" and stream_state.first_chunk:
             pcm_bytes = self._wav_stream_header(sample_rate, num_channels) + pcm_bytes
         stream_state.first_chunk = False
         return pcm_bytes, "audio/wav" if fmt == "wav" else "audio/pcm"
 
     @staticmethod
-    def _normalize_audio_layout(audio_np: np.ndarray) -> tuple[np.ndarray, int]:
-        """Convert vLLM-Omni channel-first audio to soundfile's layout."""
+    def _channel_first_audio(audio_np: np.ndarray) -> tuple[np.ndarray, int]:
+        """Validate vLLM-Omni channel-first audio layout."""
         if audio_np.ndim == 3:
             if audio_np.shape[0] != 1:
                 raise ValueError(
@@ -500,15 +485,18 @@ class AudioFormatter:
         if audio_np.ndim == 1:
             return audio_np, 1
 
-        if audio_np.ndim == 2:
-            num_channels = int(audio_np.shape[0])
-            if num_channels not in (1, 2):
-                raise ValueError(
-                    f"Expected mono or stereo audio, got shape {audio_np.shape}"
-                )
-            return audio_np.T, num_channels
+        if audio_np.ndim == 2 and audio_np.shape[0] in (1, 2):
+            return audio_np, int(audio_np.shape[0])
 
-        raise ValueError(f"Unexpected audio shape {audio_np.shape}")
+        raise ValueError(f"Expected mono or stereo audio, got shape {audio_np.shape}")
+
+    @classmethod
+    def _normalize_audio_layout(cls, audio_np: np.ndarray) -> tuple[np.ndarray, int]:
+        """Convert vLLM-Omni channel-first audio to soundfile's layout."""
+        audio_np, num_channels = cls._channel_first_audio(audio_np)
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T
+        return audio_np, num_channels
 
     @staticmethod
     def _wav_stream_header(
@@ -538,8 +526,8 @@ class AudioFormatter:
 
     def _encode_audio(
         self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
-    ) -> tuple:
-        audio_np, _ = self._normalize_audio_layout(audio_np)
+    ) -> tuple[bytes, str]:
+        audio_np, _ = self._channel_first_audio(audio_np)
         if speed != 1.0:
             try:
                 import librosa
@@ -548,6 +536,14 @@ class AudioFormatter:
             except ImportError:
                 logger.warning("librosa not installed, ignoring speed adjustment")
 
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T
+        return self._write_audio(audio_np, sample_rate, fmt)
+
+    @staticmethod
+    def _write_audio(
+        audio_np: np.ndarray, sample_rate: int, fmt: str
+    ) -> tuple[bytes, str]:
         fmt = (fmt or "wav").lower()
         format_map = {
             "wav": ("WAV", "audio/wav", {}),

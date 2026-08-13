@@ -4,12 +4,20 @@
 """Tests for output_formatter.py — modality-specific formatters."""
 
 import base64
+import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 try:
+    import torch
+
     from dynamo.vllm.omni.output_formatter import (
+        AudioAggregateState,
+        AudioFormatter,
+        AudioStreamState,
         DiffusionFormatter,
         TextFormatter,
         _build_completion_usage,
@@ -22,6 +30,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
+    pytest.mark.multimodal,
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -356,10 +365,6 @@ class TestAudioFormatterEncode:
     def test_normalizes_vllm_omni_channel_first_layout(
         self, input_shape, output_shape, num_channels
     ):
-        import numpy as np
-
-        from dynamo.vllm.omni.output_formatter import AudioFormatter
-
         normalized, actual_channels = AudioFormatter._normalize_audio_layout(
             np.zeros(input_shape, dtype=np.float32)
         )
@@ -369,10 +374,6 @@ class TestAudioFormatterEncode:
 
     @pytest.mark.parametrize("shape", [(2, 1, 8), (3, 8), (1, 1, 1, 8)])
     def test_rejects_unsupported_audio_layout(self, shape):
-        import numpy as np
-
-        from dynamo.vllm.omni.output_formatter import AudioFormatter
-
         with pytest.raises(ValueError):
             AudioFormatter._normalize_audio_layout(np.zeros(shape, dtype=np.float32))
 
@@ -403,10 +404,6 @@ class TestAudioFormatterFormat:
 
     @pytest.mark.asyncio
     async def test_streaming_cumulative_chunks_emit_only_new_audio(self):
-        import torch
-
-        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
-
         formatter = AudioFormatter("test", None, None)
         state = AudioStreamState()
         first_chunk = torch.tensor([0.1, 0.2], dtype=torch.float32)
@@ -437,10 +434,6 @@ class TestAudioFormatterFormat:
 
     @pytest.mark.asyncio
     async def test_streaming_per_step_tensors_are_all_emitted(self):
-        import numpy as np
-
-        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
-
         formatter = AudioFormatter("test", None, None)
         state = AudioStreamState()
         chunks = []
@@ -459,21 +452,11 @@ class TestAudioFormatterFormat:
     async def test_aggregate_audio_is_encoded_once_with_speed_adjustment(
         self, monkeypatch
     ):
-        import sys
-        from types import SimpleNamespace
-
-        import numpy as np
-
-        from dynamo.vllm.omni.output_formatter import (
-            AudioAggregateState,
-            AudioFormatter,
-        )
-
         formatter = AudioFormatter("test", None, None)
         state = AudioAggregateState()
         for value in (0.1, 0.2):
             response = await formatter.format(
-                {"audio": np.full(2048, value, dtype=np.float32), "sr": 24000},
+                {"audio": np.full((2, 2048), value, dtype=np.float32), "sr": 24000},
                 "req-1",
                 output_format="wav",
                 audio_aggregate_state=state,
@@ -485,7 +468,7 @@ class TestAudioFormatterFormat:
         def time_stretch(*, y, rate):
             observed["shape"] = y.shape
             observed["rate"] = rate
-            return y[::2]
+            return y[:, ::2]
 
         monkeypatch.setitem(
             sys.modules,
@@ -497,17 +480,13 @@ class TestAudioFormatterFormat:
         )
         audio = base64.b64decode(response["data"][0]["b64_json"])
 
-        assert observed == {"shape": (4096,), "rate": 2.0}
+        assert observed == {"shape": (2, 4096), "rate": 2.0}
         assert audio.count(b"RIFF") == 1
         assert audio[:4] == b"RIFF"
-        assert len(audio) == 44 + 2048 * 2
+        assert len(audio) == 44 + 2048 * 2 * 2
 
     @pytest.mark.asyncio
     async def test_streaming_wav_header_is_emitted_once(self):
-        import numpy as np
-
-        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
-
         formatter = AudioFormatter("test", None, None)
         state = AudioStreamState()
         responses = [
@@ -533,10 +512,6 @@ class TestAudioFormatterFormat:
 
     @pytest.mark.asyncio
     async def test_streaming_wav_preserves_stereo_layout(self):
-        import numpy as np
-
-        from dynamo.vllm.omni.output_formatter import AudioFormatter, AudioStreamState
-
         formatter = AudioFormatter("test", None, None)
         channel_major = np.linspace(-0.5, 0.5, 16, dtype=np.float32).reshape(2, 8)
 

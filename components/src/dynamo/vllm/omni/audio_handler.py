@@ -189,20 +189,17 @@ class AudioGenerationHandler:
 
         output_format = (req.response_format or "wav").lower()
 
-        # Unlike Chat Completions, /v1/audio/speech uses `stream_format`
-        # ("audio" or "sse"), not a `stream` boolean. Dynamo supports the
-        # default binary "audio" mode here; SSE framing is not implemented.
-        # URL delivery, whole-file encoders, and speed adjustment all require
-        # the complete waveform, so only the remaining requests can stream.
+        # URL delivery, whole-file encoders, and speed adjustment require the
+        # complete waveform before the worker can emit a response.
         returns_audio_bytes = req.data_source != "url"
         supports_chunk_encoding = output_format in {"pcm", "wav"}
         uses_default_speed = req.speed is None or req.speed == 1.0
-        can_stream_audio = (
+        stream_audio = (
             returns_audio_bytes and supports_chunk_encoding and uses_default_speed
         )
 
         if self._is_tts_model():
-            return await self._engine_inputs_tts(req, can_stream_audio=can_stream_audio)
+            return await self._engine_inputs_tts(req, stream_audio=stream_audio)
 
         # Generic audio model – plain text prompt (same as image/video)
         prompt = OmniTextPrompt(prompt=req.input)
@@ -214,13 +211,13 @@ class AudioGenerationHandler:
             response_format=req.data_source,
             output_format=req.response_format,
             speed=req.speed or 1.0,
-            stream_audio=can_stream_audio,
+            stream_audio=stream_audio,
         )
 
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
     async def _engine_inputs_tts(
-        self, req: NvCreateAudioSpeechRequest, *, can_stream_audio: bool
+        self, req: NvCreateAudioSpeechRequest, *, stream_audio: bool
     ):
         """Build engine inputs for Qwen3-TTS models."""
         from dynamo.vllm.omni.omni_handler import EngineInputs
@@ -274,7 +271,7 @@ class AudioGenerationHandler:
             response_format=req.data_source,
             output_format=req.response_format,
             speed=req.speed or 1.0,
-            stream_audio=can_stream_audio,
+            stream_audio=stream_audio,
         )
 
     def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
