@@ -558,9 +558,8 @@ where
         let worker = self.slots.request_worker(&request_id);
         let slot_result = self.slots.free(&request_id, Instant::now());
         if !self.queue.has_admission_policy() {
-            match worker {
-                Some(worker) => self.queue.update_worker(worker).await,
-                None => self.queue.update().await,
+            if let Some(worker) = worker {
+                self.queue.update_worker(worker).await;
             }
             slot_result?;
             return Ok(worker.is_some());
@@ -623,10 +622,13 @@ where
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         if !self.queue.has_admission_policy() {
+            let owned = self.slots.request_worker(&request_id) == Some(worker);
             let slot_result = self
                 .slots
                 .free_if_worker(&request_id, worker, Instant::now());
-            self.queue.update_worker(worker).await;
+            if owned {
+                self.queue.update_worker(worker).await;
+            }
             return slot_result;
         }
         let slot_result = self
