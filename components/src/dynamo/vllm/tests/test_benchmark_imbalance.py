@@ -65,20 +65,48 @@ def test_available_segments_follow_from_the_conserved_total():
 
 def test_uniform_batch_has_no_deviation():
     rows = [(1024, 512)] * 4
-    assert work_columns(rows, rows, TOPK) == (0.0, 0.0, 0.0)
+    assert work_columns(rows, rows, TOPK) == (0.0, 0.0)
 
 
-def test_columns_credit_the_subtrahend_to_the_average_point_s_own_kernels():
-    """A dense average point subtracts through the dense column, so a batch
-    that moves rows onto the sparse path shows a NEGATIVE dense deviation --
-    which is the shape of the label, not a bug in the sign."""
+def test_columns_credit_the_subtrahend_per_row():
+    """The subtrahend is the reference batch's own rows, credited to the same
+    columns by the same rule. Here the reference sits below the bound, so it
+    contributes nothing to x_idx and the whole scan of the row that crossed
+    survives into that column, while x_mla carries only what the batch's
+    attention gained over the reference's."""
     rows = [(4096, 0), (128, 0), (128, 0), (128, 0)]
-    x_idx, x_sparse, x_dense = work_columns(rows, [(1120, 0)] * 4, TOPK)
-    assert x_idx > 0 and x_sparse > 0
-    assert x_dense < 0
+    reference = [(1120, 0)] * 4
+    x_idx, x_mla = work_columns(rows, reference, TOPK)
+
+    assert x_idx == pytest.approx(idx_work(4096, 0, TOPK))
+    assert x_mla == pytest.approx(
+        sum(mla_work(s, p, TOPK) for s, p in rows)
+        - sum(mla_work(s, p, TOPK) for s, p in reference)
+    )
+    assert x_idx > 0 and x_mla > 0
 
 
-# --------------------------------------------------------------- planning
+def test_indexer_column_leaves_out_rows_below_the_budget():
+    """Short rows do run the indexer, and their scan is still kept out of
+    x_idx. Below the bound a row's scan and its attention are the same
+    trapezoid up to a half-token that the conserved total cancels, so counting
+    both would make the two columns exactly collinear and a pure unsaturated
+    segment would identify nothing. Left out, that cost lands in c_mla."""
+    s_bar, p_bar, b = 512, 0, 4
+    rows = [(1024, 0), (256, 0), (256, 0), (512, 0)]
+    assert all(s + p <= TOPK for s, p in rows)
+    assert sum(s for s, _ in rows) == b * s_bar
+
+    x_idx, x_mla = work_columns(rows, [(s_bar, p_bar)] * b, TOPK)
+    assert x_idx == 0.0
+    assert x_mla > 0.0
+
+    # What that exclusion buys: counting the short rows would have made the two
+    # columns identical, leaving only their sum determined.
+    naive = sum(idx_work(s, p, TOPK) for s, p in rows) - b * idx_work(
+        s_bar, p_bar, TOPK
+    )
+    assert naive == pytest.approx(x_mla)
 
 
 def test_plan_conserves_both_totals_exactly():
@@ -120,24 +148,6 @@ def test_a_cell_with_no_room_to_redistribute_plans_nothing():
 
 
 # --------------------------------------------------------------- manifest
-
-
-def test_indexer_column_carries_rows_below_the_budget():
-    """``idx_work`` is not gated on ``topk`` -- the scoring pass runs for a
-    request at or below the budget too -- so the column must not be. Gating it
-    charged zero to exactly the rows a mixed batch is full of, and left a batch
-    entirely below the budget looking like it did no indexer work at all."""
-    s_bar, p_bar, b = 512, 0, 4
-    rows = [(1024, 0), (256, 0), (256, 0), (512, 0)]
-    assert all(s + p <= TOPK for s, p in rows)
-    assert sum(s for s, _ in rows) == b * s_bar
-    x_idx, _, _ = work_columns(rows, [(s_bar, p_bar)] * b, TOPK)
-    expected = sum(idx_work(s, p, TOPK) for s, p in rows) - b * idx_work(
-        s_bar, p_bar, TOPK
-    )
-    assert x_idx == pytest.approx(expected)
-    # Convex in s at fixed totals, so a spread costs strictly more than equal.
-    assert x_idx > 0
 
 
 def test_every_shape_conserves_the_cell_s_exact_totals():

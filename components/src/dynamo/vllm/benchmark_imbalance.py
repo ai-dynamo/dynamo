@@ -21,37 +21,40 @@ spread. Conserving a floored total instead would leave a token-count change in
 the label, and at the C+1 coordinates the sweep samples on purpose that change
 is a whole CUDA-graph capture size rather than one token of work.
 
-Three prices, not two. A request whose full length stays at or below ``topk``
-short-circuits the indexer and runs the dense kernel; one above it runs the
-indexer and the capped-attention kernel. Those are different kernels with
-different prices, so a batch that straddles the bound cannot be charged with a
-single attention coefficient:
+Two prices, not one. A request whose full length stays at or below topk
+reads every key it scores; one above it has its attention capped while the
+indexer still scores the whole sequence, because a top-k selection cannot skip
+what it has not scored. That divergence above the bound is the only place the
+two costs separate, and it is what the label is solved for:
 
-    y = c_idx * x_idx  +  c_mla_sparse * x_mla_sparse  +  c_mla_mha * x_mla_dense
+    y = c_idx * x_idx  +  c_mla * x_mla
 
-The three columns are what :func:`work_columns` returns. Splitting them is not
-a refinement -- in the measured grid the dense rows carry between 1% and 88% of
-a mixed batch's attention work, so lumping them prices most of that work at the
-wrong rate.
+x_mla counts the attention pairs of every row; x_idx counts the scoring
+trapezoid of the rows that cross topk alone. A short row does run the
+indexer, and its scan is deliberately not in x_idx: below the bound the
+scan and the attention are the same trapezoid, differing by a half-token that
+the conserved total cancels, so counting both makes the two columns exactly
+collinear and only their sum is recoverable. Left out, that sum lands in
+c_mla, which then prices the whole cost of a sub-topk row. c_idx is
+correspondingly the price of what a row adds by crossing.
+
+The attention column is not split by kernel path. Capped and uncapped reads are
+different kernels at different rates, but under the conserved totals they move
+in lockstep -- the downstream fit measured them 170-177 degrees apart, and
+splitting them left saturated average points with a dense price no segment
+could isolate. These columns must stay the shape the fit uses, since they are
+what decides which shapes get measured for it.
 
 Which column a segment can move follows from the regime, and that is what lets
-one segment pin one coefficient without a joint fit:
+each segment stand alone:
 
-    pure saturated    every row is above topk, the indexer is pinned there for
-                      all of them, so the attention term is linear in s and its
-                      deviation cancels exactly -- only x_idx survives.
-    pure unsaturated  every row short-circuits the indexer, so x_idx is
-                      identically zero -- only x_mla_dense survives.
-    mixed             all three are live; the segment is solved against
-                      whichever coefficients the cell's other segment and the
-                      global dense fit already fixed.
-
-``c_mla_mha`` is a property of the dense kernel rather than of a cell, and at a
-cell whose average request is long it cannot be measured at all: a dense row is
-capped at ``topk`` tokens, so the dense column tops out at ``(b - 1) * topk^2 /
-2`` while the cell's own work grows with ``s_bar^2``. It is therefore fitted
-once from the unsaturated cells, where it carries 8-196% of the work, and
-treated as known everywhere else.
+    pure saturated    every row is above topk, so the attention term is linear
+                      in s and its deviation cancels exactly -- x_mla is
+                      identically zero and the segment solves c_idx.
+    pure unsaturated  no row crosses, so x_idx is identically zero and the
+                      segment solves c_mla.
+    mixed             both columns are live and not collinear, so the segment
+                      solves the pair on its own.
 """
 
 from __future__ import annotations
@@ -125,38 +128,48 @@ def work_columns(
     rows: list[tuple[int, int]],
     reference: list[tuple[int, int]],
     topk: int,
-) -> tuple[float, float, float]:
-    """``(x_idx, x_mla_sparse, x_mla_dense)`` against the cell's reference batch.
+) -> tuple[float, float]:
+    """(x_idx, x_mla) against the cell's reference batch.
 
-    The subtrahend is the reference batch's own rows rather than ``b`` copies of
-    the average request. Those agree whenever the cell's totals divide by ``b``,
-    and where they do not the reference carries the remainder on one row -- a
-    row that can sit on the other side of ``topk`` from its neighbours, which
-    ``b`` copies of the average cannot express.
+    x_idx collects the scoring trapezoid of the rows that CROSS topk;
+    x_mla collects the attention pairs of every row. Both are deviations
+    from the reference batch of the same cell, credited per row on both sides,
+    so a reference carrying its remainder on one row -- which can sit on the
+    other side of topk from its neighbours -- is charged where it belongs.
 
-    The indexer column carries EVERY row, on both sides of the subtraction:
-    ``idx_work`` is not gated on ``topk`` (see its docstring -- the scoring pass
-    runs for a request at or below the budget too), so gating the column would
-    reintroduce exactly the error that docstring records, and it would do it
-    where it hurts most: a mixed batch is mostly short rows.
+    Short rows run the indexer too (see :func:), and they are still
+    left out of x_idx on purpose. Include them and a pure unsaturated
+    segment stops identifying anything: within it every row's scan and every
+    row's attention are the same trapezoid, and the half-token they differ by
+    sums to a conserved total and cancels, so the two columns become EXACTLY
+    collinear and only their sum is determined. Excluding them puts that sum
+    where it is identifiable -- inside c_mla, which then prices the whole
+    cost of a sub-topk row rather than its attention alone.
 
-    Attention is different, and is credited per row -- on both sides -- to the
-    column for the kernel that row actually runs on.
+    So x_idx is not "indexer work". It is the work a row adds by crossing
+    the bound, over and above what the same row would have cost below it.
+
+    The attention column is not split by kernel path. Capped and uncapped reads
+    are different kernels at different rates, but they are not separately
+    identifiable: both count attention pairs, so a batch moving a row from one
+    path to the other moves both columns in lockstep under the conserved
+    totals. The downstream fit measured the two at 170-177 degrees apart and
+    found that splitting them left saturated average points with a dense price
+    no segment could isolate, rejecting nine of eighteen such cells. This must
+    stay the same shape as the columns that fit is done on, since these are
+    what decide which shapes get measured for it.
     """
 
-    def split(batch: list[tuple[int, int]]) -> tuple[float, float, float]:
-        idx = sum(idx_work(s, p, topk) for s, p in batch)
-        sp = sum(mla_work(s, p, topk) for s, p in batch if runs_sparse(s, p, topk))
-        dn = sum(mla_work(s, p, topk) for s, p in batch if not runs_sparse(s, p, topk))
-        return idx, sp, dn
+    def split(batch: list[tuple[int, int]]) -> tuple[float, float]:
+        idx = sum(idx_work(s, p, topk) for s, p in batch if runs_sparse(s, p, topk))
+        mla = sum(mla_work(s, p, topk) for s, p in batch)
+        return idx, mla
 
     got, want = split(rows), split(reference)
-    return got[0] - want[0], got[1] - want[1], got[2] - want[2]
+    return got[0] - want[0], got[1] - want[1]
 
 
-def key_column(
-    columns: tuple[float, float, float], regime: Regime, avg_is_sat: bool
-) -> float:
+def key_column(columns: tuple[float, float], regime: Regime, avg_is_sat: bool) -> float:
     """Magnitude of the column this segment has to move to be worth measuring.
 
     A segment that leaves its own column near zero produces a label the fit
@@ -164,16 +177,14 @@ def key_column(
     to -- not the total work change, which a mixed batch can inflate by an order
     of magnitude through a column whose coefficient is already known.
     """
-    x_idx, x_sp, x_dn = columns
+    x_idx, x_mla = columns
     if regime == SAT:
         return abs(x_idx)
     if regime == UNSAT:
-        return abs(x_dn)
-    # A mixed batch at a saturated average point is solved for the sparse
-    # attention price alone: the gated price came from the cell's own saturated
-    # segment and the dense price from the global fit. At an unsaturated average
-    # point only the dense price is known, so two columns have to carry signal.
-    return abs(x_sp) if avg_is_sat else min(abs(x_idx), abs(x_sp))
+        return abs(x_mla)
+    # A mixed segment closes whichever price its cell's pure segment left open,
+    # so the column that has to carry signal is the other one.
+    return abs(x_mla) if avg_is_sat else abs(x_idx)
 
 
 # ------------------------------------------------------------------ regimes
@@ -440,19 +451,18 @@ def mixed_rows(
 
 @dataclass(frozen=True)
 class CalibrationBatch:
-    """One constructed batch and the three work columns it moves."""
+    """One constructed batch and the two work columns it moves."""
 
     regime: Regime
     m: int
     short_len: int
     rows: list[tuple[int, int]]
     x_idx: float
-    x_mla_sparse: float
-    x_mla_dense: float
+    x_mla: float
 
     @property
-    def columns(self) -> tuple[float, float, float]:
-        return self.x_idx, self.x_mla_sparse, self.x_mla_dense
+    def columns(self) -> tuple[float, float]:
+        return self.x_idx, self.x_mla
 
     @property
     def totals(self) -> tuple[int, int]:
