@@ -250,10 +250,7 @@ async def test_repeated_attempt_can_run_concurrent_decoder_invocations() -> None
     engine.started = asyncio.Event()
     engine.release = asyncio.Event()
     stage = VllmDecoderStage(runtime)
-    inputs = {
-        "request": _request(),
-        "prompt": {"prompt_token_ids": [1]},
-    }
+    inputs = _inputs([1])
     first = asyncio.create_task(
         stage.run(inputs, _context("attempt-8", invocation_id="attempt-8:1"))
     )
