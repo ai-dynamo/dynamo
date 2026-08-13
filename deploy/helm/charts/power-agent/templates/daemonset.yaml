@@ -62,6 +62,10 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: power-agent
           image: {{ include "power-agent.imageRef" (dict "repository" .Values.image.repository "tag" .Values.image.tag "digest" .Values.image.digest) | quote }}

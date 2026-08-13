@@ -51,6 +51,10 @@ spec:
   tolerations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   containers:
     - name: power-agent
       image: "{{ include "power-agent.imageRef" (dict "repository" .Values.dev.image.repository "tag" .Values.dev.image.tag) }}"
