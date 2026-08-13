@@ -664,7 +664,7 @@ where
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
         candidates: Option<&KvTransferCandidates>,
-    ) -> Option<KvHints> {
+    ) -> Option<TransferHint> {
         let candidates = candidates?;
 
         let (block_hashes, source_control_endpoint) = {
@@ -699,12 +699,28 @@ where
             return None;
         }
 
-        Some(KvHints {
-            transfer: Some(TransferHint {
-                source_control_endpoint,
-                block_hashes,
-            }),
+        Some(TransferHint {
+            source_control_endpoint,
+            block_hashes,
         })
+    }
+
+    fn kv_hints_for_selection(
+        &self,
+        target: WorkerWithDpRank,
+        target_cached_prefix_blocks: u32,
+        transfer_candidates: Option<&KvTransferCandidates>,
+    ) -> Option<KvHints> {
+        // Compose each hint independently. Add future materializers here; one
+        // unavailable hint must not suppress another supported hint.
+        let hints = KvHints {
+            transfer: self.transfer_hint_for_selection(
+                target,
+                target_cached_prefix_blocks,
+                transfer_candidates,
+            ),
+        };
+        (!hints.is_empty()).then_some(hints)
     }
 
     pub async fn record_routing_decision(
@@ -1110,7 +1126,7 @@ where
             },
         };
         let kv_hints = if is_admitted_routing {
-            self.transfer_hint_for_selection(
+            self.kv_hints_for_selection(
                 response.best_worker,
                 response.target_cached_prefix_blocks,
                 response.kv_transfer_candidates.as_ref(),
@@ -2184,7 +2200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transfer_hint_allows_other_dp_ranks_of_selected_target_worker() {
+    async fn kv_hints_composer_wraps_transfer_from_another_dp_rank() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
@@ -2210,8 +2226,7 @@ mod tests {
             owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 1), 2)],
         };
 
-        let hint =
-            router.transfer_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+        let hint = router.kv_hints_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
 
         assert_eq!(
             hint,
@@ -2341,14 +2356,12 @@ mod tests {
             router.transfer_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
         assert_eq!(
             prefill_hint,
-            Some(KvHints {
-                transfer: Some(TransferHint {
-                    source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(101),
-                        ExternalSequenceBlockHash(102),
-                    ],
-                }),
+            Some(TransferHint {
+                source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
             })
         );
 
@@ -2356,15 +2369,13 @@ mod tests {
             router.transfer_hint_for_selection(WorkerWithDpRank::new(10, 0), 0, Some(&candidates));
         assert_eq!(
             decode_hint,
-            Some(KvHints {
-                transfer: Some(TransferHint {
-                    source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(101),
-                        ExternalSequenceBlockHash(102),
-                        ExternalSequenceBlockHash(103),
-                    ],
-                }),
+            Some(TransferHint {
+                source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                    ExternalSequenceBlockHash(103),
+                ],
             })
         );
     }

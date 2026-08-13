@@ -13,7 +13,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import WorkerType
-from dynamo.vllm.kv_hints import enable_kv_transfer_hint_support
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 pytestmark = [
     pytest.mark.unit,
@@ -23,7 +23,7 @@ pytestmark = [
 ]
 
 
-def test_enable_kv_transfer_hint_support_publishes_single_dp_rank_endpoint():
+def test_publish_kv_hint_capabilities_publishes_transfer_endpoint():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -41,7 +41,7 @@ def test_enable_kv_transfer_hint_support_publishes_single_dp_rank_endpoint():
         )
     )
 
-    enable_kv_transfer_hint_support(runtime_config, engine_args, WorkerType.Prefill)
+    publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_any_call(
         KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
@@ -62,7 +62,7 @@ def test_enable_kv_transfer_hint_support_publishes_single_dp_rank_endpoint():
         (WorkerType.Decode, "decode"),
     ],
 )
-def test_enable_kv_transfer_hint_support_publishes_worker_type(
+def test_publish_kv_hint_capabilities_publishes_transfer_worker_type(
     worker_type, expected_runtime_value
 ):
     runtime_config = MagicMock()
@@ -81,14 +81,14 @@ def test_enable_kv_transfer_hint_support_publishes_worker_type(
         )
     )
 
-    enable_kv_transfer_hint_support(runtime_config, engine_args, worker_type)
+    publish_kv_hint_capabilities(runtime_config, engine_args, worker_type)
 
     runtime_config.set_engine_specific.assert_any_call(
         KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, json.dumps(expected_runtime_value)
     )
 
 
-def test_enable_kv_transfer_hint_support_publishes_dp_rank_endpoints():
+def test_publish_kv_hint_capabilities_publishes_transfer_dp_rank_endpoints():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -106,7 +106,7 @@ def test_enable_kv_transfer_hint_support_publishes_dp_rank_endpoints():
         )
     )
 
-    enable_kv_transfer_hint_support(
+    publish_kv_hint_capabilities(
         runtime_config, engine_args, WorkerType.Prefill, dp_range=(4, 2)
     )
 
@@ -116,7 +116,7 @@ def test_enable_kv_transfer_hint_support_publishes_dp_rank_endpoints():
     )
 
 
-def test_enable_kv_transfer_hint_support_brackets_ipv6_endpoint():
+def test_publish_kv_hint_capabilities_brackets_transfer_ipv6_endpoint():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -133,7 +133,7 @@ def test_enable_kv_transfer_hint_support_brackets_ipv6_endpoint():
         )
     )
 
-    enable_kv_transfer_hint_support(runtime_config, engine_args, WorkerType.Prefill)
+    publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_any_call(
         KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
@@ -141,7 +141,7 @@ def test_enable_kv_transfer_hint_support_brackets_ipv6_endpoint():
     )
 
 
-def test_enable_kv_transfer_hint_support_rejects_dp_offset_port_overflow():
+def test_publish_kv_hint_capabilities_rejects_transfer_port_overflow():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -159,7 +159,7 @@ def test_enable_kv_transfer_hint_support_rejects_dp_offset_port_overflow():
     )
 
     with pytest.raises(ValueError, match="TRANSFER hint support requires"):
-        enable_kv_transfer_hint_support(
+        publish_kv_hint_capabilities(
             runtime_config, engine_args, WorkerType.Prefill, dp_range=(0, 2)
         )
 
@@ -167,7 +167,7 @@ def test_enable_kv_transfer_hint_support_rejects_dp_offset_port_overflow():
 
 
 @pytest.mark.parametrize("dp_range", [(-1, 1), (0, 0)])
-def test_enable_kv_transfer_hint_support_rejects_invalid_dp_range(dp_range):
+def test_publish_kv_hint_capabilities_rejects_invalid_transfer_dp_range(dp_range):
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -185,14 +185,14 @@ def test_enable_kv_transfer_hint_support_rejects_invalid_dp_range(dp_range):
     )
 
     with pytest.raises(ValueError, match="TRANSFER hint support requires"):
-        enable_kv_transfer_hint_support(
+        publish_kv_hint_capabilities(
             runtime_config, engine_args, WorkerType.Prefill, dp_range=dp_range
         )
 
     runtime_config.set_engine_specific.assert_not_called()
 
 
-def test_enable_kv_transfer_hint_support_fails_with_multiple_transfer_hint_tiers():
+def test_publish_kv_hint_capabilities_rejects_multiple_transfer_tiers():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -215,13 +215,13 @@ def test_enable_kv_transfer_hint_support_fails_with_multiple_transfer_hint_tiers
         )
     )
 
-    with pytest.raises(ValueError, match="exactly one TRANSFER hint-capable"):
-        enable_kv_transfer_hint_support(runtime_config, engine_args, WorkerType.Prefill)
+    with pytest.raises(ValueError, match="exactly one TRANSFER-capable"):
+        publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_not_called()
 
 
-def test_enable_kv_transfer_hint_support_skips_for_unsupported_worker_roles():
+def test_publish_kv_hint_capabilities_skips_transfer_for_unsupported_worker_role():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -239,12 +239,12 @@ def test_enable_kv_transfer_hint_support_skips_for_unsupported_worker_roles():
         )
     )
 
-    enable_kv_transfer_hint_support(runtime_config, engine_args, WorkerType.Encode)
+    publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Encode)
 
     runtime_config.set_engine_specific.assert_not_called()
 
 
-def test_enable_kv_transfer_hint_support_skips_without_transfer_hint_capability():
+def test_publish_kv_hint_capabilities_skips_unadvertised_transfer():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -261,12 +261,12 @@ def test_enable_kv_transfer_hint_support_skips_without_transfer_hint_capability(
         )
     )
 
-    enable_kv_transfer_hint_support(runtime_config, engine_args, WorkerType.Prefill)
+    publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_not_called()
 
 
-def test_enable_kv_transfer_hint_support_fails_without_advertisable_endpoint():
+def test_publish_kv_hint_capabilities_rejects_transfer_without_endpoint():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -284,6 +284,6 @@ def test_enable_kv_transfer_hint_support_fails_without_advertisable_endpoint():
     )
 
     with pytest.raises(ValueError, match="TRANSFER hint support requires"):
-        enable_kv_transfer_hint_support(runtime_config, engine_args, WorkerType.Prefill)
+        publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_not_called()
