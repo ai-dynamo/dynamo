@@ -1822,7 +1822,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | name identifies a rendered container. Use main for the generated workload<br />container or the name of a container in podTemplate.spec.containers. |  | MinLength: 1 <br /> |
-| `append` _string array_ | append contains arguments added after defaults and normal overrides. |  | MinItems: 1 <br /> |
+| `append` _string array_ | append contains arguments added after defaults and normal overrides. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
 
 
 #### DGDRPhase
