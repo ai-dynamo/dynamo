@@ -186,12 +186,12 @@ Workers that share a namespace, component, endpoint, model type, and worker type
 This is not specific to router flags — any card difference splits a set the same way — but router flags are easy to apply to one replica by mistake. Two practical consequences:
 
 - **Changing the routing of a running fleet is a card change.** Roll the whole set rather than mixing old and new replicas, the same as any other change that alters the card.
-- **Setting `DYN_ROUTER_MODE` on part of a deployment splits the sets it reaches.** Prefer the explicit flag on every member of the set.
+- **Applying the flag to only some replicas of a set splits it.** Whether by flag or by an exported `DYN_ROUTER_MODE` that reaches some processes and not others, every member of a set must end up with the same value.
 
 > [!IMPORTANT]
 > An advertised configuration **replaces** the frontend's for that worker set rather than merging with it. If you set `--router-mode kv` on a worker and the frontend was tuned with KV flags such as `--router-temperature`, restate those flags on the worker too, or that set falls back to KV defaults.
 
-Because the flags are shared with the frontend, they read the same environment variables — `--router-mode` reads `DYN_ROUTER_MODE`. Setting that variable deployment-wide therefore makes every worker advertise it rather than inherit. Prefer passing the flag on the specific worker sets that need it.
+Because the flags are shared with the frontend, they read the same environment variables — `--router-mode` reads `DYN_ROUTER_MODE`. Kubernetes scopes environment per service, so a frontend's value does not reach workers, and the launch scripts pass the flag rather than exporting it. The one case to watch is a shell that exports `DYN_ROUTER_MODE` and then starts both the frontend and workers: there the workers advertise it instead of inheriting.
 
 The frontend-only options (`--router-min-initial-workers`, `--enforce-disagg`, `--admission-control`) are not accepted by workers, since a model card does not carry them.
 
