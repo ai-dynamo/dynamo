@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# kimi-k3 on vLLM via Dynamo, DISAGGREGATED prefill/decode (1P2D), GB300.
+# Kimi-K3 on vLLM via Dynamo, disaggregated 2P1D + DSpark DL7 on 6x GB300.
+# Replace the example image and provision the model-cache PVC before deployment.
 
 ---
 apiVersion: resource.nvidia.com/v1beta1
@@ -30,7 +31,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              image: example.com/your-registry/dynamo-vllm:arm64
               securityContext:
                 runAsUser: 0
               command:
@@ -47,7 +48,7 @@ spec:
     # ---------------------------------------------------------------- Prefill worker (compute-bound)
     - name: PrefillWorker
       type: prefill
-      replicas: 1
+      replicas: 2
       multinode:
         nodeCount: 2
       sharedMemorySize: 200Gi
@@ -69,9 +70,12 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+            - name: dspark-cache
+              emptyDir:
+                sizeLimit: 20Gi
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              image: example.com/your-registry/dynamo-vllm:arm64
               securityContext:
                 runAsUser: 0
               resources:
@@ -84,6 +88,8 @@ spec:
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
+                - name: dspark-cache
+                  mountPath: /dspark
               startupProbe:
                 httpGet:
                   path: /health
@@ -102,6 +108,10 @@ spec:
                   value: moonshotai/Kimi-K3
                 - name: SERVED_MODEL_NAME
                   value: moonshotai/Kimi-K3
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
                 - name: NCCL_SOCKET_IFNAME       # DGD pods use CNI pod networking -> eth0
                   value: eth0
                 - name: GLOO_SOCKET_IFNAME
@@ -141,7 +151,7 @@ spec:
                 - name: TORCHINDUCTOR_ENABLE_PDL
                   value: "1"
                 - name: VLLM_USE_V2_MODEL_RUNNER
-                  value: "0"
+                  value: "1"
                 - name: VLLM_USE_RUST_FRONTEND
                   value: "0"
                 - name: VLLM_ALLREDUCE_USE_FLASHINFER
@@ -166,32 +176,40 @@ spec:
                   value: "DS"
                 - name: NCCL_P2P_LEVEL
                   value: NVL
+                - name: UCX_RCACHE_MAX_UNRELEASED
+                  value: "1024"
               command:
                 - /bin/sh
                 - -c
               args:
                 - |
                   # Prefill worker: dedicated to prompt processing -> larger prefill batch, fewer
-                  # concurrent seqs. Builds KV then hands it to decode over NIXL. Roles/registration
-                  # come from --disaggregation-mode; KV path from --kv-transfer-config.
+                  # concurrent seqs. Builds target and DSpark prompt KV, then hands both to decode
+                  # over NIXL. Roles/registration come from --disaggregation-mode; KV path from
+                  # --kv-transfer-config.
+                  set -eu
+                  HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_HOME=/dspark/.hf python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Inferact/Kimi-K3-DSpark', local_dir='/dspark')"
+                  # Performance benchmarking only: to emulate AL 4.25, replace the rejection
+                  # settings below with "rejection_sample_method":"synthetic" and
+                  # "synthetic_acceptance_length":4.25. Do not use synthetic AL for accuracy.
                   exec python3 -m dynamo.vllm \
                     --model "${MODEL_ID}" \
                     --served-model-name "${SERVED_MODEL_NAME}" \
                     --trust-remote-code \
                     --tensor-parallel-size 8 \
                     --gpu-memory-utilization 0.9 \
-                    --max-num-seqs 4 \
+                    --max-num-seqs 8 \
                     --distributed-executor-backend mp \
                     --load-format fastsafetensors \
                     --safetensors-load-strategy lazy \
                     --enable-cumem-allocator \
-                    --enforce-eager \
-                    --max-num-batched-tokens 32768 \
+                    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE", "max_cudagraph_capture_size": 16384, "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 6656, 13312, 15872, 16384]}' \
+                    --max-num-batched-tokens 16384 \
                     --kv-cache-dtype fp8 \
                     --no-enable-flashinfer-autotune \
                     --enable-prefix-caching \
                     --enable-multimodal \
-                    --attention-backend FLASHINFER_MLA \
+                    --attention-backend TOKENSPEED_MLA \
                     --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED", "use_prefill_query_quantization":true}' \
                     --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
                     --dyn-tool-call-parser kimi_k3 \
@@ -199,11 +217,12 @@ spec:
                     --dyn-reasoning-parser kimi_k3 \
                     --disaggregation-mode prefill \
                     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --speculative-config '{"method": "dspark", "model": "/dspark", "num_speculative_tokens": 7, "attention_backend": "TOKENSPEED_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}' \
                     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
     # ---------------------------------------------------------------- Decode worker (memory-bound)
     - name: DecodeWorker
       type: decode
-      replicas: 2
+      replicas: 1
       multinode:
         nodeCount: 2
       sharedMemorySize: 200Gi
@@ -225,9 +244,12 @@ spec:
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+            - name: dspark-cache
+              emptyDir:
+                sizeLimit: 20Gi
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              image: example.com/your-registry/dynamo-vllm:arm64
               securityContext:
                 runAsUser: 0
               resources:
@@ -240,6 +262,8 @@ spec:
               volumeMounts:
                 - name: model-cache
                   mountPath: /model-cache
+                - name: dspark-cache
+                  mountPath: /dspark
               startupProbe:
                 httpGet:
                   path: /health
@@ -258,6 +282,10 @@ spec:
                   value: moonshotai/Kimi-K3
                 - name: SERVED_MODEL_NAME
                   value: moonshotai/Kimi-K3
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
                 - name: NCCL_SOCKET_IFNAME       # DGD pods use CNI pod networking -> eth0
                   value: eth0
                 - name: GLOO_SOCKET_IFNAME
@@ -297,7 +325,7 @@ spec:
                 - name: TORCHINDUCTOR_ENABLE_PDL
                   value: "1"
                 - name: VLLM_USE_V2_MODEL_RUNNER
-                  value: "0"
+                  value: "1"
                 - name: VLLM_USE_RUST_FRONTEND
                   value: "0"
                 - name: VLLM_ALLREDUCE_USE_FLASHINFER
@@ -324,6 +352,8 @@ spec:
                   value: NVL
                 - name: VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION
                   value: "1"
+                - name: UCX_RCACHE_MAX_UNRELEASED
+                  value: "1024"
               command:
                 - /bin/sh
                 - -c
@@ -331,28 +361,34 @@ spec:
                 - |
                   # Decode worker: receives prefilled KV over NIXL, generates tokens. Many concurrent
                   # seqs + FULL_DECODE_ONLY cudagraph (uniform decode step -> fast). No prompt prefill here.
+                  set -eu
+                  HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_HOME=/dspark/.hf python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Inferact/Kimi-K3-DSpark', local_dir='/dspark')"
+                  # Performance benchmarking only: to emulate AL 4.25, replace the rejection
+                  # settings below with "rejection_sample_method":"synthetic" and
+                  # "synthetic_acceptance_length":4.25. Do not use synthetic AL for accuracy.
                   exec python3 -m dynamo.vllm \
                     --model "${MODEL_ID}" \
                     --served-model-name "${SERVED_MODEL_NAME}" \
                     --trust-remote-code \
                     --tensor-parallel-size 8 \
-                    --gpu-memory-utilization 0.9 \
+                    --gpu-memory-utilization 0.85 \
                     --max-num-seqs 256 \
                     --max-num-batched-tokens 2048 \
                     --distributed-executor-backend mp \
                     --load-format fastsafetensors \
                     --safetensors-load-strategy lazy \
                     --enable-cumem-allocator \
-                    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "max_cudagraph_capture_size": 2048, "cudagraph_capture_sizes": [1, 2, 4, 8, 12, 16, 24, 32, 64, 128, 256, 512, 1024, 2048]}' \
+                    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "max_cudagraph_capture_size": 2048}' \
                     --no-enable-flashinfer-autotune \
                     --enable-prefix-caching \
                     --kv-cache-dtype fp8 \
                     --enable-multimodal \
-                    --attention-backend FLASHINFER_MLA \
+                    --attention-backend TOKENSPEED_MLA \
                     --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED", "use_prefill_query_quantization":true}' \
                     --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
                     --dyn-tool-call-parser kimi_k3 \
                     --reasoning-parser kimi_k3 \
                     --dyn-reasoning-parser kimi_k3 \
                     --disaggregation-mode decode \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --speculative-config '{"method": "dspark", "model": "/dspark", "num_speculative_tokens": 7, "attention_backend": "TOKENSPEED_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'

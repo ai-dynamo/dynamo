@@ -22,22 +22,23 @@ Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
 |                          | [GB300 aggregated agentic](vllm/agg-gb300-agentic/deploy.yaml) | [GB300 disaggregated agentic](vllm/disagg-gb300-agentic/deploy.yaml) | [GB200 aggregated agentic](vllm/agg-gb200-agentic/deploy.yaml) | [GB200 disaggregated agentic](vllm/disagg-gb200-agentic/deploy.yaml) |
 | ------------------------ | ------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------- |
 | **GPU** (per worker)     | 8x GB300 (2 nodes x 4)                            | 8x GB300 prefill + 8x GB300 decode (2 nodes x 4 each)          | 16x GB200 (4 nodes x 4)                           | 16x GB200 prefill + 16x GB200 decode (4 nodes x 4 each)       |
-| **Replicas**             | 2 decode workers — 16 GPUs / 4 nodes              | 1P2D — 24 GPUs / 6 nodes                                       | 1 decode worker — 16 GPUs / 4 nodes               | 1P1D — 32 GPUs / 8 nodes                                      |
+| **Replicas**             | 1 decode worker — 8 GPUs / 2 nodes                | 2P1D — 24 GPUs / 6 nodes                                       | 1 decode worker — 16 GPUs / 4 nodes               | 1P1D — 32 GPUs / 8 nodes                                      |
 | **Mode**                 | Aggregated                                        | Prefill/decode disaggregated                                   | Aggregated                                        | Prefill/decode disaggregated                                   |
 | **Framework**            | vLLM                                              | vLLM                                                           | vLLM                                              | vLLM                                                           |
 | **Precision**            | MXFP4 experts + BF16 dense, FP8 KV                | MXFP4 experts + BF16 dense, FP8 KV                             | MXFP4 experts + BF16 dense, FP8 KV               | MXFP4 experts + BF16 dense, FP8 KV                            |
 | **Parallelism**          | TP8 over MNNVL                                    | TP8 over MNNVL on both roles                                   | TP16 over MNNVL                                   | TP16 over MNNVL on both roles                                  |
-| **Attention backend**    | `FLASHINFER_MLA`, `TRTLLM_RAGGED` MLA prefill with prefill query quantization | Same as aggregated, on both roles                   | `FLASHINFER_MLA`, `TRTLLM_RAGGED` MLA prefill with prefill query quantization | `FLASHINFER_MLA`; `TRTLLM_RAGGED` on prefill, `FLASHINFER` on decode |
+| **Attention backend**    | `TOKENSPEED_MLA`, `TRTLLM_RAGGED` MLA prefill with prefill query quantization | Same as aggregated, on both roles                    | `FLASHINFER_MLA`, `TRTLLM_RAGGED` MLA prefill with prefill query quantization | `FLASHINFER_MLA`; `TRTLLM_RAGGED` on prefill, `FLASHINFER` on decode |
 | **MoE backend**          | trtllm-gen cubins + K3 latent-MoE tail fusion (CuTeDSL) | trtllm-gen cubins; tail fusion on decode only             | `flashinfer_trtllm`                               | `flashinfer_trtllm`                                            |
 | **AllReduce backend**    | FlashInfer MNNVL                                  | FlashInfer MNNVL                                               | FlashInfer MNNVL                                  | NCCL (MNNVL + NVLS)                                            |
-| **CUDA graphs**          | `FULL_AND_PIECEWISE`, capture up to 8192          | `FULL_DECODE_ONLY`, capture up to 2048 on decode; prefill runs eager | `FULL_AND_PIECEWISE`, capture up to 8192     | `FULL_AND_PIECEWISE`, capture up to 2048 on decode             |
+| **CUDA graphs**          | `FULL_AND_PIECEWISE`, capture up to 8192          | `FULL_AND_PIECEWISE` up to 16384 on prefill; `FULL_DECODE_ONLY` up to 256 on decode | `FULL_AND_PIECEWISE`, capture up to 8192 | `FULL_AND_PIECEWISE`, capture up to 2048 on decode             |
 | **Scheduler**            | vLLM `AsyncScheduler`                             | vLLM `AsyncScheduler`                                          | vLLM `AsyncScheduler`                             | vLLM `AsyncScheduler`                                          |
-| **Batching**             | 8192 batched tokens / 256 seqs                    | 32768 tokens / 4 seqs prefill; 2048 tokens / 256 seqs decode   | 16384 batched tokens / 256 seqs                   | 16384 tokens / 4 seqs prefill; 2048 tokens / 256 seqs decode   |
-| **GPU memory util**      | 0.85                                              | 0.90                                                           | 0.92                                              | 0.90                                                           |
+| **Speculative decoding** | DSpark DL7, 7 draft tokens, probabilistic draft sampling, and block rejection. For performance-only synthetic AL 4.25, set `"rejection_sample_method":"synthetic"` and `"synthetic_acceptance_length":4.25`; do not use synthetic AL for accuracy or production evaluation. | Same on prefill and decode | Disabled | Disabled |
+| **Batching**             | 8192 batched tokens / 256 seqs                    | 16384 tokens / 8 seqs prefill; 2048 tokens / 256 seqs decode   | 16384 batched tokens / 256 seqs                   | 16384 tokens / 4 seqs prefill; 2048 tokens / 256 seqs decode   |
+| **GPU memory util**      | 0.85                                              | 0.90 prefill / 0.85 decode                                    | 0.92                                              | 0.90                                                           |
 | **Routing**              | KV-aware                                          | KV-aware                                                       | KV-aware                                          | KV-aware                                                       |
 | **Prefix caching**       | Enabled                                           | Enabled on both roles                                          | Enabled                                           | Enabled on both roles                                          |
 | **KV transfer**          | N/A                                               | NIXL (`NixlConnector`, `kv_both`) over MNNVL; UCX left at defaults | N/A                                          | NIXL (`NixlConnector`, `kv_both`) over RDMA; `UCX_TLS=^cuda_ipc` |
-| **Context length**       | 1,048,576 (explicit `--max-model-len`)            | 1,048,576 (model default)                                      | 1,048,576 (model default)                         | 1,048,576 (model default)                                      |
+| **Context length**       | 1,048,576 (model default)                         | 1,048,576 (model default)                                      | 1,048,576 (model default)                         | 1,048,576 (model default)                                      |
 
 
 ## Supported features
@@ -58,6 +59,10 @@ Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
    Each manifest creates its own `ComputeDomain` and the workers claim its channel. Names vary by profile — check the `metadata.name` fields in each `deploy.yaml`.
 3. **Hugging Face token** with access to `moonshotai/Kimi-K3`. The workers read the weights from the
    `model-cache` PVC — see [Download the model](#3-download-the-model).
+4. **Dynamo vLLM image.** Build one with [the ARM64 container recipe](container_build/README.md),
+   push it to a registry visible to the cluster, and replace
+   `example.com/your-registry/dynamo-vllm:arm64` in both GB300 manifests. Add an
+   `imagePullSecrets` entry if that registry requires authentication.
 
 ## Cluster assumptions
 
@@ -148,8 +153,10 @@ The Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Huggin
 
 **This flow applies to the GB300 profiles.** Their worker pods mount the PVC at `/model-cache` with
 `HF_HOME=/model-cache` and pass the repo id (`moonshotai/Kimi-K3`) to `--model`, so the weights
-resolve straight out of the cache. The frontend does not mount the PVC — see
-[Configuration notes](#configuration-notes).
+resolve straight out of the cache with Hugging Face and Transformers offline mode enabled. Every
+GB300 worker separately downloads `Inferact/Kimi-K3-DSpark` from the Hugging Face Hub into its
+ephemeral `/dspark` volume at startup, so worker startup still requires Hub access. The frontend
+does not mount the PVC — see [Configuration notes](#configuration-notes).
 
 **The GB200 profiles do not use the PVC.** They mount the host path
 `/mnt/stateful_partition/kube-ephemeral-ssd/models` at `/models` and serve
@@ -165,13 +172,17 @@ PVC flow: replace the `models` `hostPath` volume with `claimName: model-cache` m
 
 > [!WARNING]
 > Serving ~1.5 TB of weights off a shared filesystem is the slow path. Every worker pod pulls the
-> full checkpoint over the PVC on each cold start — 4 pods for the aggregated profile, 6 for the
+> full checkpoint over the PVC on each cold start — 2 pods for the aggregated profile, 6 for the
 > disaggregated one — so first-load time is bounded by the storage backend, not by the GPUs. The
 > startup probes budget 120 minutes per worker (`failureThreshold: 720`); raise it if your storage
 > class is slower. Keeping the pods on nodes that already hold a warm page cache, or staging the
 > checkpoint on node-local NVMe and mounting it as a `hostPath` instead, both cut this substantially.
 
 ### 4. Deploy the DGD
+
+Before deploying a GB300 profile, replace the example image and verify that the worker affinity's
+`NVIDIA-GB300` value matches the cluster's product label. Add any cluster-specific selectors and
+tolerations that the GPU pool requires.
 
 ```bash
 SKU=gb300 # or gb200
@@ -265,15 +276,21 @@ Non-obvious knobs, all already set in the manifests:
 
 - **Model resolution.** Each worker pod mounts the `model-cache` PVC at `/model-cache` with
   `HF_HOME=/model-cache`, and the workers pass the repo id (`MODEL_ID=moonshotai/Kimi-K3`) to
-  `--model`, so vLLM loads the checkpoint out of the PVC's Hugging Face cache instead of
-  downloading it. `envFrom: hf-token-secret` on the workers covers the hub lookup at startup.
+  `--model`. Every GB300 worker sets `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`, so vLLM loads
+  the main checkpoint from the populated PVC without contacting the Hub. Before vLLM starts, each
+  worker temporarily sets both variables to `0` and downloads `Inferact/Kimi-K3-DSpark` into the
+  ephemeral `/dspark` volume. Consequently, every worker downloads the DSpark draft model from the
+  Hub again whenever its pod starts, while the main Kimi-K3 checkpoint remains offline and cached.
 - **MNNVL all-reduce.** The aggregated profiles (GB300 and GB200) and the GB300 disaggregated profile use `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Do not enable the NCCL symmetric-memory knobs alongside it — `VLLM_USE_NCCL_SYMM_MEM=0` is required because symmetric memory breaks CUDA-graph capture on this build. The GB200 disaggregated profile uses NCCL directly (MNNVL + NVLS) for all-reduce.
 - **Pod networking.** DGD pods use CNI networking, so `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`
   are pinned to `eth0`.
 - **UCX.** The GB300 disaggregated profile leaves UCX at its defaults for the NIXL transport. The GB200 disaggregated profile sets `UCX_TLS=^cuda_ipc` to disable NVLink IPC and route NIXL KV transfer over RDMA IB (allocated via `networking.gke.io.networks/rdma-*` resources).
 - **KDA state transfer.** The disaggregated profile sets `VLLM_SSM_CONV_STATE_LAYOUT=DS` — the
   Mamba-style conv state needs the DS layout to move across NIXL.
-- **Asymmetric worker config (disaggregated).** On GB300, prefill runs `--enforce-eager` (no CUDA graphs) while decode captures graphs up to 2048. On GB200, both prefill and decode use `FULL_AND_PIECEWISE` graphs (up to 2048 on decode), with separate attention configs: `TRTLLM_RAGGED` on prefill and `FLASHINFER` on decode.
+- **Asymmetric worker config (disaggregated).** On GB300, prefill uses
+  `FULL_AND_PIECEWISE` graphs up to 16384 while decode uses `FULL_DECODE_ONLY` up to 256. On GB200,
+  both prefill and decode use `FULL_AND_PIECEWISE` graphs (up to 2048 on decode), with separate
+  attention configs: `TRTLLM_RAGGED` on prefill and `FLASHINFER` on decode.
 - **Scheduler override.** Both profiles force
   `--scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler`. See
   [Known issues](#known-issues).
@@ -287,6 +304,6 @@ Non-obvious knobs, all already set in the manifests:
    profiles work around it by forcing vLLM's native `AsyncScheduler` via `--scheduler-cls`, which
    gives up the Dynamo scheduler instrumentation. Drop the override once the image carries a fix.
 2. Every worker replica loads its own copy of the ~1.5 TB checkpoint from the PVC on every cold
-   start — 4 worker pods for the aggregated profile, 6 for the disaggregated one, with no shared or
+   start — 2 worker pods for the aggregated profile, 6 for the disaggregated one, with no shared or
    streamed loading between them. This makes pod restarts expensive, which matters most for
    benchmark sweeps that restart workers between concurrency points to reset prefix-cache state.
