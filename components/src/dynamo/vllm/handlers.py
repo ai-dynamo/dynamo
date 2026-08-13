@@ -7,7 +7,6 @@ import functools
 import importlib
 import inspect
 import logging
-import math
 import os
 import struct
 import tempfile
@@ -37,11 +36,7 @@ from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
-from vllm.sampling_params import (
-    RequestOutputKind,
-    SamplingParams,
-    StructuredOutputsParams,
-)
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
@@ -64,9 +59,7 @@ from dynamo.common.rl import (
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
@@ -87,6 +80,8 @@ from dynamo.vllm.kv_connector_protocols import (
 )
 from dynamo.vllm.router_hints import enable_router_hint_support
 
+from . import decoder_output as _decoder_output
+from . import decoder_sampling as _decoder_sampling
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
@@ -110,6 +105,20 @@ from .multimodal_utils.request_processor import (
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Preserve the existing handlers-module import surface while the implementation
+# moves behind a reusable decoder boundary.
+_MIN_FINITE_LOGPROB = _decoder_output._MIN_FINITE_LOGPROB
+_attach_prompt_logprobs_engine_data = (
+    _decoder_output._attach_prompt_logprobs_engine_data
+)
+_attach_routed_experts_engine_data = _decoder_output._attach_routed_experts_engine_data
+_finite_logprob = _decoder_output._finite_logprob
+_serialize_prompt_logprobs = _decoder_output._serialize_prompt_logprobs
+_serialize_routed_experts = _decoder_output._serialize_routed_experts
+_VllmDecodeOutputAdapter = _decoder_output._VllmDecodeOutputAdapter
+build_completion_usage = _decoder_output.build_completion_usage
+build_prompt_tokens_details = _decoder_output.build_prompt_tokens_details
+
 # Marker set by the Rust conditional-disagg bypass path. When present on a
 # DECODE-mode worker, the request runs as local prefill+decode instead of
 # expecting KV-transfer metadata from an upstream prefill worker.
@@ -119,10 +128,12 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
-_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = (
+    _decoder_sampling._KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+)
 # Request payload key under extra_args.kv_transfer_params. This intentionally
 # matches the runtime capability string, but it lives in a different namespace.
-_ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
+_ROUTER_HINT_EXTRA_ARGS_KEY: Final = _decoder_sampling._ROUTER_HINT_EXTRA_ARGS_KEY
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -131,15 +142,6 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
         "weight_version",
     }
 )
-
-
-def build_prompt_tokens_details(
-    num_cached_tokens: int | None,
-) -> dict[str, int] | None:
-    """Preserve the distinction between unavailable and zero cached tokens."""
-    if num_cached_tokens is None:
-        return None
-    return {"cached_tokens": num_cached_tokens}
 
 
 def _rl_init_weights_timeout_s() -> float:
@@ -395,109 +397,10 @@ class VllmEnginePauseController:
 # Helpers for nvext response fields requested through `nvext.extra_fields`.
 
 
-# Logprobs can be -inf (log of probability 0) for masked/disallowed tokens (e.g.
-# via bad_words_token_ids / allowed_token_ids) or full-vocab prompt logprobs.
-# JSON has no inf/nan, so pythonize -> serde_json rewrites them to `null`, which
-# then fails typed deserialization on the Rust side and SILENTLY DROPS the whole
-# logprobs payload. Clamp non-finite logprobs to a large finite-negative
-# sentinel so the value survives transport while still meaning "effectively
-# impossible".
-_MIN_FINITE_LOGPROB = -1e30
-
-
-def _finite_logprob(value: Any) -> float:
-    lp = float(value)
-    return lp if math.isfinite(lp) else _MIN_FINITE_LOGPROB
-
-
-def _serialize_prompt_logprobs(
-    raw_prompt_logprobs: list,
-) -> list:
-    """Convert vLLM's ``RequestOutput.prompt_logprobs`` into the dict shape
-    expected by Dynamo's Rust ``PromptLogprobEntry`` (serde deserialization).
-
-    vLLM shape: ``list[dict[int, Logprob] | None]`` where ``Logprob`` has
-    ``.logprob``, ``.rank``, ``.decoded_token`` attributes.
-
-    Output shape: ``list[dict[str, {"logprob": float, ...}] | None]``.
-    Workers carry it under ``engine_data.prompt_logprobs`` so the Rust
-    postprocessor can surface it on ``NvExtResponse.prompt_logprobs`` without
-    changing the public ``LLMEngineOutput`` struct shape.
-
-    NOTE: token_id keys are emitted as **strings** (not ints) so that
-    pythonize → serde → JSON survives the worker→frontend transport. JSON
-    object keys are required to be strings; ``HashMap<u32, _>`` on the Rust
-    side deserializes string keys via ``u32::from_str``. Emitting int keys
-    here causes the chunk to be silently dropped on pythonize → JSON, which
-    surfaces as ``"Stream ended before generation completed"`` on the
-    frontend (worker emits cleanly, frontend never sees ``complete_final``).
-    """
-    result: list = []
-    for entry in raw_prompt_logprobs:
-        if entry is None:
-            result.append(None)
-        else:
-            converted: Dict[str, Dict[str, Any]] = {}
-            for token_id, logprob_obj in entry.items():
-                try:
-                    key = str(int(token_id))
-                except (TypeError, ValueError):
-                    # vLLM only emits int token-id keys; skip a non-int key
-                    # rather than aborting the whole prompt_logprobs payload.
-                    continue
-                lp_dict: Dict[str, Any] = {
-                    "logprob": _finite_logprob(logprob_obj.logprob),
-                }
-                rank = getattr(logprob_obj, "rank", None)
-                if rank is not None:
-                    lp_dict["rank"] = int(rank)
-                decoded = getattr(logprob_obj, "decoded_token", None)
-                if decoded is not None:
-                    lp_dict["decoded_token"] = decoded
-                converted[key] = lp_dict
-            result.append(converted)
-    return result
-
-
-def _attach_prompt_logprobs_engine_data(
-    tok: Dict[str, Any], prompt_logprobs: list
-) -> None:
-    engine_data = tok.setdefault("engine_data", {})
-    if isinstance(engine_data, dict):
-        engine_data["prompt_logprobs"] = prompt_logprobs
-
-
-def _attach_routed_experts_engine_data(
-    tok: Dict[str, Any], routed_experts: Dict[str, Any]
-) -> None:
-    # routed_experts rides the engine's opaque engine_data passthrough (surfaced
-    # by the Rust postprocessor as nvext.routed_experts); disaggregated_params
-    # stays KV-transfer only. Merge via setdefault so we don't clobber any
-    # prompt_logprobs already attached to engine_data on the final chunk.
-    engine_data = tok.setdefault("engine_data", {})
-    if isinstance(engine_data, dict):
-        engine_data["routed_experts"] = routed_experts
-
-
 def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
-    """Yield each nvext dict on the request, in priority order:
+    """Yield each request nvext dictionary in protocol priority order."""
 
-      1. ``request["nvext"]``               — raw OpenAI shape (SGLang / tests).
-      2. ``request["extra_args"]["nvext"]`` — what the Rust preprocessor stashes
-         when building PreprocessedRequest from an OpenAI request
-         (PreprocessedRequest itself has no nvext field).
-
-    Centralizing this lookup keeps ``_nvext_extra_field_requested``,
-    ``_is_token_in_request`` and ``_apply_nvext_cache_salt`` consistent so an
-    nvext field is never honored by one helper but silently missed by another.
-    """
-    extra_args = request.get("extra_args")
-    for source in (
-        request.get("nvext"),
-        extra_args.get("nvext") if isinstance(extra_args, dict) else None,
-    ):
-        if isinstance(source, dict):
-            yield source
+    yield from _decoder_sampling._iter_nvext_sources(request)
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -586,10 +489,7 @@ def _flatten_logprobs(
 
 
 def _is_token_in_request(request: Dict[str, Any]) -> bool:
-    return any(
-        source.get("token_data") or source.get("token_in")
-        for source in _iter_nvext_sources(request)
-    )
+    return _decoder_sampling._is_token_in_request(request)
 
 
 def _accumulate_engine_data(
@@ -655,210 +555,23 @@ def _accumulate_engine_data(
     tok["engine_data"] = engine_data
 
 
-def _serialize_routed_experts(
-    routed_experts: Any, start: int = 0
-) -> Optional[Dict[str, Any]]:
-    if routed_experts is None:
-        return None
-
-    shape = getattr(routed_experts, "shape", None)
-    tobytes = getattr(routed_experts, "tobytes", None)
-    if shape is None or not callable(tobytes):
-        logger.warning(
-            "Unable to serialize routed_experts of type %s",
-            type(routed_experts).__name__,
-        )
-        return None
-
-    return {
-        # base64, matching vLLM-native encoding.
-        "data": base64.b64encode(tobytes()).decode("ascii"),
-        "shape": [int(dim) for dim in shape],
-        # Row offset of the first returned routing entry within the full
-        # sequence (= SamplingParams.routed_experts_prompt_start; vLLM trims the
-        # leading prompt rows). Lets the RL consumer align the completion.
-        "start": int(start),
-        # Encode dtype so the consumer decodes the raw bytes with the right
-        # element type instead of assuming a fixed width.
-        "dtype": str(getattr(routed_experts, "dtype", "")),
-    }
-
-
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None = None,
     enable_rl: bool = False,
+    *,
+    prompt_token_count_override: int | None = None,
 ) -> SamplingParams:
-    """
-    Build SamplingParams from a PreprocessedRequest (internal protocol format).
+    """Build native vLLM sampling parameters from a Dynamo request."""
 
-    Args:
-        request: The PreprocessedRequest dict with 'sampling_options', 'stop_conditions',
-                 and 'output_options'
-        default_sampling_params: Default sampling parameters from the model's
-            ``generation_config.json`` (vLLM ``ModelConfig.get_diff_sampling_param``).
-            Used for non-RL/chat clients that want the model's recommended
-            sampling defaults applied transparently.
-
-    Returns:
-        SamplingParams configured from the request
-
-    RL token-in requests use vLLM's default sampling values instead of model
-    `generation_config.json` sampling overrides. Ordinary token-data requests
-    keep generation_config defaults for Gateway/backward-compatible traffic.
-    Stop-token defaults from the model config are still applied later.
-    """
-    if enable_rl and _is_token_in_request(request):
-        # Use vLLM defaults without model generation_config overlays.
-        sampling_params = SamplingParams()
-    else:
-        sampling_params = SamplingParams(**default_sampling_params)
-
-    # Handle guided_decoding - convert to StructuredOutputsParams
-    sampling_options = dict(request.get("sampling_options") or {})
-    extra_args = request.get("extra_args") or {}
-    if isinstance(extra_args, dict):
-        passthrough_sampling_options = extra_args.get("sampling_options")
-        if isinstance(passthrough_sampling_options, dict):
-            sampling_options.update(passthrough_sampling_options)
-    guided_decoding = sampling_options.get("guided_decoding")
-    if guided_decoding is not None and isinstance(guided_decoding, dict):
-        json_schema = guided_decoding.get("json")
-        if json_schema is not None:
-            reject_nonprogressing_guided_json_ref_cycles(json_schema)
-        sampling_params.structured_outputs = StructuredOutputsParams(
-            json=json_schema,
-            regex=guided_decoding.get("regex"),
-            choice=guided_decoding.get("choice"),
-            grammar=guided_decoding.get("grammar"),
-            whitespace_pattern=guided_decoding.get("whitespace_pattern"),
-            structural_tag=serialize_structural_tag(
-                guided_decoding.get("structural_tag")
-            ),
-        )
-
-    # Apply remaining sampling_options
-    for key, value in sampling_options.items():
-        # Skip guided_decoding - already handled above
-        if key == "guided_decoding":
-            continue
-        if key == "bad_words_token_ids" and value is not None:
-            # vLLM has no public setter for token-id bad words; we write the
-            # private field directly. Guard so a vLLM upgrade that renames it
-            # fails loudly here instead of silently dropping the constraint.
-            if not hasattr(sampling_params, "_bad_words_token_ids"):
-                raise AttributeError(
-                    "vLLM SamplingParams._bad_words_token_ids missing; TITO "
-                    "bad_words_token_ids passthrough needs updating for this "
-                    "vLLM version"
-                )
-            sampling_params._bad_words_token_ids = value
-            continue
-        if value is not None and hasattr(sampling_params, key):
-            setattr(sampling_params, key, value)
-
-    # routed_experts_prompt_start (RL capture offset) must be a non-negative
-    # int; reject bad client values so the worker emits a sane `start` instead
-    # of a bogus offset the consumer cannot align (vLLM clamps the upper bound).
-    reps = getattr(sampling_params, "routed_experts_prompt_start", None)
-    if reps is not None and (
-        isinstance(reps, bool) or not isinstance(reps, int) or reps < 0
-    ):
-        logger.warning(
-            "Ignoring invalid routed_experts_prompt_start=%r (want non-negative int)",
-            reps,
-        )
-        sampling_params.routed_experts_prompt_start = 0
-
-    # Apply stop_conditions
-    for key, value in request.get("stop_conditions", {}).items():
-        if value is not None and hasattr(sampling_params, key):
-            # Do not add stop key to sampling params - dynamo handles stop conditions directly
-            if key == "stop":
-                continue
-            setattr(sampling_params, key, value)
-        if (
-            key == "stop_token_ids_hidden"
-            and value is not None
-            and hasattr(sampling_params, "stop_token_ids")
-        ):
-            existing = sampling_params.stop_token_ids or []
-            sampling_params.stop_token_ids = list(set(existing).union(value))
-        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
-        # the same concept as `thinking_token_budget` on SamplingParams and
-        # enforces it via the builtin thinking-budget logits processor.
-        if (
-            key == "max_thinking_tokens"
-            and value is not None
-            and hasattr(sampling_params, "thinking_token_budget")
-        ):
-            sampling_params.thinking_token_budget = value
-
-    # Apply output_options (logprobs, prompt_logprobs, etc.)
-    output_options = request.get("output_options", {}) or {}
-    logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
-    if logprobs is not None:
-        sampling_params.logprobs = logprobs
-    if prompt_logprobs is not None:
-        sampling_params.prompt_logprobs = prompt_logprobs
-
-    # skip_special_tokens is intentionally NOT forwarded to vLLM here: this path
-    # forces detokenize=False (below), so vLLM never detokenizes and ignores it.
-    # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
-    # directly from the request output_options (lib/llm/src/backend.rs).
-
-    # If max_tokens wasn't provided (None or missing), compute a dynamic default
-    provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
-    token_ids = request.get("token_ids", [])
-    input_length = len(token_ids)
-    if model_max_len is not None and provided_max_tokens is None:
-        # Ensure at least 1 token generation by default when possible
-        dynamic_default = max(1, model_max_len - input_length)
-        configured_default = default_sampling_params.get("max_tokens", dynamic_default)
-        sampling_params.max_tokens = min(configured_default, dynamic_default)
-
-    # Forward only Dynamo's router-generated hint from
-    # request.extra_args.kv_transfer_params into vLLM SamplingParams. Today,
-    # router_hint is the only kv_transfer_params key the Rust preprocessor adds,
-    # so do not pass through any other request-provided connector inputs. Copy
-    # extra_args before mutation because SamplingParams may reuse the
-    # default_sampling_params dict across requests.
-    if isinstance(extra_args, dict):
-        request_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-        if isinstance(request_kv_transfer_params, dict):
-            passthrough_router_hint = request_kv_transfer_params.get(
-                _ROUTER_HINT_EXTRA_ARGS_KEY
-            )
-            if isinstance(passthrough_router_hint, dict):
-                passthrough_extra_args = (
-                    dict(sampling_params.extra_args)
-                    if isinstance(sampling_params.extra_args, dict)
-                    else {}
-                )
-                existing_kv_transfer_params = passthrough_extra_args.get(
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                )
-                passthrough_kv_transfer_params = (
-                    dict(existing_kv_transfer_params)
-                    if isinstance(existing_kv_transfer_params, dict)
-                    else {}
-                )
-                passthrough_kv_transfer_params[
-                    _ROUTER_HINT_EXTRA_ARGS_KEY
-                ] = passthrough_router_hint
-                passthrough_extra_args[
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                ] = passthrough_kv_transfer_params
-                sampling_params.extra_args = passthrough_extra_args
-
-    # Dynamo's internal token path consumes disjoint token deltas. This mirrors
-    # the SGLang integration and lets vLLM's stream_interval gate reduce backend
-    # bridge pressure before chunks cross into Dynamo.
-    sampling_params.detokenize = False
-    sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
-
-    return sampling_params
+    return _decoder_sampling.build_sampling_params(
+        request,
+        default_sampling_params,
+        model_max_len,
+        enable_rl,
+        prompt_token_count_override=prompt_token_count_override,
+    )
 
 
 def _update_kv_transfer_params(
@@ -2875,41 +2588,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_output: RequestOutput,
         completion_token_counts: dict[int, int] | None = None,
     ) -> Dict[str, Any]:
-        """
-        Build completion usage statistics.
-
-        Args:
-            request_output: vLLM RequestOutput object
-            completion_token_counts: Optional cumulative generated-token counts by
-                                     output index. DELTA-mode streams need this
-                                     because the final vLLM chunk is not cumulative.
-
-        Returns:
-            Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
-        """
-        prompt_tokens = (
-            len(request_output.prompt_token_ids)
-            if request_output.prompt_token_ids
-            else None
-        )
-
-        if completion_token_counts is not None:
-            completion_tokens = sum(completion_token_counts.values())
-        else:
-            completion_tokens = sum(
-                len(output.token_ids) for output in request_output.outputs
-            )
-
-        return {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": (
-                prompt_tokens + completion_tokens if prompt_tokens is not None else None
-            ),
-            "prompt_tokens_details": build_prompt_tokens_details(
-                getattr(request_output, "num_cached_tokens", None)
-            ),
-        }
+        return build_completion_usage(request_output, completion_token_counts)
 
     @staticmethod
     def _extract_logprobs(
@@ -2995,126 +2674,36 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 ),
             )
 
-            total_output_tokens_by_index: dict[int, int] = {}
-            raw_routed_experts_by_output: dict[int, Any] = {}
-            # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
-            # them on subsequent chunks, so the generation-finish chunk often
-            # carries None. Capture the first non-None payload and attach it to
-            # the final chunk instead of reading res.prompt_logprobs there.
-            prompt_logprobs_payload: Optional[list] = None
+            output_adapter = _VllmDecodeOutputAdapter(
+                sampling_params,
+                tokenizer=getattr(self.engine_client, "tokenizer", None),
+                extract_logprobs=self._extract_logprobs,
+            )
             async for res in gen:
-                # res is vllm's RequestOutput
-                if (
-                    prompt_logprobs_payload is None
-                    and getattr(res, "prompt_logprobs", None) is not None
-                ):
-                    prompt_logprobs_payload = _serialize_prompt_logprobs(
-                        res.prompt_logprobs
-                    )
-
                 if not res.outputs:
                     self._log_with_lora_context(
                         "Request {request_id}{lora_info} returned no outputs",
                         request_id,
                         lora_request,
                     )
-                    # Use string format "error: message" for consistency with vLLM's string-based finish_reason
-                    # Rust will parse this into FinishReason::Error(message)
-                    yield {
-                        "finish_reason": "error: No outputs from vLLM engine",
-                        "index": 0,
-                        "token_ids": [],
-                    }
+                    for chunk in output_adapter.convert(res):
+                        yield chunk
                     break
-
-                prepared_outputs = []
-                for output in res.outputs:
-                    output_idx = getattr(output, "index", 0) or 0
-                    token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[
-                        output_idx
-                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
-                    finish_reason = getattr(output, "finish_reason", None)
-                    stop_reason = getattr(output, "stop_reason", None)
-                    if not token_ids and not finish_reason and not stop_reason:
-                        continue
-                    prepared_outputs.append(
-                        (output, output_idx, token_ids, finish_reason, stop_reason)
-                    )
-
-                for (
-                    output,
-                    output_idx,
-                    token_ids,
-                    finish_reason,
-                    stop_reason,
-                ) in prepared_outputs:
-                    out = {
-                        "index": output_idx,
-                        "token_ids": token_ids,
-                    }
-                    # Capture the raw routed_experts cheaply here; serialize it
-                    # only once on the final chunk (base64-encoding a tensor on
-                    # every streamed chunk would be wasted work, since only the
-                    # final value is emitted).
-                    raw_routed_experts = getattr(output, "routed_experts", None)
-                    if raw_routed_experts is not None:
-                        raw_routed_experts_by_output[output_idx] = raw_routed_experts
-
-                    # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
-                    tokenizer = getattr(self.engine_client, "tokenizer", None)
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, 0, tokenizer=tokenizer
-                    )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
-
+                for chunk in output_adapter.convert(res):
+                    finish_reason = chunk.get("finish_reason")
                     if finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
-                        )
-                        if prompt_logprobs_payload is not None:
-                            _attach_prompt_logprobs_engine_data(
-                                out, prompt_logprobs_payload
-                            )
-                        # Emit the EFFECTIVE trim offset: clamp the requested
-                        # routed_experts_prompt_start to the prompt length. vLLM
-                        # clamps the returned routing rows the same way, so an
-                        # out-of-range request (e.g. start=999 on a 100-token
-                        # prompt) would otherwise publish a `start` the consumer
-                        # cannot align to the (clamped) tensor.
-                        raw_start = int(
-                            getattr(sampling_params, "routed_experts_prompt_start", 0)
-                            or 0
-                        )
-                        prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
-                        effective_start = min(raw_start, prompt_len)
-                        routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx),
-                            start=effective_start,
-                        )
-                        if routed_experts is not None:
-                            _attach_routed_experts_engine_data(out, routed_experts)
-                        # Log completion with LoRA info (debug level to avoid log spam)
+                        output_index = int(chunk.get("index") or 0)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
                             "{output_tokens} output tokens, finish_reason={finish_reason}",
                             request_id,
                             lora_request,
-                            output_tokens=total_output_tokens_by_index.get(
-                                output_idx, 0
+                            output_tokens=output_adapter.completion_tokens(
+                                output_index
                             ),
                             finish_reason=finish_reason,
                         )
-                    if stop_reason:
-                        out["stop_reason"] = stop_reason
-                    yield out
+                    yield chunk
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
