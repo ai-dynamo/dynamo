@@ -976,6 +976,10 @@ struct TraceWorkerAccountingState {
     /// except `Removed` is billable, so transitions among starting, active,
     /// static-inactive, and draining leave this span open.
     provisioned_since_ms: Option<f64>,
+    /// Latest lifecycle or settlement timestamp seen for this identity. This
+    /// remains meaningful while removed so re-registration cannot move its
+    /// accounting clock backward across an unprovisioned gap.
+    last_accounting_ms: f64,
     gpus_per_worker: usize,
 }
 
@@ -987,21 +991,21 @@ impl TraceWorkerAccountingState {
     /// Settle an open provisioned span through `now_ms`, leaving it open at
     /// that timestamp so finalization can be repeated safely.
     fn settle_provisioned_span(&mut self, now_ms: f64) -> f64 {
+        self.assert_valid_timestamp(now_ms);
         let Some(since_ms) = self.provisioned_since_ms else {
+            self.last_accounting_ms = now_ms;
             return 0.0;
         };
-        debug_assert!(
-            now_ms >= since_ms,
-            "decode-worker accounting clock moved backward: {now_ms} < {since_ms}"
-        );
         let worker_seconds = (now_ms - since_ms).max(0.0) / 1000.0;
         self.worker_seconds += worker_seconds;
-        self.provisioned_since_ms = Some(now_ms.max(since_ms));
+        self.provisioned_since_ms = Some(now_ms);
+        self.last_accounting_ms = now_ms;
         worker_seconds
     }
 
     /// Apply a lifecycle transition and return newly settled worker-seconds.
     fn transition_to(&mut self, lifecycle_status: ReplayWorkerLifecycleStatus, now_ms: f64) -> f64 {
+        self.assert_valid_timestamp(now_ms);
         let was_provisioned = Self::is_provisioned(self.lifecycle_status);
         let will_be_provisioned = Self::is_provisioned(lifecycle_status);
         debug_assert_eq!(was_provisioned, self.provisioned_since_ms.is_some());
@@ -1019,7 +1023,20 @@ impl TraceWorkerAccountingState {
             _ => 0.0,
         };
         self.lifecycle_status = lifecycle_status;
+        self.last_accounting_ms = now_ms;
         settled
+    }
+
+    fn assert_valid_timestamp(&self, now_ms: f64) {
+        assert!(
+            now_ms.is_finite(),
+            "decode-worker accounting timestamp must be finite, got {now_ms}"
+        );
+        assert!(
+            now_ms >= self.last_accounting_ms,
+            "decode-worker accounting clock moved backward: {now_ms} < {}",
+            self.last_accounting_ms
+        );
     }
 }
 
@@ -1162,6 +1179,10 @@ impl TraceCollector {
         gpus_per_worker: usize,
         now_ms: f64,
     ) -> DecodeWorkerAccountingHandle {
+        assert!(
+            now_ms.is_finite() && now_ms >= 0.0,
+            "decode-worker accounting registration timestamp must be finite and non-negative, got {now_ms}"
+        );
         let key = TraceWorkerAccountingKey {
             pool_id,
             worker_id,
@@ -1184,6 +1205,7 @@ impl TraceCollector {
                 worker_seconds: 0.0,
                 provisioned_since_ms: TraceWorkerAccountingState::is_provisioned(lifecycle_status)
                     .then_some(now_ms),
+                last_accounting_ms: now_ms,
                 gpus_per_worker,
             }));
         self.worker_accounting.insert(key, handle);
@@ -3025,6 +3047,52 @@ mod tests {
         assert_eq!(accounting.workers[1].worker_seconds, 0.75);
         assert!(accounting.workers.iter().all(|worker| !worker.provisioned));
         assert!(accounting.reconciliation.all_reconciled());
+    }
+
+    #[test]
+    #[should_panic(expected = "decode-worker accounting timestamp must be finite")]
+    fn decode_worker_accounting_rejects_non_finite_timestamp() {
+        let mut collector = TraceCollector::default();
+        let handle = collector.register_decode_worker(
+            "pool-a".to_string(),
+            1,
+            0,
+            ReplayWorkerLifecycleStatus::Active,
+            1,
+            0.0,
+        );
+        collector.set_decode_worker_lifecycle_status(
+            handle,
+            ReplayWorkerLifecycleStatus::Draining,
+            f64::NAN,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "decode-worker accounting clock moved backward")]
+    fn decode_worker_accounting_rejects_backward_reregistration_after_removed_gap() {
+        let mut collector = TraceCollector::default();
+        let handle = collector.register_decode_worker(
+            "pool-a".to_string(),
+            1,
+            0,
+            ReplayWorkerLifecycleStatus::Starting,
+            1,
+            100.0,
+        );
+        collector.set_decode_worker_lifecycle_status(
+            handle,
+            ReplayWorkerLifecycleStatus::Removed,
+            200.0,
+        );
+        collector.register_decode_worker(
+            "pool-a".to_string(),
+            1,
+            0,
+            ReplayWorkerLifecycleStatus::Active,
+            1,
+            150.0,
+        );
     }
 
     #[test]

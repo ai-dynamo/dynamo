@@ -266,6 +266,39 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         }
         removed
     }
+
+    fn register_ready_target(
+        &mut self,
+        worker: WorkerTopology,
+        target: &WorkerTarget,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            target.dp_rank == 0,
+            "interactive replay lifecycle target must identify logical worker rank zero, got {target:?}"
+        );
+        let key = (target.pool_id.clone(), target.worker_id);
+        anyhow::ensure!(
+            !self.workers.contains_key(&key),
+            "interactive replay lifecycle target {target:?} collides with an available worker"
+        );
+        self.pool_routers
+            .entry(target.pool_id.clone())
+            .or_insert(PoolRouter::RoundRobin);
+        let pool_workers = self.pool_workers.entry(target.pool_id.clone()).or_default();
+        pool_workers.push(target.clone());
+        pool_workers.sort_by_key(|worker| worker.worker_id);
+        self.workers
+            .insert(key, (worker.scheduler_ids, Default::default()));
+        Ok(())
+    }
+
+    fn unregister_target(&mut self, target: &WorkerTarget) {
+        self.workers
+            .remove(&(target.pool_id.clone(), target.worker_id));
+        if let Some(workers) = self.pool_workers.get_mut(&target.pool_id) {
+            workers.retain(|candidate| candidate.worker_id != target.worker_id);
+        }
+    }
 }
 
 impl<Events, Request> PlacementPolicy<Request> for ExternalPlacement<Events>
@@ -350,32 +383,17 @@ where
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
         let target = WorkerTarget::default_pool(worker.worker_id, 0);
-        self.pool_workers
-            .entry(DEFAULT_REPLAY_POOL_ID.to_string())
-            .or_default()
-            .push(target.clone());
-        self.workers.insert(
-            (target.pool_id, target.worker_id),
-            (worker.scheduler_ids, Default::default()),
-        );
+        self.register_ready_target(worker, &target)?;
         Ok(Vec::new())
     }
 
     fn worker_draining(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.workers
-            .remove(&(DEFAULT_REPLAY_POOL_ID.to_string(), worker.worker_id));
-        if let Some(workers) = self.pool_workers.get_mut(DEFAULT_REPLAY_POOL_ID) {
-            workers.retain(|target| target.worker_id != worker.worker_id);
-        }
+        self.unregister_target(&WorkerTarget::default_pool(worker.worker_id, 0));
         Ok(Vec::new())
     }
 
     fn worker_removed(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.workers
-            .remove(&(DEFAULT_REPLAY_POOL_ID.to_string(), worker.worker_id));
-        if let Some(workers) = self.pool_workers.get_mut(DEFAULT_REPLAY_POOL_ID) {
-            workers.retain(|target| target.worker_id != worker.worker_id);
-        }
+        self.unregister_target(&WorkerTarget::default_pool(worker.worker_id, 0));
         Ok(Vec::new())
     }
 
@@ -385,6 +403,36 @@ where
 }
 
 impl<Events: EngineEventBatch> AggregatedPlacement<Events, ()> for ExternalPlacement<Events> {
+    fn worker_ready_authored(
+        &mut self,
+        worker: WorkerTopology,
+        target: &WorkerTarget,
+        _now_ms: f64,
+    ) -> Result<Vec<Placement>> {
+        self.register_ready_target(worker, target)?;
+        Ok(Vec::new())
+    }
+
+    fn worker_draining_authored(
+        &mut self,
+        _worker: WorkerTopology,
+        target: &WorkerTarget,
+        _now_ms: f64,
+    ) -> Result<Vec<Placement>> {
+        self.unregister_target(target);
+        Ok(Vec::new())
+    }
+
+    fn worker_removed_authored(
+        &mut self,
+        _worker: WorkerTopology,
+        target: &WorkerTarget,
+        _now_ms: f64,
+    ) -> Result<Vec<Placement>> {
+        self.unregister_target(target);
+        Ok(Vec::new())
+    }
+
     #[cfg(test)]
     fn is_router(&self) -> bool {
         false

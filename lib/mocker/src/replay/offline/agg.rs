@@ -38,7 +38,9 @@ use super::scaling::{LatestFpmBuffer, ReplayScalingPolicy, ReplayScalingSnapshot
 use super::state::AggRequestPhase;
 #[cfg(test)]
 use super::state::OfflineWorkerSnapshot;
-use super::topology::{ResolvedPoolTopology, ResolvedPoolWorker, WorkerTarget};
+use super::topology::{
+    DEFAULT_REPLAY_POOL_ID, ResolvedPoolTopology, ResolvedPoolWorker, WorkerTarget,
+};
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
@@ -114,6 +116,38 @@ where
     Events: EngineEventBatch,
     Metadata: ReplayAdmissionMetadata,
 {
+    /// Publish a worker lifecycle transition together with the stable authored
+    /// identity used by interactive/multipool replay. Native policies operate
+    /// on dense engine topology and use the default adapters; external
+    /// placement overrides them so sparse authored IDs remain coherent after
+    /// dynamic scaling.
+    fn worker_ready_authored(
+        &mut self,
+        worker: WorkerTopology,
+        _target: &WorkerTarget,
+        now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        self.worker_ready(worker, now_ms)
+    }
+
+    fn worker_draining_authored(
+        &mut self,
+        worker: WorkerTopology,
+        _target: &WorkerTarget,
+        now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        self.worker_draining(worker, now_ms)
+    }
+
+    fn worker_removed_authored(
+        &mut self,
+        worker: WorkerTopology,
+        _target: &WorkerTarget,
+        now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        self.worker_removed(worker, now_ms)
+    }
+
     #[cfg(test)]
     fn is_router(&self) -> bool;
 
@@ -1730,7 +1764,10 @@ where
                 let topology = self.engine.worker_topology(worker_id).ok_or_else(|| {
                     anyhow::anyhow!("ready worker {worker_id} has no engine topology")
                 })?;
-                let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                let target = self.accounting_target(worker_id);
+                let placements =
+                    self.placement
+                        .worker_ready_authored(topology, &target, self.now_ms)?;
                 let mut released = placements
                     .iter()
                     .map(|placement| placement.request_id)
@@ -1797,11 +1834,13 @@ where
             let removed = self.engine.try_remove_drained();
             for worker_id in &removed {
                 self.set_worker_accounting_status(*worker_id, ReplayWorkerLifecycleStatus::Removed);
-                self.placement.worker_removed(
+                let target = self.accounting_target(*worker_id);
+                self.placement.worker_removed_authored(
                     WorkerTopology {
                         worker_id: *worker_id,
                         scheduler_ids: Vec::new(),
                     },
+                    &target,
                     self.now_ms,
                 )?;
             }
@@ -1934,7 +1973,42 @@ where
         self.interactive_worker_targets
             .get(engine_worker_id)
             .cloned()
-            .unwrap_or_else(|| WorkerTarget::default_pool(engine_worker_id, 0))
+            .unwrap_or_else(|| {
+                panic!("offline replay worker {engine_worker_id} has no authored target")
+            })
+    }
+
+    /// Allocate and persist an authored identity for a newly scaled worker.
+    /// Engine IDs are dense implementation indices and can collide with sparse
+    /// static authored IDs, so choose the lowest unused ID in the dynamic
+    /// default pool instead of exposing the engine index.
+    fn register_dynamic_worker_target(
+        &mut self,
+        engine_worker_id: usize,
+    ) -> anyhow::Result<WorkerTarget> {
+        anyhow::ensure!(
+            engine_worker_id == self.interactive_worker_targets.len(),
+            "offline replay dynamic worker target sequence diverged: new engine worker {engine_worker_id}, next target slot {}",
+            self.interactive_worker_targets.len()
+        );
+        let used_ids = self
+            .interactive_worker_targets
+            .iter()
+            .filter(|target| target.pool_id == DEFAULT_REPLAY_POOL_ID)
+            .map(|target| target.worker_id)
+            .collect::<BTreeSet<_>>();
+        let mut authored_worker_id = 0usize;
+        for used_id in used_ids {
+            if used_id != authored_worker_id {
+                break;
+            }
+            authored_worker_id = authored_worker_id.checked_add(1).ok_or_else(|| {
+                anyhow::anyhow!("offline replay exhausted dynamic authored worker IDs")
+            })?;
+        }
+        let target = WorkerTarget::default_pool(authored_worker_id, 0);
+        self.interactive_worker_targets.push(target.clone());
+        Ok(target)
     }
 
     fn set_worker_accounting_status(
@@ -2004,7 +2078,7 @@ where
         let mut lifecycle_releases = Vec::new();
 
         for &id in &delta.added {
-            let target = self.accounting_target(id);
+            let target = self.register_dynamic_worker_target(id)?;
             let handle = self.collector.register_decode_worker(
                 target.pool_id,
                 target.worker_id,
@@ -2016,6 +2090,10 @@ where
                 },
                 self.decode_gpus_per_worker,
                 self.now_ms,
+            );
+            anyhow::ensure!(
+                !self.decode_worker_accounting_handles.contains(&handle),
+                "offline replay dynamic worker {id} reused an existing accounting handle {handle:?}"
             );
             anyhow::ensure!(
                 id == self.decode_worker_accounting_handles.len(),
@@ -2054,7 +2132,10 @@ where
                         .engine
                         .worker_topology(id)
                         .ok_or_else(|| anyhow::anyhow!("new worker {id} has no engine topology"))?;
-                    let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                    let target = self.accounting_target(id);
+                    let placements =
+                        self.placement
+                            .worker_ready_authored(topology, &target, self.now_ms)?;
                     lifecycle_releases
                         .extend(placements.iter().map(|placement| placement.request_id));
                     self.dispatch_placements(placements)?;
@@ -2067,16 +2148,21 @@ where
                 worker_id: id,
                 scheduler_ids: Vec::new(),
             });
-            let placements = self.placement.worker_draining(topology, self.now_ms)?;
+            let target = self.accounting_target(id);
+            let placements =
+                self.placement
+                    .worker_draining_authored(topology, &target, self.now_ms)?;
             lifecycle_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_placements(placements)?;
         }
         for &id in &delta.removed {
-            let placements = self.placement.worker_removed(
+            let target = self.accounting_target(id);
+            let placements = self.placement.worker_removed_authored(
                 WorkerTopology {
                     worker_id: id,
                     scheduler_ids: Vec::new(),
                 },
+                &target,
                 self.now_ms,
             )?;
             lifecycle_releases.extend(placements.iter().map(|placement| placement.request_id));
@@ -5806,6 +5892,100 @@ mod tests {
                 (1, ReplayWorkerLifecycleStatus::Removed, 2.0),
                 (2, ReplayWorkerLifecycleStatus::Removed, 1.0),
                 (3, ReplayWorkerLifecycleStatus::Removed, 5.0),
+            ]
+        );
+        assert!(accounting.reconciliation.all_reconciled());
+    }
+
+    #[test]
+    fn sparse_authored_worker_ids_do_not_collide_with_dynamic_accounting() {
+        let args = fast_router_args();
+        let workers = [2, 7]
+            .into_iter()
+            .map(|worker_id| ResolvedPoolWorker {
+                target: WorkerTarget::default_pool(worker_id, 0),
+                engine_args: args.clone(),
+                tags: BTreeSet::new(),
+                taints: BTreeSet::new(),
+                capabilities: BTreeSet::new(),
+                active: true,
+                draining: false,
+            })
+            .collect();
+        let mut rt = ExternalAggRuntime::new_composed_heterogeneous(
+            &args,
+            AdmissionQueue::new_requests(VecDeque::new(), ReplayMode::Trace),
+            workers,
+            |_args, topology, workers| {
+                Ok(ExternalPlacement::new_pooled(
+                    topology,
+                    workers.to_vec(),
+                    vec![(
+                        DEFAULT_REPLAY_POOL_ID.to_string(),
+                        super::super::topology::PoolRouter::RoundRobin,
+                    )],
+                ))
+            },
+        )
+        .unwrap();
+
+        rt.advance_now_ms(1000.0);
+        rt.apply_scaling(3).unwrap();
+        assert_eq!(
+            rt.interactive_worker_targets,
+            vec![
+                WorkerTarget::default_pool(2, 0),
+                WorkerTarget::default_pool(7, 0),
+                WorkerTarget::default_pool(0, 0),
+            ]
+        );
+        assert_eq!(rt.decode_worker_accounting_handles.len(), 3);
+        assert!(
+            rt.decode_worker_accounting_handles
+                .iter()
+                .enumerate()
+                .all(
+                    |(index, handle)| !rt.decode_worker_accounting_handles[..index]
+                        .contains(handle)
+                )
+        );
+        rt.preassign_interactive(
+            Uuid::from_u128(991),
+            WorkerTarget::default_pool(0, 0),
+            BTreeSet::new(),
+        )
+        .unwrap();
+
+        rt.advance_now_ms(2000.0);
+        rt.apply_scaling(2).unwrap();
+        assert!(
+            rt.preassign_interactive(
+                Uuid::from_u128(992),
+                WorkerTarget::default_pool(0, 0),
+                BTreeSet::new(),
+            )
+            .is_err(),
+            "removed dynamic authored target must leave external placement"
+        );
+        rt.advance_now_ms(3000.0);
+
+        let report = rt.finalize_report();
+        assert_eq!(report.throughput.decode_worker_seconds, 7.0);
+        let accounting = report.topology_accounting.unwrap();
+        assert_eq!(
+            accounting
+                .workers
+                .iter()
+                .map(|worker| (
+                    worker.worker_id,
+                    worker.lifecycle_status,
+                    worker.worker_seconds,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, ReplayWorkerLifecycleStatus::Removed, 1.0),
+                (2, ReplayWorkerLifecycleStatus::Active, 3.0),
+                (7, ReplayWorkerLifecycleStatus::Active, 3.0),
             ]
         );
         assert!(accounting.reconciliation.all_reconciled());
