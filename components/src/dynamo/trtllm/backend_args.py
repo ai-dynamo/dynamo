@@ -19,10 +19,6 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
-from dynamo.common.configuration.worker_router_config import (
-    ROUTER_MODE_CHOICES,
-    WORKER_ROUTER_MODE_HELP,
-)
 
 from . import __version__
 from .constants import DisaggregationMode, Modality
@@ -232,14 +228,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
                 "'pd' for a combined prefill+decode worker, 'prefill', "
                 "'decode', or 'encode'."
             ),
-        )
-        add_argument(
-            g,
-            flag_name="--router-mode",
-            env_var="DYN_TRTLLM_ROUTER_MODE",
-            default=None,
-            help=WORKER_ROUTER_MODE_HELP,
-            choices=ROUTER_MODE_CHOICES,
         )
         add_negatable_bool_argument(
             g,
@@ -517,9 +505,6 @@ class DynamoTrtllmConfig(ConfigBase):
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
-    # Router mode this worker set advertises in its model deployment card.
-    # None leaves router_config off the card, inheriting the frontend's mode.
-    router_mode: Optional[str] = None
     enable_multimodal: bool
     modality: Modality
     encode_endpoint: str

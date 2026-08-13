@@ -16,6 +16,11 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.configuration.groups.worker_router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
@@ -37,7 +42,13 @@ VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
 
 class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     component: str
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
     connector: list[str]  # Redeclare for mypy (inherited from DynamoRuntimeConfig)
 
     def validate(self) -> None:
@@ -125,8 +136,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     DynamoRuntimeArgGroup().add_arguments(parser)
     DynamoTrtllmArgGroup().add_arguments(parser)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto Config: the router's --router-kv-events lands on
+    # `use_kv_events`, which Config already uses for "this worker publishes KV
+    # events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     parsed_args, remaining = parser.parse_known_args(cli_args)
     config = Config.from_cli_args(parsed_args)
+
+    # Consume the router flags before the dynamic --trtllm.* scan sees them.
+    config.router_advertisement, remaining = parse_worker_router_config(remaining)
 
     # Parse dynamic --trtllm.* flags from the remaining args
     dynamic_overrides = parse_dynamic_flags(remaining)

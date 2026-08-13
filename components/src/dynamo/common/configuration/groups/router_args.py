@@ -132,7 +132,27 @@ class RouterConfigBase(ConfigBase):
 
 
 class RouterArgGroup(ArgGroup):
-    """CLI arguments for the shared router configuration parameters."""
+    """CLI arguments for the shared router configuration parameters.
+
+    Args:
+        default_router_mode: Default for ``--router-mode``. The frontend keeps
+            the historical ``"round-robin"``; a worker set passes ``None`` so
+            that omitting the flag advertises nothing and inherits the
+            frontend's mode. Defaulting a worker to a concrete mode would make
+            every worker override the frontend on upgrade.
+        include_frontend_only: Whether to register arguments the frontend alone
+            consumes. ``--router-min-initial-workers`` gates frontend startup
+            and is not carried on the model card, so a worker registering it
+            would ship a flag that does nothing.
+    """
+
+    def __init__(
+        self,
+        default_router_mode: Optional[str] = "round-robin",
+        include_frontend_only: bool = True,
+    ) -> None:
+        self.default_router_mode = default_router_mode
+        self.include_frontend_only = include_frontend_only
 
     def add_arguments(self, parser) -> None:
         if "DYN_ADMISSION_CONTROL" in os.environ:
@@ -145,19 +165,22 @@ class RouterArgGroup(ArgGroup):
         # Removed master switch, still accepted so existing launch commands
         # keep starting; warns and sets nothing on the namespace (parity with
         # the DYN_ADMISSION_CONTROL handling above). Not in _ROUTER_FIELDS.
-        g.add_argument(
-            "--admission-control",
-            choices=("token-capacity", "none"),
-            action=_IgnoredAdmissionControlAction,
-            default=argparse.SUPPRESS,
-            help=argparse.SUPPRESS,
-        )
+        # Only the frontend ever accepted it, so there are no worker launch
+        # commands to keep compatible.
+        if self.include_frontend_only:
+            g.add_argument(
+                "--admission-control",
+                choices=("token-capacity", "none"),
+                action=_IgnoredAdmissionControlAction,
+                default=argparse.SUPPRESS,
+                help=argparse.SUPPRESS,
+            )
 
         add_argument(
             g,
             flag_name="--router-mode",
             env_var="DYN_ROUTER_MODE",
-            default="round-robin",
+            default=self.default_router_mode,
             help=(
                 "How to route the request. power-of-two picks 2 random workers and "
                 "routes to the one with fewer in-flight requests. least-loaded routes to "
@@ -176,20 +199,21 @@ class RouterArgGroup(ArgGroup):
                 "device-aware-weighted",
             ],
         )
-        add_argument(
-            g,
-            flag_name="--router-min-initial-workers",
-            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
-            default=0,
-            help=(
-                "Minimum number of workers required before router startup continues. "
-                "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
-                "push-router path and the KV router's config-ready worker gate share "
-                "the same startup threshold. Set to 0 to disable the startup wait."
-            ),
-            arg_type=int,
-            dest="min_initial_workers",
-        )
+        if self.include_frontend_only:
+            add_argument(
+                g,
+                flag_name="--router-min-initial-workers",
+                env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
+                default=0,
+                help=(
+                    "Minimum number of workers required before router startup continues. "
+                    "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
+                    "push-router path and the KV router's config-ready worker gate share "
+                    "the same startup threshold. Set to 0 to disable the startup wait."
+                ),
+                arg_type=int,
+                dest="min_initial_workers",
+            )
         add_argument(
             g,
             flag_name="--router-session-affinity-ttl-secs",
@@ -204,19 +228,22 @@ class RouterArgGroup(ArgGroup):
             arg_type=int,
             dest="session_affinity_ttl_secs",
         )
-        add_argument(
-            g,
-            flag_name="--enforce-disagg",
-            env_var="DYN_ENFORCE_DISAGG",
-            default=False,
-            dest="enforce_disagg",
-            help=(
-                "DEPRECATED: accepted for compatibility but ignored. Routing topology and "
-                "readiness are determined from registered worker types."
-            ),
-            arg_type=None,
-            action=_DeprecatedEnforceDisaggAction,
-        )
+        # Deprecated and ignored; kept so existing frontend launch commands keep
+        # starting. No worker ever accepted it, so it is not registered there.
+        if self.include_frontend_only:
+            add_argument(
+                g,
+                flag_name="--enforce-disagg",
+                env_var="DYN_ENFORCE_DISAGG",
+                default=False,
+                dest="enforce_disagg",
+                help=(
+                    "DEPRECATED: accepted for compatibility but ignored. Routing topology and "
+                    "readiness are determined from registered worker types."
+                ),
+                arg_type=None,
+                action=_DeprecatedEnforceDisaggAction,
+            )
         add_argument(
             g,
             flag_name="--active-decode-blocks-threshold",

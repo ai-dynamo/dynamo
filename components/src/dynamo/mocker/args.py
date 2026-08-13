@@ -7,9 +7,9 @@ import os
 import tempfile
 from pathlib import Path
 
-from dynamo.common.configuration.worker_router_config import (
-    ROUTER_MODE_CHOICES,
-    WORKER_ROUTER_MODE_HELP,
+from dynamo.common.configuration.groups.worker_router_args import (
+    WorkerRouterConfig,
+    add_worker_router_arguments,
 )
 from dynamo.common.utils.namespace import get_worker_namespace
 
@@ -694,13 +694,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
     )
     parser.add_argument(
-        "--router-mode",
-        type=str,
-        choices=ROUTER_MODE_CHOICES,
-        default=os.environ.get("DYN_MOCKER_ROUTER_MODE"),
-        help=WORKER_ROUTER_MODE_HELP,
-    )
-    parser.add_argument(
         "--event-plane",
         type=str,
         choices=["nats", "zmq"],
@@ -710,7 +703,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "for etcd/kubernetes).",
     )
 
+    # Same flags the frontend and engine backends expose, so a mocker can stand
+    # in for a real worker set when exercising per-role routing.
+    add_worker_router_arguments(parser)
+
     args = parser.parse_args(argv)
+    # Collect them into their own config object, matching the backends.
+    args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
 
     kvbm_offload_enabled = (
         (args.num_g2_blocks or 0) > 0

@@ -12,6 +12,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.configuration.groups.worker_router_args import build_router_config
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 from dynamo.common.utils.output_modalities import get_output_modalities
@@ -205,6 +206,11 @@ async def _register_model_with_runtime_config(
             media_fetcher=media_fetcher,
             worker_type=worker_type,
             needs=needs,
+            # Advertise this worker set's own routing when --router-mode is set;
+            # None inherits the frontend's global config. Combined with
+            # worker_type, this is what lets a disaggregated deployment route to
+            # its prefill and decode tiers differently.
+            router_config=build_router_config(dynamo_args.router_advertisement),
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
             model_aliases=aliases or None,

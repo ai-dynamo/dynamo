@@ -29,14 +29,12 @@ from typing import TYPE_CHECKING, Any, Optional
 import uvloop
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.groups.worker_router_args import build_router_config
 from dynamo.llm import (
     AicPerfConfig,
     EngineType,
     EntrypointArgs,
     FrontendRoute,
-    KvRouterConfig,
-    RouterConfig,
-    RouterMode,
     make_engine,
     run_input,
 )
@@ -367,32 +365,11 @@ async def async_main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    if config.router_mode == "kv":
-        router_mode = RouterMode.KV
-        kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
-    elif config.router_mode == "random":
-        router_mode = RouterMode.Random
-        kv_router_config = None
-    elif config.router_mode == "direct":
-        router_mode = RouterMode.Direct
-        kv_router_config = None
-    elif config.router_mode == "power-of-two":
-        router_mode = RouterMode.PowerOfTwoChoices
-        kv_router_config = None
-    elif config.router_mode == "least-loaded":
-        router_mode = RouterMode.LeastLoaded
-        kv_router_config = None
-    elif config.router_mode == "device-aware-weighted":
-        router_mode = RouterMode.DeviceAwareWeighted
-        kv_router_config = None
-    else:
-        router_mode = RouterMode.RoundRobin
-        kv_router_config = None
-
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
-    router_config = RouterConfig(
-        router_mode, kv_router_config, **config.router_kwargs()
-    )
+    # Shared with the backends, so a worker set's advertised config is built
+    # from exactly the same flags and semantics as the frontend's global one.
+    router_config = build_router_config(config)
+    assert router_config is not None  # --router-mode always defaults for the frontend
 
     metrics_prefix = (
         config.metrics_prefix
