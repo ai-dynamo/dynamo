@@ -202,11 +202,11 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
 {
   const Path restore_root = staging_root_ / "restore";
   const Path staging_directory = TransactionDirectory(restore_root, request.transaction_id());
-  const uintmax_t bytes = engine.RestoreSize(source);
   Transaction& transaction = GetTransaction(request.transaction_id());
   std::lock_guard lock(transaction.mutex());
   if (transaction.state() != Transaction::State::NEW || fs::exists(staging_directory))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
+  const uintmax_t bytes = engine.RestoreSize(source);
   if (!ReserveStaging(bytes))
     return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
   bool staging_reserved = true;
@@ -242,12 +242,12 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
 {
   const Path checkpoint_root = staging_root_ / "checkpoint";
   const Path staging_directory = TransactionDirectory(checkpoint_root, request.transaction_id());
+  engine.ValidateCheckpointDestination(destination);
   Transaction& transaction = GetTransaction(request.transaction_id());
   std::lock_guard lock(transaction.mutex());
   if (transaction.state() != Transaction::State::NEW || fs::exists(staging_directory))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
   try {
-    engine.ValidateCheckpointDestination(destination);
     transaction.set_state(Transaction::State::PREPARING);
     fs::create_directory(staging_directory);
     transaction.set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type()));
