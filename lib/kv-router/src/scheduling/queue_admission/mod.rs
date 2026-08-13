@@ -60,7 +60,7 @@ impl QueueAdmissionWorker {
         self.capacity_tokens
     }
 
-    /// Return whether the worker is currently eligible, including transient overload state.
+    /// Return whether the worker is currently available, including transient overload state.
     pub fn is_available(&self) -> bool {
         self.available
     }

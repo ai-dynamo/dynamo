@@ -160,6 +160,16 @@ async fn delete_reservation(
     }
 }
 
+async fn abort_reservation(
+    State(state): State<Arc<AppState>>,
+    Path(selection_id): Path<String>,
+) -> Response {
+    match state.service.abort_reservation(&selection_id).await {
+        Ok(()) => json_ok(StatusCode::OK),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn add_output_block(
     State(state): State<Arc<AppState>>,
     Path(selection_id): Path<String>,
@@ -319,6 +329,10 @@ pub(crate) fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/reservations/{selection_id}/output_block",
             post(add_output_block),
+        )
+        .route(
+            "/reservations/{selection_id}/abort",
+            post(abort_reservation),
         )
         .route("/reservations/{selection_id}", delete(delete_reservation))
         .route("/workers", post(create_worker).get(list_workers))

@@ -532,21 +532,49 @@ where
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
+        self.release_by_id(request_id, RequestOutcome::Completed(None))
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) async fn free_if_present(&self, request_id: &str) -> Result<bool, SequenceError> {
+        self.release_by_id(request_id, RequestOutcome::Completed(None))
+            .await
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) async fn abort_if_present(&self, request_id: &str) -> Result<bool, SequenceError> {
+        self.release_by_id(request_id, RequestOutcome::Aborted)
+            .await
+    }
+
+    async fn release_by_id(
+        &self,
+        request_id: &str,
+        outcome: RequestOutcome,
+    ) -> Result<bool, SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        self.slots.free(&request_id, Instant::now())?;
+        let slot_result = self.slots.free(&request_id, Instant::now());
         if !self.queue.has_admission_policy() {
             match worker {
                 Some(worker) => self.queue.update_worker(worker).await,
                 None => self.queue.update().await,
             }
-            return Ok(());
+            slot_result?;
+            return Ok(worker.is_some());
         }
-        match worker {
-            Some(worker) => self.queue.complete_request(&request_id, worker, None).await,
-            None => self.queue.update().await,
-        }
-        Ok(())
+        let admission_owned = match outcome {
+            RequestOutcome::Completed(context_tokens) => {
+                self.queue
+                    .complete_request(&request_id, None, context_tokens)
+                    .await
+            }
+            RequestOutcome::Aborted => self.queue.abort_request(&request_id, None).await,
+        };
+        slot_result?;
+        Ok(worker.is_some() || admission_owned)
     }
 
     /// Release a booking only if it still belongs to `worker`.
@@ -595,22 +623,27 @@ where
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         if !self.queue.has_admission_policy() {
-            self.slots
-                .free_if_worker(&request_id, worker, Instant::now())?;
+            let slot_result = self
+                .slots
+                .free_if_worker(&request_id, worker, Instant::now());
             self.queue.update_worker(worker).await;
-            return Ok(());
+            return slot_result;
         }
-        self.slots
-            .free_if_worker(&request_id, worker, Instant::now())?;
+        let slot_result = self
+            .slots
+            .free_if_worker(&request_id, worker, Instant::now());
         match outcome {
             RequestOutcome::Completed(context_tokens) => {
-                self.queue
-                    .complete_request(&request_id, worker, context_tokens)
+                let _ = self
+                    .queue
+                    .complete_request(&request_id, Some(worker), context_tokens)
                     .await;
             }
-            RequestOutcome::Aborted => self.queue.abort_request(&request_id, worker).await,
+            RequestOutcome::Aborted => {
+                let _ = self.queue.abort_request(&request_id, Some(worker)).await;
+            }
         }
-        Ok(())
+        slot_result
     }
 
     pub fn pending_count(&self) -> usize {
