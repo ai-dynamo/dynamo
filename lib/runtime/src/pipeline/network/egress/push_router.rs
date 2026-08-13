@@ -402,6 +402,27 @@ impl EndpointWatcher {
     fn record_removed(&self, id: &EndpointInstanceId) {
         self.state.lock().unwrap().live.remove(&id.instance_id);
     }
+
+    /// True while discovery still reports `instance_id` for this endpoint.
+    fn is_live(&self, instance_id: u64) -> bool {
+        self.state.lock().unwrap().live.contains_key(&instance_id)
+    }
+
+    /// Forget every remembered instance missing from `present`, returning the
+    /// ones dropped so the caller can fan their removal out to the sinks.
+    fn retain_live(&self, present: &HashSet<u64>) -> Vec<EndpointInstanceId> {
+        let mut state = self.state.lock().unwrap();
+        let stale: Vec<u64> = state
+            .live
+            .keys()
+            .filter(|id| !present.contains(*id))
+            .copied()
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|id| state.live.remove(&id))
+            .collect()
+    }
 }
 
 /// At most one `list_and_watch` per runtime endpoint, across all `PushRouter`
@@ -510,17 +531,31 @@ where
         }
     };
 
-    // A late subscriber missed the initial `Added` burst, so hand it the
-    // instances the watcher already knows about. Only this sink is replayed.
-    for id in replay {
-        sink.on_instance_added(&id).await;
-    }
-
-    WatcherSubscription {
+    // Own the deregistration guard before the first `await`. The sink is
+    // already registered, so a caller that drops this future mid-replay would
+    // otherwise leave it in the watcher for the life of the process, holding
+    // the dispatch alive and keeping the subscriber count above zero.
+    let subscription = WatcherSubscription {
         key,
         watcher,
         sink_id,
+    };
+
+    // A late subscriber missed the initial `Added` burst, so hand it the
+    // instances the watcher already knows about. Only this sink is replayed.
+    for id in replay {
+        // The snapshot was taken under the shard lock, but the fan-out task
+        // runs free of it and can retire an instance before the replay reaches
+        // it. That inverts the order this sink sees — removal, then a stale
+        // add — leaving a dead instance marked live until the next discovery
+        // event. Re-reading liveness keeps the replay honest.
+        if !subscription.watcher.is_live(id.instance_id) {
+            continue;
+        }
+        sink.on_instance_added(&id).await;
     }
+
+    subscription
 }
 
 /// Run the shared `list_and_watch` loop for one runtime endpoint, fanning every
@@ -561,12 +596,56 @@ fn spawn_endpoint_watcher_task(
 
         // Reconnect on transient discovery failure; cancel-aware backoff.
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut resubscribing = false;
         'reconnect: loop {
             let query = DiscoveryQuery::Endpoint {
                 namespace: namespace.clone(),
                 component: component.clone(),
                 endpoint: endpoint_name.clone(),
             };
+
+            // A fresh `list_and_watch` re-lists whatever still exists but never
+            // reports what vanished while the previous stream was down, so an
+            // instance that died during the outage would stay in `live` for the
+            // life of the process: replayed as present to every router built
+            // afterwards, and never released. Reconcile against an explicit
+            // listing before resubscribing — taken first, so an instance that
+            // registers in the gap is absent here but still arrives as `Added`
+            // on the new stream.
+            if resubscribing {
+                match endpoint.drt().discovery().list(query.clone()).await {
+                    Ok(instances) => {
+                        let present: HashSet<u64> = instances
+                            .iter()
+                            .filter_map(|instance| match instance {
+                                DiscoveryInstance::Endpoint(inst) => Some(inst.instance_id),
+                                _ => None,
+                            })
+                            .collect();
+                        for eid in watcher.retain_live(&present) {
+                            tracing::debug!(
+                                endpoint = %endpoint_name,
+                                instance_id = eid.instance_id,
+                                "Instance disappeared while the discovery watch was down"
+                            );
+                            for sink in watcher.sinks() {
+                                sink.on_instance_removed(&eid).await;
+                            }
+                        }
+                    }
+                    // Reconciliation is best effort: without a listing we cannot
+                    // tell a departed instance from an unreachable store, and
+                    // pruning on that guess would cancel live dispatches. Keep
+                    // the remembered set and try again on the next reconnect.
+                    Err(e) => {
+                        tracing::warn!(
+                            endpoint = %endpoint_name,
+                            "Could not re-list instances to reconcile the watcher: {e}"
+                        );
+                    }
+                }
+            }
+            resubscribing = true;
 
             let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
                 Ok(s) => s,
@@ -3482,5 +3561,85 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         pred()
+    }
+
+    fn test_instance_id(instance_id: u64) -> EndpointInstanceId {
+        EndpointInstanceId {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id,
+        }
+    }
+
+    /// Stands in for a subscribed router where only the watcher's bookkeeping
+    /// is under test; the hooks themselves are exercised end to end above.
+    struct InertSink;
+
+    #[async_trait]
+    impl LifecycleSink for InertSink {
+        async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
+        async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
+    }
+
+    #[test]
+    fn add_sink_replays_only_instances_discovery_still_reports() {
+        let watcher = EndpointWatcher::new();
+        watcher.record_added(&test_instance_id(1));
+        watcher.record_added(&test_instance_id(2));
+
+        let (_sink_id, replay) = watcher.add_sink(Arc::new(InertSink));
+        assert_eq!(replay.len(), 2);
+
+        // What the fan-out task does between the snapshot and the replay await.
+        watcher.record_removed(&test_instance_id(2));
+
+        let replayed: Vec<u64> = replay
+            .iter()
+            .filter(|id| watcher.is_live(id.instance_id))
+            .map(|id| id.instance_id)
+            .collect();
+        assert_eq!(
+            replayed,
+            vec![1],
+            "an instance retired after the snapshot must not be replayed as present"
+        );
+    }
+
+    #[test]
+    fn retain_live_drops_instances_missing_from_a_fresh_listing() {
+        let watcher = EndpointWatcher::new();
+        watcher.record_added(&test_instance_id(1));
+        watcher.record_added(&test_instance_id(2));
+        watcher.record_added(&test_instance_id(3));
+
+        // Instance 2 vanished while the watch was down, so the re-listing that
+        // follows a reconnect does not mention it.
+        let present = HashSet::from([1, 3]);
+        let dropped: Vec<u64> = watcher
+            .retain_live(&present)
+            .iter()
+            .map(|id| id.instance_id)
+            .collect();
+
+        assert_eq!(dropped, vec![2]);
+        assert!(watcher.is_live(1));
+        assert!(!watcher.is_live(2));
+        assert!(watcher.is_live(3));
+
+        // The reconciled set is what a later subscriber gets replayed.
+        let (_sink_id, replay) = watcher.add_sink(Arc::new(InertSink));
+        let mut replayed: Vec<u64> = replay.iter().map(|id| id.instance_id).collect();
+        replayed.sort_unstable();
+        assert_eq!(replayed, vec![1, 3]);
+    }
+
+    #[test]
+    fn retain_live_keeps_everything_when_the_listing_matches() {
+        let watcher = EndpointWatcher::new();
+        watcher.record_added(&test_instance_id(7));
+
+        assert!(watcher.retain_live(&HashSet::from([7])).is_empty());
+        assert!(watcher.is_live(7));
     }
 }
