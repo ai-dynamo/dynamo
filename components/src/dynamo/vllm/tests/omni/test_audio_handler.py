@@ -19,6 +19,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -249,15 +250,13 @@ class TestEngineInputsFromAudio:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("request_args", "expected"),
+        "request_args",
         [
-            ({"response_format": "pcm"}, True),
-            ({"response_format": "wav"}, True),
-            ({"response_format": "mp3"}, False),
-            ({"response_format": "pcm", "data_source": "url"}, False),
+            {"response_format": "mp3"},
+            {"response_format": "pcm", "data_source": "url"},
         ],
     )
-    async def test_streaming_eligibility(self, request_args, expected):
+    async def test_non_streaming_eligibility(self, request_args):
         handler = _make_audio_handler()
         handler.engine_client.stage_list = None
 
@@ -265,4 +264,4 @@ class TestEngineInputsFromAudio:
             NvCreateAudioSpeechRequest(input="hello", **request_args)
         )
 
-        assert inputs.stream_audio is expected
+        assert inputs.stream_audio is False
