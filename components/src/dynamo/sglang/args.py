@@ -19,12 +19,12 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
-from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
-from dynamo.common.configuration.groups.worker_router_args import (
+from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     parse_worker_router_config,
     register_worker_router_help,
 )
+from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_fetch import fetch_model

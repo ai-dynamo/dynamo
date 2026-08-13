@@ -15,7 +15,7 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
-from dynamo.common.configuration.groups.worker_router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime.logging import configure_dynamo_logging

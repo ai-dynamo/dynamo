@@ -38,7 +38,7 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
-from dynamo.common.configuration.groups.worker_router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (

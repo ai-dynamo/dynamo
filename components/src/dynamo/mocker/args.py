@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from dynamo.common.configuration.groups.worker_router_args import (
+from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     add_worker_router_arguments,
 )

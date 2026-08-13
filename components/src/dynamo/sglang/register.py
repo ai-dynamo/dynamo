@@ -12,7 +12,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
-from dynamo.common.configuration.groups.worker_router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 from dynamo.common.utils.output_modalities import get_output_modalities

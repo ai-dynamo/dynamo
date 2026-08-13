@@ -12,14 +12,14 @@ import warnings
 from typing import Any, Dict, Optional, Sequence
 
 from dynamo.common.config_dump import register_encoder
-from dynamo.common.configuration.groups.runtime_args import (
-    DynamoRuntimeArgGroup,
-    DynamoRuntimeConfig,
-)
-from dynamo.common.configuration.groups.worker_router_args import (
+from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     parse_worker_router_config,
     register_worker_router_help,
+)
+from dynamo.common.configuration.groups.runtime_args import (
+    DynamoRuntimeArgGroup,
+    DynamoRuntimeConfig,
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig

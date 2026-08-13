@@ -7,7 +7,7 @@ import argparse
 
 import pytest
 
-from dynamo.common.configuration.groups.worker_router_args import (
+from dynamo.common.configuration.groups.router_args import (
     ROUTER_MODE_MAP,
     add_worker_router_arguments,
     build_router_config,
@@ -75,6 +75,22 @@ def test_frontend_only_arguments_are_not_offered_to_workers():
     assert "--router-mode" in flags
     assert "--router-session-affinity-ttl-secs" in flags
     assert "--router-kv-events" in flags
+
+
+def test_router_arg_group_refuses_to_guess_its_caller():
+    """`RouterArgGroup()` must not fall back to frontend-shaped defaults.
+
+    Copying the frontend's construction into a worker would default that worker
+    to `--router-mode round-robin`. Because a worker's card replaces the
+    frontend's configuration wholesale, the worker would then silently override
+    a frontend running any other mode -- with no error, just routing that
+    ignores the operator. Requiring both arguments makes that a startup
+    TypeError instead.
+    """
+    from dynamo.common.configuration.groups.router_args import RouterArgGroup
+
+    with pytest.raises(TypeError):
+        RouterArgGroup()  # type: ignore[call-arg]
 
 
 def test_unknown_mode_is_rejected():

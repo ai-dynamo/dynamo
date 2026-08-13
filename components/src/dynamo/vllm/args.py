@@ -18,14 +18,14 @@ except ImportError:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
-from dynamo.common.configuration.groups.runtime_args import (
-    DynamoRuntimeArgGroup,
-    DynamoRuntimeConfig,
-)
-from dynamo.common.configuration.groups.worker_router_args import (
+from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     parse_worker_router_config,
     register_worker_router_help,
+)
+from dynamo.common.configuration.groups.runtime_args import (
+    DynamoRuntimeArgGroup,
+    DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint

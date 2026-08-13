@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import uvloop
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.configuration.groups.worker_router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.llm import (
     AicPerfConfig,
     EngineType,

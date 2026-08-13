@@ -16,11 +16,18 @@ import argparse
 import logging
 import math
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.kv_router_args import (
+    KvRouterArgGroup,
+    KvRouterConfigBase,
+)
 from dynamo.common.configuration.utils import add_argument, nullable_float, nullable_int
+
+if TYPE_CHECKING:
+    from dynamo.llm import RouterConfig
 
 logger = logging.getLogger(__name__)
 
@@ -134,12 +141,18 @@ class RouterConfigBase(ConfigBase):
 class RouterArgGroup(ArgGroup):
     """CLI arguments for the shared router configuration parameters.
 
+    Both arguments are required, deliberately. A caller that fell back to
+    frontend-shaped defaults would give a worker ``--router-mode round-robin``,
+    and since a worker's card replaces the frontend's configuration wholesale,
+    that worker would silently override a frontend running any other mode.
+    Requiring the choice turns "forgot to think about it" into a TypeError at
+    startup instead of routing that quietly ignores the operator.
+
     Args:
-        default_router_mode: Default for ``--router-mode``. The frontend keeps
+        default_router_mode: Default for ``--router-mode``. The frontend passes
             the historical ``"round-robin"``; a worker set passes ``None`` so
             that omitting the flag advertises nothing and inherits the
-            frontend's mode. Defaulting a worker to a concrete mode would make
-            every worker override the frontend on upgrade.
+            frontend's configuration.
         include_frontend_only: Whether to register arguments the frontend alone
             consumes. ``--router-min-initial-workers`` gates frontend startup
             and is not carried on the model card, so a worker registering it
@@ -148,8 +161,9 @@ class RouterArgGroup(ArgGroup):
 
     def __init__(
         self,
-        default_router_mode: Optional[str] = "round-robin",
-        include_frontend_only: bool = True,
+        *,
+        default_router_mode: Optional[str],
+        include_frontend_only: bool,
     ) -> None:
         self.default_router_mode = default_router_mode
         self.include_frontend_only = include_frontend_only
@@ -162,18 +176,47 @@ class RouterArgGroup(ArgGroup):
 
         g = parser.add_argument_group("Router Options")
 
-        # Removed master switch, still accepted so existing launch commands
-        # keep starting; warns and sets nothing on the namespace (parity with
-        # the DYN_ADMISSION_CONTROL handling above). Not in _ROUTER_FIELDS.
-        # Only the frontend ever accepted it, so there are no worker launch
-        # commands to keep compatible.
         if self.include_frontend_only:
+            # Arguments the frontend alone consumes. None of them are carried on
+            # a model card, so registering them on a worker would ship flags
+            # that silently do nothing.
+            #
+            # --admission-control and --enforce-disagg are removed/deprecated
+            # and accepted only so existing frontend launch commands keep
+            # starting; no worker command ever passed them.
             g.add_argument(
                 "--admission-control",
                 choices=("token-capacity", "none"),
                 action=_IgnoredAdmissionControlAction,
                 default=argparse.SUPPRESS,
                 help=argparse.SUPPRESS,
+            )
+            add_argument(
+                g,
+                flag_name="--enforce-disagg",
+                env_var="DYN_ENFORCE_DISAGG",
+                default=False,
+                dest="enforce_disagg",
+                help=(
+                    "DEPRECATED: accepted for compatibility but ignored. Routing topology and "
+                    "readiness are determined from registered worker types."
+                ),
+                arg_type=None,
+                action=_DeprecatedEnforceDisaggAction,
+            )
+            add_argument(
+                g,
+                flag_name="--router-min-initial-workers",
+                env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
+                default=0,
+                help=(
+                    "Minimum number of workers required before router startup continues. "
+                    "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
+                    "push-router path and the KV router's config-ready worker gate share "
+                    "the same startup threshold. Set to 0 to disable the startup wait."
+                ),
+                arg_type=int,
+                dest="min_initial_workers",
             )
 
         add_argument(
@@ -199,21 +242,6 @@ class RouterArgGroup(ArgGroup):
                 "device-aware-weighted",
             ],
         )
-        if self.include_frontend_only:
-            add_argument(
-                g,
-                flag_name="--router-min-initial-workers",
-                env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
-                default=0,
-                help=(
-                    "Minimum number of workers required before router startup continues. "
-                    "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
-                    "push-router path and the KV router's config-ready worker gate share "
-                    "the same startup threshold. Set to 0 to disable the startup wait."
-                ),
-                arg_type=int,
-                dest="min_initial_workers",
-            )
         add_argument(
             g,
             flag_name="--router-session-affinity-ttl-secs",
@@ -228,22 +256,6 @@ class RouterArgGroup(ArgGroup):
             arg_type=int,
             dest="session_affinity_ttl_secs",
         )
-        # Deprecated and ignored; kept so existing frontend launch commands keep
-        # starting. No worker ever accepted it, so it is not registered there.
-        if self.include_frontend_only:
-            add_argument(
-                g,
-                flag_name="--enforce-disagg",
-                env_var="DYN_ENFORCE_DISAGG",
-                default=False,
-                dest="enforce_disagg",
-                help=(
-                    "DEPRECATED: accepted for compatibility but ignored. Routing topology and "
-                    "readiness are determined from registered worker types."
-                ),
-                arg_type=None,
-                action=_DeprecatedEnforceDisaggAction,
-            )
         add_argument(
             g,
             flag_name="--active-decode-blocks-threshold",
@@ -283,3 +295,109 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=nullable_float,
         )
+
+
+# CLI spelling -> `dynamo.llm.RouterMode` attribute name.
+ROUTER_MODE_MAP: dict[str, str] = {
+    "round-robin": "RoundRobin",
+    "random": "Random",
+    "power-of-two": "PowerOfTwoChoices",
+    "kv": "KV",
+    "direct": "Direct",
+    "least-loaded": "LeastLoaded",
+    "device-aware-weighted": "DeviceAwareWeighted",
+}
+
+
+class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
+    """Router configuration a worker set advertises in its model card.
+
+    Same composition the frontend's config uses, so the two stay in step
+    without duplicating field declarations.
+    """
+
+    # Registered only for the frontend, so give them values here rather than
+    # leaving the attributes absent on a worker's config object.
+    min_initial_workers: int = 0
+    enforce_disagg: bool = False
+
+
+def add_worker_router_arguments(parser) -> None:
+    """Register the worker-side router flags on ``parser``.
+
+    ``--router-mode`` defaults to ``None`` so that a worker which does not pass
+    it advertises nothing and inherits the frontend's mode. Defaulting to a
+    concrete mode would make every worker override the frontend on upgrade.
+    """
+    RouterArgGroup(default_router_mode=None, include_frontend_only=False).add_arguments(
+        parser
+    )
+    KvRouterArgGroup().add_arguments(parser)
+
+
+def parse_worker_router_config(
+    argv: Sequence[str],
+) -> tuple[WorkerRouterConfig, list[str]]:
+    """Parse the router flags out of ``argv``, returning the rest untouched.
+
+    Backends call this between their own argument parsing and their engine's,
+    so the engine parser never sees these flags.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    add_worker_router_arguments(parser)
+    namespace, remainder = parser.parse_known_args(list(argv))
+    return WorkerRouterConfig.from_cli_args(namespace), remainder
+
+
+def register_worker_router_help(parser, source_parser=None) -> None:
+    """Surface the worker router flags in ``parser``'s ``--help``.
+
+    The flags are parsed by a separate parser, so they would otherwise be
+    invisible to ``--help``. Mirrors how the backends already display their
+    engine's arguments.
+    """
+    if source_parser is None:
+        source_parser = argparse.ArgumentParser(add_help=False)
+        add_worker_router_arguments(source_parser)
+    group = parser.add_argument_group(
+        "Router Advertisement Options. Declared in this worker's model card to "
+        "override the frontend's routing for this worker set only."
+    )
+    for action in source_parser._actions:
+        if action.option_strings:
+            group._group_actions.append(action)
+
+
+def build_router_config(config) -> Optional["RouterConfig"]:
+    """Build the ``RouterConfig`` a worker set advertises in its model card.
+
+    Returns ``None`` when no mode was requested, which leaves ``router_config``
+    off the card so the worker inherits the frontend's global configuration.
+    That is the behavior of every deployment that does not set ``--router-mode``.
+
+    Accepts anything carrying `RouterConfigBase` and `KvRouterConfigBase`
+    fields, so the frontend can share it.
+    """
+    router_mode = getattr(config, "router_mode", None)
+    if router_mode is None:
+        return None
+
+    # Imported lazily so that importing a backend's argument definitions does
+    # not pull in the compiled bindings.
+    from dynamo.llm import KvRouterConfig, RouterConfig, RouterMode
+
+    try:
+        mode_attr = ROUTER_MODE_MAP[router_mode]
+    except KeyError as error:
+        raise ValueError(
+            f"unknown router mode {router_mode!r}; expected one of "
+            f"{', '.join(sorted(ROUTER_MODE_MAP))}"
+        ) from error
+
+    mode = getattr(RouterMode, mode_attr)
+    # Only KV routing consults KvRouterConfig; passing it for other modes would
+    # imply tuning that is never read.
+    kv_router_config = (
+        KvRouterConfig(**config.kv_router_kwargs()) if mode == RouterMode.KV else None
+    )
+    return RouterConfig(mode, kv_router_config, **config.router_kwargs())
