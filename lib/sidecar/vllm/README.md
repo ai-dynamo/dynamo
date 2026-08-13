@@ -10,8 +10,13 @@ SPDX-License-Identifier: Apache-2.0
 > and not yet packaged for distribution. The manifests, flags, and behavior may
 > change without notice.
 
-`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC
-`Generate` service. It is a standalone Rust executable.
+`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC services:
+
+- `vllm.Inference` for generation
+- `vllm.Control` for model and server discovery
+- Standard gRPC health for startup readiness
+
+It is a standalone Rust executable.
 
 ## Supported
 
@@ -20,13 +25,18 @@ SPDX-License-Identifier: Apache-2.0
 - Token and text requests through Dynamo preprocessing
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
+- Data-parallel rank routing and KV-event source discovery
+- Image URL and data-URI inputs, including media UUIDs
 
-The initial protocol does not support multimodal input, LoRA, KV-aware data
-parallel routing, encode workers, beam search, or `n > 1`.
+The protocol does not support LoRA, encode workers, beam search, `n > 1`,
+preprocessed multimodal features, audio/video media, or Dynamo tool-call and
+reasoning parsers. Parser defaults returned by Control are intentionally not
+advertised to the Dynamo frontend because the current inference protocol does
+not preserve all parser-related request semantics.
 
 ## Run
 
-Start vLLM with its released gRPC listener:
+Start vLLM with its gRPC listener:
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
@@ -40,12 +50,17 @@ Start the Dynamo worker explicitly:
 
 ```bash
 dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path Qwen/Qwen3-0.6B
+  --vllm-endpoint 127.0.0.1:50051
 ```
 
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
 provided through the environment.
+
+The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates.
+
+The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
+
+Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 
 The sidecar opens eight gRPC connections by default. This avoided
 connection-level throttling in high-concurrency sidecar tests. Override the
@@ -57,10 +72,11 @@ pool. Override them with `--grpc-connect-attempt-timeout-secs`,
 `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the
 corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
+Each request owns its response stream but borrows a channel from the shared pool. Aggregate and prefill cancellation drops only that request's stream. Decode cancellation first submits the decode request and retains its stream until the first output token or a response containing `finish_info`, so a NIXL receiver can complete and release the transferred KV; it then drops the stream. If the stream ends early, returns a gRPC error, or produces an invalid response after cancellation, the sidecar logs the failure and reports the request as cancelled. vLLM automatically aborts the corresponding engine request while the pooled HTTP/2 connection remains available to other requests. The sidecar does not call the Control `Abort` RPC.
+
 ## Test without vLLM or a GPU
 
-Use the CPU-only `dynamo-vllm-mocker-server` to exercise this sidecar against
-the same `Generate` gRPC contract:
+Use the CPU-only `dynamo-vllm-mocker-server` to exercise the same Inference, Control, and health contracts:
 
 ```bash
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
@@ -69,8 +85,7 @@ cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --extra-engine-args '{"speedup_ratio":1000}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path mocker-model
+  --vllm-endpoint 127.0.0.1:50051
 ```
 
 See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
@@ -86,11 +101,7 @@ disaggregated prefill/decode with NIXL KV transfer.
 There is no published vLLM sidecar image yet, so you build and push your own from
 `Dockerfile` — the same pattern as the TensorRT-LLM and SGLang sidecars.
 
-> [!NOTE]
-> vLLM's `vllm-rs` exposes no gRPC health method, so the engine's probes can only
-> confirm the gRPC port accepts connections (not that the model is loaded) —
-> weaker than the TensorRT-LLM and SGLang sidecars, which make a real HealthCheck
-> RPC. The engine image must be a stock vLLM build that ships `vllm-rs` (v0.26.0+).
+The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
 
 ### Prerequisites
 

@@ -38,7 +38,7 @@ dynamo:
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.12.0"
 
-  nats_version: v2.10.28
+  nats_version: v2.12.12
   etcd_version: v3.5.30
 
   nixl_ref: v1.0.1
@@ -89,7 +89,7 @@ vllm:
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
   flashinf_ref: v0.6.14
   vllm_omni_ref: "v0.26.0rc1"
-  nixl_ref: v1.3.1
+  nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

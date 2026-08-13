@@ -34,7 +34,15 @@ class BasePlannerDefaults:
     # See dynamo.planner.core.budget.proportional_clamp_pair for the
     # tolerance band semantics.
     min_gpu_budget = -1
-    min_endpoint = 1  # applies to both decode and prefill
+    # Minimum endpoints for agg, both roles in disagg, or the active role in
+    # single-component mode when its role-specific value is unset. A
+    # role-specific value overrides it for that role.
+    min_endpoint = 1
+    prefill_min_endpoint = None
+    decode_min_endpoint = None
+    # Localhost-only runtime configuration API (0 disables). It is
+    # unauthenticated by design and trusts processes in the pod namespace.
+    control_api_port = 9086
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
     # Port for exposing planner's own metrics (0 means disabled)

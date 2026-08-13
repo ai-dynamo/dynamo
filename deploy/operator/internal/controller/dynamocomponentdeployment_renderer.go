@@ -54,14 +54,14 @@ type dcdWorkloadRenderer struct {
 	reader                client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commonController.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
 }
 
 func newDCDWorkloadRenderer(
 	reader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *dcdWorkloadRenderer {
 	return &dcdWorkloadRenderer{
 		reader:                reader,
@@ -191,7 +191,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			r.reader,
 			dcd.Namespace,
 			dynamo.ToAlphaCheckpointConfig(checkpointConfig),
-			r.runtimeConfig.Gate,
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")

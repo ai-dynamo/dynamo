@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	podScheduleTimeout  = 5 * time.Minute
-	podScheduleInterval = 3 * time.Second
+	podScheduleTimeout      = 5 * time.Minute
+	podScheduleInterval     = 3 * time.Second
 	podSnapshotPollInterval = 3 * time.Second
 )
 

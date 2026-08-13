@@ -3,8 +3,10 @@
 
 use std::collections::VecDeque;
 
+#[cfg(test)]
+use dynamo_kv_router::protocols::KvCacheEventData;
 use dynamo_kv_router::{
-    protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
+    protocols::{DpRank, ResetScope, RouterEvent, WorkerId},
     recovery::{CursorObservation, CursorState},
 };
 
@@ -76,7 +78,7 @@ impl RankState {
     ) -> LiveEventAction {
         let event_id = event.event.event_id;
 
-        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+        if matches!(event.reset_scope(), Ok(Some(ResetScope::All))) {
             if self
                 .last_admitted_id()
                 .is_some_and(|last_admitted_id| event_id <= last_admitted_id)
@@ -214,6 +216,17 @@ impl RankState {
         self.recovery_inflight = false;
         self.pending_live_events.clear();
         self.max_seen_live_id = None;
+    }
+
+    /// Leave authoritative state and the admission cursor unchanged after a
+    /// non-authoritative snapshot failure.
+    ///
+    /// The production fetch path performs bounded retries before completion. This
+    /// transition is the defensive fallback for a failure delivered directly to
+    /// the state machine; it deliberately waits for the next live event instead of
+    /// starting an unbounded autonomous retry loop.
+    pub(super) fn retry_after_failed_snapshot(&mut self) {
+        self.recovery_inflight = false;
     }
 
     pub(super) fn take_failed_recovery_degraded(&mut self) -> Vec<RouterEvent> {
@@ -358,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_supersedes_same_rank_gap_recovery() {
+    fn only_all_domain_clear_supersedes_same_rank_gap_recovery() {
         let mut state = RankState::default();
         assert!(matches!(
             state.observe_live_event(store(1), false),
@@ -370,19 +383,27 @@ mod tests {
             LiveEventAction::Recover { reset: true, .. }
         ));
 
-        let mut clear = store(5);
+        let mut worker_clear = store(5);
+        worker_clear.event.data = KvCacheEventData::Cleared;
+        assert!(matches!(
+            state.observe_live_event(worker_clear, true),
+            LiveEventAction::Ignore
+        ));
+
+        let mut clear = store(6);
         clear.event.data = KvCacheEventData::Cleared;
+        clear.residency_domain = Default::default();
         assert!(matches!(
             state.observe_live_event(clear, true),
-            LiveEventAction::Clear { event_id: 5, .. }
+            LiveEventAction::Clear { event_id: 6, .. }
         ));
         state.discard_recovery_before_clear();
-        state.commit_live_admission(5);
+        state.commit_live_admission(6);
 
         assert!(!state.recovery_inflight);
         assert!(matches!(
-            state.observe_live_event(store(6), true),
-            LiveEventAction::Apply { event_id: 6, .. }
+            state.observe_live_event(store(7), true),
+            LiveEventAction::Apply { event_id: 7, .. }
         ));
     }
 }

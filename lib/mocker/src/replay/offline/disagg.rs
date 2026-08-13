@@ -612,7 +612,7 @@ impl DisaggFlowState {
     ) -> Result<Uuid> {
         let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         let input_length = request.input_length();
-        let output_length = request.metadata().max_output_tokens;
+        let output_length = request.metadata().effective_max_output_tokens();
         request.metadata_mut().uuid = Some(uuid);
         request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
@@ -801,7 +801,10 @@ impl DisaggFlowState {
             let (input_tokens, requested_output_tokens) = {
                 let state = self.state(signal.uuid)?;
                 let original = state.original_request()?;
-                (original.tokens.len(), original.max_output_tokens)
+                (
+                    original.tokens.len(),
+                    original.effective_max_output_tokens(),
+                )
             };
             let actual_output_tokens =
                 collector.actual_output_length(signal.uuid).ok_or_else(|| {
@@ -2043,7 +2046,9 @@ where
     fn drive_prefill_workers(&mut self) -> Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self.prefill_engine.drive_ready(self.now_ms, None)?;
+            let effects = self
+                .prefill_engine
+                .drive_ready(self.now_ms, &mut self.collector)?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 return Ok(changed);
@@ -2059,7 +2064,7 @@ where
         loop {
             let effects = self
                 .decode_engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+                .drive_ready(self.now_ms, &mut self.collector)?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 #[cfg(test)]
@@ -2090,7 +2095,7 @@ where
 
     fn record_prefill_admissions(&mut self, admissions: Vec<AdmissionEvent>) {
         for admission in admissions {
-            self.collector.on_prefill_admit(
+            self.collector.on_prefill_pool_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,
@@ -2100,7 +2105,7 @@ where
 
     fn record_decode_admissions(&mut self, admissions: Vec<AdmissionEvent>) -> Result<()> {
         for admission in admissions {
-            self.collector.on_decode_admit(
+            self.collector.on_decode_pool_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,

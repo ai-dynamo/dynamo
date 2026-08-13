@@ -6,10 +6,18 @@
 //! Provides helpers for loading PEM certificates and building rustls
 //! `ServerConfig` / `ClientConfig` objects for transport-layer security.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, TryLockError},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use arc_swap::ArcSwap;
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
+use rustls::{ClientConfig, RootCertStore, ServerConfig, SignatureScheme};
 use rustls_pemfile::{certs, private_key};
 
 /// TLS handshake timeout, configurable via `DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS` (default: 3s).
@@ -23,27 +31,21 @@ pub fn handshake_timeout() -> std::time::Duration {
 }
 
 /// Build a rustls `ServerConfig` from PEM certificate and key files.
+///
+/// The certificate is served through a [`ReloadingCertifiedKey`], so a rotated
+/// cert/key on disk (in-place rewrite or an atomic symlink swap) is picked up
+/// automatically on the next handshake without restarting the process. The
+/// initial load is validated eagerly: an invalid cert/key path
+/// fails here rather than starting a server that cannot serve TLS.
 pub fn server_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
-    let cert_pem = std::fs::read(cert_path)
-        .with_context(|| format!("reading cert: {}", cert_path.display()))?;
-    let key_pem =
-        std::fs::read(key_path).with_context(|| format!("reading key: {}", key_path.display()))?;
-
-    let cert_chain = certs(&mut cert_pem.as_slice())
-        .collect::<Result<Vec<_>, _>>()
-        .context("parsing certificate PEM")?;
-
-    let key = private_key(&mut key_pem.as_slice())
-        .context("parsing private key PEM")?
-        .context("no private key found in PEM")?;
+    let resolver = Arc::new(ReloadingCertifiedKey::new(cert_path, key_path)?);
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .context("configuring TLS protocol versions")?
         .with_no_client_auth()
-        .with_single_cert(cert_chain, key)
-        .context("building ServerConfig")?;
+        .with_cert_resolver(resolver);
 
     Ok(config)
 }
@@ -99,6 +101,198 @@ pub fn client_tls_config(ca_cert_path: Option<&Path>, insecure: bool) -> Result<
         .with_no_client_auth();
 
     Ok(config)
+}
+
+/// Load a leaf certificate chain + private key from PEM bytes into a rustls
+/// [`CertifiedKey`], validating that the certificate and key match.
+fn load_certified_key(cert_pem: &[u8], key_pem: &[u8]) -> Result<CertifiedKey> {
+    let mut cert_reader = cert_pem;
+    let cert_chain = certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .context("parsing certificate PEM")?;
+    if cert_chain.is_empty() {
+        anyhow::bail!("no certificates found in PEM");
+    }
+
+    let mut key_reader = key_pem;
+    let key = private_key(&mut key_reader)
+        .context("parsing private key PEM")?
+        .context("no private key found in PEM")?;
+    let signing_key =
+        rustls::crypto::ring::sign::any_supported_type(&key).context("loading TLS private key")?;
+
+    let certified_key = CertifiedKey::new(cert_chain, signing_key);
+    certified_key
+        .keys_match()
+        .context("TLS certificate and private key do not match")?;
+    Ok(certified_key)
+}
+
+/// Content fingerprint of a loaded identity. Change is detected by hashing the
+/// file *contents* (blake3) rather than mtime, so atomic symlink swaps (where a
+/// mounted directory of certs is rotated by relinking) are handled reliably.
+#[derive(Debug, Eq, PartialEq)]
+struct IdentityFingerprint {
+    content_hash: [u8; 32],
+}
+
+impl IdentityFingerprint {
+    fn from_loaded(cert_pem: &[u8], key_pem: &[u8]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(cert_pem);
+        hasher.update(&[0]); // domain separator between cert and key
+        hasher.update(key_pem);
+        Self {
+            content_hash: *hasher.finalize().as_bytes(),
+        }
+    }
+}
+
+struct LoadedIdentity {
+    fingerprint: IdentityFingerprint,
+    certified_key: Arc<CertifiedKey>,
+}
+
+struct ReloadState {
+    /// Fingerprint of the last successfully loaded identity.
+    fingerprint: IdentityFingerprint,
+    last_checked: Instant,
+    /// Minimum time between filesystem checks: the full interval after a
+    /// successful check, a short backoff after a failed one so an in-progress
+    /// rotation is picked up promptly.
+    min_check_interval: Duration,
+}
+
+/// A rustls certificate resolver that reloads the leaf certificate and private
+/// key from disk when their contents change, so certificate rotation takes
+/// effect without a process restart.
+///
+/// Handshakes read the current identity from an [`ArcSwap`] without locking.
+/// One caller at a time performs the rate-limited filesystem check (`try_lock`);
+/// others keep serving the current identity, so a reload never blocks a
+/// handshake. A failed reload keeps the last valid identity and retries soon.
+///
+/// The same type serves as both a [`ResolvesServerCert`] (server leaf cert) and
+/// a [`rustls::client::ResolvesClientCert`] (mTLS client identity).
+pub(crate) struct ReloadingCertifiedKey {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    current: ArcSwap<CertifiedKey>,
+    reload_state: Mutex<ReloadState>,
+}
+
+impl fmt::Debug for ReloadingCertifiedKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReloadingCertifiedKey")
+            .field("cert_path", &self.cert_path)
+            .field("key_path", &self.key_path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReloadingCertifiedKey {
+    const RELOAD_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+    const FAILURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+    fn new(cert_path: &Path, key_path: &Path) -> Result<Self> {
+        let cert_path = cert_path.to_path_buf();
+        let key_path = key_path.to_path_buf();
+        let loaded = Self::load(&cert_path, &key_path)?;
+        Ok(Self {
+            cert_path,
+            key_path,
+            current: ArcSwap::from(loaded.certified_key),
+            reload_state: Mutex::new(ReloadState {
+                fingerprint: loaded.fingerprint,
+                last_checked: Instant::now(),
+                min_check_interval: Self::RELOAD_CHECK_INTERVAL,
+            }),
+        })
+    }
+
+    fn load(cert_path: &Path, key_path: &Path) -> Result<LoadedIdentity> {
+        let cert_pem = std::fs::read(cert_path)
+            .with_context(|| format!("reading cert: {}", cert_path.display()))?;
+        let key_pem = std::fs::read(key_path)
+            .with_context(|| format!("reading key: {}", key_path.display()))?;
+        let certified_key = load_certified_key(&cert_pem, &key_pem)?;
+        let fingerprint = IdentityFingerprint::from_loaded(&cert_pem, &key_pem);
+        Ok(LoadedIdentity {
+            fingerprint,
+            certified_key: Arc::new(certified_key),
+        })
+    }
+
+    fn resolve_key(&self) -> Arc<CertifiedKey> {
+        // Never make a handshake wait on another handshake's filesystem check;
+        // the current identity stays available via ArcSwap while one caller
+        // performs the rate-limited reload.
+        let mut state = match self.reload_state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return self.current.load_full(),
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        if state.last_checked.elapsed() < state.min_check_interval {
+            return self.current.load_full();
+        }
+
+        match Self::load(&self.cert_path, &self.key_path) {
+            Ok(reloaded) => {
+                if state.fingerprint != reloaded.fingerprint {
+                    let cert_count = reloaded.certified_key.cert.len();
+                    self.current.store(reloaded.certified_key);
+                    tracing::info!(
+                        cert_path = %self.cert_path.display(),
+                        cert_count,
+                        "Reloaded rotated TLS certificate and key from disk"
+                    );
+                }
+                state.fingerprint = reloaded.fingerprint;
+                state.last_checked = Instant::now();
+                state.min_check_interval = Self::RELOAD_CHECK_INTERVAL;
+            }
+            Err(error) => {
+                state.last_checked = Instant::now();
+                state.min_check_interval = Self::FAILURE_RETRY_INTERVAL;
+                tracing::warn!(
+                    cert_path = %self.cert_path.display(),
+                    error = %format!("{error:#}"),
+                    "Failed to reload rotated TLS certificate; keeping the last valid identity"
+                );
+            }
+        }
+        self.current.load_full()
+    }
+
+    #[cfg(test)]
+    fn mark_reload_due(&self) {
+        let mut state = self
+            .reload_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.min_check_interval = Duration::ZERO;
+        state.last_checked = Instant::now() - Duration::from_secs(1);
+    }
+}
+
+impl ResolvesServerCert for ReloadingCertifiedKey {
+    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.resolve_key())
+    }
+}
+
+impl rustls::client::ResolvesClientCert for ReloadingCertifiedKey {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(self.resolve_key())
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
 }
 
 /// Certificate verifier that accepts any certificate.
@@ -185,6 +379,108 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("reading key")
+        );
+    }
+
+    fn make_cert_pem() -> (String, String) {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        (cert.pem(), key_pair.serialize_pem())
+    }
+
+    #[test]
+    fn certified_key_reloads_rotated_files() {
+        let (cert1, key1) = make_cert_pem();
+        let cert_file = NamedTempFile::new().unwrap();
+        let key_file = NamedTempFile::new().unwrap();
+        std::fs::write(cert_file.path(), &cert1).unwrap();
+        std::fs::write(key_file.path(), &key1).unwrap();
+
+        let resolver = ReloadingCertifiedKey::new(cert_file.path(), key_file.path()).unwrap();
+        let before = resolver.resolve_key().cert[0].clone();
+
+        // Rotate the file contents in place and force a re-check.
+        let (cert2, key2) = make_cert_pem();
+        std::fs::write(cert_file.path(), &cert2).unwrap();
+        std::fs::write(key_file.path(), &key2).unwrap();
+        resolver.mark_reload_due();
+
+        let after = resolver.resolve_key().cert[0].clone();
+        assert_ne!(
+            before, after,
+            "resolver should serve the rotated certificate after the contents change"
+        );
+    }
+
+    #[test]
+    fn certified_key_reloads_symlinked_generation() {
+        use std::os::unix::fs::symlink;
+
+        // Mimic a symlink-based cert rotation: the mounted paths are symlinks
+        // into a per-generation directory, rotated by an atomic rename over the
+        // link.
+        let dir = tempfile::tempdir().unwrap();
+        let (c1, k1) = make_cert_pem();
+        let gen1 = dir.path().join("gen1");
+        std::fs::create_dir(&gen1).unwrap();
+        std::fs::write(gen1.join("tls.crt"), &c1).unwrap();
+        std::fs::write(gen1.join("tls.key"), &k1).unwrap();
+
+        let cert_link = dir.path().join("tls.crt");
+        let key_link = dir.path().join("tls.key");
+        symlink(gen1.join("tls.crt"), &cert_link).unwrap();
+        symlink(gen1.join("tls.key"), &key_link).unwrap();
+
+        let resolver = ReloadingCertifiedKey::new(&cert_link, &key_link).unwrap();
+        let before = resolver.resolve_key().cert[0].clone();
+
+        let (c2, k2) = make_cert_pem();
+        let gen2 = dir.path().join("gen2");
+        std::fs::create_dir(&gen2).unwrap();
+        std::fs::write(gen2.join("tls.crt"), &c2).unwrap();
+        std::fs::write(gen2.join("tls.key"), &k2).unwrap();
+        // Atomic symlink swap: create new links then rename over the live ones.
+        let cert_tmp = dir.path().join("tls.crt.tmp");
+        let key_tmp = dir.path().join("tls.key.tmp");
+        symlink(gen2.join("tls.crt"), &cert_tmp).unwrap();
+        symlink(gen2.join("tls.key"), &key_tmp).unwrap();
+        std::fs::rename(&cert_tmp, &cert_link).unwrap();
+        std::fs::rename(&key_tmp, &key_link).unwrap();
+        resolver.mark_reload_due();
+
+        let after = resolver.resolve_key().cert[0].clone();
+        assert_ne!(
+            before, after,
+            "resolver should follow the swapped symlink to the new generation"
+        );
+    }
+
+    #[test]
+    fn certified_key_keeps_previous_on_corrupt_reload() {
+        let (c1, k1) = make_cert_pem();
+        let cert_file = NamedTempFile::new().unwrap();
+        let key_file = NamedTempFile::new().unwrap();
+        std::fs::write(cert_file.path(), &c1).unwrap();
+        std::fs::write(key_file.path(), &k1).unwrap();
+        let resolver = ReloadingCertifiedKey::new(cert_file.path(), key_file.path()).unwrap();
+        let before = resolver.resolve_key().cert[0].clone();
+
+        // Simulate a partial write mid-rotation.
+        std::fs::write(cert_file.path(), b"not a valid pem").unwrap();
+        resolver.mark_reload_due();
+
+        let after = resolver.resolve_key().cert[0].clone();
+        assert_eq!(
+            before, after,
+            "a failed reload must keep serving the previously loaded certificate"
+        );
+        assert_eq!(
+            resolver.reload_state.lock().unwrap().min_check_interval,
+            ReloadingCertifiedKey::FAILURE_RETRY_INTERVAL,
+            "a failed reload should schedule a short retry"
         );
     }
 

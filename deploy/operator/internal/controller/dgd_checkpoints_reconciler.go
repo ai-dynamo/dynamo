@@ -58,14 +58,14 @@ type dgdCheckpointsReconciler struct {
 	dgdResourceSyncer
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commoncontroller.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
 }
 
 func newDGDCheckpointsReconciler(
 	syncer dgdResourceSyncer,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *dgdCheckpointsReconciler {
 	return &dgdCheckpointsReconciler{
 		dgdResourceSyncer:     syncer,
@@ -130,7 +130,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
 			refConfig := *alphaCheckpointConfig.DeepCopy()
 			refConfig.CheckpointRef = &checkpointName
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dgd.Namespace, &refConfig, r.runtimeConfig.Gate)
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dgd.Namespace, &refConfig)
 			if apierrors.IsNotFound(err) {
 				info = nil
 				err = nil
@@ -142,7 +142,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				}
 			}
 		} else {
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dgd.Namespace, alphaCheckpointConfig, r.runtimeConfig.Gate)
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dgd.Namespace, alphaCheckpointConfig)
 		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
@@ -275,9 +275,6 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 	}
 	var checkpointGMSClaimTemplateName string
 	if gmsSpec != nil && gmsSpec.Enabled {
-		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec, r.runtimeConfig.Gate); err != nil {
-			return nil, err
-		}
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
 		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
 		if err != nil {
@@ -324,7 +321,6 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		deletionPolicy,
 		gmsSpec,
 		dynamoDeployment,
-		r.runtimeConfig.Gate,
 	)
 	if err != nil {
 		return nil, err

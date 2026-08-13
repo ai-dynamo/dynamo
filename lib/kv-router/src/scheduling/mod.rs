@@ -14,6 +14,8 @@ pub mod queue;
 mod queue_admission;
 pub mod selector;
 
+mod worker_selection_config;
+
 mod types;
 pub use filter::*;
 pub use local::LocalScheduler;
@@ -26,6 +28,7 @@ pub use overlap_refresh::{
 };
 pub use policy_config::{
     PolicyClassConfig, PolicyProfile, RouterPolicyConfig, RouterPolicyConfigError,
+    WorkerSelectionConfig, WorkerSelectionInstance,
 };
 pub use policy_queue::{
     PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
