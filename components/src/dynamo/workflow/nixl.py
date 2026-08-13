@@ -309,11 +309,12 @@ class NixlTensorCarrier:
     ) -> None:
         if nixl_module is None:
             try:
-                from dynamo import nixl_connect as nixl_module
+                from dynamo import nixl_connect as default_nixl_module
             except ImportError as error:
                 raise RuntimeError(
                     "NIXL tensor carrier requested but dynamo.nixl_connect is unavailable"
                 ) from error
+            nixl_module = default_nixl_module
         if torch_module is None:
             try:
                 import torch
