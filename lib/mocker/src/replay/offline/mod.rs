@@ -56,6 +56,8 @@ pub use evidence::{
 pub use extensions::kv_router::{
     CanonicalReplayRouterMode, CanonicalRouterMetadata, canonical_router_metadata,
 };
+#[doc(hidden)]
+pub use interactive::{CapturedReplayEvent, CapturedReplayEventData, CapturedReplayEventDataView};
 pub use interactive::{
     OfflineReplaySession, ReplayAgenticRequest, ReplayAgenticWorkflow, ReplayEvent,
     ReplayEventData, ReplayPendingPlacement, ReplayPlacementCandidate, ReplayRequestSpec,

@@ -971,6 +971,14 @@ impl InteractiveRuntime {
         }
     }
 
+    fn drain_captured_events(&mut self) -> Vec<CapturedReplayEvent> {
+        match self {
+            Self::External(runtime) => runtime.drain_interactive_captured_events(),
+            Self::RoundRobin(runtime) => runtime.drain_interactive_captured_events(),
+            Self::KvRouter(runtime) => runtime.drain_interactive_captured_events(),
+        }
+    }
+
     fn snapshot(&self) -> ReplaySnapshot {
         match self {
             Self::External(runtime) => runtime.interactive_snapshot(),
@@ -3831,6 +3839,16 @@ impl OfflineReplaySession {
 
     pub fn drain_events(&mut self) -> Result<Vec<ReplayEvent>> {
         Ok(self.runtime_mut()?.drain_events())
+    }
+
+    /// Drain eagerly captured events without cloning repeated owned metadata.
+    ///
+    /// This is a general adapter surface. Each item is a frozen snapshot and
+    /// cannot observe later replay state; adapters must materialize independent
+    /// public values before returning across a mutable foreign-language boundary.
+    #[doc(hidden)]
+    pub fn drain_captured_events(&mut self) -> Result<Vec<CapturedReplayEvent>> {
+        Ok(self.runtime_mut()?.drain_captured_events())
     }
 
     pub fn pending_placements(&mut self) -> Result<Vec<ReplayPendingPlacement>> {

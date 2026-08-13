@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import hashlib
+import json
+
 import pytest
 
 from dynamo.mocker import MockEngineArgs
@@ -443,6 +447,64 @@ def test_interactive_event_and_pending_python_schema_is_exact():
         event["event"]["terminal_status"] is None
         for event in lifecycle
         if event["event_type"] != "terminal"
+    )
+
+
+def _mutation_isolation_lifecycle(mutate_returned_event: bool) -> list[dict]:
+    session = OfflineReplaySession(
+        engine_args=_engine_args(),
+        num_workers=1,
+        trace_block_size=4,
+        router="external",
+    )
+    request = _request("mutation-isolation", 0).to_native()
+    request["routing_constraints"] = ReplayRoutingConstraints(
+        preferred_taints={"preferred": 1.5}
+    ).to_native()
+    session.submit(request)
+    session.settle_current_time()
+    placement = session.drain_events()[0]
+    retained_placement = copy.deepcopy(placement)
+    if mutate_returned_event:
+        data = placement["event"]
+        data["logical_request_id"] = "corrupted"
+        data["routing_constraints"]["preferred_taints"].clear()
+        data["eligible_pool_ids"].clear()
+        data["candidates"][0]["target"]["pool_id"] = "corrupted"
+        data["candidates"][0]["tags"].append("corrupted")
+
+    pending = session.pending_placements()[0]
+    assert pending["logical_request_id"] == "mutation-isolation"
+    assert pending["routing_constraints"]["preferred_taints"] == {
+        "preferred": 1.5
+    }
+    assert pending["eligible_pool_ids"] == ["default"]
+    assert pending["candidates"][0]["target"]["pool_id"] == "default"
+    assert pending["candidates"][0]["tags"] == []
+
+    session.assign("mutation-isolation", WorkerTarget(worker_id=0))
+    lifecycle = [retained_placement] + _drive_external_to_terminals(
+        session, {"mutation-isolation"}
+    )
+    session.close()
+    session.finalize()
+    return lifecycle
+
+
+def test_drained_event_mutation_cannot_change_lifecycle_or_terminal_digests():
+    control = _mutation_isolation_lifecycle(False)
+    mutated = _mutation_isolation_lifecycle(True)
+    assert mutated == control
+
+    def digest(value: object) -> str:
+        payload = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    assert digest(mutated) == digest(control)
+    assert digest([event for event in mutated if event["event_type"] == "terminal"]) == digest(
+        [event for event in control if event["event_type"] == "terminal"]
     )
 
 

@@ -21,8 +21,9 @@ use super::evidence::{
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
 use super::interactive::{
-    InteractiveCapture, InteractiveRequestIdentity, ReplayEvent, ReplayPendingPlacement,
-    ReplayPlacementCandidate, ReplaySnapshot, ReplayStepStatus, ReplayWorkerSnapshot,
+    CapturedReplayEvent, InteractiveCapture, InteractiveRequestIdentity, ReplayEvent,
+    ReplayPendingPlacement, ReplayPlacementCandidate, ReplaySnapshot, ReplayStepStatus,
+    ReplayWorkerSnapshot,
 };
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -2250,10 +2251,19 @@ where
     }
 
     pub(in crate::replay::offline) fn drain_interactive_events(&mut self) -> Vec<ReplayEvent> {
+        self.drain_interactive_captured_events()
+            .into_iter()
+            .map(CapturedReplayEvent::into_owned)
+            .collect()
+    }
+
+    pub(in crate::replay::offline) fn drain_interactive_captured_events(
+        &mut self,
+    ) -> Vec<CapturedReplayEvent> {
         let mut events = self
             .interactive
             .as_mut()
-            .map(InteractiveCapture::drain_events)
+            .map(InteractiveCapture::drain_captured_events)
             .unwrap_or_default();
         let Some(request_id) = self.placement.next_pending_request_id() else {
             return events;
@@ -2273,9 +2283,10 @@ where
         };
         let candidates = self.interactive_placement_candidates(request);
         if let Some(capture) = self.interactive.as_mut() {
-            let event = capture
-                .placement_needed_event(request_id, self.now_ms, candidates)
+            let (event, candidates) = capture
+                .placement_needed_captured_event(request_id, self.now_ms, candidates)
                 .expect("pending external placement must retain authored identity");
+            capture.retain_captured_placement(request_id, candidates);
             // Existing terminal/DAG/lifecycle events retain priority. The one
             // fresh controller boundary is always appended after them.
             events.push(event);

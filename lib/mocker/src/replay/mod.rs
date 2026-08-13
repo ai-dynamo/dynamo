@@ -188,6 +188,8 @@ pub use offline::{
     simulate_controlled_aggregated, simulate_controlled_aggregated_kv_router_with_options,
     simulate_controlled_aggregated_with_options, with_runtime_evidence,
 };
+#[doc(hidden)]
+pub use offline::{CapturedReplayEvent, CapturedReplayEventData, CapturedReplayEventDataView};
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(

@@ -16,6 +16,9 @@ use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
 use dynamo_mocker::replay::{
+    CapturedReplayEvent as RsCapturedReplayEvent,
+    CapturedReplayEventData as RsCapturedReplayEventData,
+    CapturedReplayEventDataView as RsCapturedReplayEventDataView,
     OfflineReplaySession as RsOfflineReplaySession, PoolRouter as RsPoolRouter,
     PoolSpec as RsPoolSpec, ReplayAgenticRequest as RsReplayAgenticRequest,
     ReplayAgenticWorkflow as RsReplayAgenticWorkflow, ReplayArgsMode, ReplayEvent as RsReplayEvent,
@@ -24,8 +27,8 @@ use dynamo_mocker::replay::{
     ReplayRequestSpec as RsReplayRequestSpec,
     ReplayRoutingConstraints as RsReplayRoutingConstraints, ReplayScalingDecision,
     ReplayScalingPolicy, ReplayScalingSnapshot, ReplaySessionOptions as RsReplaySessionOptions,
-    ReplaySessionRouter as RsReplaySessionRouter, ReplayTerminalStatus as RsReplayTerminalStatus,
-    ReplayStepStatus as RsReplayStepStatus, WorkerSpec as RsWorkerSpec,
+    ReplaySessionRouter as RsReplaySessionRouter, ReplayStepStatus as RsReplayStepStatus,
+    ReplayTerminalStatus as RsReplayTerminalStatus, WorkerSpec as RsWorkerSpec,
     WorkerTarget as RsWorkerTarget,
 };
 use pyo3::{
@@ -1253,9 +1256,7 @@ fn has_exact_worker_target_fields(value: &Bound<'_, PyDict>) -> PyResult<bool> {
 /// path so its exception type and detailed message remain byte-for-byte
 /// compatible. PyO3 integer extraction also preserves Serde's current Python
 /// behavior for `bool` and `__index__` values.
-fn parse_interactive_worker_target(
-    value: &Bound<'_, PyAny>,
-) -> PyResult<InteractiveWorkerTarget> {
+fn parse_interactive_worker_target(value: &Bound<'_, PyAny>) -> PyResult<InteractiveWorkerTarget> {
     if let Ok(value) = value.downcast::<PyDict>()
         && has_exact_worker_target_fields(value).unwrap_or(false)
     {
@@ -1277,7 +1278,8 @@ fn parse_interactive_worker_target(
                     .map(Bound::extract)
                     .transpose()?
                     .unwrap_or_default(),
-            })();
+            })
+        })();
         if let Ok(target) = direct {
             return Ok(target);
         }
@@ -1313,10 +1315,7 @@ fn replay_step_status_parts(status: RsReplayStepStatus) -> (&'static str, f64) {
     }
 }
 
-fn replay_step_status_to_python(
-    py: Python<'_>,
-    status: RsReplayStepStatus,
-) -> PyResult<PyObject> {
+fn replay_step_status_to_python(py: Python<'_>, status: RsReplayStepStatus) -> PyResult<PyObject> {
     let (status, now_ms) = replay_step_status_parts(status);
     let value = PyDict::new(py);
     // Preserve the internally-tagged Serde declaration order exactly.
@@ -1534,6 +1533,225 @@ fn replay_events_to_python(py: Python<'_>, events: Vec<RsReplayEvent>) -> PyResu
     Ok(values.into_any().unbind())
 }
 
+fn replay_strings_to_python<'py>(
+    py: Python<'py>,
+    values: &[String],
+) -> PyResult<Bound<'py, PyList>> {
+    let result = PyList::empty(py);
+    for value in values {
+        result.append(value.as_str())?;
+    }
+    Ok(result)
+}
+
+fn replay_worker_target_ref_to_python<'py>(
+    py: Python<'py>,
+    target: &RsWorkerTarget,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    value.set_item(pyo3::intern!(py, "pool_id"), target.pool_id.as_str())?;
+    value.set_item(pyo3::intern!(py, "worker_id"), target.worker_id)?;
+    value.set_item(pyo3::intern!(py, "dp_rank"), target.dp_rank)?;
+    Ok(value)
+}
+
+fn replay_routing_constraints_ref_to_python<'py>(
+    py: Python<'py>,
+    constraints: &RsReplayRoutingConstraints,
+) -> PyResult<Bound<'py, PyDict>> {
+    let preferred_taints = PyDict::new(py);
+    for (taint, weight) in &constraints.preferred_taints {
+        preferred_taints.set_item(taint.as_str(), *weight)?;
+    }
+    let value = PyDict::new(py);
+    value.set_item(
+        pyo3::intern!(py, "required_taints"),
+        replay_strings_to_python(py, &constraints.required_taints)?,
+    )?;
+    value.set_item(pyo3::intern!(py, "preferred_taints"), preferred_taints)?;
+    Ok(value)
+}
+
+fn replay_placement_candidate_ref_to_python<'py>(
+    py: Python<'py>,
+    candidate: &RsReplayPlacementCandidate,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    value.set_item(
+        pyo3::intern!(py, "target"),
+        replay_worker_target_ref_to_python(py, &candidate.target)?,
+    )?;
+    value.set_item(pyo3::intern!(py, "active"), candidate.active)?;
+    value.set_item(pyo3::intern!(py, "draining"), candidate.draining)?;
+    value.set_item(pyo3::intern!(py, "eligible"), candidate.eligible)?;
+    value.set_item(
+        pyo3::intern!(py, "constraint_reason"),
+        candidate.constraint_reason.as_deref(),
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "in_flight_requests"),
+        candidate.in_flight_requests,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "queued_requests"),
+        candidate.queued_requests,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "running_requests"),
+        candidate.running_requests,
+    )?;
+    value.set_item(pyo3::intern!(py, "queued_tokens"), candidate.queued_tokens)?;
+    value.set_item(
+        pyo3::intern!(py, "running_tokens"),
+        candidate.running_tokens,
+    )?;
+    value.set_item(pyo3::intern!(py, "max_num_seqs"), candidate.max_num_seqs)?;
+    value.set_item(
+        pyo3::intern!(py, "preemption_count"),
+        candidate.preemption_count,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "kv_prefix_overlap_tokens"),
+        candidate.kv_prefix_overlap_tokens,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "kv_capacity_blocks"),
+        candidate.kv_capacity_blocks,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "kv_occupied_blocks"),
+        candidate.kv_occupied_blocks,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "kv_free_blocks"),
+        candidate.kv_free_blocks,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "tags"),
+        replay_strings_to_python(py, &candidate.tags)?,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "taints"),
+        replay_strings_to_python(py, &candidate.taints)?,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "capabilities"),
+        replay_strings_to_python(py, &candidate.capabilities)?,
+    )?;
+    Ok(value)
+}
+
+fn replay_placement_candidates_ref_to_python<'py>(
+    py: Python<'py>,
+    candidates: &[RsReplayPlacementCandidate],
+) -> PyResult<Bound<'py, PyList>> {
+    let values = PyList::empty(py);
+    for candidate in candidates {
+        values.append(replay_placement_candidate_ref_to_python(py, candidate)?)?;
+    }
+    Ok(values)
+}
+
+fn replay_captured_event_data_to_python<'py>(
+    py: Python<'py>,
+    data: &RsCapturedReplayEventData,
+) -> PyResult<Bound<'py, PyDict>> {
+    let RsCapturedReplayEventDataView {
+        logical_request_id,
+        attempt_id,
+        group_id,
+        internal_uuid,
+        session_id,
+        authored_turn_index,
+        timestamp_ms,
+        pool_id,
+        worker_id,
+        dp_rank,
+        terminal_status,
+        input_length,
+        requested_output_length,
+        emitted_output_count,
+        reused_input_tokens,
+        ttft_ms,
+        e2e_latency_ms,
+        priority,
+        strict_priority,
+        policy_class,
+        routing_constraints,
+        eligible_pool_ids,
+        candidates,
+    } = data.view();
+    let value = PyDict::new(py);
+    value.set_item(pyo3::intern!(py, "logical_request_id"), logical_request_id)?;
+    value.set_item(pyo3::intern!(py, "attempt_id"), attempt_id)?;
+    value.set_item(pyo3::intern!(py, "group_id"), group_id)?;
+    value.set_item(
+        pyo3::intern!(py, "internal_uuid"),
+        internal_uuid.to_string(),
+    )?;
+    value.set_item(pyo3::intern!(py, "session_id"), session_id)?;
+    value.set_item(
+        pyo3::intern!(py, "authored_turn_index"),
+        authored_turn_index,
+    )?;
+    value.set_item(pyo3::intern!(py, "timestamp_ms"), timestamp_ms)?;
+    value.set_item(pyo3::intern!(py, "pool_id"), pool_id)?;
+    value.set_item(pyo3::intern!(py, "worker_id"), worker_id)?;
+    value.set_item(pyo3::intern!(py, "dp_rank"), dp_rank)?;
+    value.set_item(
+        pyo3::intern!(py, "terminal_status"),
+        terminal_status.map(replay_terminal_status_name),
+    )?;
+    value.set_item(pyo3::intern!(py, "input_length"), input_length)?;
+    value.set_item(
+        pyo3::intern!(py, "requested_output_length"),
+        requested_output_length,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "emitted_output_count"),
+        emitted_output_count,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "reused_input_tokens"),
+        reused_input_tokens,
+    )?;
+    value.set_item(pyo3::intern!(py, "ttft_ms"), ttft_ms)?;
+    value.set_item(pyo3::intern!(py, "e2e_latency_ms"), e2e_latency_ms)?;
+    value.set_item(pyo3::intern!(py, "priority"), priority)?;
+    value.set_item(pyo3::intern!(py, "strict_priority"), strict_priority)?;
+    value.set_item(pyo3::intern!(py, "policy_class"), policy_class)?;
+    value.set_item(
+        pyo3::intern!(py, "routing_constraints"),
+        replay_routing_constraints_ref_to_python(py, routing_constraints)?,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "eligible_pool_ids"),
+        replay_strings_to_python(py, eligible_pool_ids)?,
+    )?;
+    value.set_item(
+        pyo3::intern!(py, "candidates"),
+        replay_placement_candidates_ref_to_python(py, candidates)?,
+    )?;
+    Ok(value)
+}
+
+fn replay_captured_events_to_python(
+    py: Python<'_>,
+    events: Vec<RsCapturedReplayEvent>,
+) -> PyResult<PyObject> {
+    let values = PyList::empty(py);
+    for event in events {
+        let value = PyDict::new(py);
+        value.set_item(pyo3::intern!(py, "event_type"), event.event_type())?;
+        value.set_item(
+            pyo3::intern!(py, "event"),
+            replay_captured_event_data_to_python(py, event.data())?,
+        )?;
+        values.append(value)?;
+    }
+    Ok(values.into_any().unbind())
+}
+
 fn replay_pending_placements_to_python(
     py: Python<'_>,
     pending: Vec<RsReplayPendingPlacement>,
@@ -1708,8 +1926,8 @@ impl PyOfflineReplaySession {
     }
 
     fn drain_events(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let events = self.inner.drain_events().map_err(to_pyerr)?;
-        replay_events_to_python(py, events)
+        let events = self.inner.drain_captured_events().map_err(to_pyerr)?;
+        replay_captured_events_to_python(py, events)
     }
 
     fn pending_placements(&mut self, py: Python<'_>) -> PyResult<PyObject> {
