@@ -67,9 +67,6 @@ impl QueueAdmissionPolicy for SessionAdmissionPolicy {
         };
         let request_id = request.request_id().to_owned();
         let admission_id = request.id();
-        if self.request_admissions.contains_key(&request_id) {
-            return QueueAdmissionDecision::Bypass;
-        }
         self.request_sessions
             .insert(request_id.clone(), session_id.clone());
         self.admission_requests

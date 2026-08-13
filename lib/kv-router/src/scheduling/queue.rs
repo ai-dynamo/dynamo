@@ -248,6 +248,8 @@ struct SchedulerQueueActor<
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     admission_workers: Vec<QueueAdmissionWorker>,
     admission_workers_initialized: bool,
+    lifecycle_request_ids: HashSet<String>,
+    managed_admission_request_ids: HashSet<String>,
     admission_bookings: HashMap<String, WorkerWithDpRank>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
 }
@@ -431,6 +433,8 @@ impl<
             available_worker_provider,
             admission_workers: Vec::new(),
             admission_workers_initialized: false,
+            lifecycle_request_ids: HashSet::new(),
+            managed_admission_request_ids: HashSet::new(),
             admission_bookings: HashMap::new(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
         };
@@ -812,12 +816,13 @@ impl<
                     ack_tx,
                 } => {
                     let mut finished_handled = false;
-                    if let Some((request_id, expected_worker, outcome)) = finished
-                        && let Some(booked_worker) =
-                            self.handle_admission_finished(&request_id, expected_worker, outcome)
-                    {
-                        worker = worker.or(Some(booked_worker));
-                        finished_handled = true;
+                    if let Some((request_id, expected_worker, outcome)) = finished {
+                        let (handled, booked_worker) =
+                            self.handle_admission_finished(&request_id, expected_worker, outcome);
+                        if handled {
+                            worker = worker.or(booked_worker);
+                            finished_handled = true;
+                        }
                     }
                     self.handle_update(worker).await;
                     if drain_cleanup && self.drain_cleanup() {
@@ -857,7 +862,7 @@ impl<
 
     fn handle_enqueue(
         &mut self,
-        request: SchedulingRequest,
+        mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
     ) -> (bool, bool) {
         let decay_now = Instant::now();
@@ -876,9 +881,27 @@ impl<
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
             (class_index, Some(snapshot))
         };
-        let admission_decision = if request.mode.lifecycle_request_id().is_some()
-            && self.pending.has_admission_policy()
+        let lifecycle_request_id = request
+            .mode
+            .lifecycle_request_id()
+            .filter(|_| self.pending.has_admission_policy())
+            .map(str::to_owned);
+        if lifecycle_request_id
+            .as_ref()
+            .is_some_and(|request_id| self.lifecycle_request_ids.contains(request_id))
         {
+            request.respond(Err(KvSchedulerError::BookingFailed(format!(
+                "request ID {} is already managed by queue admission",
+                lifecycle_request_id.as_deref().expect("checked as some")
+            ))));
+            return (false, false);
+        }
+        if let Some(request_id) = lifecycle_request_id.as_ref() {
+            let inserted = self.lifecycle_request_ids.insert(request_id.clone());
+            debug_assert!(inserted, "duplicate lifecycle request ID");
+        }
+
+        let admission_decision = if lifecycle_request_id.is_some() {
             self.refresh_admission_request_workers(&request);
             self.pending.admit_with_admission_policy(
                 request
@@ -892,6 +915,12 @@ impl<
         } else {
             None
         };
+        if admission_decision.is_some() {
+            let inserted = self
+                .managed_admission_request_ids
+                .insert(lifecycle_request_id.expect("admission request is lifecycle-managed"));
+            debug_assert!(inserted, "duplicate managed admission request ID");
+        }
         let admission_id = admission_decision.map(|(id, _)| id);
         let deferred = admission_decision
             .is_some_and(|(_, decision)| matches!(decision, QueueAdmissionDecision::Defer));
@@ -945,14 +974,10 @@ impl<
         };
         if let Err((rejection, queued)) = enqueue {
             let mut request = queued.request;
-            let made_ready = queued.admission_id.is_some_and(|_| {
-                self.pending.admission_event(QueueAdmissionEvent::Aborted {
-                    request_id: request
-                        .mode
-                        .tracked_request_id()
-                        .expect("queue admission request is tracked"),
-                })
-            });
+            let made_ready = request
+                .mode
+                .lifecycle_request_id()
+                .is_some_and(|request_id| self.abort_admission_request(request_id));
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
             return (made_ready, false);
         }
@@ -1073,10 +1098,13 @@ impl<
         let mut unmanaged_request_ids = HashSet::new();
         for cleanup in dirty {
             let request_id = &cleanup.request_id;
+            self.lifecycle_request_ids.remove(request_id);
             self.admission_bookings.remove(request_id);
-            made_ready |= self
-                .pending
-                .admission_event(QueueAdmissionEvent::Aborted { request_id });
+            if self.managed_admission_request_ids.remove(request_id) {
+                made_ready |= self
+                    .pending
+                    .admission_event(QueueAdmissionEvent::Aborted { request_id });
+            }
             if self.slots.request_worker(request_id).is_some() {
                 if let Err(error) = self.slots.free(request_id, Instant::now()) {
                     tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
@@ -1109,12 +1137,27 @@ impl<
         request_id: &str,
         expected_worker: Option<WorkerWithDpRank>,
         outcome: AdmissionRequestOutcome,
-    ) -> Option<WorkerWithDpRank> {
-        let worker = self.admission_bookings.get(request_id).copied()?;
-        if expected_worker.is_some_and(|expected| expected != worker) {
-            return None;
+    ) -> (bool, Option<WorkerWithDpRank>) {
+        if !self.lifecycle_request_ids.contains(request_id) {
+            return (false, None);
         }
+        let managed = self.managed_admission_request_ids.contains(request_id);
+        let worker = self.admission_bookings.get(request_id).copied();
+        if managed && worker.is_none() {
+            return (false, None);
+        }
+        if expected_worker
+            .zip(worker)
+            .is_some_and(|(expected, actual)| expected != actual)
+        {
+            return (false, None);
+        }
+
+        self.lifecycle_request_ids.remove(request_id);
         self.admission_bookings.remove(request_id);
+        if !self.managed_admission_request_ids.remove(request_id) {
+            return (true, worker);
+        }
         let event = match outcome {
             AdmissionRequestOutcome::Completed { context_tokens } => {
                 QueueAdmissionEvent::Completed {
@@ -1125,7 +1168,16 @@ impl<
             AdmissionRequestOutcome::Aborted => QueueAdmissionEvent::Aborted { request_id },
         };
         self.pending.admission_event(event);
-        Some(worker)
+        (true, worker)
+    }
+
+    fn abort_admission_request(&mut self, request_id: &str) -> bool {
+        self.lifecycle_request_ids.remove(request_id);
+        self.admission_bookings.remove(request_id);
+        self.managed_admission_request_ids.remove(request_id)
+            && self
+                .pending
+                .admission_event(QueueAdmissionEvent::Aborted { request_id })
     }
 
     fn has_dispatchable_ready_head(&self) -> bool {
@@ -1347,16 +1399,10 @@ impl<
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
-                let made_ready = if admission_id.is_some() {
-                    self.pending.admission_event(QueueAdmissionEvent::Aborted {
-                        request_id: request
-                            .mode
-                            .tracked_request_id()
-                            .expect("queue admission request is tracked"),
-                    })
-                } else {
-                    false
-                };
+                let made_ready = request
+                    .mode
+                    .lifecycle_request_id()
+                    .is_some_and(|request_id| self.abort_admission_request(request_id));
                 request.respond(Err(e));
                 return (made_ready, false);
             }
@@ -1409,18 +1455,16 @@ impl<
             response,
             non_max_overlap_selection,
         );
-        let made_ready = admission_id.is_some_and(|id| {
-            if owns_lifecycle {
+        let made_ready = if owns_lifecycle {
+            admission_id.is_some_and(|id| {
                 let previous = self.admission_bookings.insert(request_id.clone(), worker);
                 debug_assert!(previous.is_none(), "duplicate admission booking request ID");
                 self.pending
                     .admission_event(QueueAdmissionEvent::Dispatched { id, worker })
-            } else {
-                self.pending.admission_event(QueueAdmissionEvent::Aborted {
-                    request_id: &request_id,
-                })
-            }
-        });
+            })
+        } else {
+            self.abort_admission_request(&request_id)
+        };
         (made_ready, owns_lifecycle)
     }
 
@@ -2388,6 +2432,60 @@ mod tests {
             .await;
         assert_eq!(state.completed.load(Ordering::Relaxed), 1);
         assert_eq!(state.completed_context_tokens.load(Ordering::Relaxed), 48);
+    }
+
+    #[tokio::test]
+    async fn custom_admission_policy_rejects_duplicate_request_id_while_deferred() {
+        let state = Arc::new(AdmissionPolicyState::default());
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(DeferOncePolicy {
+                state: Arc::clone(&state),
+            })),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(1, 16, 128, None, selector);
+
+        let (mut first, mut first_response_rx) = make_request("policy-request", 32);
+        first.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "policy-request".to_owned(),
+        };
+        let first_lease = queue.new_request_lifecycle_lease(Some("policy-request"));
+        let mut first_lease = queue
+            .enqueue_with_block_hashes_and_lease(first, None, first_lease)
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut first_response_rx)
+                .await
+                .is_err()
+        );
+
+        let (mut duplicate, duplicate_response_rx) = make_request("policy-request", 32);
+        duplicate.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "policy-request".to_owned(),
+        };
+        let duplicate_lease = queue.new_request_lifecycle_lease(Some("policy-request"));
+        let _duplicate_lease = queue
+            .enqueue_with_block_hashes_and_lease(duplicate, None, duplicate_lease)
+            .await;
+        let error = duplicate_response_rx.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            KvSchedulerError::BookingFailed(message)
+                if message.contains("already managed by queue admission")
+        ));
+
+        queue.update().await;
+        let response = first_response_rx.await.unwrap().unwrap();
+        first_lease.as_mut().unwrap().disarm();
+        slots
+            .free(&"policy-request".to_owned(), Instant::now())
+            .unwrap();
+        assert!(
+            queue
+                .complete_request("policy-request", Some(response.best_worker), Some(48))
+                .await
+        );
+        assert_eq!(state.completed.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
