@@ -9,17 +9,19 @@
 # GPL-encumbered ffmpeg binary that has CVE exposure; we point imageio at the
 # in-tree LGPL ffmpeg CLI via IMAGEIO_FFMPEG_EXE instead.
 --no-binary imageio-ffmpeg
-
-# Used by the trtllm video_diffusion handler to encode generated frames to MP4.
-# Upstream tensorrt-llm/release does not ship them.
-imageio>=2.37.0
-imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # The upstream tensorrt-llm/release image bundles the JupyterLab developer stack
 # (jupyterlab/notebook -> jupyter-server -> tornado; nbconvert -> mistune;
 # beautifulsoup4 -> soupsieve) at older releases than PyPI currently publishes.
 # Floor them so the --no-deps install refreshes the bundled copies in place to
 # the current patch releases (see also mistune/soupsieve/tornado below).
+gitpython>=3.1.58
+
+# Used by the trtllm video_diffusion handler to encode generated frames to MP4.
+# Upstream tensorrt-llm/release does not ship them.
+imageio>=2.37.0
+imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 jupyter-server>=2.20.0
+jupyterlab>=4.5.10
 mistune>=3.3.0  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime + gpu_memory_service. Upstream tensorrt-llm/release
 # does not ship them; vllm/vllm-openai does (which is why DYN-2204's vllm path
