@@ -1,0 +1,289 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reusable PagerDuty notifier for nightly artifact-publication failures.
+# Maps the publication stages' job results to a PagerDuty Events API v2 trigger
+# routed to the Ops-Support service, so an unattended nightly that fails to push
+# containers to NGC or wheels to Artifactory pages someone instead of dying in a
+# Slack thread. Called via `uses: ./.github/workflows/notify-pagerduty.yml`.
+#
+# Sends `trigger` only — never `resolve`. Callers pass a dedup_key containing
+# github.run_id, so each nightly opens its own incident (closed manually by
+# Ops-Support) while a "Re-run failed jobs" folds into the incident already open.
+name: Notify PagerDuty
+
+on:
+  workflow_call:
+    inputs:
+      pipeline_name:
+        description: "Human-readable pipeline name used in the incident summary (e.g. Nightly)."
+        required: true
+        type: string
+      dedup_key:
+        description: |
+          PagerDuty dedup_key. Include github.run_id so each run opens its own
+          incident but re-runs of the same run fold into it.
+        required: true
+        type: string
+      runs_on:
+        description: "Runner label for the notifier job."
+        required: false
+        type: string
+        default: ubuntu-slim
+
+      # --- publication stage results (pass needs.<job>.result) ---------------
+      # Empty string means "stage not applicable to this caller" and is ignored.
+      prepare_result:
+        description: "Result of prepare-release."
+        required: false
+        type: string
+        default: ''
+      ngc_result:
+        description: "Result of release-publish (NGC container publish)."
+        required: false
+        type: string
+        default: ''
+      artifactory_result:
+        description: "Result of stage-wheels-artifactory."
+        required: false
+        type: string
+        default: ''
+      gitlab_result:
+        description: "Result of trigger-gitlab-release-pipeline. Only 'failure' pages; 'skipped' is the documented emergency bypass."
+        required: false
+        type: string
+        default: ''
+
+      # --- context for the incident body ------------------------------------
+      commit_sha:
+        description: "Source commit the nightly published from."
+        required: false
+        type: string
+        default: ''
+      ngc_version_tag:
+        description: "NGC version tag (YYYYMMDD-<shortsha>)."
+        required: false
+        type: string
+        default: ''
+      wheel_version:
+        description: "Wheel version (X.Y.Z.devYYYYMMDD)."
+        required: false
+        type: string
+        default: ''
+      skipped_image_copies:
+        description: |
+          release-publish's failed_copy_count. Correlation context ONLY — never
+          escalates on its own. On a green release-publish this can only be
+          fail-soft optional-image warn-skips (see release.yml's copy_images
+          step), so paging on it would fire most nights.
+        required: false
+        type: string
+        default: ''
+      runbook_url:
+        description: "Triage runbook surfaced in the incident."
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: "Build and print the payload (routing key redacted) without POSTing."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      # required: false on purpose. With `required: true` GitHub fails the CALLER
+      # when the secret is unset — reddening the whole nightly because an alerting
+      # secret is missing. The guard step below degrades to a warning instead.
+      PAGERDUTY_OPS_SUPPORT_ROUTING_KEY:
+        required: false
+
+jobs:
+  notify-pagerduty:
+    name: Notify PagerDuty
+    runs-on: ${{ inputs.runs_on }}
+    permissions:
+      contents: read
+    steps:
+      - name: Send PagerDuty event
+        # This job is invoked via `uses:`, which cannot set job-level
+        # continue-on-error, so fail-soft lives on the step (same as
+        # notify-slack-staging). A PagerDuty outage must never fail publication.
+        continue-on-error: true
+        shell: bash
+        env:
+          PD_ROUTING_KEY:  ${{ secrets.PAGERDUTY_OPS_SUPPORT_ROUTING_KEY }}
+          PD_ENABLED:      ${{ vars.PAGERDUTY_ENABLED }}
+          PIPELINE:        ${{ inputs.pipeline_name }}
+          DEDUP_KEY:       ${{ inputs.dedup_key }}
+          PREPARE:         ${{ inputs.prepare_result }}
+          NGC:             ${{ inputs.ngc_result }}
+          ART:             ${{ inputs.artifactory_result }}
+          GITLAB:          ${{ inputs.gitlab_result }}
+          COMMIT_SHA:      ${{ inputs.commit_sha }}
+          NGC_TAG:         ${{ inputs.ngc_version_tag }}
+          WHEEL_VERSION:   ${{ inputs.wheel_version }}
+          SKIPPED_COPIES:  ${{ inputs.skipped_image_copies }}
+          RUNBOOK_URL:     ${{ inputs.runbook_url }}
+          DRY_RUN:         ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # Kill switch: lets Ops-Support mute paging during a planned NGC or
+          # Artifactory maintenance window without reverting code.
+          if [ "${PD_ENABLED:-}" = "false" ]; then
+            echo "::notice::PagerDuty paging disabled via vars.PAGERDUTY_ENABLED."
+            exit 0
+          fi
+
+          if [ -z "${PD_ROUTING_KEY:-}" ]; then
+            echo "::warning::PAGERDUTY_OPS_SUPPORT_ROUTING_KEY is not set — skipping PagerDuty event."
+            echo "Register it as a repository secret to enable Ops-Support paging."
+            exit 0
+          fi
+
+          # --- severity mapping ------------------------------------------------
+          # Aggregate severity is the max over the failing stages. A single
+          # incident enumerates every failing stage rather than paging per stage,
+          # so one root cause (e.g. expired NGC credentials) is one page.
+          FAILING=()
+          SEVERITY="info"
+          CLASS=""
+
+          bump() {
+            case "$1:${SEVERITY}" in
+              critical:*)               SEVERITY=critical ;;
+              error:info|error:warning) SEVERITY=error ;;
+              warning:info)             SEVERITY=warning ;;
+            esac
+          }
+
+          # `skipped` counts as failure for the publish stages: they are only
+          # skipped when prepare-release failed, which is itself a paging case.
+          if [ -n "${PREPARE}" ] && [ "${PREPARE}" != "success" ]; then
+            FAILING+=("prepare-release (${PREPARE})"); bump error; CLASS="prepare"
+          fi
+          # Suppressed when prepare-release already failed — the downstream
+          # `skipped` results are a consequence, not independent findings.
+          if [ -n "${NGC}" ] && [ "${NGC}" != "success" ] && [ "${PREPARE}" = "success" ]; then
+            FAILING+=("NGC publish (${NGC})"); bump critical; CLASS="ngc-publish"
+          fi
+          if [ -n "${ART}" ] && [ "${ART}" != "success" ] && [ "${PREPARE}" = "success" ]; then
+            FAILING+=("Artifactory wheels (${ART})"); bump critical; CLASS="artifactory-wheels"
+          fi
+          # Only 'failure': 'skipped' is the documented skip_gitlab_pipeline bypass.
+          if [ "${GITLAB}" = "failure" ]; then
+            FAILING+=("GitLab release trigger (failure)"); bump error; CLASS="gitlab-trigger"
+          fi
+
+          if [ "${#FAILING[@]}" -eq 0 ]; then
+            echo "Artifact publication is green — no PagerDuty event sent."
+            exit 0
+          fi
+          [ "${#FAILING[@]}" -gt 1 ] && CLASS="multi-stage"
+
+          # "${FAILING[*]}" would join on IFS's first char only, giving "a,b".
+          FAILING_STR=$(printf '%s, ' "${FAILING[@]}"); FAILING_STR="${FAILING_STR%, }"
+
+          # --- payload ---------------------------------------------------------
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          SUMMARY="[${PIPELINE}] Dynamo artifact publication FAILED — ${FAILING_STR} — ${NGC_TAG:-<no tag>}"
+          SUMMARY="${SUMMARY:0:1024}"   # PagerDuty truncates summary at 1024 chars
+
+          # Destinations are deliberately SYMBOLIC. NGC_PUBLISH_ORG,
+          # ARTIFACTORY_URL and GITLAB_PIPELINE_URL are repo secrets; GitHub masks
+          # secrets in logs but NOT in an outbound HTTP body, so interpolating them
+          # would ship them to PagerDuty. Concrete hostnames live in the runbook.
+          CUSTOM_DETAILS=$(jq -n \
+            --arg repo     "${GITHUB_REPOSITORY}" \
+            --arg workflow "${GITHUB_WORKFLOW}" \
+            --arg run_id   "${GITHUB_RUN_ID}" \
+            --arg attempt  "${GITHUB_RUN_ATTEMPT}" \
+            --arg run_url  "${RUN_URL}" \
+            --arg commit   "${COMMIT_SHA:-unknown}" \
+            --arg ngc_tag  "${NGC_TAG:-unknown}" \
+            --arg wheel    "${WHEEL_VERSION:-unknown}" \
+            --arg failing  "${FAILING_STR}" \
+            --arg prepare  "${PREPARE:-n/a}" \
+            --arg ngc      "${NGC:-n/a}" \
+            --arg art      "${ART:-n/a}" \
+            --arg gitlab   "${GITLAB:-n/a}" \
+            --arg skipped  "${SKIPPED_COPIES:-unknown}" \
+            --arg runbook  "${RUNBOOK_URL:-none}" \
+            '{
+              failing_stages:                     $failing,
+              "result: prepare-release":          $prepare,
+              "result: release-publish (NGC)":    $ngc,
+              "result: stage-wheels-artifactory": $art,
+              "result: trigger-gitlab-pipeline":  $gitlab,
+              repository:           $repo,
+              workflow:             $workflow,
+              run_id:               $run_id,
+              run_attempt:          $attempt,
+              run_url:              $run_url,
+              source_commit:        $commit,
+              ngc_version_tag:      $ngc_tag,
+              wheel_version:        $wheel,
+              skipped_image_copies: $skipped,
+              ngc_targets:          "ai-dynamo/{vllm,sglang,tensorrtllm}-runtime-nightly:<ngc_version_tag> plus the :nightly floating tags",
+              artifactory_target:   "nightly/<run_id>/ (ai_dynamo, ai_dynamo_runtime, kvbm wheels; amd64+arm64)",
+              runbook:              $runbook
+            }')
+
+          PAYLOAD=$(jq -n \
+            --arg routing_key "${PD_ROUTING_KEY}" \
+            --arg dedup_key   "${DEDUP_KEY}" \
+            --arg summary     "${SUMMARY}" \
+            --arg severity    "${SEVERITY}" \
+            --arg class       "${CLASS}" \
+            --arg source      "github.com/${GITHUB_REPOSITORY}/nightly-ci" \
+            --arg ts          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg run_url     "${RUN_URL}" \
+            --argjson details "${CUSTOM_DETAILS}" \
+            '{
+              routing_key:  $routing_key,
+              event_action: "trigger",
+              dedup_key:    $dedup_key,
+              client:       "GitHub Actions",
+              client_url:   $run_url,
+              payload: {
+                summary:        $summary,
+                severity:       $severity,
+                source:         $source,
+                component:      "nightly-artifact-publication",
+                group:          "dynamo-ci",
+                class:          $class,
+                timestamp:      $ts,
+                custom_details: $details
+              },
+              links: [ { href: $run_url, text: "GitHub Actions run" } ]
+            }')
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "::notice::DRY RUN — payload below, not sent to PagerDuty."
+            printf '%s' "${PAYLOAD}" | jq '.routing_key = "***"'
+            exit 0
+          fi
+
+          # --- send ------------------------------------------------------------
+          # Body goes over stdin so the routing key never lands in argv or a file.
+          RESPONSE_FILE=$(mktemp)
+          trap 'rm -f "${RESPONSE_FILE}"' EXIT
+
+          # No --fail: it discards the response body, and PagerDuty's 400 body is
+          # the only place the validation error appears. Capture the code with -w.
+          HTTP_CODE=$(printf '%s' "${PAYLOAD}" | curl -sS -o "${RESPONSE_FILE}" -w '%{http_code}' \
+            -X POST https://events.pagerduty.com/v2/enqueue \
+            -H 'Content-Type: application/json' \
+            --connect-timeout 10 --max-time 30 \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --data @-)
+
+          STATUS=$(jq -r '.status // "unknown"' "${RESPONSE_FILE}" 2>/dev/null || echo unknown)
+          if [ "${HTTP_CODE}" != "202" ] || [ "${STATUS}" != "success" ]; then
+            echo "::error::PagerDuty enqueue failed: HTTP ${HTTP_CODE} status=${STATUS}"
+            jq -r '.errors // [] | .[]' "${RESPONSE_FILE}" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "PagerDuty incident triggered (severity=${SEVERITY}, class=${CLASS})"
+          echo "  dedup_key: $(jq -r '.dedup_key' "${RESPONSE_FILE}")"
+          echo "  stages:    ${FAILING_STR}"

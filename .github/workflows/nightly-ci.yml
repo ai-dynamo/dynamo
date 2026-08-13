@@ -1316,9 +1316,16 @@ jobs:
           docker buildx rm ${{ env.BUILDER_NAME }} || true
 
   ############################## SLACK NOTIFICATION ##############################
+  # `release` is in needs so publication failures are actually observed. The
+  # notifier takes a point-in-time snapshot of this run's jobs via the Actions
+  # API; without this dependency it ran while release.yml was still in_progress
+  # (conclusion: null), so NGC/Artifactory failures never matched
+  # `conclusion == "failure"` and were reported to nobody. A called workflow's
+  # jobs belong to the same run, so once `release` is terminal they all are.
+  # Trade-off: the alert for test failures now waits for publication to finish.
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests, release]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
@@ -1326,4 +1333,34 @@ jobs:
     with:
       pipeline_name: Nightly
       runs_on: prod-default-v2
+    secrets: inherit
+
+  ########################### PAGERDUTY: NOTHING PUBLISHED ###########################
+  # The publication-failure page lives in release.yml, next to the per-stage
+  # results. But when a build gate fails, `release` is SKIPPED, release.yml never
+  # runs, and that job never exists — while the consumer-visible symptom is
+  # identical (the :nightly tags are a day stale). This covers that case.
+  #
+  # Distinct dedup_key prefix so it can never collide with the publication
+  # incident. Expect this to be the noisier of the two: it fires on any
+  # build-gate break, which is dev-owned and already loud in Slack. If it proves
+  # fatiguing, drop this job — that is why it is separate rather than folded in.
+  notify-pagerduty-not-published:
+    name: Notify PagerDuty — nightly did not publish
+    needs: [compute-release-mode, release]
+    if: ${{ !cancelled()
+        && github.event_name == 'schedule'
+        && needs.compute-release-mode.outputs.release == 'true'
+        && needs.release.result == 'skipped' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/notify-pagerduty.yml
+    with:
+      pipeline_name: Nightly
+      dedup_key: ${{ github.repository }}/nightly-not-published/${{ github.run_id }}
+      # No stage ever ran; prepare_result drives the notifier's error-severity path.
+      prepare_result: skipped
+      runbook_url: https://github.com/${{ github.repository }}/blob/main/.github/RUNBOOK-nightly-publication.md
+      # PHASE 1: print the payload, page nobody. See release.yml's note.
+      dry_run: true
     secrets: inherit

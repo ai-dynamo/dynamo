@@ -1292,6 +1292,61 @@ jobs:
             exit 1
           fi
           echo "Posted GitLab trigger reply"
+
+  # ============================================================================
+  # PAGERDUTY: nightly artifact-publication failure
+  # ============================================================================
+  # Pages Ops-Support when the unattended (cron) nightly fails to publish
+  # containers to NGC or wheels to Artifactory, or fails to hand off to the
+  # GitLab release-automation pipeline. Without this the only publication signal
+  # is notify-slack-staging — a continue-on-error thread reply that is skipped
+  # outright when slack_thread_ts is empty.
+  #
+  # This job lives here rather than in nightly-ci.yml because release.yml
+  # declares no workflow_call outputs: the caller can only see the single
+  # needs.release.result bit, not which stage broke.
+  #
+  # `!cancelled()` rather than `always()`: both still run when a need FAILED or
+  # was SKIPPED (the coverage we want), but `always()` would also page when a
+  # human cancels the run. Cancellations are not incidents.
+  #
+  # Gated on `inputs.nightly` (not needs.prepare-release.outputs.nightly, which
+  # is unavailable exactly when prepare-release fails — a paging case) and on
+  # event_name == 'schedule', which inside a called workflow resolves to the
+  # caller's event. Together these exclude RC/GA runs and manual re-stages,
+  # where a human is already driving and would otherwise page themselves.
+  #
+  # Deliberately NOT gated on release-publish's failed_copy_count: on a green
+  # release-publish that count only reflects fail-soft optional-image warn-skips
+  # (a core copy failure aborts the copy step under `set -e` and fails the job
+  # outright), so paging on it would fire most nights. It is passed as
+  # correlation context only.
+  notify-pagerduty-publish:
+    name: Notify PagerDuty — publication failure
+    needs: [prepare-release, release-publish, stage-wheels-artifactory, trigger-gitlab-release-pipeline]
+    if: ${{ !cancelled() && inputs.nightly && github.event_name == 'schedule' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/notify-pagerduty.yml
+    with:
+      pipeline_name: Nightly
+      # run_id, so each nightly opens its own incident while a "Re-run failed
+      # jobs" (same run_id) folds into the one already open.
+      dedup_key: ${{ github.repository }}/nightly-artifact-publication/${{ github.run_id }}
+      prepare_result:       ${{ needs.prepare-release.result }}
+      ngc_result:           ${{ needs.release-publish.result }}
+      artifactory_result:   ${{ needs.stage-wheels-artifactory.result }}
+      gitlab_result:        ${{ needs.trigger-gitlab-release-pipeline.result }}
+      commit_sha:           ${{ needs.prepare-release.outputs.commit_sha }}
+      ngc_version_tag:      ${{ needs.prepare-release.outputs.ngc_version_tag }}
+      wheel_version:        ${{ needs.prepare-release.outputs.wheel_version }}
+      skipped_image_copies: ${{ needs.release-publish.outputs.failed_copy_count }}
+      runbook_url: https://github.com/${{ github.repository }}/blob/main/.github/RUNBOOK-nightly-publication.md
+      # PHASE 1: print the payload, page nobody. Flip to false once a few
+      # nightlies have shown the severity mapping behaves against real noise.
+      dry_run: true
+    secrets: inherit
+
   # ============================================================================
   # LINEAR RELEASE SYNC
   # ============================================================================
