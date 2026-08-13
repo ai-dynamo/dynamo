@@ -823,6 +823,7 @@ impl<
                     reconcile_admission,
                     ack_tx,
                 } => {
+                    let terminal_update = finished.is_some();
                     let mut finished_handled = false;
                     if let Some((request_id, expected_worker, outcome)) = finished {
                         let (handled, booked_worker) =
@@ -832,7 +833,9 @@ impl<
                             finished_handled = true;
                         }
                     }
-                    self.handle_update(worker, reconcile_admission).await;
+                    if !terminal_update || worker.is_some() || finished_handled {
+                        self.handle_update(worker, reconcile_admission).await;
+                    }
                     if drain_cleanup && self.drain_cleanup() {
                         self.handle_update(None, false).await;
                     }
@@ -2874,6 +2877,32 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_terminal_update_does_not_drain_pending_queue() {
+        let isl = 512;
+        let (queue, slots) = make_queue(1, 16, isl, Some(0.0));
+
+        let (active, active_rx) = make_request("active", isl);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (queued, mut queued_rx) = make_request("queued", isl);
+        queue.enqueue(queued).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots.free(&"active".to_owned(), decay_now()).unwrap();
+        assert!(!queue.complete_request("unknown", None, None).await);
+        assert!(matches!(
+            queued_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        queue.update().await;
+        queued_rx.await.unwrap().unwrap();
+        slots.free(&"queued".to_owned(), decay_now()).unwrap();
         slots.assert_completely_drained(decay_now());
     }
 
