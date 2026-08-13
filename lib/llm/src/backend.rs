@@ -40,7 +40,7 @@ use crate::protocols::{
         StopConditions,
         llm_backend::{
             BackendOutput, EmbeddingsEngineOutput, FinishReason, LLMEngineOutput,
-            PreprocessedRequest,
+            PreprocessedRequest, TopLogprobs,
         },
         preprocessor::PreprocessedEmbeddingRequest,
         timing::RequestTracker,
@@ -76,6 +76,26 @@ struct DecoderUnfoldState {
     /// (e.g. SGLang with --skip-tokenizer-init forcibly drops it).
     tokenizer: Tokenizer,
     skip_special_tokens: bool,
+}
+
+fn fill_missing_top_logprob_text(
+    tokenizer: &Tokenizer,
+    top_logprobs: &mut TopLogprobs,
+    skip_special_tokens: bool,
+) {
+    for position in top_logprobs.iter_mut() {
+        for entry in position.iter_mut() {
+            if entry.token.is_none()
+                && let Ok(decoded) = tokenizer.decode(&[entry.token_id], skip_special_tokens)
+            {
+                let token: String = decoded.into();
+                if entry.bytes.is_none() && !token.is_empty() {
+                    entry.bytes = Some(token.as_bytes().to_vec());
+                }
+                entry.token = Some(token);
+            }
+        }
+    }
 }
 
 struct DecoderParams {
@@ -351,21 +371,11 @@ impl
                     // decode(&[ids..]) call: BPE merge / leading-space rules differ
                     // between single-token and sequence decode and will corrupt strings.
                     if let Some(top_logprobs) = data.top_logprobs.as_mut() {
-                        for position in top_logprobs.iter_mut() {
-                            for entry in position.iter_mut() {
-                                if entry.token.is_none()
-                                    && let Ok(decoded) = state
-                                        .tokenizer
-                                        .decode(&[entry.token_id], state.skip_special_tokens)
-                                {
-                                    let s: String = decoded.into();
-                                    if entry.bytes.is_none() && !s.is_empty() {
-                                        entry.bytes = Some(s.as_bytes().to_vec());
-                                    }
-                                    entry.token = Some(s);
-                                }
-                            }
-                        }
+                        fill_missing_top_logprob_text(
+                            &state.tokenizer,
+                            top_logprobs,
+                            state.skip_special_tokens,
+                        );
                     }
 
                     output.data = Some(data);
@@ -738,7 +748,14 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::llm_backend::TopLogprob;
+    use crate::protocols::common::{OutputOptions, SamplingOptions};
+    use crate::protocols::openai::{
+        DeltaGeneratorExt, chat_completions::DeltaGenerator, delta_common::DeltaGeneratorOptions,
+    };
     use crate::tokenizers::traits;
+    use dynamo_runtime::pipeline::{AsyncEngine, Error, ResponseStream};
+    use futures::StreamExt;
     use std::sync::Arc;
 
     #[test]
@@ -780,6 +797,166 @@ mod tests {
     }
 
     impl traits::Tokenizer for FailingDecoder {}
+
+    struct CandidateDecoder;
+
+    impl traits::Encoder for CandidateDecoder {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            Ok(crate::tokenizers::Encoding::Sp(vec![]))
+        }
+
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            Ok(vec![])
+        }
+    }
+
+    impl traits::Decoder for CandidateDecoder {
+        fn decode(
+            &self,
+            token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<traits::DecodeResult> {
+            let token = match token_ids {
+                [] => "",
+                [101] => "Okay",
+                [102] => " Okay",
+                _ => anyhow::bail!("unexpected token IDs: {token_ids:?}"),
+            };
+            Ok(traits::DecodeResult::Complete(token.to_string()))
+        }
+    }
+
+    impl traits::Tokenizer for CandidateDecoder {}
+
+    struct SyntheticSglangEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SyntheticSglangEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let output = LLMEngineOutput {
+                token_ids: vec![101],
+                log_probs: Some(vec![-0.125]),
+                top_logprobs: Some(vec![vec![
+                    TopLogprob {
+                        rank: 1,
+                        token_id: 101,
+                        token: None,
+                        logprob: -0.125,
+                        bytes: None,
+                    },
+                    TopLogprob {
+                        rank: 2,
+                        token_id: 102,
+                        token: None,
+                        logprob: -1.5,
+                        bytes: None,
+                    },
+                ]]),
+                index: Some(0),
+                ..Default::default()
+            };
+
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::once(async move {
+                    Annotated::from_data(output)
+                })),
+                request.context(),
+            ))
+        }
+    }
+
+    #[test]
+    fn test_fill_missing_top_logprob_text_without_worker_tokenizer() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let tokenizer = Tokenizer::from(tokenizer);
+        let mut top_logprobs = vec![vec![
+            TopLogprob {
+                rank: 1,
+                token_id: 101,
+                token: None,
+                logprob: -0.1,
+                bytes: None,
+            },
+            TopLogprob {
+                rank: 2,
+                token_id: 102,
+                token: None,
+                logprob: -0.2,
+                bytes: None,
+            },
+        ]];
+
+        fill_missing_top_logprob_text(&tokenizer, &mut top_logprobs, true);
+
+        assert_eq!(top_logprobs[0][0].token.as_deref(), Some("Okay"));
+        assert_eq!(top_logprobs[0][0].bytes, Some(b"Okay".to_vec()));
+        assert_eq!(top_logprobs[0][1].token.as_deref(), Some(" Okay"));
+        assert_eq!(top_logprobs[0][1].bytes, Some(b" Okay".to_vec()));
+        assert_eq!(top_logprobs[0][0].logprob, -0.1);
+        assert_eq!(top_logprobs[0][1].logprob, -0.2);
+    }
+
+    #[tokio::test]
+    async fn test_sglang_top_logprobs_are_decoded_in_openai_response() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(2),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangEngine);
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+
+        let options = DeltaGeneratorOptions::new(None, None, true, None);
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("client-visible logprobs")
+            .content
+            .as_ref()
+            .expect("client-visible logprob content");
+        let candidates = &content[0].top_logprobs;
+
+        assert_eq!(candidates[0].token, "Okay");
+        assert_eq!(candidates[0].bytes, Some(b"Okay".to_vec()));
+        assert_eq!(candidates[0].logprob, -0.125);
+        assert_eq!(candidates[1].token, " Okay");
+        assert_eq!(candidates[1].bytes, Some(b" Okay".to_vec()));
+        assert_eq!(candidates[1].logprob, -1.5);
+    }
 
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
     /// should propagate the error. In the backend unfold closure, this error
