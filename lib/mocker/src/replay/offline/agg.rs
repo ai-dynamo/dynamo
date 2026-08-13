@@ -4021,14 +4021,13 @@ mod tests {
     }
 
     fn interactive_round_robin_runtime(requests: VecDeque<DirectRequest>) -> RoundRobinAggRuntime {
-        let runtime = RoundRobinAggRuntime::new_round_robin(
+        RoundRobinAggRuntime::new_round_robin(
             &parity_args(EngineType::Vllm),
             requests,
             1,
             ReplayMode::Trace,
         )
-        .unwrap();
-        runtime
+        .unwrap()
     }
 
     fn legacy_interactive_advance_next<PlacementPolicyImpl>(
