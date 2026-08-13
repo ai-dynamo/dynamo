@@ -456,6 +456,53 @@ class TestAudioFormatterFormat:
         assert [len(chunk) for chunk in chunks] == [2, 2]
 
     @pytest.mark.asyncio
+    async def test_aggregate_audio_is_encoded_once_with_speed_adjustment(
+        self, monkeypatch
+    ):
+        import sys
+        from types import SimpleNamespace
+
+        import numpy as np
+
+        from dynamo.vllm.omni.output_formatter import (
+            AudioAggregateState,
+            AudioFormatter,
+        )
+
+        formatter = AudioFormatter("test", None, None)
+        state = AudioAggregateState()
+        for value in (0.1, 0.2):
+            response = await formatter.format(
+                {"audio": np.full(2048, value, dtype=np.float32), "sr": 24000},
+                "req-1",
+                output_format="wav",
+                audio_aggregate_state=state,
+            )
+            assert response is None
+
+        observed = {}
+
+        def time_stretch(*, y, rate):
+            observed["shape"] = y.shape
+            observed["rate"] = rate
+            return y[::2]
+
+        monkeypatch.setitem(
+            sys.modules,
+            "librosa",
+            SimpleNamespace(effects=SimpleNamespace(time_stretch=time_stretch)),
+        )
+        response = await formatter.finish_aggregate(
+            "req-1", state, output_format="wav", speed=2.0
+        )
+        audio = base64.b64decode(response["data"][0]["b64_json"])
+
+        assert observed == {"shape": (4096,), "rate": 2.0}
+        assert audio.count(b"RIFF") == 1
+        assert audio[:4] == b"RIFF"
+        assert len(audio) == 44 + 2048 * 2
+
+    @pytest.mark.asyncio
     async def test_streaming_wav_header_is_emitted_once(self):
         import numpy as np
 

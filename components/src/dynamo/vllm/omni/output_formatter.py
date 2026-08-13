@@ -15,7 +15,7 @@ import struct
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Dict, Optional
 
@@ -46,6 +46,15 @@ class AudioStreamState:
 
     emitted_chunks: int = 0
     first_chunk: bool = True
+
+
+@dataclass
+class AudioAggregateState:
+    """Request-local raw audio accumulated for one final encode."""
+
+    chunks: list[np.ndarray] = field(default_factory=list)
+    sample_rate: int | None = None
+    emitted_chunks: int = 0
 
 
 class TextFormatter:
@@ -307,13 +316,21 @@ class AudioFormatter:
         output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
         stream_state = ctx.get("audio_stream_state")
+        aggregate_state = ctx.get("audio_aggregate_state")
 
         try:
             start_time = time.time()
             audio_np, sample_rate = self._extract_audio_tensor(
-                mm_output, stream_state=stream_state
+                mm_output,
+                chunk_state=(
+                    stream_state if stream_state is not None else aggregate_state
+                ),
             )
             if audio_np.size == 0:
+                return None
+
+            if aggregate_state is not None:
+                self._append_audio_chunk(aggregate_state, audio_np, sample_rate)
                 return None
 
             encode_fmt = ("wav" if output_format is None else output_format).lower()
@@ -334,7 +351,7 @@ class AudioFormatter:
             logger.info(
                 "Audio encoded for request %s: %d samples, sr=%d, %d bytes %s",
                 request_id,
-                len(audio_np),
+                audio_np.shape[-1],
                 sample_rate,
                 len(audio_bytes),
                 encode_fmt,
@@ -370,11 +387,59 @@ class AudioFormatter:
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
 
+    async def finish_aggregate(
+        self, request_id: str, aggregate_state: AudioAggregateState, **ctx: Any
+    ) -> Dict[str, Any]:
+        """Encode all buffered raw chunks as one complete audio file."""
+        if not aggregate_state.chunks or aggregate_state.sample_rate is None:
+            return self._error_response(request_id, "No audio generated")
+
+        audio_np = np.concatenate(aggregate_state.chunks, axis=-1)
+        return await self.format(
+            {"audio": audio_np, "sr": aggregate_state.sample_rate},
+            request_id,
+            **ctx,
+        )
+
+    def _append_audio_chunk(
+        self,
+        state: AudioAggregateState,
+        audio_np: np.ndarray,
+        sample_rate: int,
+    ) -> None:
+        if audio_np.ndim == 3:
+            if audio_np.shape[0] != 1:
+                raise ValueError(
+                    f"Expected one audio batch, got shape {audio_np.shape}"
+                )
+            audio_np = audio_np[0]
+        if audio_np.ndim == 1:
+            num_channels = 1
+        elif audio_np.ndim == 2 and audio_np.shape[0] in (1, 2):
+            num_channels = int(audio_np.shape[0])
+        else:
+            raise ValueError(
+                f"Expected mono or stereo audio, got shape {audio_np.shape}"
+            )
+
+        if state.sample_rate is not None and state.sample_rate != sample_rate:
+            raise ValueError(
+                f"Audio sample rate changed from {state.sample_rate} to {sample_rate}"
+            )
+        if state.chunks:
+            first_chunk = state.chunks[0]
+            first_num_channels = 1 if first_chunk.ndim == 1 else first_chunk.shape[0]
+            if first_num_channels != num_channels:
+                raise ValueError("Audio channel count changed while generating")
+
+        state.sample_rate = sample_rate
+        state.chunks.append(audio_np)
+
     def _extract_audio_tensor(
         self,
         mm_output: Dict[str, Any],
         *,
-        stream_state: AudioStreamState | None = None,
+        chunk_state: AudioStreamState | AudioAggregateState | None = None,
     ) -> tuple[np.ndarray, int]:
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
         audio_val = mm_output.get(audio_key)
@@ -384,9 +449,9 @@ class AudioFormatter:
             )
 
         if isinstance(audio_val, list):
-            if stream_state is not None:
-                new_audio = audio_val[stream_state.emitted_chunks :]
-                stream_state.emitted_chunks = len(audio_val)
+            if chunk_state is not None:
+                new_audio = audio_val[chunk_state.emitted_chunks :]
+                chunk_state.emitted_chunks = len(audio_val)
                 audio_val = new_audio
                 if not audio_val:
                     return np.empty(0, dtype=np.float32), self._sample_rate(mm_output)
@@ -599,4 +664,14 @@ class OutputFormatter:
 
         return await formatter.format(
             stage_output, request_id, request_type=request_type, **ctx
+        )
+
+    async def finish_audio(
+        self,
+        request_id: str,
+        aggregate_state: AudioAggregateState,
+        **ctx: Any,
+    ) -> Dict[str, Any]:
+        return await self._formatters["audio"].finish_aggregate(
+            request_id, aggregate_state, **ctx
         )

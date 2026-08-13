@@ -47,7 +47,11 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
-from dynamo.vllm.omni.output_formatter import AudioStreamState, OutputFormatter
+from dynamo.vllm.omni.output_formatter import (
+    AudioAggregateState,
+    AudioStreamState,
+    OutputFormatter,
+)
 from dynamo.vllm.omni.utils import (
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
@@ -354,7 +358,7 @@ class OmniHandler(BaseOmniHandler):
             "request_id": request_id,
         }
         sampling_params_list = inputs.sampling_params_list
-        if inputs.stream_audio:
+        if inputs.request_type == RequestType.AUDIO_GENERATION:
             sampling_params_list = streaming_sampling_params(
                 self.engine_client, sampling_params_list
             )
@@ -369,6 +373,12 @@ class OmniHandler(BaseOmniHandler):
 
         previous_text = ""
         audio_stream_state = AudioStreamState() if inputs.stream_audio else None
+        audio_aggregate_state = (
+            AudioAggregateState()
+            if inputs.request_type == RequestType.AUDIO_GENERATION
+            and not inputs.stream_audio
+            else None
+        )
 
         def update_previous_text(stage_output: Any, current: str) -> str:
             if getattr(stage_output, "final_output_type", None) == "text" and getattr(
@@ -413,9 +423,20 @@ class OmniHandler(BaseOmniHandler):
                     previous_text=previous_text,
                     speed=inputs.speed,
                     audio_stream_state=audio_stream_state,
+                    audio_aggregate_state=audio_aggregate_state,
                 )
                 previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
+
+            if audio_aggregate_state is not None:
+                chunk = await self.output_formatter.finish_audio(
+                    request_id,
+                    audio_aggregate_state,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    speed=inputs.speed,
+                )
+                yield {"stage_output": None, "formatted_chunk": chunk}
 
         async with self._abort_monitor(context, request_id):
             try:
