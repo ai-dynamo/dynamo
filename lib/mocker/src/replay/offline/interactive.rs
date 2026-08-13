@@ -117,6 +117,7 @@ pub enum ReplayEvent {
     Terminal(ReplayEventData),
 }
 
+#[cfg(test)]
 impl ReplayEvent {
     fn event_type(&self) -> &'static str {
         match self {
@@ -653,6 +654,7 @@ impl InteractiveCapture {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn placement_needed_event(
         &mut self,
         uuid: Uuid,

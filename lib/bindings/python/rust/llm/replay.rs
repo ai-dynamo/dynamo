@@ -21,8 +21,8 @@ use dynamo_mocker::replay::{
     CapturedReplayEventDataView as RsCapturedReplayEventDataView,
     OfflineReplaySession as RsOfflineReplaySession, PoolRouter as RsPoolRouter,
     PoolSpec as RsPoolSpec, ReplayAgenticRequest as RsReplayAgenticRequest,
-    ReplayAgenticWorkflow as RsReplayAgenticWorkflow, ReplayArgsMode, ReplayEvent as RsReplayEvent,
-    ReplayEventData as RsReplayEventData, ReplayPendingPlacement as RsReplayPendingPlacement,
+    ReplayAgenticWorkflow as RsReplayAgenticWorkflow, ReplayArgsMode,
+    ReplayPendingPlacement as RsReplayPendingPlacement,
     ReplayPlacementCandidate as RsReplayPlacementCandidate,
     ReplayRequestSpec as RsReplayRequestSpec,
     ReplayRoutingConstraints as RsReplayRoutingConstraints, ReplayScalingDecision,
@@ -31,6 +31,8 @@ use dynamo_mocker::replay::{
     ReplayTerminalStatus as RsReplayTerminalStatus, WorkerSpec as RsWorkerSpec,
     WorkerTarget as RsWorkerTarget,
 };
+#[cfg(test)]
+use dynamo_mocker::replay::{ReplayEvent as RsReplayEvent, ReplayEventData as RsReplayEventData};
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
@@ -1427,86 +1429,7 @@ fn replay_placement_candidate_to_python<'py>(
     Ok(value)
 }
 
-fn replay_event_data_to_python<'py>(
-    py: Python<'py>,
-    data: RsReplayEventData,
-) -> PyResult<Bound<'py, PyDict>> {
-    let RsReplayEventData {
-        logical_request_id,
-        attempt_id,
-        group_id,
-        internal_uuid,
-        session_id,
-        authored_turn_index,
-        timestamp_ms,
-        pool_id,
-        worker_id,
-        dp_rank,
-        terminal_status,
-        input_length,
-        requested_output_length,
-        emitted_output_count,
-        reused_input_tokens,
-        ttft_ms,
-        e2e_latency_ms,
-        priority,
-        strict_priority,
-        policy_class,
-        routing_constraints,
-        eligible_pool_ids,
-        candidates,
-    } = data;
-    let value = PyDict::new(py);
-    value.set_item(pyo3::intern!(py, "logical_request_id"), logical_request_id)?;
-    value.set_item(pyo3::intern!(py, "attempt_id"), attempt_id)?;
-    value.set_item(pyo3::intern!(py, "group_id"), group_id)?;
-    value.set_item(
-        pyo3::intern!(py, "internal_uuid"),
-        internal_uuid.to_string(),
-    )?;
-    value.set_item(pyo3::intern!(py, "session_id"), session_id)?;
-    value.set_item(
-        pyo3::intern!(py, "authored_turn_index"),
-        authored_turn_index,
-    )?;
-    value.set_item(pyo3::intern!(py, "timestamp_ms"), timestamp_ms)?;
-    value.set_item(pyo3::intern!(py, "pool_id"), pool_id)?;
-    value.set_item(pyo3::intern!(py, "worker_id"), worker_id)?;
-    value.set_item(pyo3::intern!(py, "dp_rank"), dp_rank)?;
-    value.set_item(
-        pyo3::intern!(py, "terminal_status"),
-        terminal_status.map(replay_terminal_status_name),
-    )?;
-    value.set_item(pyo3::intern!(py, "input_length"), input_length)?;
-    value.set_item(
-        pyo3::intern!(py, "requested_output_length"),
-        requested_output_length,
-    )?;
-    value.set_item(
-        pyo3::intern!(py, "emitted_output_count"),
-        emitted_output_count,
-    )?;
-    value.set_item(
-        pyo3::intern!(py, "reused_input_tokens"),
-        reused_input_tokens,
-    )?;
-    value.set_item(pyo3::intern!(py, "ttft_ms"), ttft_ms)?;
-    value.set_item(pyo3::intern!(py, "e2e_latency_ms"), e2e_latency_ms)?;
-    value.set_item(pyo3::intern!(py, "priority"), priority)?;
-    value.set_item(pyo3::intern!(py, "strict_priority"), strict_priority)?;
-    value.set_item(pyo3::intern!(py, "policy_class"), policy_class)?;
-    value.set_item(
-        pyo3::intern!(py, "routing_constraints"),
-        replay_routing_constraints_to_python(py, routing_constraints)?,
-    )?;
-    value.set_item(pyo3::intern!(py, "eligible_pool_ids"), eligible_pool_ids)?;
-    value.set_item(
-        pyo3::intern!(py, "candidates"),
-        replay_placement_candidates_to_python(py, candidates)?,
-    )?;
-    Ok(value)
-}
-
+#[cfg(test)]
 fn replay_event_parts(event: RsReplayEvent) -> (&'static str, RsReplayEventData) {
     match event {
         RsReplayEvent::PlacementNeeded(data) => ("placement_needed", data),
@@ -1516,21 +1439,6 @@ fn replay_event_parts(event: RsReplayEvent) -> (&'static str, RsReplayEventData)
         RsReplayEvent::FirstToken(data) => ("first_token", data),
         RsReplayEvent::Terminal(data) => ("terminal", data),
     }
-}
-
-fn replay_events_to_python(py: Python<'_>, events: Vec<RsReplayEvent>) -> PyResult<PyObject> {
-    let values = PyList::empty(py);
-    for event in events {
-        let (event_type, data) = replay_event_parts(event);
-        let value = PyDict::new(py);
-        value.set_item(pyo3::intern!(py, "event_type"), event_type)?;
-        value.set_item(
-            pyo3::intern!(py, "event"),
-            replay_event_data_to_python(py, data)?,
-        )?;
-        values.append(value)?;
-    }
-    Ok(values.into_any().unbind())
 }
 
 fn replay_strings_to_python<'py>(
