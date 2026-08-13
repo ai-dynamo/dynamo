@@ -1,3 +1,5 @@
+#include "daemon.hpp"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -6,15 +8,19 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <syncstream>
 #include <system_error>
-#include <thread>
+#include <utility>
+#include <vector>
 
 #include "broker.hpp"
-#include "connection_tracker.hpp"
 #include "file_descriptor.hpp"
 
 namespace fs = std::filesystem;
@@ -27,13 +33,95 @@ namespace {
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 constexpr timeval kConnectionTimeout{30, 0};
 constexpr int kShutdownPollTimeoutMs = 1000;
-enum ArgumentIndex { kSocketPath = 1, kStagingDirectory, kArgumentCount };
 volatile sig_atomic_t shutting_down;
 
 void
 Stop(int)
 {
   shutting_down = 1;
+}
+
+void
+LogError(std::string_view operation, const std::error_code& error)
+{
+  std::cerr << operation << ": " << error.message() << '\n';
+}
+
+ExitCode
+Fail(std::string_view operation, const std::error_code& error)
+{
+  LogError(operation, error);
+  return ExitCode::FAILURE;
+}
+
+std::error_code
+InstallSignalHandler(int signal)
+{
+  struct sigaction action {};
+  action.sa_handler = Stop;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(signal, &action, nullptr) < 0)
+    return {errno, std::generic_category()};
+  return {};
+}
+
+std::error_code
+InstallSignalHandlers()
+{
+  if (const auto error = InstallSignalHandler(SIGINT); error)
+    return error;
+  return InstallSignalHandler(SIGTERM);
+}
+
+std::error_code
+PrepareDirectories(const fs::path& socket_path, const fs::path& staging_directory)
+{
+  std::error_code error;
+  fs::create_directories(socket_path.parent_path(), error);
+  if (error)
+    return error;
+  fs::create_directories(staging_directory, error);
+  return error;
+}
+
+std::error_code
+ConfigureConnection(int connection)
+{
+  if (setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &kConnectionTimeout, sizeof(kConnectionTimeout)) < 0 ||
+      setsockopt(connection, SOL_SOCKET, SO_SNDTIMEO, &kConnectionTimeout, sizeof(kConnectionTimeout)) < 0)
+    return {errno, std::generic_category()};
+  return {};
+}
+
+std::error_code
+ConfigureListener(int listener)
+{
+  const int flags = fcntl(listener, F_GETFL);
+  if (flags < 0 || fcntl(listener, F_SETFL, flags | O_NONBLOCK) < 0)
+    return {errno, std::generic_category()};
+  return {};
+}
+
+std::pair<FileDescriptor, std::error_code>
+CreateListener(const fs::path& socket_path)
+{
+  std::error_code error;
+  fs::remove(socket_path, error);
+  if (error)
+    return std::make_pair(FileDescriptor(-1), error);
+
+  FileDescriptor listener(socket(AF_UNIX, SOCK_STREAM, 0));
+  if (listener.get() < 0)
+    return std::make_pair(std::move(listener), std::error_code(errno, std::generic_category()));
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  std::strcpy(address.sun_path, socket_path.c_str());
+  if (bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0 ||
+      listen(listener.get(), SOMAXCONN) < 0)
+    return std::make_pair(std::move(listener), std::error_code(errno, std::generic_category()));
+  if (error = ConfigureListener(listener.get()); error)
+    return std::make_pair(std::move(listener), error);
+  return std::make_pair(std::move(listener), std::error_code{});
 }
 
 bool
@@ -81,6 +169,42 @@ InvalidRequest()
   return response;
 }
 
+const char*
+CommandName(Request::CommandCase command)
+{
+  switch (command) {
+    case Request::kStagedRestore:
+      return "staged_restore";
+    case Request::kPrepareStagedCheckpoint:
+      return "prepare_staged_checkpoint";
+    case Request::kCommit:
+      return "commit";
+    case Request::kAbort:
+      return "abort";
+    default:
+      return "invalid";
+  }
+}
+
+const char*
+ResultName(const Response& response)
+{
+  switch (response.result_case()) {
+    case Response::kStagedRestoreDirectory:
+      return "staged_restore";
+    case Response::kStagedCheckpointDirectory:
+      return "staged_checkpoint";
+    case Response::kCommitComplete:
+      return "committed";
+    case Response::kAbortComplete:
+      return "aborted";
+    case Response::kFailure:
+      return "failed";
+    default:
+      return "invalid";
+  }
+}
+
 void
 HandleConnection(int connection, Broker& broker)
 {
@@ -99,6 +223,10 @@ HandleConnection(int connection, Broker& broker)
       response = InvalidRequest();
     } else {
       response = broker.HandleRequest(request);
+      std::osyncstream(std::cerr) << "transaction=" << request.transaction_id()
+                                  << " command=" << CommandName(request.command_case())
+                                  << " result=" << ResultName(response)
+                                  << (response.has_failure() ? " error=" + response.failure().message() : "") << '\n';
     }
   }
 
@@ -109,96 +237,86 @@ HandleConnection(int connection, Broker& broker)
 }
 
 void
-ServeConnection(int connection, Broker& broker, ConnectionTracker& connections)
+ServeConnection(int connection, Broker& broker)
 {
   FileDescriptor descriptor(connection);
-  try {
-    if (setsockopt(descriptor.get(), SOL_SOCKET, SO_RCVTIMEO, &kConnectionTimeout, sizeof(kConnectionTimeout)) < 0 ||
-        setsockopt(descriptor.get(), SOL_SOCKET, SO_SNDTIMEO, &kConnectionTimeout, sizeof(kConnectionTimeout)) < 0)
-      throw std::system_error(errno, std::generic_category(), "set connection timeout");
-    HandleConnection(descriptor.get(), broker);
+  if (const auto error = ConfigureConnection(descriptor.get()); error) {
+    LogError("set connection timeout", error);
+    return;
   }
-  catch (const std::exception& error) {
-    std::cerr << "handle connection: " << error.what() << '\n';
-  }
-  connections.Finish();
+  HandleConnection(descriptor.get(), broker);
 }
-}  // namespace
 
-int
-main(int argc, char** argv)
+void
+ReapHandlers(std::vector<std::future<void>>& handlers)
 {
-  if (argc != kArgumentCount) {
-    std::cerr << "usage: pagebroker-daemon SOCKET STAGING_DIRECTORY\n";
-    return 2;
-  }
-
-  struct sigaction action {};
-  action.sa_handler = Stop;
-  sigemptyset(&action.sa_mask);
-  if (sigaction(SIGINT, &action, nullptr) < 0 || sigaction(SIGTERM, &action, nullptr) < 0) {
-    std::cerr << "install signal handler: " << std::strerror(errno) << '\n';
-    return 1;
-  }
-
-  const fs::path socket_path(argv[kSocketPath]);
-  std::error_code error;
-  fs::create_directories(socket_path.parent_path(), error);
-  if (error) {
-    std::cerr << "create socket directory: " << error.message() << '\n';
-    return 1;
-  }
-  fs::create_directories(argv[kStagingDirectory], error);
-  if (error) {
-    std::cerr << "create staging directory: " << error.message() << '\n';
-    return 1;
-  }
-  if (socket_path.string().size() >= sizeof(sockaddr_un::sun_path)) {
-    std::cerr << "socket path is too long\n";
-    return 2;
-  }
-  unlink(socket_path.c_str());
-
-  FileDescriptor listener(socket(AF_UNIX, SOCK_STREAM, 0));
-  if (listener.get() < 0) {
-    std::cerr << "create listener: " << std::strerror(errno) << '\n';
-    return 1;
-  }
-  sockaddr_un address{};
-  address.sun_family = AF_UNIX;
-  std::strcpy(address.sun_path, socket_path.c_str());
-  if (bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0 ||
-      listen(listener.get(), 16) < 0) {
-    std::cerr << "listen: " << std::strerror(errno) << '\n';
-    return 1;
-  }
-  const int listener_flags = fcntl(listener.get(), F_GETFL);
-  if (listener_flags < 0 || fcntl(listener.get(), F_SETFL, listener_flags | O_NONBLOCK) < 0) {
-    std::cerr << "make listener nonblocking: " << std::strerror(errno) << '\n';
-    return 1;
-  }
-
-  Broker broker(argv[kStagingDirectory]);
-  ConnectionTracker connections;
-  while (!shutting_down) {
-    pollfd poll_descriptor{listener.get(), POLLIN, 0};
-    if (poll(&poll_descriptor, 1, kShutdownPollTimeoutMs) <= 0)
-      continue;
-    const int connection = accept(listener.get(), nullptr, nullptr);
-    if (connection < 0) {
-      if (errno != EINTR)
-        std::cerr << "accept: " << std::strerror(errno) << '\n';
+  for (auto handler = handlers.begin(); handler != handlers.end();) {
+    if (handler->wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+      ++handler;
       continue;
     }
-    connections.Start();
+    handler->get();
+    handler = handlers.erase(handler);
+  }
+}
+
+void
+WaitForHandlers(std::vector<std::future<void>>& handlers)
+{
+  for (auto& handler : handlers) handler.get();
+}
+
+void
+Serve(FileDescriptor& listener, Broker& broker)
+{
+  std::vector<std::future<void>> handlers;
+  while (!shutting_down) {
+    ReapHandlers(handlers);
+    pollfd poll_descriptor{listener.get(), POLLIN, 0};
+    const int ready = poll(&poll_descriptor, 1, kShutdownPollTimeoutMs);
+    if (ready == 0)
+      continue;
+    if (ready < 0) {
+      if (errno != EINTR)
+        LogError("poll", {errno, std::generic_category()});
+      continue;
+    }
+    const int connection = accept(listener.get(), nullptr, nullptr);
+    if (connection < 0) {
+      if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+        LogError("accept", {errno, std::generic_category()});
+      continue;
+    }
     try {
-      std::thread(ServeConnection, connection, std::ref(broker), std::ref(connections)).detach();
+      handlers.emplace_back(
+          std::async(std::launch::async, [connection, &broker] { ServeConnection(connection, broker); }));
     }
     catch (const std::system_error& error) {
       FileDescriptor descriptor(connection);
-      connections.Finish();
       std::cerr << "start connection: " << error.what() << '\n';
     }
   }
-  connections.Wait();
+  WaitForHandlers(handlers);
+}
+}  // namespace
+
+ExitCode
+RunDaemon(const fs::path& socket_path, const fs::path& staging_directory)
+{
+  shutting_down = 0;
+  if (const auto error = InstallSignalHandlers(); error)
+    return Fail("install signal handlers", error);
+  if (const auto error = PrepareDirectories(socket_path, staging_directory); error)
+    return Fail("create daemon directories", error);
+  if (socket_path.string().size() >= sizeof(sockaddr_un::sun_path)) {
+    std::cerr << "socket path is too long\n";
+    return ExitCode::INVALID_ARGUMENTS;
+  }
+  auto [listener, error] = CreateListener(socket_path);
+  if (error)
+    return Fail("create listener", error);
+
+  Broker broker(staging_directory);
+  Serve(listener, broker);
+  return ExitCode::SUCCESS;
 }

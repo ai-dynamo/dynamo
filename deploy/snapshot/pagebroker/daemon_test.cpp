@@ -82,8 +82,10 @@ TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
 {
   auto first = RequestFor("first");
   auto second = RequestFor("second");
-  Configure(first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
-  Configure(second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
+  Configure(
+      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
+  Configure(
+      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
 
   Response first_response;
   Response second_response;
@@ -94,7 +96,28 @@ TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
 
   ASSERT_TRUE(first_response.has_staged_restore_directory());
   ASSERT_TRUE(second_response.has_staged_restore_directory());
-  EXPECT_NE(first_response.staged_restore_directory().image_directory(), second_response.staged_restore_directory().image_directory());
+  EXPECT_NE(
+      first_response.staged_restore_directory().image_directory(),
+      second_response.staged_restore_directory().image_directory());
+}
+
+TEST_F(BrokerTest, RejectsConcurrentRestoreForSameTransaction)
+{
+  auto first = RequestFor("restore");
+  auto second = RequestFor("restore");
+  Configure(
+      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
+  Configure(
+      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
+
+  Response first_response;
+  Response second_response;
+  std::thread first_request([&] { first_response = broker().HandleRequest(first); });
+  std::thread second_request([&] { second_response = broker().HandleRequest(second); });
+  first_request.join();
+  second_request.join();
+
+  EXPECT_NE(first_response.has_staged_restore_directory(), second_response.has_staged_restore_directory());
 }
 
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
@@ -120,6 +143,37 @@ TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
   const auto response = broker().HandleRequest(restore);
   ASSERT_TRUE(response.has_failure());
   EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
+}
+
+TEST_F(BrokerTest, RejectsInvalidStagedRestore)
+{
+  auto restore = RequestFor("restore");
+  restore.mutable_staged_restore();
+  const auto response = broker().HandleRequest(restore);
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+}
+
+TEST_F(BrokerTest, AbortsFailedCheckpointStaging)
+{
+  const fs::path destination = root_ / "storage" / "published";
+  const fs::path staging_directory = root_ / "tmpfs" / "checkpoint" / "checkpoint";
+  fs::create_symlink(root_ / "missing", staging_directory);
+  auto prepare = RequestFor("checkpoint");
+  Configure(
+      prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), destination);
+  const auto failed = broker().HandleRequest(prepare);
+  ASSERT_TRUE(failed.has_failure());
+  EXPECT_EQ(failed.failure().code(), Failure::STORAGE_ERROR);
+
+  auto abort = RequestFor("checkpoint");
+  abort.mutable_abort();
+  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+
+  const auto retry = broker().HandleRequest(prepare);
+  ASSERT_TRUE(retry.has_failure());
+  EXPECT_EQ(retry.failure().code(), Failure::TRANSACTION_CONFLICT);
 }
 
 TEST_F(BrokerTest, PublishesCheckpoint)

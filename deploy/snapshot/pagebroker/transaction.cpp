@@ -39,15 +39,4 @@ Transaction::clear_descriptor()
   descriptor_ = std::monostate();
 }
 
-uintmax_t
-Transaction::reserved_bytes() const
-{
-  return reserved_bytes_;
-}
-
-void
-Transaction::set_reserved_bytes(uintmax_t bytes)
-{
-  reserved_bytes_ = bytes;
-}
 }  // namespace snapshot::pagebroker

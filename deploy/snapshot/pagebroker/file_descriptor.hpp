@@ -7,6 +7,8 @@ class FileDescriptor {
 
   FileDescriptor(const FileDescriptor&) = delete;
   FileDescriptor& operator=(const FileDescriptor&) = delete;
+  FileDescriptor(FileDescriptor&& other) noexcept;
+  FileDescriptor& operator=(FileDescriptor&& other) noexcept;
 
   int get() const;
 
