@@ -113,6 +113,10 @@ impl<'a> QueueAdmissionRequest<'a> {
         self.id
     }
 
+    /// Return the caller-supplied request identity.
+    ///
+    /// The host rejects another admission-managed request with the same identity until this
+    /// request reaches a terminal event.
     pub fn request_id(&self) -> &str {
         self.request_id
     }
