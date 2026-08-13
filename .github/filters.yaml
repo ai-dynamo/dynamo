@@ -246,6 +246,11 @@ deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/checkpoint-placeholder/**'
+  # deploy/snapshot/ was removed entirely (Dynamo no longer owns the
+  # snapshot agent). Nothing will ever exist under this path again, but the
+  # PR that deletes it still needs its diff classified by the
+  # changed-files coverage check, so the pattern stays.
+  - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.
