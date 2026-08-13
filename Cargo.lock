@@ -3019,6 +3019,7 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-runtime",
+ "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
  "rand 0.9.4",
