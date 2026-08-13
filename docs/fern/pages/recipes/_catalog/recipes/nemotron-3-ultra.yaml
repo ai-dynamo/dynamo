@@ -11,7 +11,7 @@ model:
   precision: NVFP4 + FP8
 status: experimental
 targets:
-- id: agg-b200-chat-mtp
+- id: agg-b200-chat-256k-mtp
   recommended: true
   hardware:
     gpu: B200
@@ -28,14 +28,14 @@ targets:
     type: chat
     traffic: 8K/1K chat Moontrace replay (70% KV reuse shape), reference concurrency 18
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-chat-256k-mtp/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: true
     summary: 52.0 tok/s/user, 201.4 tok/s/GPU @ c18 (15% raw Moontrace replay)
-- id: agg-b200-agentic-mtp
+- id: agg-b200-agentic-256k-mtp
   recommended: true
   hardware:
     gpu: B200
@@ -52,14 +52,14 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay (90% KV reuse shape), reference concurrency 20
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256k-mtp/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: true
     summary: 80.6 tok/s/user, 310.8 tok/s/GPU @ c20 (15% raw Moontrace replay)
-- id: agg-h200-chat-mtp
+- id: agg-h200-chat-256k-mtp
   recommended: true
   hardware:
     gpu: H200
@@ -76,14 +76,14 @@ targets:
     type: chat
     traffic: 8K/1K chat Moontrace replay, reference concurrency 10
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-chat-256k-mtp/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: true
     summary: 58.7 tok/s/user, 46.8 tok/s/GPU @ c10 (300-sample replay evidence)
-- id: agg-h200-agentic-mtp
+- id: agg-h200-agentic-256k-mtp
   recommended: true
   hardware:
     gpu: H200
@@ -100,14 +100,14 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, reference concurrency 8
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256k-mtp/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: true
     summary: 53.2 tok/s/user, 27.4 tok/s/GPU @ c8 (300-sample replay evidence)
-- id: disagg-b200-agentic
+- id: disagg-b200-agentic-256k
   recommended: false
   hardware:
     gpu: B200
@@ -124,13 +124,154 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, reference concurrency 32
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256k/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: true
     summary: 61.6 tok/s/user, 231.1 tok/s/GPU @ c32, no MTP (15% raw Moontrace replay)
+- id: refresh-b200-256k
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4-per-worker
+  - mtp5-spec-dec
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 94
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+  expected_performance:
+    available: false
+- id: refresh-b200-1m
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4-per-worker
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 46
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+  expected_performance:
+    available: false
+- id: refresh-gb200-256k
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4-per-worker
+  - mtp5-spec-dec
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 96
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+  expected_performance:
+    available: false
+- id: refresh-gb200-1m
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4-per-worker
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+  expected_performance:
+    available: false
+- id: refresh-h200-256k
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp8-per-worker
+  - mtp5-spec-dec
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 64
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+  expected_performance:
+    available: false
+- id: refresh-h200-1m
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp8-per-worker
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+  expected_performance:
+    available: false
 related_benchmarks: []
 maintainer: null
 gaps:
@@ -138,5 +279,5 @@ gaps:
 - no SLA/goodput target in source (perf.yaml has no goodput flags)
 - 'status tension: recipes/README.md lists Ultra as benchmarked, but runtime image is Day-0 dev (1.3.0-nemotron-ultra-dev.1);
   page marks experimental'
-- single shared perf.yaml serves all targets (env-block retargeting)
+- Day-0 and Refresh targets each use one shared perf Job (env-block retargeting)
 - maintainer unknown
