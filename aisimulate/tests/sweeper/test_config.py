@@ -114,6 +114,8 @@ def test_extra_fields_are_forbidden_at_each_boundary():
     "field",
     [
         "min_endpoint",
+        "prefill_min_endpoint",
+        "decode_min_endpoint",
         "planner_scaling_policy",
         "planner_fpm_sampling",
         "planner_load_sensitivity",

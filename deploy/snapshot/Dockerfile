@@ -131,12 +131,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64/stubs \
     -lcuda
+
+RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -226,11 +229,71 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
+             /usr/local/sbin/ns-bind-mount
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
-COPY --from=builder /nsrestore /usr/local/bin/nsrestore
+
+# Assemble the injection bundle: bind-mounted read-only into the placeholder's
+# mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
+# The placeholder ships none of this. nsrestore redirects all three lookup
+# mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
+# LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
+RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
+COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
+COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
+COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+
+# Network binaries needed during restore:
+#   ip  — address/route restore (criu/net.c)
+#   tar — used by runtime.ApplyRootfsDiff
+# Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts, so
+# criu never forks iptables-restore/ip6tables-restore on this path and neither
+# binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
+# for restore specifically.
+# All resolve through PATH inside the namespace.
+RUN set -eu; \
+    cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
+    chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
+             /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+             /snapshot-binaries/ip /snapshot-binaries/tar
+
+# Shared-library closure of the bundled binaries and plugins.
+#
+# glibc (libc, libm, libpthread, libdl, librt, libresolv) and the loader are
+# deliberately excluded: the kernel reads PT_INTERP before LD_LIBRARY_PATH
+# applies, so the loader always comes from the placeholder, and glibc's loader
+# and libc are version-locked — pairing them across builds breaks at exec.
+# Also excluded: libmvec, libutil, libanl, libnsl, libthread_db — same glibc
+# version-lock; libm matches only when followed by '.' or '-', not libmvec.
+# libcuda/libnvidia are excluded because they are injected by the NVIDIA
+# container runtime and must match the host driver.
+RUN set -eu; \
+    command -v ldd >/dev/null || { echo "ERROR: ldd missing in builder" >&2; exit 1; }; \
+    for f in /snapshot-binaries/* /snapshot-binaries/criu-plugins/*.so; do \
+      [ -f "$f" ] || continue; \
+      ldd "$f" 2>/dev/null | awk '/=> \//{print $3}'; \
+    done | sort -u \
+    | grep -Ev '/(ld-linux|libc|libm|libmvec|libdl|libpthread|librt|libresolv|libutil|libanl|libnsl|libthread_db|libcuda|libnvidia)[.-]' \
+    | xargs -r -I{} cp -Ln {} /snapshot-binaries/lib/
+
+# Post-condition: verify each key binary resolves cleanly against the bundle's
+# lib/. The closure step above uses xargs -r which exits 0 on empty input, so
+# a silent ldd failure leaves lib/ empty; asserting here catches that.
+RUN set -eu; \
+    for f in /snapshot-binaries/criu /snapshot-binaries/ip \
+             /snapshot-binaries/tar /snapshot-binaries/criu-plugins/*.so; do \
+      [ -f "$f" ] || continue; \
+      if LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" 2>&1 | grep -q 'not found'; then \
+        echo "ERROR: unresolved shared libraries in $f:" >&2; \
+        LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" >&2; \
+        exit 1; \
+      fi; \
+    done
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot
@@ -362,8 +425,34 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 
 # =============================================================================
 # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
-# This image is a superset of the runtime image: same default execution contract
-# (entrypoint/cmd/user), plus CRIU/cuda-checkpoint tooling for external restore.
+#
+# This is the runtime image with the same default execution contract
+# (entrypoint/cmd), running as root so the agent can restore into it. It ships
+# NO checkpoint/restore tooling: criu, nsrestore, the cuda-checkpoint binaries,
+# their shared libraries, and the criu plugins are all bind-mounted on demand
+# from the agent's /snapshot-binaries bundle at restore time (internal/nsmount).
+# The mount destination is created by the ns-bind-mount helper inside this
+# namespace, so nothing needs pre-provisioning here.
+#
+# Three constraints follow from that and must hold for every BASE_IMAGE:
+#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
+#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
+#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
+#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
+#     restore with "version 'GLIBC_2.38' not found".
+#   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
+#   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
+#     writable volume is mounted at /tmp. The agent bind-mounts the binary
+#     bundle into the placeholder's /tmp at restore time; with a read-only
+#     root and nothing mounted at /tmp, creating the mount point fails with
+#     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
+#     volume mounts stay writable independently of the root filesystem.
+#
+# cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
+# When used, the source workload image must have cuda-checkpoint at the same
+# path as it runs from — CRIU restores file-backed mappings by path, not via
+# PATH search — and so must this placeholder image (same BASE_IMAGE).
+#
 # Dynamo backend entrypoints run a restore standby path when the operator
 # injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
 # snapshot-agent restores into the container.
@@ -377,41 +466,9 @@ ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 USER root
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+      echo "ERROR: Dynamo Snapshot requires x86_64" >&2; exit 1; \
     fi
 
-# Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libbsd0 \
-    libcap2 \
-    libnet1 \
-    libnl-3-200 \
-    libnl-route-3-200 \
-    libprotobuf-c1 \
-    libgnutls30t64 \
-    libnftables1 \
-    iproute2 \
-    iptables \
-    procps \
-    uuid-runtime \
-    tar \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy CRIU from builder (needed by nsrestore running inside these namespaces)
-COPY --from=criu-builder /criu-install/usr/local /usr/local
-COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
-RUN criu --version && echo "CRIU installed successfully"
-
-# Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
-COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
-
-# Copy nsrestore binary (invoked by DaemonSet via nsenter)
-COPY --from=builder /nsrestore /usr/local/bin/nsrestore
-RUN chmod +x /usr/local/bin/nsrestore
-
-# Create directories
-RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
+# Checkpoint volume mount point. This is a storage concern — no restore tooling
+# is provisioned here; see the stage comment above.
+RUN mkdir -p /checkpoints
