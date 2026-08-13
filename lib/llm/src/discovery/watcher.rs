@@ -1504,6 +1504,7 @@ mod tests {
             .expect("base chat pipeline was not committed");
         let released_base_engine = Arc::downgrade(&base_engine);
         drop(base_engine);
+        let base_engine_owner_count = released_base_engine.strong_count();
 
         let mut released_adapter_views = Vec::new();
         let mut released_adapter_engines = Vec::new();
@@ -1527,6 +1528,10 @@ mod tests {
             })
             .await
             .expect("LoRA adapter view was not committed");
+            assert!(
+                released_base_engine.strong_count() > base_engine_owner_count,
+                "LoRA adapter must retain the shared base chat pipeline"
+            );
             let engine = adapter_view.chat_engine.clone().unwrap();
             let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
                 serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
@@ -1572,6 +1577,11 @@ mod tests {
                 released_adapter_engines.last().unwrap().strong_count(),
                 0,
                 "removed LoRA adapter engine remained strongly referenced"
+            );
+            assert_eq!(
+                released_base_engine.strong_count(),
+                base_engine_owner_count,
+                "removed LoRA adapter retained the shared base chat pipeline"
             );
         }
 
