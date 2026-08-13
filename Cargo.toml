@@ -186,7 +186,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = { version = "2" }
 
 [patch.crates-io]
-aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "c80c1875e1e623dc89bbe150d9d763a3a8d232df" }
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "614b9c8c8725332533616786e2eb049df48935f0" }
 
 [profile.dev.package]
 insta.opt-level = 3
