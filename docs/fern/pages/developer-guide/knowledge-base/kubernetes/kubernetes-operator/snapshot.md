@@ -60,40 +60,21 @@ For the cross-feature backend overview, see [Compatibility](../../../../referenc
 
 ### 1. Build and push a placeholder image
 
-Snapshot-enabled workers must use a placeholder image that wraps the normal runtime image with restore tooling. If you do not already have one, build it and push it to a registry your cluster can pull from:
+Snapshot-enabled workers must use a placeholder image that wraps the normal runtime image with restore tooling. Dynamo owns the placeholder image build (`deploy/checkpoint-placeholder/Dockerfile`); the agent and operator images come from the external [github.com/ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot) project and don't need building. If you do not already have a placeholder image, build it and push it to a registry your cluster can pull from:
 
 ```bash
 export RUNTIME_IMAGE=registry.example.com/dynamo/vllm-runtime:1.0.0
 export PLACEHOLDER_IMAGE=registry.example.com/dynamo/vllm-placeholder:1.0.0
 
-cd deploy/snapshot
+docker build \
+  --build-arg BASE_IMAGE="${RUNTIME_IMAGE}" \
+  -t "${PLACEHOLDER_IMAGE}" \
+  deploy/checkpoint-placeholder
 
-make docker-build-placeholder \
-  PLACEHOLDER_BASE_IMG="${RUNTIME_IMAGE}" \
-  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}"
-
-make docker-push-placeholder \
-  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}"
+docker push "${PLACEHOLDER_IMAGE}"
 ```
 
-The placeholder image preserves the normal runtime entrypoint/command contract and adds the `criu`, `cuda-checkpoint`, and `nsrestore` tooling needed for checkpoint and restore.
-
-To build either snapshot image against a custom CRIU fork or ref, pass
-`CRIU_REPO` and `CRIU_REF` through `make`. If they are unset, the Dockerfile
-defaults are used.
-
-```bash
-make docker-build-agent \
-  IMG=registry.example.com/dynamo/snapshot-agent:1.0.0 \
-  CRIU_REPO="${YOUR_CRIU_REPO}" \
-  CRIU_REF="branch-or-sha"
-
-make docker-build-placeholder \
-  PLACEHOLDER_BASE_IMG="${RUNTIME_IMAGE}" \
-  PLACEHOLDER_IMG="${PLACEHOLDER_IMAGE}" \
-  CRIU_REPO="${YOUR_CRIU_REPO}" \
-  CRIU_REF="branch-or-sha"
-```
+The placeholder image preserves the normal runtime entrypoint/command contract and runs as root so the snapshot agent can bind-mount the `criu`, `cuda-checkpoint`, and `nsrestore` tooling into it at restore time; it ships none of that tooling itself.
 
 ### 2. Enable checkpointing in the platform and verify it
 
@@ -118,13 +99,20 @@ kubectl get configmap "${OPERATOR_CONFIG}" -n "${PLATFORM_NAMESPACE}" \
 
 Verify that the rendered config includes `enabled: true`.
 
-### 3. Install the snapshot chart
+### 3. Install the Snapshot chart
 
-For the default namespace-local mode, install the snapshot chart in each
+Dynamo no longer builds or owns a snapshot chart: install
+[github.com/ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot)'s
+published chart directly (this is the same OCI dependency
+`deploy/helm/charts/platform` installs via `global.snapshot.install`, if you'd
+rather let the platform chart manage it instead of installing standalone).
+
+For the default namespace-local mode, install the chart in each
 workload namespace. The chart creates the PVC and the agent in that namespace:
 
 ```bash
-helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+helm upgrade --install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+  --version 0.1.0-alpha.1 \
   --namespace ${NAMESPACE} \
   --create-namespace \
   --set storage.pvc.create=true
@@ -138,7 +126,7 @@ a default storage class, also set `storage.pvc.storageClass`.
 
 If you are reusing an existing checkpoint PVC, do not set `storage.pvc.create=true`; install the chart with `storage.pvc.create=false` and set `storage.pvc.name` instead.
 
-CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see `deploy/helm/charts/snapshot/README.md`).
+CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see the [chart README](https://github.com/ai-dynamo/snapshot/blob/main/charts/snapshot/README.md) for sockets and Helm flags).
 
 For clusters that prefer one privileged snapshot agent instead of one DaemonSet
 per workload namespace, install the chart once in an infrastructure namespace.
@@ -146,7 +134,8 @@ In this mode the chart does not create workload PVCs; the Dynamo operator either
 creates each namespace-local PVC or verifies that it already exists:
 
 ```bash
-helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+helm upgrade --install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+  --version 0.1.0-alpha.1 \
   --namespace dynamo-system \
   --create-namespace \
   --set storage.accessMode=podMount \
@@ -450,7 +439,7 @@ Failover restore is not yet available. The current Snapshot flow does not suppor
 
 It is possible to checkpoint and restore pods without the Dynamo operator via the lower-level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet in the namespace with the checkpoint PVC mounted.
 
-`snapshotctl` is intended for lower-level debugging and validation workflows, not as the primary user-facing checkpoint interface. For command details and manifest requirements, see [deploy/snapshot/cmd/snapshotctl/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/snapshot/cmd/snapshotctl/README.md).
+`snapshotctl` is intended for lower-level debugging and validation workflows, not as the primary user-facing checkpoint interface. Its behavior is unchanged by Dynamo's snapshot externalization; only its source location moved. For command details and manifest requirements, see [operator/cmd/snapshotctl/README.md](https://github.com/ai-dynamo/snapshot/blob/main/operator/cmd/snapshotctl/README.md) in the [github.com/ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot) repo.
 
 ### Checkpoint from a worker pod manifest
 

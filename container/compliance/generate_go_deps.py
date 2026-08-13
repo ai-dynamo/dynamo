@@ -35,21 +35,19 @@ FIELDNAMES = ["dependency_type", "package_name", "version", "spdx_license", "rep
 
 DEFAULT_MODULE_DIRS = [
     "deploy/operator",
-    "deploy/snapshot",
 ]
 
 DEFAULT_IGNORE_PREFIXES = "github.com/ai-dynamo/dynamo"
 
 # Transitive test/indirect deps that go-licenses requires to be fetched
 # before it can scan certain modules. Keyed by module directory (relative to
-# repo root). See deploy/snapshot/deps.md for background.
-_PREFETCH_DEPS: dict[str, list[str]] = {
-    "deploy/snapshot": [
-        "github.com/opencontainers/runtime-spec/schema@v1.2.0",
-        "github.com/evanphx/json-patch",
-        "github.com/jessevdk/go-flags",
-    ],
-}
+# repo root).
+#
+# deploy/snapshot was removed when Dynamo stopped owning the snapshot agent
+# (github.com/ai-dynamo/snapshot); its go-licenses prefetch list lived here
+# and no longer applies to any module Dynamo builds. Kept as documentation
+# in case a future Dynamo-owned Go module needs the same prefetch pattern.
+_PREFETCH_DEPS: dict[str, list[str]] = {}
 
 _LICENSE_NAMES = [
     "LICENSE",

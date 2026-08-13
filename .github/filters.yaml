@@ -245,7 +245,7 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
-  - 'deploy/snapshot/**'
+  - 'deploy/checkpoint-placeholder/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.

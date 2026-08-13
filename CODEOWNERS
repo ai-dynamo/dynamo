@@ -372,31 +372,17 @@
 /deploy/operator/internal/controller_common/                                 @ai-dynamo/dynamo-operator-codeowners
 
 # === gms  (@ai-dynamo/dynamo-gms-codeowners) ===
-/deploy/snapshot/                                                            @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/cmd/                                                        @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/                                                     @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/                                                   @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/protocol/                                                   @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/cmd/agent/                                                  @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/cli/                                                 @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/tests/                                               @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/cmd/nsrestore/                                              @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/criu/                                              @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/cuda/                                              @ai-dynamo/dynamo-gms-codeowners
+/deploy/checkpoint-placeholder/                                              @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/client/                                              @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/common/                                              @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/server/                                              @ai-dynamo/dynamo-gms-codeowners
 /benchmarks/cuda_custom_storage/                                             @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/types/                                             @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/cmd/snapshotctl/                                            @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/snapshot/                                            @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/logging/                                           @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/runtime/                                           @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/executor/                                          @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/internal/controller/                                        @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/integrations/                                        @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/failover_lock/                                       @ai-dynamo/dynamo-gms-codeowners
-/deploy/snapshot/cmd/cuda-checkpoint-helper/                                 @ai-dynamo/dynamo-gms-codeowners
 
 # === epp  (@ai-dynamo/dynamo-epp-codeowners) ===
 /deploy/inference-gateway/                                                   @ai-dynamo/dynamo-epp-codeowners
@@ -521,7 +507,6 @@
 /lib/llm/src/grpc/service.rs                                                 @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http/service.rs                                                 @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/preprocessor.rs                                                 @ai-dynamo/dynamo-frontend-codeowners
-/deploy/helm/charts/snapshot/                                                @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/block_manager.md                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager.rs                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/benchmarks/multimodal/                                                @ai-dynamo/dynamo-multimodal-codeowners
@@ -578,6 +563,7 @@
 /lib/llm/src/block_manager/distributed/                                      @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_reasoning_parser.rs                                      @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/common/protocols/                                     @ai-dynamo/dynamo-frontend-codeowners
+/deploy/operator/internal/checkpointjob/                                     @ai-dynamo/dynamo-gms-codeowners
 /deploy/operator/internal/observability/                                     @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/block_manager/controller.rs                                     @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/multimodal/                                    @ai-dynamo/dynamo-multimodal-codeowners
