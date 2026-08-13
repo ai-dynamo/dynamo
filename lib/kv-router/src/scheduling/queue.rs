@@ -671,11 +671,12 @@ impl<
     pub(crate) async fn complete_request(
         &self,
         request_id: &str,
+        update_worker: Option<WorkerWithDpRank>,
         expected_worker: Option<WorkerWithDpRank>,
         context_tokens: Option<usize>,
     ) -> bool {
         self.update_after(
-            expected_worker,
+            update_worker,
             Some((
                 request_id.to_owned(),
                 expected_worker,
@@ -689,10 +690,11 @@ impl<
     pub(crate) async fn abort_request(
         &self,
         request_id: &str,
+        update_worker: Option<WorkerWithDpRank>,
         expected_worker: Option<WorkerWithDpRank>,
     ) -> bool {
         self.update_after(
-            expected_worker,
+            update_worker,
             Some((
                 request_id.to_owned(),
                 expected_worker,
@@ -2467,7 +2469,12 @@ mod tests {
             .free(&"policy-request".to_owned(), Instant::now())
             .unwrap();
         queue
-            .complete_request("policy-request", Some(response.best_worker), Some(48))
+            .complete_request(
+                "policy-request",
+                Some(response.best_worker),
+                Some(response.best_worker),
+                Some(48),
+            )
             .await;
         assert_eq!(state.completed.load(Ordering::Relaxed), 1);
         assert_eq!(state.completed_context_tokens.load(Ordering::Relaxed), 48);
@@ -2526,7 +2533,12 @@ mod tests {
             .unwrap();
         assert!(
             queue
-                .complete_request("policy-request", Some(response.best_worker), Some(48))
+                .complete_request(
+                    "policy-request",
+                    Some(response.best_worker),
+                    Some(response.best_worker),
+                    Some(48),
+                )
                 .await
         );
         assert_eq!(state.completed.load(Ordering::Relaxed), 1);
@@ -2894,7 +2906,7 @@ mod tests {
         assert_eq!(queue.pending_count(), 1);
 
         slots.free(&"active".to_owned(), decay_now()).unwrap();
-        assert!(!queue.complete_request("unknown", None, None).await);
+        assert!(!queue.complete_request("unknown", None, None, None).await);
         assert!(matches!(
             queued_rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -2902,6 +2914,42 @@ mod tests {
 
         queue.update().await;
         queued_rx.await.unwrap().unwrap();
+        slots.free(&"queued".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plain_tracked_terminal_update_wakes_worker_with_admission_policy() {
+        let state = Arc::new(AdmissionPolicyState::default());
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(ReadyPolicy { state })),
+        };
+        let isl = 512;
+        let (queue, slots) = make_queue_with_custom_selector(1, 16, isl, Some(0.0), selector);
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        let (active, active_rx) = make_request("active", isl);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (queued, queued_rx) = make_request("queued", isl);
+        queue.enqueue(queued).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots.free(&"active".to_owned(), decay_now()).unwrap();
+        assert!(
+            !queue
+                .complete_request("active", Some(worker), None, None)
+                .await,
+            "plain tracked request must not report a policy lifecycle event"
+        );
+        tokio::time::timeout(Duration::from_secs(1), queued_rx)
+            .await
+            .expect("freed worker did not wake pending request")
+            .unwrap()
+            .unwrap();
+
         slots.free(&"queued".to_owned(), decay_now()).unwrap();
         slots.assert_completely_drained(decay_now());
     }

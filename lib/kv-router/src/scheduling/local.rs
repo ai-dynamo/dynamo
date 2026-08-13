@@ -567,10 +567,10 @@ where
         let admission_owned = match outcome {
             RequestOutcome::Completed(context_tokens) => {
                 self.queue
-                    .complete_request(&request_id, None, context_tokens)
+                    .complete_request(&request_id, worker, None, context_tokens)
                     .await
             }
-            RequestOutcome::Aborted => self.queue.abort_request(&request_id, None).await,
+            RequestOutcome::Aborted => self.queue.abort_request(&request_id, worker, None).await,
         };
         slot_result?;
         Ok(worker.is_some() || admission_owned)
@@ -621,8 +621,8 @@ where
         outcome: RequestOutcome,
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
+        let owned = self.slots.request_worker(&request_id) == Some(worker);
         if !self.queue.has_admission_policy() {
-            let owned = self.slots.request_worker(&request_id) == Some(worker);
             let slot_result = self
                 .slots
                 .free_if_worker(&request_id, worker, Instant::now());
@@ -638,11 +638,19 @@ where
             RequestOutcome::Completed(context_tokens) => {
                 let _ = self
                     .queue
-                    .complete_request(&request_id, Some(worker), context_tokens)
+                    .complete_request(
+                        &request_id,
+                        owned.then_some(worker),
+                        Some(worker),
+                        context_tokens,
+                    )
                     .await;
             }
             RequestOutcome::Aborted => {
-                let _ = self.queue.abort_request(&request_id, Some(worker)).await;
+                let _ = self
+                    .queue
+                    .abort_request(&request_id, owned.then_some(worker), Some(worker))
+                    .await;
             }
         }
         slot_result
