@@ -2608,13 +2608,20 @@ where
         };
 
         // `advance_next` preserves its historical initial-progress return even
-        // when first-tick seeding creates work at the current timestamp. The
-        // following settle must still consume that same-time work.
-        if matches!(
-            frontier,
-            InteractiveFrontier::NextTimestamp(next_timestamp_ms)
-                if next_timestamp_ms <= self.now_ms
-        ) {
+        // when first-tick seeding creates work at the current timestamp. A
+        // drained frontier can likewise coexist with idle-only work that
+        // completion deliberately ignores. The following settle must consume
+        // either kind of same-time work while leaving future idle events alone.
+        let current_time_work = match frontier {
+            InteractiveFrontier::NextTimestamp(next_timestamp_ms) => {
+                next_timestamp_ms <= self.now_ms
+            }
+            InteractiveFrontier::Drained => self
+                .next_timestamp()
+                .is_some_and(|next_timestamp_ms| next_timestamp_ms <= self.now_ms),
+            _ => false,
+        };
+        if current_time_work {
             changed |= self.drain_current_timestamp()?;
             frontier = self.refresh_interactive_frontier();
         }
@@ -4415,9 +4422,21 @@ mod tests {
     }
 
     #[test]
-    fn drained_frontier_retains_lingering_idle_event_timestamp() {
+    fn drained_frontier_settles_current_idle_event_and_retains_future_timestamp() {
         let mut runtime = interactive_round_robin_runtime(VecDeque::new());
         runtime.stepping_started = true;
+        runtime.drain_current_timestamp().unwrap();
+        assert_eq!(
+            runtime.refresh_interactive_frontier(),
+            InteractiveFrontier::Drained
+        );
+        push_worker_ready(
+            &mut runtime.events,
+            &mut runtime.next_event_seq,
+            0.0,
+            SimulationWorkerStage::Aggregated,
+            0,
+        );
         push_worker_ready(
             &mut runtime.events,
             &mut runtime.next_event_seq,
@@ -4425,10 +4444,14 @@ mod tests {
             SimulationWorkerStage::Aggregated,
             0,
         );
-        runtime.drain_current_timestamp().unwrap();
         assert_eq!(
-            runtime.refresh_interactive_frontier(),
-            InteractiveFrontier::Drained
+            runtime.interactive_frontier,
+            Some(InteractiveFrontier::Drained)
+        );
+        assert_eq!(runtime.interactive_next_event_time_ms(), Some(0.0));
+        assert_eq!(
+            runtime.interactive_settle_current_time().unwrap(),
+            ReplayStepStatus::Drained { now_ms: 0.0 }
         );
         assert!(runtime.interactive_is_drained());
         assert_eq!(runtime.interactive_next_event_time_ms(), Some(5.0));
