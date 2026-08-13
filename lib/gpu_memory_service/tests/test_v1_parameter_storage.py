@@ -25,11 +25,13 @@ pytestmark = [
 
 def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
     model = torch.nn.Module()
+    draft_model = torch.nn.Module()
     source = torch.arange(64, dtype=torch.float32)
     source_storage = source.untyped_storage()
     model.weight = torch.nn.Parameter(source[:32])
     model.overlapping_weight = torch.nn.Parameter(source[16:40])
     model.strided_weight = torch.nn.Parameter(source[32:52:2])
+    draft_model.weight = torch.nn.Parameter(source[60:64])
     model.register_buffer("overlap", model.weight[8:24])
     model.overlap_alias = model.overlap[4:12]
     model.register_buffer(
@@ -73,6 +75,7 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
             ("weight", model.weight),
             ("overlapping_weight", model.overlapping_weight),
             ("strided_weight", model.strided_weight),
+            ("draft_weight", draft_model.weight),
             ("overlap", model.overlap),
             ("overlap_alias", model.overlap_alias),
             ("empty_view", model.empty_view),
@@ -87,7 +90,10 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
         model.empty_view.stride(),
     )
 
-    accounting = copy_non_parameter_tensors_to_default_allocator(model, (mapping,))
+    accounting = copy_non_parameter_tensors_to_default_allocator(
+        (model, draft_model),
+        (mapping,),
+    )
 
     assert {
         name: int(tensor._cdata)
@@ -95,6 +101,7 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
             ("weight", model.weight),
             ("overlapping_weight", model.overlapping_weight),
             ("strided_weight", model.strided_weight),
+            ("draft_weight", draft_model.weight),
             ("overlap", model.overlap),
             ("overlap_alias", model.overlap_alias),
             ("empty_view", model.empty_view),
@@ -105,6 +112,7 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
     assert int(model.weight.untyped_storage()._cdata) == original_storage
     assert int(model.overlapping_weight.untyped_storage()._cdata) == original_storage
     assert int(model.strided_weight.untyped_storage()._cdata) == original_storage
+    assert int(draft_model.weight.untyped_storage()._cdata) == original_storage
     assert int(model.empty_view.untyped_storage()._cdata) != original_storage
     assert (
         model.empty_view.storage_offset(),
@@ -125,6 +133,7 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
     assert int(outside.untyped_storage()._cdata) == outside_storage
     assert outside.tolist() == list(map(float, range(8)))
     assert model.weight.tolist() == list(map(float, range(32)))
+    assert draft_model.weight.tolist() == list(map(float, range(60, 64)))
     assert model.overlap.tolist() == list(map(float, range(8, 24)))
     assert model.disjoint.tolist() == [48.0, 49.0, 50.0, 51.0]
     assert workspace.tolist() == [56.0, 57.0, 58.0, 59.0]
@@ -133,4 +142,4 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
         model.overlap_alias.fill_(23)
     assert model.overlap.tolist()[4:12] == [23.0] * 8
     assert model.weight.tolist()[12:20] == list(map(float, range(12, 20)))
-    assert accounting == (51 * 4, (16 + 4 + 4) * 4)
+    assert accounting == (55 * 4, (16 + 4 + 4) * 4)

@@ -40,6 +40,16 @@ const (
 // terminates the server when the Job's regular containers exit; a regular
 // container here would keep the Pod in Running forever. Idempotent.
 func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
+	ensureServerSidecar(podSpec, mainContainer, nil)
+}
+
+// EnsureV1ServerSidecar adds a GMS V1 server. Every client in the pod must use
+// the V1 protocol.
+func EnsureV1ServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
+	ensureServerSidecar(podSpec, mainContainer, []string{"--use-v1"})
+}
+
+func ensureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, args []string) {
 	if podSpec == nil || mainContainer == nil {
 		return
 	}
@@ -47,6 +57,7 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 	EnsureClient(podSpec, mainContainer)
 
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
+	sidecar.Args = args
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {
