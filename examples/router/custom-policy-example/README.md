@@ -32,7 +32,7 @@ The `simple-filter-score-pick` policy shows the complete pipeline. It filters on
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
 
-The frontend supplies `prefill` or `decode` after discovery scopes the worker pool. A standalone EPP supplies `select`, which explicitly reuses the prefill builder. An unsupported stage stops instead of silently using the prefill policy.
+The embedded frontend supplies `prefill` or `decode` after discovery scopes the worker pool. This disaggregated policy rejects the standalone EPP's single-pool `select` stage because it cannot identify separate prefill and decode pools. Other unsupported stages also stop instead of silently using the prefill policy.
 
 The `simple-stacked-score-pick` policy has no custom filter. It adds active-request and uncached-request costs before its picker selects the lowest total.
 
@@ -236,7 +236,7 @@ DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
   cargo run --release -p dynamo-custom-policy-example-epp
 ```
 
-Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. A policy that branches on `worker_type` must handle `select`.
+Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. A policy that branches on `worker_type` must handle `select`; `disagg-filter-score-pick` intentionally rejects it and is only usable with the embedded frontend. The Rust EPP's Dynamo-runtime mode has native prefill/decode routing, but linked custom policy catalogs are not supported in that mode.
 
 Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes resources.
 

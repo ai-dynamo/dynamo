@@ -23,7 +23,6 @@ use scorer::{DecodeLoadScorer, PrefillLoadScorer};
 
 const PREFILL_WORKER_TYPE: &str = "prefill";
 const DECODE_WORKER_TYPE: &str = "decode";
-const SELECT_WORKER_TYPE: &str = "select";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,10 +41,9 @@ fn validate_min_device_overlap_blocks(
     Ok(())
 }
 
-/// Builds the complete policy used by prefill and standalone selection routes.
+/// Builds the complete policy used by prefill routes.
 fn create_prefill_policy(
     config: &KvRouterConfig,
-    worker_type: &'static str,
     min_device_overlap_blocks: f64,
 ) -> WorkerSelectionPolicy {
     let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
@@ -54,7 +52,7 @@ fn create_prefill_policy(
 
     WorkerSelectionPolicy::new_with_filters(
         config.clone(),
-        worker_type,
+        PREFILL_WORKER_TYPE,
         filters,
         vec![Box::new(PrefillLoadScorer)],
         Box::new(PrefillPicker),
@@ -79,7 +77,7 @@ fn create_decode_policy(
     )
 }
 
-/// Selects a policy from the routing stage supplied by the frontend or EPP.
+/// Selects a policy from the routing stage supplied by the embedded frontend.
 ///
 /// Discovery has already scoped the worker pool before the factory receives this stage.
 fn create_policy(
@@ -88,12 +86,10 @@ fn create_policy(
     min_device_overlap_blocks: f64,
 ) -> WorkerSelectionPolicy {
     match worker_type {
-        PREFILL_WORKER_TYPE | SELECT_WORKER_TYPE => {
-            create_prefill_policy(config, worker_type, min_device_overlap_blocks)
-        }
+        PREFILL_WORKER_TYPE => create_prefill_policy(config, min_device_overlap_blocks),
         DECODE_WORKER_TYPE => create_decode_policy(config, min_device_overlap_blocks),
         unsupported => panic!(
-            "disagg-filter-score-pick does not support worker type {unsupported:?}; expected prefill, decode, or select"
+            "disagg-filter-score-pick does not support worker type {unsupported:?}; expected prefill or decode"
         ),
     }
 }
@@ -133,7 +129,12 @@ mod tests {
         let config = KvRouterConfig::default();
         create_policy(&config, PREFILL_WORKER_TYPE, 0.0);
         create_policy(&config, DECODE_WORKER_TYPE, 0.0);
-        create_policy(&config, SELECT_WORKER_TYPE, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not support worker type \"select\"")]
+    fn rejects_standalone_select_worker_type() {
+        create_policy(&KvRouterConfig::default(), "select", 0.0);
     }
 
     #[test]
