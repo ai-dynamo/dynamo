@@ -80,9 +80,9 @@ class GraphScheduler:
             for task in tasks.values():
                 if not task.done():
                     task.cancel()
-            for task in tensor_exports.values():
-                if not task.done():
-                    task.cancel()
+            for export_task in tensor_exports.values():
+                if not export_task.done():
+                    export_task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
             await asyncio.gather(*tensor_exports.values(), return_exceptions=True)
             raise
