@@ -221,6 +221,23 @@ impl<Metadata: ReplayAdmissionMetadata> InteractiveAdmission for AdmissionQueue<
     }
 }
 
+/// Cached classification of an interactive runtime after same-timestamp work
+/// has reached a fixed point. Mutations clear the cache before touching
+/// simulation state; read-only controller calls may then share one exact view
+/// until the next mutation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum InteractiveFrontier {
+    Drained,
+    ExternalBarrier,
+    NextTimestamp(f64),
+    OpenAdmissionIdle,
+    DeadEnd {
+        in_flight: usize,
+        pending_admission: usize,
+        pending_placements: usize,
+    },
+}
+
 pub(in crate::replay) struct AggRuntimeImpl<
     PlacementPolicyImpl,
     Observation,
@@ -279,6 +296,9 @@ pub(in crate::replay) struct AggRuntimeImpl<
     interactive_workers: Vec<ResolvedPoolWorker>,
     interactive_pool_ids: Vec<String>,
     stepping_started: bool,
+    /// Classification of the last fully settled interactive state. Ordinary
+    /// one-shot replay leaves this `None` and retains its existing kernel.
+    interactive_frontier: Option<InteractiveFrontier>,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
 }
@@ -384,6 +404,7 @@ impl
         target: WorkerTarget,
         required_taints: BTreeSet<String>,
     ) -> anyhow::Result<()> {
+        self.invalidate_interactive_frontier();
         self.placement
             .preassign(request_id, target, required_taints)
     }
@@ -393,6 +414,7 @@ impl
         request_id: Uuid,
         target: WorkerTarget,
     ) -> anyhow::Result<()> {
+        self.invalidate_interactive_frontier();
         anyhow::ensure!(
             self.placement.is_pending(request_id),
             "interactive replay request {request_id} is not awaiting placement"
@@ -407,6 +429,7 @@ impl
         // next external placement boundary or the same-time fixed point so the
         // next observation is both fresh and immediately available.
         self.drain_current_timestamp()?;
+        self.refresh_interactive_frontier();
         Ok(())
     }
 
@@ -415,6 +438,7 @@ impl
         request_id: Uuid,
         pool_id: &str,
     ) -> anyhow::Result<()> {
+        self.invalidate_interactive_frontier();
         anyhow::ensure!(
             self.placement.is_pending(request_id),
             "interactive replay request {request_id} is not awaiting placement"
@@ -429,6 +453,7 @@ impl
         self.decorate_external_overlap(&mut placement, &observation)?;
         self.dispatch_resolved_placement(placement, Some(observation))?;
         self.drain_current_timestamp()?;
+        self.refresh_interactive_frontier();
         Ok(())
     }
 
@@ -471,6 +496,7 @@ impl
     }
 
     pub(in crate::replay::offline) fn cancel_interactive_placement(&mut self, request_id: Uuid) {
+        self.invalidate_interactive_frontier();
         self.placement.cancel(request_id);
         if let Some(capture) = self.interactive.as_mut() {
             capture.cancel_placement_observation(request_id);
@@ -655,6 +681,7 @@ where
             interactive_workers: workers,
             interactive_pool_ids,
             stepping_started: false,
+            interactive_frontier: None,
             #[cfg(test)]
             worker_active_requests: vec![
                 Vec::new();
@@ -676,6 +703,7 @@ where
         external_placement: bool,
         session_affinity: bool,
     ) {
+        self.invalidate_interactive_frontier();
         self.collector.set_capture_per_request(true);
         self.progress = ReplayProgress::disabled();
         self.interactive = Some(InteractiveCapture::new(
@@ -709,6 +737,7 @@ where
                 self.now_ms
             );
         }
+        self.invalidate_interactive_frontier();
         self.admission.append_agentic_trace(trace, release_at_ms)
     }
 
@@ -1804,6 +1833,7 @@ where
 
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> anyhow::Result<bool> {
+        self.invalidate_interactive_frontier();
         let mut made_progress = false;
         loop {
             // A policy-visible external request is a full controller barrier.
@@ -1889,6 +1919,7 @@ where
     /// Seed the first `ScalingTick` from the policy's requested start time (a
     /// non-finite time means "no tick" and is skipped).
     fn seed_first_scaling_tick(&mut self) -> anyhow::Result<()> {
+        self.invalidate_interactive_frontier();
         let Some(mut policy) = self.scaling_policy.take() else {
             return Ok(());
         };
@@ -2056,6 +2087,7 @@ where
     /// accounted at lifecycle boundaries and final settlement rather than on
     /// every timestamp.
     fn advance_now_ms(&mut self, new_now_ms: f64) {
+        self.invalidate_interactive_frontier();
         self.now_ms = new_now_ms;
     }
 
@@ -2090,6 +2122,7 @@ where
         target_workers: usize,
         planner_tick_ordinal: Option<u64>,
     ) -> anyhow::Result<()> {
+        self.invalidate_interactive_frontier();
         if target_workers != self.engine.non_draining_group_count() {
             self.collector.clear_static_worker_count();
         }
@@ -2322,6 +2355,95 @@ where
             && self.placement.pending_count() > 0
     }
 
+    #[inline]
+    fn invalidate_interactive_frontier(&mut self) {
+        self.interactive_frontier = None;
+    }
+
+    /// Classify the current interactive state. Callers may persist this value
+    /// only after all same-timestamp work has reached a fixed point.
+    fn classify_interactive_frontier(&mut self) -> InteractiveFrontier
+    where
+        Admission: InteractiveAdmission,
+    {
+        // Drained retains public-status priority over a controller barrier.
+        if self.is_done() {
+            return InteractiveFrontier::Drained;
+        }
+        if self.external_assignment_pending() {
+            return InteractiveFrontier::ExternalBarrier;
+        }
+        if let Some(next_timestamp_ms) = self.next_timestamp() {
+            return InteractiveFrontier::NextTimestamp(next_timestamp_ms);
+        }
+
+        let in_flight = self.cluster_in_flight();
+        let pending_admission = self.admission.pending_requests();
+        if self.admission.is_open() && pending_admission == 0 && in_flight == 0 {
+            InteractiveFrontier::OpenAdmissionIdle
+        } else {
+            InteractiveFrontier::DeadEnd {
+                in_flight,
+                pending_admission,
+                pending_placements: self.placement.pending_count(),
+            }
+        }
+    }
+
+    fn refresh_interactive_frontier(&mut self) -> InteractiveFrontier
+    where
+        Admission: InteractiveAdmission,
+    {
+        let frontier = self.classify_interactive_frontier();
+        self.interactive_frontier = Some(frontier);
+        frontier
+    }
+
+    fn interactive_frontier_or_raw(&mut self) -> InteractiveFrontier
+    where
+        Admission: InteractiveAdmission,
+    {
+        self.interactive_frontier
+            .unwrap_or_else(|| self.classify_interactive_frontier())
+    }
+
+    fn interactive_status_from_frontier(
+        &self,
+        frontier: InteractiveFrontier,
+        made_progress: bool,
+    ) -> ReplayStepStatus {
+        if matches!(frontier, InteractiveFrontier::Drained) {
+            ReplayStepStatus::Drained {
+                now_ms: self.now_ms,
+            }
+        } else if made_progress {
+            ReplayStepStatus::Advanced {
+                now_ms: self.now_ms,
+            }
+        } else {
+            ReplayStepStatus::Quiescent {
+                now_ms: self.now_ms,
+            }
+        }
+    }
+
+    fn fail_if_frontier_dead_end(frontier: InteractiveFrontier) -> anyhow::Result<()> {
+        if let InteractiveFrontier::DeadEnd {
+            in_flight,
+            pending_admission,
+            pending_placements,
+        } = frontier
+        {
+            bail!(
+                "offline replay reached a dead end with {} in-flight requests, {} pending admission requests, and {} pending placements",
+                in_flight,
+                pending_admission,
+                pending_placements
+            );
+        }
+        Ok(())
+    }
+
     /// Advance and settle exactly the next virtual timestamp.
     fn advance_kernel_next(&mut self) -> anyhow::Result<bool> {
         self.ensure_stepping_started()?;
@@ -2356,39 +2478,10 @@ where
         }
     }
 
-    /// Classify a known stalled interactive state without repeating the
-    /// external-assignment, drained, or next-timestamp probes that established
-    /// it. An open and empty admission source is the only valid no-work pause;
-    /// every other stalled state remains a fail-closed dead end.
-    fn interactive_stalled_status(&self, made_progress: bool) -> anyhow::Result<ReplayStepStatus>
-    where
-        Admission: InteractiveAdmission,
-    {
-        let in_flight = self.cluster_in_flight();
-        let pending_admission = self.admission.pending_requests();
-        if self.admission.is_open() && pending_admission == 0 && in_flight == 0 {
-            return Ok(if made_progress {
-                ReplayStepStatus::Advanced {
-                    now_ms: self.now_ms,
-                }
-            } else {
-                ReplayStepStatus::Quiescent {
-                    now_ms: self.now_ms,
-                }
-            });
-        }
-        bail!(
-            "offline replay reached a dead end with {} in-flight requests, {} pending admission requests, and {} pending placements",
-            in_flight,
-            pending_admission,
-            self.placement.pending_count()
-        )
-    }
-
     /// Advance the interactive adapter by at most one timestamp and return the
-    /// already-classified public status. The one-shot `run()` kernel remains
-    /// separate: interactive stepping also has open-admission pauses and
-    /// controller-owned placement barriers to preserve.
+    /// cached public status. The one-shot `run()` kernel remains separate:
+    /// interactive stepping also has open-admission pauses and controller-owned
+    /// placement barriers to preserve.
     fn interactive_advance_kernel_next(
         &mut self,
         initial_progress: bool,
@@ -2396,49 +2489,33 @@ where
     where
         Admission: InteractiveAdmission,
     {
+        let frontier = self.interactive_frontier_or_raw();
+
         // Preserve the historical initialization boundary: work settled while
         // stepping starts is one complete public step, including its status.
         if initial_progress {
-            return Ok(self.interactive_status(true));
+            return Ok(self.interactive_status_from_frontier(frontier, true));
         }
 
-        // Drained has public-status priority over every other condition. A
-        // pending external placement cannot normally coexist with it, but the
-        // ordering intentionally matches `interactive_status` if invariants
-        // are violated.
-        if self.is_done() {
-            return Ok(ReplayStepStatus::Drained {
-                now_ms: self.now_ms,
-            });
-        }
-        // External placement is a full controller barrier. Do not ask the
-        // admission source for another timestamp while that decision is open.
-        if self.external_assignment_pending() {
-            return Ok(ReplayStepStatus::Quiescent {
-                now_ms: self.now_ms,
-            });
-        }
-        let Some(next_timestamp_ms) = self.next_timestamp() else {
-            return self.interactive_stalled_status(false);
+        let next_timestamp_ms = match frontier {
+            InteractiveFrontier::Drained => {
+                return Ok(self.interactive_status_from_frontier(frontier, false));
+            }
+            InteractiveFrontier::ExternalBarrier | InteractiveFrontier::OpenAdmissionIdle => {
+                return Ok(self.interactive_status_from_frontier(frontier, false));
+            }
+            InteractiveFrontier::DeadEnd { .. } => {
+                Self::fail_if_frontier_dead_end(frontier)?;
+                unreachable!("dead-end classification must return an error");
+            }
+            InteractiveFrontier::NextTimestamp(next_timestamp_ms) => next_timestamp_ms,
         };
 
         self.advance_now_ms(next_timestamp_ms);
         self.drain_current_timestamp()?;
-
-        // This is the only post-drain state probe. Besides avoiding the prior
-        // repeated `is_done`/barrier/timestamp queries, it retains the exact
-        // fail-closed dead-end check before reporting progress.
-        if self.is_done() {
-            return Ok(ReplayStepStatus::Drained {
-                now_ms: self.now_ms,
-            });
-        }
-        if self.external_assignment_pending() || self.next_timestamp().is_some() {
-            return Ok(ReplayStepStatus::Advanced {
-                now_ms: self.now_ms,
-            });
-        }
-        self.interactive_stalled_status(true)
+        let frontier = self.refresh_interactive_frontier();
+        Self::fail_if_frontier_dead_end(frontier)?;
+        Ok(self.interactive_status_from_frontier(frontier, true))
     }
 
     fn fail_if_interactive_dead_end(&mut self) -> anyhow::Result<()>
@@ -2467,10 +2544,16 @@ where
     }
 
     pub(in crate::replay::offline) fn interactive_next_event_time_ms(&mut self) -> Option<f64> {
-        if self.external_assignment_pending() {
-            None
-        } else {
-            self.next_timestamp()
+        match self.interactive_frontier {
+            Some(InteractiveFrontier::ExternalBarrier)
+            | Some(InteractiveFrontier::OpenAdmissionIdle)
+            | Some(InteractiveFrontier::DeadEnd { .. }) => None,
+            Some(InteractiveFrontier::NextTimestamp(next_timestamp_ms)) => Some(next_timestamp_ms),
+            // Drained ignores idle-only events for completion, but the public
+            // next-event query historically still exposed their timestamp.
+            Some(InteractiveFrontier::Drained) => self.next_timestamp(),
+            None if self.external_assignment_pending() => None,
+            None => self.next_timestamp(),
         }
     }
 
@@ -2480,7 +2563,13 @@ where
     where
         Admission: InteractiveAdmission,
     {
+        let starting = !self.stepping_started;
         let initial_progress = self.ensure_stepping_started()?;
+        if starting {
+            // The first scaling tick is seeded after initialization drains, so
+            // classify only after both operations have completed.
+            self.refresh_interactive_frontier();
+        }
         self.interactive_advance_kernel_next(initial_progress)
     }
 
@@ -2490,13 +2579,48 @@ where
     where
         Admission: InteractiveAdmission,
     {
+        let starting = !self.stepping_started;
         let mut changed = self.ensure_stepping_started()?;
-        if self.external_assignment_pending() {
-            return Ok(self.interactive_status(changed));
+        if starting {
+            // Preserve the historical first-settle sequence: initialization
+            // drains before seeding a scaling tick, then settle drains once
+            // more unless an external placement already owns the boundary.
+            if self.external_assignment_pending() {
+                let frontier = self.refresh_interactive_frontier();
+                return Ok(self.interactive_status_from_frontier(frontier, changed));
+            }
+            changed |= self.drain_current_timestamp()?;
+            let frontier = self.refresh_interactive_frontier();
+            Self::fail_if_frontier_dead_end(frontier)?;
+            return Ok(self.interactive_status_from_frontier(frontier, changed));
         }
-        changed |= self.drain_current_timestamp()?;
-        self.fail_if_interactive_dead_end()?;
-        Ok(self.interactive_status(changed))
+
+        let mut frontier = if let Some(frontier) = self.interactive_frontier {
+            frontier
+        } else {
+            // Preserve the legacy barrier fast path when a prior mutation
+            // invalidated the cache without settling the timestamp.
+            if self.external_assignment_pending() {
+                return Ok(self.interactive_status(changed));
+            }
+            changed |= self.drain_current_timestamp()?;
+            self.refresh_interactive_frontier()
+        };
+
+        // `advance_next` preserves its historical initial-progress return even
+        // when first-tick seeding creates work at the current timestamp. The
+        // following settle must still consume that same-time work.
+        if matches!(
+            frontier,
+            InteractiveFrontier::NextTimestamp(next_timestamp_ms)
+                if next_timestamp_ms <= self.now_ms
+        ) {
+            changed |= self.drain_current_timestamp()?;
+            frontier = self.refresh_interactive_frontier();
+        }
+
+        Self::fail_if_frontier_dead_end(frontier)?;
+        Ok(self.interactive_status_from_frontier(frontier, changed))
     }
 
     /// Advance to the controller boundary, stopping at an earlier Dynamo
@@ -2514,7 +2638,11 @@ where
                 self.now_ms
             );
         }
+        let starting = !self.stepping_started;
         let initial_progress = self.ensure_stepping_started()?;
+        if starting {
+            self.refresh_interactive_frontier();
+        }
         if initial_progress {
             return Ok(self.interactive_status(true));
         }
@@ -2524,6 +2652,7 @@ where
             }
             let changed = self.drain_current_timestamp()?;
             self.fail_if_interactive_dead_end()?;
+            self.refresh_interactive_frontier();
             return Ok(self.interactive_status(changed));
         }
         if self.external_assignment_pending() {
@@ -2534,10 +2663,12 @@ where
         {
             self.advance_now_ms(next_timestamp_ms);
             self.drain_current_timestamp()?;
+            self.refresh_interactive_frontier();
             return Ok(self.interactive_status(true));
         }
         self.advance_now_ms(target_ms);
         self.drain_current_timestamp()?;
+        self.refresh_interactive_frontier();
         Ok(self.interactive_status(true))
     }
 
@@ -2545,16 +2676,32 @@ where
     where
         Admission: InteractiveAdmission,
     {
-        !self.is_done()
-            && (self.external_assignment_pending()
-                || (self.next_timestamp().is_none()
-                    && self.admission.is_open()
-                    && self.admission.pending_requests() == 0
-                    && self.cluster_in_flight() == 0))
+        match self.interactive_frontier {
+            Some(InteractiveFrontier::ExternalBarrier | InteractiveFrontier::OpenAdmissionIdle) => {
+                true
+            }
+            Some(
+                InteractiveFrontier::Drained
+                | InteractiveFrontier::NextTimestamp(_)
+                | InteractiveFrontier::DeadEnd { .. },
+            ) => false,
+            None => {
+                !self.is_done()
+                    && (self.external_assignment_pending()
+                        || (self.next_timestamp().is_none()
+                            && self.admission.is_open()
+                            && self.admission.pending_requests() == 0
+                            && self.cluster_in_flight() == 0))
+            }
+        }
     }
 
     pub(in crate::replay::offline) fn interactive_is_drained(&self) -> bool {
-        self.is_done()
+        match self.interactive_frontier {
+            Some(InteractiveFrontier::Drained) => true,
+            Some(_) => false,
+            None => self.is_done(),
+        }
     }
 
     pub(in crate::replay::offline) fn drain_interactive_events(&mut self) -> Vec<ReplayEvent> {
@@ -2627,6 +2774,7 @@ where
     where
         Admission: InteractiveAdmission,
     {
+        self.invalidate_interactive_frontier();
         self.admission.close()
     }
 
@@ -4048,6 +4196,21 @@ mod tests {
         Ok(runtime.interactive_status(advanced))
     }
 
+    fn legacy_interactive_settle_current_time<PlacementPolicyImpl>(
+        runtime: &mut AggRuntimeImpl<PlacementPolicyImpl, NoEngineEvents, NoReplayMetadata>,
+    ) -> anyhow::Result<ReplayStepStatus>
+    where
+        PlacementPolicyImpl: AggregatedPlacement<(), NoReplayMetadata>,
+    {
+        let mut changed = runtime.ensure_stepping_started()?;
+        if runtime.external_assignment_pending() {
+            return Ok(runtime.interactive_status(changed));
+        }
+        changed |= runtime.drain_current_timestamp()?;
+        runtime.fail_if_interactive_dead_end()?;
+        Ok(runtime.interactive_status(changed))
+    }
+
     #[test]
     fn interactive_advance_kernel_matches_legacy_advanced_and_drained_statuses() {
         let requests = VecDeque::from([DirectRequest {
@@ -4062,6 +4225,28 @@ mod tests {
         let mut legacy = interactive_round_robin_runtime(requests);
 
         for _ in 0..32 {
+            assert_eq!(
+                optimized.interactive_settle_current_time().unwrap(),
+                legacy_interactive_settle_current_time(&mut legacy).unwrap()
+            );
+            let legacy_next_event = if legacy.external_assignment_pending() {
+                None
+            } else {
+                legacy.next_timestamp()
+            };
+            assert_eq!(
+                optimized.interactive_next_event_time_ms(),
+                legacy_next_event
+            );
+            let legacy_quiescent = !legacy.is_done()
+                && (legacy.external_assignment_pending()
+                    || (legacy.next_timestamp().is_none()
+                        && legacy.admission.is_open()
+                        && legacy.admission.pending_requests() == 0
+                        && legacy.cluster_in_flight() == 0));
+            assert_eq!(optimized.interactive_is_quiescent(), legacy_quiescent);
+            assert_eq!(optimized.interactive_is_drained(), legacy.is_done());
+
             let optimized_status = optimized.interactive_advance_next().unwrap();
             let legacy_status = legacy_interactive_advance_next(&mut legacy).unwrap();
             assert_eq!(optimized_status, legacy_status);
@@ -4182,6 +4367,71 @@ mod tests {
         assert!(optimized.placement.is_pending(uuid));
         assert!(legacy.placement.is_pending(uuid));
         assert_eq!(optimized.now_ms, legacy.now_ms);
+        assert_eq!(
+            optimized.refresh_interactive_frontier(),
+            InteractiveFrontier::ExternalBarrier
+        );
+        optimized.drain_interactive_events();
+        optimized.pending_interactive_placements();
+        assert_eq!(
+            optimized.interactive_frontier,
+            Some(InteractiveFrontier::ExternalBarrier)
+        );
+    }
+
+    #[test]
+    fn interactive_frontier_invalidates_on_mutation_and_survives_capture_reads() {
+        let driver = WorkloadDriver::new_open_agentic_without_replay_hashes(4, 4).unwrap();
+        let mut runtime = RoundRobinAggRuntime::new_round_robin_workload(
+            &parity_args(EngineType::Vllm),
+            driver,
+            1,
+            ReplayMode::Trace,
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime.interactive_settle_current_time().unwrap(),
+            ReplayStepStatus::Quiescent { now_ms: 0.0 }
+        );
+        assert_eq!(
+            runtime.interactive_frontier,
+            Some(InteractiveFrontier::OpenAdmissionIdle)
+        );
+        runtime.drain_interactive_events();
+        assert_eq!(
+            runtime.interactive_frontier,
+            Some(InteractiveFrontier::OpenAdmissionIdle)
+        );
+
+        runtime
+            .append_interactive_agentic_trace(parity_agentic_trace(), 0.0)
+            .unwrap();
+        assert_eq!(runtime.interactive_frontier, None);
+        runtime.interactive_settle_current_time().unwrap();
+        assert!(runtime.interactive_frontier.is_some());
+        runtime.interactive_close_admission().unwrap();
+        assert_eq!(runtime.interactive_frontier, None);
+    }
+
+    #[test]
+    fn drained_frontier_retains_lingering_idle_event_timestamp() {
+        let mut runtime = interactive_round_robin_runtime(VecDeque::new());
+        runtime.stepping_started = true;
+        push_worker_ready(
+            &mut runtime.events,
+            &mut runtime.next_event_seq,
+            5.0,
+            SimulationWorkerStage::Aggregated,
+            0,
+        );
+        runtime.drain_current_timestamp().unwrap();
+        assert_eq!(
+            runtime.refresh_interactive_frontier(),
+            InteractiveFrontier::Drained
+        );
+        assert!(runtime.interactive_is_drained());
+        assert_eq!(runtime.interactive_next_event_time_ms(), Some(5.0));
     }
 
     fn fast_router_args() -> MockEngineArgs {
