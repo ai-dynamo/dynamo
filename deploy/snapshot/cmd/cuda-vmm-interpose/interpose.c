@@ -86,6 +86,7 @@ struct allocation {
   CUcontext context;
   CUmemGenericAllocationHandle carrier;
   bool creator;
+  bool shared;
   struct allocation* next;
 };
 
@@ -503,11 +504,11 @@ inspect_records(uint32_t* count)
   size_t index;
 
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    if (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL)
+    if (allocation->shared && (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL))
       total++;
   }
   for (mapping = mappings; mapping != NULL; mapping = mapping->next) {
-    if (mapping->mapped)
+    if (mapping->allocation->shared && mapping->mapped)
       total++;
   }
   if (total > SNAPSHOT_VMM_MAX_RECORDS)
@@ -518,7 +519,7 @@ inspect_records(uint32_t* count)
   record = records;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
     size_t handles_count = live_handle_count(allocation);
-    if (handles_count == 0 && first_mapping(allocation) == NULL)
+    if (!allocation->shared || (handles_count == 0 && first_mapping(allocation) == NULL))
       continue;
     record->kind = SNAPSHOT_VMM_ALLOCATION;
     record->flags = allocation->creator ? SNAPSHOT_VMM_CREATOR : 0;
@@ -534,7 +535,7 @@ inspect_records(uint32_t* count)
     record++;
   }
   for (mapping = mappings; mapping != NULL; mapping = mapping->next) {
-    if (!mapping->mapped)
+    if (!mapping->allocation->shared || !mapping->mapped)
       continue;
     record->kind = SNAPSHOT_VMM_MAPPING;
     record->flags = mapping->allocation->creator ? SNAPSHOT_VMM_CREATOR : 0;
@@ -580,7 +581,8 @@ create_checkpoint_carriers(void)
     struct mapping* carrier_mapping;
     CUresult result;
 
-    if (!allocation->creator || (live_handle_count(allocation) == 0 && first_mapping(allocation) == NULL))
+    if (!allocation->shared || !allocation->creator ||
+        (live_handle_count(allocation) == 0 && first_mapping(allocation) == NULL))
       continue;
     carrier_handle = first_live_handle(allocation);
     carrier_mapping = first_mapping(allocation);
@@ -614,13 +616,14 @@ prepare_topology(void)
   if (current_phase != PHASE_CARRIERS || release == NULL || unmap == NULL)
     return -1;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    if (allocation->creator && (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL) &&
-        allocation->carrier == 0)
+    if (allocation->shared && allocation->creator &&
+        (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL) && allocation->carrier == 0)
       goto failed;
   }
   current_phase = PHASE_PREPARED;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    if (live_handle_count(allocation) == 0 && first_mapping(allocation) == NULL && allocation->carrier == 0)
+    if (!allocation->shared ||
+        (live_handle_count(allocation) == 0 && first_mapping(allocation) == NULL && allocation->carrier == 0))
       continue;
     if (enter_context(allocation->context, &scope) != 0)
       goto failed;
@@ -672,7 +675,7 @@ restore_mappings(struct allocation* allocation, CUmemGenericAllocationHandle han
     return CUDA_ERROR_NOT_INITIALIZED;
   }
   for (mapping = mappings; mapping != NULL; mapping = mapping->next) {
-    if (mapping->allocation != allocation || !mapping->checkpointed)
+    if (!mapping->allocation->shared || mapping->allocation != allocation || !mapping->checkpointed)
       continue;
     result = map(mapping->address, mapping->size, mapping->offset, handle, 0);
     if (result != CUDA_SUCCESS) {
@@ -704,7 +707,7 @@ restore_creators(void)
   if ((current_phase != PHASE_PREPARED && current_phase != PHASE_FAILED) || release == NULL)
     return -1;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    if (!allocation->creator || allocation->carrier == 0)
+    if (!allocation->shared || !allocation->creator || allocation->carrier == 0)
       continue;
     if (enter_context(allocation->context, &scope) != 0)
       goto failed;
@@ -757,7 +760,7 @@ restore_importers(void)
     bool needed = false;
     const char* mapping_operation;
 
-    if (allocation->creator)
+    if (!allocation->shared || allocation->creator)
       continue;
     for (handle = handles; handle != NULL; handle = handle->next) {
       if (handle->live && handle->allocation == allocation) {
@@ -1119,7 +1122,7 @@ cuMemCreate(
     return result;
   allocation = calloc(1, sizeof(*allocation));
   pthread_mutex_lock(&state_lock);
-  if (allocation == NULL || current_phase != PHASE_ACTIVE || current_context(&allocation->context) != 0 ||
+  if (allocation == NULL || current_phase != PHASE_ACTIVE ||
       random_bytes(allocation->id, sizeof(allocation->id)) != 0 ||
       random_bytes(allocation->authorization, sizeof(allocation->authorization)) != 0 ||
       add_handle(allocation, *output, *output) != 0) {
@@ -1306,6 +1309,7 @@ cuMemExportToShareableHandle(
 {
   export_fn function = (export_fn)real_symbol("cuMemExportToShareableHandle");
   struct handle* handle;
+  CUcontext context;
   CUresult result;
   int capability = -1;
 
@@ -1321,11 +1325,13 @@ cuMemExportToShareableHandle(
     pthread_mutex_unlock(&state_lock);
     return function != NULL ? function(shareable, application, type, flags) : unavailable();
   }
-  if (!handle->allocation->creator || current_phase != PHASE_ACTIVE ||
+  if (!handle->allocation->creator || current_phase != PHASE_ACTIVE || current_context(&context) != 0 ||
       create_posix_capability(handle->allocation, &capability) != 0) {
     pthread_mutex_unlock(&state_lock);
     return CUDA_ERROR_INVALID_HANDLE;
   }
+  handle->allocation->context = context;
+  handle->allocation->shared = true;
   *(int*)shareable = capability;
   pthread_mutex_unlock(&state_lock);
   return CUDA_SUCCESS;
@@ -1390,6 +1396,8 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
       allocations = allocation;
     }
   }
+  if (allocation != NULL)
+    allocation->shared = true;
   if (allocation == NULL || current_context(&allocation->context) != 0 ||
       get_properties(&allocation->properties, imported) != CUDA_SUCCESS ||
       add_handle(allocation, imported, imported) != 0) {

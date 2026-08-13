@@ -40,6 +40,8 @@ communication-library setup, and teardown must not be in flight.
 During ordinary execution:
 
 - CUDA generic allocation handles are real driver handles.
+- A POSIX-capable allocation becomes checkpoint-managed when its shim
+  capability is exported.
 - POSIX exports return sealed capability FDs containing the job, creator,
   allocation, endpoint, and authorization identities.
 - A shim capability import resolves through the creator's local Unix
@@ -55,9 +57,10 @@ Before native CUDA checkpoint, the snapshot agent asks the native coordinator
 to validate the complete participant topology. The original `cuMemCreate`
 participant is always the saver and must still have a live creator handle or
 mapping (the creator-anchor invariant). The shim then puts every allocation
-in checkpoint normal form: one unmapped creator-local carrier remains,
-managed mappings are removed without freeing VA reservations, and importer
-handles are released. Native CUDA alone saves and restores allocation bytes.
+managed by the shim in checkpoint normal form: one unmapped creator-local
+carrier remains, managed mappings are removed without freeing VA reservations,
+and importer handles are released. Native CUDA alone saves and restores
+allocation bytes.
 
 On restore, native CUDA first restores creator allocations. CUDA processes are
 then unlocked so the shim can replay VMM topology while the application stays
