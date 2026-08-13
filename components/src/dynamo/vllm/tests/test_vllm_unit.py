@@ -1143,7 +1143,7 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_translates_transfer_hint():
+def test_build_sampling_params_translates_transfer_from_multi_hint_envelope():
     from dynamo.vllm.handlers import build_sampling_params
 
     router_hint = {
@@ -1155,7 +1155,10 @@ def test_build_sampling_params_translates_transfer_hint():
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "kv_hints": {"transfer": router_hint},
+        "kv_hints": {
+            "transfer": router_hint,
+            "future_hint": {"version": 1},
+        },
     }
 
     default_sampling_params = {
