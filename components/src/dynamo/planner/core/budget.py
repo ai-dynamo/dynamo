@@ -210,7 +210,18 @@ def proportional_clamp_single(
         return max(min_endpoint, math.floor(max_gpus / engine_gpu))
 
     # total < min_gpus - tolerance
-    return max(min_endpoint, math.ceil(min_gpus / engine_gpu))
+    new_replicas = max(min_endpoint, math.ceil(min_gpus / engine_gpu))
+
+    # The floor push rounds up to whole replicas, so it can land above the
+    # hard ceiling whenever min_gpus is not a multiple of engine_gpu -- e.g.
+    # min_gpus == max_gpus == 5 with a 2-GPU engine needs ceil(5/2) = 3
+    # replicas = 6 GPUs. ``max_gpus`` is never relaxed, so keep the inputs
+    # unchanged and let the caller surface the infeasible band, matching what
+    # proportional_clamp_pair already does on the same path.
+    if max_gpus >= 0 and new_replicas * engine_gpu > max_gpus:
+        return desired
+
+    return new_replicas
 
 
 # ---------------------------------------------------------------------------- #
