@@ -46,6 +46,11 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.constants import (
+    KV_HINT_PROTOCOL_VERSION,
+    KV_SOURCE_LOCATIONS_ACTION_TYPE,
+    KV_SOURCE_LOCATIONS_ACTION_VERSION,
+)
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -837,10 +842,10 @@ def build_sampling_params(
     return sampling_params
 
 
-def _apply_transfer_hint(
-    sampling_params: SamplingParams, transfer: Mapping[str, Any]
+def _apply_source_locations_action(
+    sampling_params: SamplingParams, payload: Mapping[str, Any]
 ) -> None:
-    """Lower one Dynamo TRANSFER hint into vLLM's private connector input."""
+    """Lower one typed source-locations payload into vLLM's private input."""
     extra_args = (
         dict(sampling_params.extra_args)
         if isinstance(sampling_params.extra_args, dict)
@@ -852,19 +857,33 @@ def _apply_transfer_hint(
         if isinstance(existing_kv_transfer_params, dict)
         else {}
     )
-    kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = dict(transfer)
+    kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = dict(payload)
     extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = kv_transfer_params
     sampling_params.extra_args = extra_args
 
 
 def _apply_kv_hints(sampling_params: SamplingParams, kv_hints: Any) -> None:
-    """Lower each Dynamo KV hint that this vLLM adapter supports."""
-    if not isinstance(kv_hints, Mapping):
+    """Lower each supported action from the Dynamo KV hint envelope."""
+    if (
+        not isinstance(kv_hints, Mapping)
+        or kv_hints.get("protocol_version") != KV_HINT_PROTOCOL_VERSION
+    ):
         return
 
-    transfer = kv_hints.get("transfer")
-    if isinstance(transfer, Mapping):
-        _apply_transfer_hint(sampling_params, transfer)
+    actions = kv_hints.get("actions")
+    if not isinstance(actions, list):
+        return
+
+    for action in actions:
+        if (
+            not isinstance(action, Mapping)
+            or action.get("action_type") != KV_SOURCE_LOCATIONS_ACTION_TYPE
+            or action.get("action_version") != KV_SOURCE_LOCATIONS_ACTION_VERSION
+        ):
+            continue
+        payload = action.get("payload")
+        if isinstance(payload, Mapping):
+            _apply_source_locations_action(sampling_params, payload)
 
 
 def _update_kv_transfer_params(

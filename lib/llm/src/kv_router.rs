@@ -9,7 +9,7 @@ use dynamo_kv_router::{
     SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{KvRouterError, RoutingDecisionHashes},
-    kv_hints::{KvHints, KvTransferCandidates, TransferHint},
+    kv_hints::{KvHintAction, KvHints, KvSourceLocationsPayload, KvTransferCandidates},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
@@ -660,12 +660,12 @@ where
         })
     }
 
-    fn transfer_hint_for_selection(
+    fn source_locations_payload_for_selection(
         &self,
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
         candidates: Option<&KvTransferCandidates>,
-    ) -> Option<TransferHint> {
+    ) -> Option<KvSourceLocationsPayload> {
         let candidates = candidates?;
 
         let (block_hashes, source_control_endpoint) = {
@@ -700,7 +700,7 @@ where
             return None;
         }
 
-        Some(TransferHint {
+        Some(KvSourceLocationsPayload {
             source_control_endpoint,
             block_hashes,
         })
@@ -712,16 +712,16 @@ where
         target_cached_prefix_blocks: u32,
         transfer_candidates: Option<&KvTransferCandidates>,
     ) -> Option<KvHints> {
-        // Compose each hint independently. Add future materializers here; one
-        // unavailable hint must not suppress another supported hint.
-        let hints = KvHints {
-            transfer: self.transfer_hint_for_selection(
+        let actions = self
+            .source_locations_payload_for_selection(
                 target,
                 target_cached_prefix_blocks,
                 transfer_candidates,
-            ),
-        };
-        (!hints.is_empty()).then_some(hints)
+            )
+            .map(KvHintAction::source_locations)
+            .into_iter()
+            .collect::<Vec<_>>();
+        (!actions.is_empty()).then(|| KvHints::new(actions))
     }
 
     pub async fn record_routing_decision(
@@ -2208,22 +2208,37 @@ mod tests {
 
         let hint = router.kv_hints_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
 
-        assert_eq!(
-            hint,
-            Some(KvHints {
-                transfer: Some(TransferHint {
-                    source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(101),
-                        ExternalSequenceBlockHash(102),
-                    ],
-                }),
-            })
-        );
+        let hint = hint.expect("source locations action");
+        assert_eq!(hint.protocol_version, Default::default());
+        assert!(hint.message_id.starts_with("msg-"));
+        assert_eq!(hint.actions.len(), 1);
+        match &hint.actions[0] {
+            KvHintAction::SourceLocations {
+                action_id,
+                action_version,
+                payload,
+            } => {
+                assert!(action_id.starts_with("a-"));
+                assert_eq!(
+                    *action_version,
+                    dynamo_kv_router::kv_hints::KvSourceLocationsActionVersion::V1_0
+                );
+                assert_eq!(
+                    payload,
+                    &KvSourceLocationsPayload {
+                        source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                        block_hashes: vec![
+                            ExternalSequenceBlockHash(101),
+                            ExternalSequenceBlockHash(102),
+                        ],
+                    }
+                );
+            }
+        }
     }
 
     #[tokio::test]
-    async fn transfer_hint_skips_sources_without_usable_endpoint() {
+    async fn source_locations_payload_skips_sources_without_usable_endpoint() {
         for source_endpoint in [None, Some("")] {
             let mut workers = HashMap::new();
             workers.insert(
@@ -2248,7 +2263,7 @@ mod tests {
                 owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
             };
 
-            let hint = router.transfer_hint_for_selection(
+            let hint = router.source_locations_payload_for_selection(
                 WorkerWithDpRank::new(7, 0),
                 0,
                 Some(&candidates),
@@ -2259,7 +2274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transfer_hint_skips_sources_with_different_worker_type() {
+    async fn source_locations_payload_skips_sources_with_different_worker_type() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
@@ -2286,14 +2301,17 @@ mod tests {
             owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
         };
 
-        let hint =
-            router.transfer_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+        let hint = router.source_locations_payload_for_selection(
+            WorkerWithDpRank::new(7, 0),
+            0,
+            Some(&candidates),
+        );
 
         assert_eq!(hint, None);
     }
 
     #[tokio::test]
-    async fn transfer_hint_selects_source_with_matching_worker_type() {
+    async fn source_locations_payload_selects_source_with_matching_worker_type() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
@@ -2332,11 +2350,14 @@ mod tests {
             ],
         };
 
-        let prefill_hint =
-            router.transfer_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+        let prefill_hint = router.source_locations_payload_for_selection(
+            WorkerWithDpRank::new(7, 0),
+            0,
+            Some(&candidates),
+        );
         assert_eq!(
             prefill_hint,
-            Some(TransferHint {
+            Some(KvSourceLocationsPayload {
                 source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
                 block_hashes: vec![
                     ExternalSequenceBlockHash(101),
@@ -2345,11 +2366,14 @@ mod tests {
             })
         );
 
-        let decode_hint =
-            router.transfer_hint_for_selection(WorkerWithDpRank::new(10, 0), 0, Some(&candidates));
+        let decode_hint = router.source_locations_payload_for_selection(
+            WorkerWithDpRank::new(10, 0),
+            0,
+            Some(&candidates),
+        );
         assert_eq!(
             decode_hint,
-            Some(TransferHint {
+            Some(KvSourceLocationsPayload {
                 source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
                 block_hashes: vec![
                     ExternalSequenceBlockHash(101),
