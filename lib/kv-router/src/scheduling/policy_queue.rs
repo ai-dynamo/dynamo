@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, BinaryHeap};
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
 
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -12,10 +12,10 @@ use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::queue_admission::{
     QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
-    QueueAdmissionRequest, QueueAdmissionWorker, WorkerPlacement,
+    QueueAdmissionRequest, QueueAdmissionWorkerSnapshot, WorkerPlacement,
 };
 use super::types::SessionContext;
-use crate::protocols::WorkerWithDpRank;
+use crate::protocols::{WorkerId, WorkerWithDpRank};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
@@ -480,17 +480,25 @@ impl<T> PolicyQueue<T> {
         request_id: &str,
         context_tokens: usize,
         session_context: Option<&SessionContext>,
-        workers: &[QueueAdmissionWorker],
+        worker_snapshot: &QueueAdmissionWorkerSnapshot,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<&HashSet<WorkerId>>,
+        has_hard_constraints: bool,
+        eligibility: &dyn Fn(WorkerWithDpRank) -> bool,
     ) -> Option<(QueueAdmissionId, QueueAdmissionDecision)> {
         let policy = self.admission_policy.as_mut()?;
         let id = QueueAdmissionId::new(self.next_admission_id);
         self.next_admission_id = self.next_admission_id.wrapping_add(1);
-        let decision = policy.admit(QueueAdmissionRequest::new(
+        let decision = policy.admit(QueueAdmissionRequest::new_with_eligibility(
             id,
             request_id,
             context_tokens,
             session_context,
-            workers,
+            worker_snapshot,
+            pinned_worker,
+            allowed_worker_ids,
+            has_hard_constraints,
+            eligibility,
         ));
         (!matches!(decision, QueueAdmissionDecision::Bypass)).then_some((id, decision))
     }
@@ -963,7 +971,9 @@ fn subtract_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduling::RouterPolicyConfig;
+    use crate::scheduling::{
+        QueueAdmissionWorker, QueueAdmissionWorkerSnapshot, RouterPolicyConfig,
+    };
 
     #[derive(Default)]
     struct WakeOnReconcile {
@@ -1016,14 +1026,25 @@ policy_classes:
     fn admission_policy_defers_host_owned_request_until_wake() {
         let mut queue = PolicyQueue::new(admission_profile())
             .with_admission_policy(Box::new(WakeOnReconcile::default()));
-        let workers = [QueueAdmissionWorker::new(
-            WorkerWithDpRank::new(7, 0),
-            Some(1_024),
-            true,
-            true,
-        )];
+        let snapshot = QueueAdmissionWorkerSnapshot::new(
+            1,
+            vec![QueueAdmissionWorker::new(
+                WorkerWithDpRank::new(7, 0),
+                Some(1_024),
+                true,
+            )],
+        );
         let (id, decision) = queue
-            .admit_with_admission_policy("request-1", 32, None, &workers)
+            .admit_with_admission_policy(
+                "request-1",
+                32,
+                None,
+                &snapshot,
+                None,
+                None,
+                false,
+                &|_| true,
+            )
             .unwrap();
         assert_eq!(decision, QueueAdmissionDecision::Defer);
 
@@ -1043,7 +1064,9 @@ policy_classes:
         assert_eq!(queue.pending_count(), 1);
         assert!(queue.pop_next(|_, _, _| true).is_none());
 
-        assert!(queue.admission_event(QueueAdmissionEvent::Reconcile { workers: &workers }));
+        assert!(queue.admission_event(QueueAdmissionEvent::Reconcile {
+            snapshot: &snapshot,
+        }));
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "payload"

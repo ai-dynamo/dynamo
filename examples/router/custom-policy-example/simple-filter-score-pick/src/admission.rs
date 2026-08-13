@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 
 use dynamo_kv_router::{
     QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
-    QueueAdmissionRequest,
+    QueueAdmissionRequest, QueueAdmissionWorkerSnapshot,
 };
 
 #[derive(Default)]
@@ -102,26 +102,28 @@ mod tests {
         id: u64,
         request_id: &'a str,
         session: &'a SessionContext,
+        snapshot: &'a QueueAdmissionWorkerSnapshot,
     ) -> QueueAdmissionRequest<'a> {
         QueueAdmissionRequest::new(
             QueueAdmissionId::new(id),
             request_id,
             16,
             Some(session),
-            &[],
+            snapshot,
         )
     }
 
     #[test]
     fn terminal_event_promotes_the_next_request_in_the_same_session() {
         let session = SessionContext::new("session-a".to_string(), None, None, None, None);
+        let snapshot = QueueAdmissionWorkerSnapshot::new(1, Vec::new());
         let mut policy = SessionAdmissionPolicy::default();
         assert_eq!(
-            policy.admit(request(1, "request-a", &session)),
+            policy.admit(request(1, "request-a", &session, &snapshot)),
             QueueAdmissionDecision::Ready
         );
         assert_eq!(
-            policy.admit(request(2, "request-b", &session)),
+            policy.admit(request(2, "request-b", &session, &snapshot)),
             QueueAdmissionDecision::Defer
         );
 

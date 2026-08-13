@@ -47,7 +47,7 @@ impl WorkerPicker for FirstPicker {
 type BenchScheduler =
     LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, WorkerSelectionPolicy>;
 
-fn scheduler(worker_count: usize) -> (BenchScheduler, CancellationToken) {
+fn scheduler(worker_count: usize, admission_enabled: bool) -> (BenchScheduler, CancellationToken) {
     let dp_ranges = (0..worker_count as u64)
         .map(|worker_id| (worker_id, (0, 1)))
         .collect();
@@ -76,8 +76,12 @@ fn scheduler(worker_count: usize) -> (BenchScheduler, CancellationToken) {
         "bench",
         Vec::new(),
         Box::new(FirstPicker),
-    )
-    .with_admission_policy(Box::new(BypassPolicy));
+    );
+    let selector = if admission_enabled {
+        selector.with_admission_policy(Box::new(BypassPolicy))
+    } else {
+        selector
+    };
     let cancellation_token = CancellationToken::new();
     let scheduler = LocalScheduler::new(
         slots,
@@ -126,31 +130,35 @@ fn policy_queue_admission(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
 
-    for worker_count in [32, 1_024, 10_000] {
-        let (scheduler, cancellation_token) = runtime.block_on(async { scheduler(worker_count) });
-        let mut request_seq = 0_u64;
-        group.bench_with_input(
-            BenchmarkId::from_parameter(worker_count),
-            &worker_count,
-            |b, _| {
-                b.iter(|| {
-                    request_seq += 1;
-                    let request_id = request_seq.to_string();
-                    runtime.block_on(async {
-                        let response = scheduler
-                            .schedule_request(request(request_id.clone()))
-                            .await
-                            .unwrap();
-                        scheduler
-                            .complete_if_worker(&request_id, response.best_worker, 64)
-                            .await
-                            .unwrap();
-                        black_box(response);
+    for admission_enabled in [false, true] {
+        let mode = if admission_enabled { "on" } else { "off" };
+        for worker_count in [32, 1_024, 10_000] {
+            let (scheduler, cancellation_token) =
+                runtime.block_on(async { scheduler(worker_count, admission_enabled) });
+            let mut request_seq = 0_u64;
+            group.bench_with_input(
+                BenchmarkId::new(mode, worker_count),
+                &worker_count,
+                |b, _| {
+                    b.iter(|| {
+                        request_seq += 1;
+                        let request_id = request_seq.to_string();
+                        runtime.block_on(async {
+                            let response = scheduler
+                                .schedule_request(request(request_id.clone()))
+                                .await
+                                .unwrap();
+                            scheduler
+                                .complete_if_worker(&request_id, response.best_worker, 64)
+                                .await
+                                .unwrap();
+                            black_box(response);
+                        });
                     });
-                });
-            },
-        );
-        cancellation_token.cancel();
+                },
+            );
+            cancellation_token.cancel();
+        }
     }
     group.finish();
 }
