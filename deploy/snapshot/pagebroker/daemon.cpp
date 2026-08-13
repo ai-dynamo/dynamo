@@ -248,6 +248,20 @@ ServeConnection(int connection, Broker& broker)
 }
 
 void
+WaitForHandler(std::future<void>& handler)
+{
+  try {
+    handler.get();
+  }
+  catch (const std::exception& error) {
+    std::cerr << "connection handler: " << error.what() << '\n';
+  }
+  catch (...) {
+    std::cerr << "connection handler: unknown exception\n";
+  }
+}
+
+void
 ReapHandlers(std::vector<std::future<void>>& handlers)
 {
   for (auto handler = handlers.begin(); handler != handlers.end();) {
@@ -255,7 +269,7 @@ ReapHandlers(std::vector<std::future<void>>& handlers)
       ++handler;
       continue;
     }
-    handler->get();
+    WaitForHandler(*handler);
     handler = handlers.erase(handler);
   }
 }
@@ -263,7 +277,7 @@ ReapHandlers(std::vector<std::future<void>>& handlers)
 void
 WaitForHandlers(std::vector<std::future<void>>& handlers)
 {
-  for (auto& handler : handlers) handler.get();
+  for (auto& handler : handlers) WaitForHandler(handler);
 }
 
 void

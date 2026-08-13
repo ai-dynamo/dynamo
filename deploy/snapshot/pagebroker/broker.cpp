@@ -247,6 +247,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
   if (transaction.state() != Transaction::State::NEW || fs::exists(staging_directory))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
   try {
+    engine.ValidateCheckpointDestination(destination);
     transaction.set_state(Transaction::State::PREPARING);
     fs::create_directory(staging_directory);
     transaction.set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type()));

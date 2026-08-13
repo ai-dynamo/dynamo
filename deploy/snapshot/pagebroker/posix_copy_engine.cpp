@@ -67,6 +67,12 @@ PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destinat
   CopyDirectory(SourcePath(source), destination);
 }
 
+void
+PosixCopyEngine::ValidateCheckpointDestination(const StorageBackend& destination) const
+{
+  DestinationPath(destination);
+}
+
 bool
 PosixCopyEngine::CheckpointDestinationConflicts(const StorageBackend& destination) const
 {
