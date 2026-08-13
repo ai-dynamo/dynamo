@@ -1,0 +1,292 @@
+{
+  "protocol_version": "V2.0-draft",
+  "status": "awaiting_explicit_approval",
+  "execution_authorized": false,
+  "retention_cleanup_authorized": false,
+  "artifact_prefix": "v2-",
+  "seed": 20260814,
+  "objective": "Attribute and reduce pod-creation-to-first-token restore latency while preserving correctness, memory, security, and the immutable V1 baseline.",
+  "baseline": {
+    "protocol_version": "V0.1",
+    "v1_artifact_directory": "v1-driver580-v3",
+    "raw_results_sha256": "b55e89421e759c06a3be0a57a6030b7e12445662d01988efc566e2ed848b91f6",
+    "phase_analysis_sha256": "e6dec04dcf1b0cf484889587126dec50f11582f39527d9c2c81fcf716b91a36d"
+  },
+  "pinned": {
+    "dynamo_version": "v1.3.0",
+    "dynamo_commit": "8ce9e22f11576402102ea9d8b8e46233f5430a0d",
+    "gpu_count": 1,
+    "gpu_product": "NVIDIA L40S",
+    "workload_container": "server"
+  },
+  "identity": {
+    "model": "openai/gpt-oss-20b",
+    "model_revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+    "driver_version": "580.178.04",
+    "node": "ec213103",
+    "source_image": "docker.io/vllm/vllm-openai@sha256:c2f3b1b964e47809b722b5e75b61b1e7b39a50f70388cf2bf2418f16a9f31da2",
+    "v1_candidate_image": "docker.io/library/regolo-vllm-snapshot@sha256:84e626a76456827946ada12120fd6842ae7eefc4b2a4005663bab137385f030a",
+    "v1_compatibility_hash": "a42c07d50e863d43838bcf0ec3c07c544324579f3df80cc08047191838e1e805"
+  },
+  "campaign": {
+    "paired_blocks": 20,
+    "runs_per_block": 2,
+    "arms": [
+      "cold",
+      "restore"
+    ],
+    "blinded": true,
+    "randomized_with_seed": 20260814,
+    "timeout_seconds": 1800,
+    "outlier_policy": "none",
+    "exclusion_policy": "documented_cluster_incident_only_repeat_complete_pair",
+    "raw_events_required": true,
+    "raw_agent_phase_logs_required": true
+  },
+  "required_metrics": [
+    "pod_to_scheduled_s",
+    "pod_to_restore_start_s",
+    "criu_restore_s",
+    "cuda_restore_s",
+    "ready_s",
+    "http_200_s",
+    "first_token_s",
+    "token_after_restore_summary_s",
+    "checkpoint_storage_read_bytes",
+    "checkpoint_storage_read_throughput_bytes_s",
+    "node_memory_available_bytes",
+    "node_page_cache_bytes",
+    "node_cpu_utilization",
+    "node_io_pressure",
+    "gpu_memory_mib",
+    "checkpoint_size_bytes",
+    "pages_12_size_bytes",
+    "kv_prepare_s",
+    "kv_wake_s",
+    "gpu_memory_before_kv_release_mib",
+    "gpu_memory_after_kv_release_mib",
+    "gpu_memory_after_kv_wake_mib",
+    "inflight_requests_before_checkpoint",
+    "valid_response",
+    "restore_success"
+  ],
+  "storage_characterization": {
+    "execution_requires_protocol_approval": true,
+    "target": "retained V2 checkpoint only",
+    "mode": "read-only",
+    "conditions": [
+      "buffered first read",
+      "buffered repeated read",
+      "direct sequential read when supported"
+    ],
+    "prohibited": [
+      "writes to checkpoint storage",
+      "global drop_caches",
+      "filesystem remount",
+      "unbounded concurrent reads"
+    ],
+    "capture": [
+      "bytes",
+      "wall duration",
+      "effective throughput",
+      "diskstats delta",
+      "memory and page-cache delta",
+      "I/O pressure"
+    ]
+  },
+  "kv_cache_release": {
+    "stage": "V2-B1",
+    "status": "planned_not_implemented",
+    "execution_requires_separate_approval": true,
+    "baseline_kv_cache_gib": 21.37,
+    "baseline_checkpoint_share_percent": 52.28,
+    "mechanism": "vLLM sleep level 1 after a fail-closed drain, followed by wake-up after restore",
+    "rationale": "The retained source checkpoint was created before customer traffic, so its preallocated KV cache has no request state worth preserving. vLLM 0.27.1 level-1 sleep clears caches, offloads weights to CPU, and discards the KV allocation while retaining enough state to wake after restore.",
+    "preconditions": [
+      "no customer traffic",
+      "request admission disabled before drain",
+      "zero in-flight requests",
+      "empty logical KV and prefix caches",
+      "vLLM sleep mode and cuMem allocator supported by the pinned runtime",
+      "checkpoint source remains drained until checkpoint completion"
+    ],
+    "prepare_sequence": [
+      "remove readiness and stop new request admission",
+      "drain and prove zero in-flight requests",
+      "clear logical prefix and encoder caches",
+      "invoke vLLM checkpoint_prepare",
+      "invoke vLLM sleep level 1 in wait mode",
+      "verify sleeping state and minimum GPU-memory release",
+      "create the checkpoint only after every assertion passes"
+    ],
+    "restore_sequence": [
+      "restore CRIU and CUDA while the engine remains non-ready",
+      "invoke vLLM checkpoint_restore",
+      "wake weights and KV cache",
+      "verify the expected GPU-memory envelope and an empty logical cache",
+      "complete two valid inference probes",
+      "publish readiness only after every restore invariant passes"
+    ],
+    "failure_behavior": [
+      "checkpoint aborts if drain cannot be proven",
+      "checkpoint aborts if GPU memory release is below the acceptance floor",
+      "restore remains non-ready if wake-up or cache reallocation fails",
+      "no partial candidate checkpoint may replace or alias the retained V1 checkpoint"
+    ],
+    "restore_invariants": [
+      "readiness remains false until KV cache reallocation and a valid inference probe complete",
+      "logical KV and prefix caches are empty after restore",
+      "model revision weights and output-validity contract match V1",
+      "post-wake GPU memory remains within five percent of V1"
+    ],
+    "control_plane": {
+      "public_vllm_dev_api_allowed": false,
+      "required_boundary": "authenticated Pod-local or Unix-socket control path that is absent from every Service and Ingress",
+      "fail_closed": true
+    },
+    "acceptance": {
+      "gpu_memory_freed_gib_min": 18,
+      "checkpoint_size_ratio_to_v1_max": 0.6,
+      "post_wake_gpu_memory_relative_delta_max": 0.05,
+      "checkpoint_and_restore_trials_before_campaign": 2,
+      "full_campaign_runs": 20
+    },
+    "required_tests": [
+      "checkpoint is rejected with any in-flight request",
+      "checkpoint is rejected when sleep or memory-release verification fails",
+      "sleep and wake are idempotent or fail explicitly on duplicate control messages",
+      "restore never becomes ready before wake-up completes",
+      "two valid post-restore responses with an empty logical KV cache",
+      "control endpoint is unreachable outside the Pod",
+      "candidate checkpoint is at most sixty percent of V1 size",
+      "V0 I1 and V1 artifacts remain byte-for-byte unchanged"
+    ]
+  },
+  "optimization_backlog": [
+    {
+      "priority": 2,
+      "name": "right-sized elastic KV cache",
+      "target_share_percent": 52.28,
+      "idea": "Replace gpu-memory-utilization=0.85 with a capacity-derived initial KV allocation and expand only after readiness when demand requires it.",
+      "risk": "Changes concurrency and throughput capacity; requires a separate pressure campaign."
+    },
+    {
+      "priority": 3,
+      "name": "CUDA-graph diet",
+      "target_share_percent": 1.66,
+      "idea": "Retain only graph capture sizes supported by observed request shapes, or rebuild low-priority graphs after the first-token readiness gate.",
+      "risk": "Graph recapture can move saved checkpoint time into post-restore latency."
+    },
+    {
+      "priority": 4,
+      "name": "weight externalization",
+      "target_share_percent": 36.87,
+      "idea": "Keep immutable weights outside CRIU and reconnect them through GMS, ModelExpress, or a supported local-NVMe/GDS path while CRIU restores only process state.",
+      "risk": "Architectural change; GMS plus Snapshot remains ineligible under the pinned Dynamo release."
+    },
+    {
+      "priority": 5,
+      "name": "frontend-engine split checkpoint",
+      "target_share_percent": 3.23,
+      "idea": "Checkpoint only EngineCore and launch the lightweight API frontend concurrently during restore.",
+      "risk": "Introduces a new process boundary and reconnection protocol for a modest size reduction."
+    },
+    {
+      "priority": 6,
+      "name": "semantic allocation manifest",
+      "target_share_percent": 90.81,
+      "idea": "Tag allocations as preserve, recreate-before-ready, or recreate-in-background so the snapshot stores only correctness-critical pages.",
+      "risk": "Requires vLLM and CUDA allocator integration plus strict address-stability tests."
+    },
+    {
+      "priority": 7,
+      "name": "parallel restore with a node-local hot tier",
+      "target_share_percent": 100,
+      "idea": "Combine the reduced checkpoint with bounded asynchronous CRIU reads and a digest-verified RAM or NVMe node cache.",
+      "risk": "Reduces transfer time rather than bytes and needs memory-pressure and cache-coherency controls."
+    }
+  ],
+  "stages": [
+    {
+      "name": "V2-A-instrumented-supported-path",
+      "purpose": "Reproduce the supported non-GMS path with complete phase and storage telemetry and test whether the V1 tail is storage/cache driven.",
+      "allowed_changes": [
+        "observer-only phase collection",
+        "bounded read-only storage characterization",
+        "new seed run IDs and artifact directory"
+      ],
+      "forbidden_changes": [
+        "model command image driver GPU node or checkpoint format changes",
+        "V0 I1 or V1 artifact changes",
+        "customer traffic",
+        "retention cleanup"
+      ]
+    },
+    {
+      "name": "V2-B-experimental-optimization",
+      "purpose": "Evaluate exactly one size or restore-path optimization against V2-A after its bottleneck is confirmed.",
+      "separate_approval_required": true,
+      "selected_first_candidate": "workload-aware KV-cache release",
+      "candidate_changes": [
+        "workload-aware KV-cache release",
+        "optimized CRIU",
+        "GMS"
+      ],
+      "constraints": [
+        "one candidate change per campaign",
+        "new candidate image digest and compatibility hash",
+        "never override a disabled safety feature gate",
+        "GMS is ineligible while Dynamo v1.3.0 documents GMS plus Snapshot as disabled"
+      ]
+    }
+  ],
+  "decision_gates": {
+    "diagnosis_complete": {
+      "restore_runs_with_complete_phase_data_required": 20,
+      "storage_bytes_accounted_for_each_restore": true,
+      "median_and_nearest_rank_p95_required_for_every_phase": true,
+      "tail_runs_retained": true,
+      "bottleneck_requires_measured_attribution": true
+    },
+    "optimized_go": {
+      "restore_successes_required": 20,
+      "valid_responses_required": 40,
+      "max_paired_gpu_memory_relative_delta": 0.05,
+      "first_token_median_s_max": 15,
+      "first_token_p95_s_max": 25,
+      "first_token_max_s_max": 40,
+      "criu_restore_p95_s_max": 12,
+      "zero_unexplained_errors": true,
+      "zero_statistical_exclusions": true
+    },
+    "no_go": [
+      "any restore failure or invalid response",
+      "GPU memory deviation above five percent",
+      "compatibility identity mismatch",
+      "missing phase or storage evidence",
+      "secret exposure or service-account token mount",
+      "median p95 or maximum first-token target missed"
+    ]
+  },
+  "security_invariants": [
+    "automountServiceAccountToken=false",
+    "encrypted checkpoint storage",
+    "no customer prompts or traffic",
+    "empty KV cache at checkpoint source",
+    "immutable image digests",
+    "fail-closed manifest image-history and admitted-pod secret audit",
+    "keys remain mode 0600 outside Git"
+  ],
+  "performance_safety": [
+    "bounded sequential campaign with one active measured workload",
+    "capture baseline expected stress and recovery telemetry before optimization claims",
+    "abort on node pressure GPU Xid I/O errors or correctness failure",
+    "do not infer capacity from page-cache-warm results"
+  ],
+  "rollback": [
+    "do not modify or delete V0/I1/V1 artifacts",
+    "retain namespace PVC checkpoint image and keys until approved cleanup",
+    "stop V2 pods and observers without changing retained V1 resources",
+    "revert by selecting the immutable V1 candidate image and checkpoint"
+  ]
+}

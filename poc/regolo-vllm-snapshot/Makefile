@@ -3,6 +3,7 @@
 test: verify-v0-checksum
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s verification/v0/tests -v
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s implementation/tests -v
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s diagnostics/tests -v
 
 verify-v0-checksum:
 	sha256sum --check verification/v0/SHA256SUMS

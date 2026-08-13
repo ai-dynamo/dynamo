@@ -19,6 +19,10 @@ GPU environment.
   Kubernetes Pod template, protocol primitives and campaign tools.
 - `validation`: completed report and sanitized V1 evidence. Full runtime data
   belongs outside Git in `artifacts/`.
+- `diagnostics`: reproducible V1 restore-phase analysis and the measured V2
+  diagnostic report.
+- `verification/v2`: a separate V2 draft that cannot be executed until it is
+  explicitly approved.
 
 ## V0: verify and collect the unmodified baseline
 
