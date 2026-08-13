@@ -18,9 +18,15 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
+
+// Mounter mounts the agent binary bundle into a placeholder container's mount namespace.
+type Mounter interface {
+	Mount(ctx context.Context, pid int) (nsmount.MountPoint, error)
+}
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
@@ -29,7 +35,6 @@ type RestoreRequest struct {
 	ContainerCheckpointLocation string
 	ContainerID                 string
 	StartedAt                   time.Time
-	NSRestorePath               string
 	PodName                     string
 	PodNamespace                string
 	TargetPodIP                 string
@@ -45,7 +50,7 @@ type RestoreRequest struct {
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (int, error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounter Mounter) (placeholderPID int, retErr error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -54,7 +59,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"container", req.ContainerName,
 	)
 
-	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
+	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map.
 	hostInspectStart := time.Now()
 	snap, err := inspectRestore(ctx, rt, log, req)
 	if err != nil {
@@ -62,17 +67,37 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	hostInspectDuration := time.Since(hostInspectStart)
 
-	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
-	result, err := execNSRestore(ctx, log, req, snap)
+	// Phase 2: Mount agent binaries into the placeholder's namespace so nsrestore is reachable.
+	injectStart := time.Now()
+	mp, err := mountBundle(ctx, mounter, snap.PlaceholderPID)
+	if err != nil {
+		return 0, err
+	}
+	injectDuration := time.Since(injectStart)
+	defer func() {
+		// Pass a background context: mp.Unmount has its own internal timeout
+		// (nsmount.unmountTimeout) around the ns-bind-mount subprocess.
+		if cleanupErr := mp.Unmount(context.Background()); cleanupErr != nil {
+			// Deliberately not promoted to retErr. The controller treats any
+			// error from Restore as a failed restore and SIGKILLs the placeholder,
+			// so surfacing a cleanup failure here would destroy a workload that
+			// already restored successfully. Log it and let the pod continue.
+			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
+		}
+	}()
+
+	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
+	result, err := execNSRestore(ctx, log, req, snap, mp)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
+	restoreDuration := hostInspectDuration + injectDuration + result.TotalDuration()
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
 			"duration": restoreDuration.String(),
 			"phases": map[string]string{
 				"host_inspect_duration":    hostInspectDuration.String(),
+				"inject_duration":          injectDuration.String(),
 				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
 				"criu_restore_duration":    result.CRIURestoreDuration.String(),
 				"cuda_duration":            result.CUDADuration.String(),
@@ -85,13 +110,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		)
 	}
 
-	// Validate restored process from the host side
 	validationStart := time.Now()
-	procRoot := filepath.Join(snap.TargetRoot, "proc")
-	if err := snapshotruntime.ValidateProcessState(procRoot, result.RestoredPID); err != nil {
-		restoreLogPath := filepath.Join(snap.TargetRoot, "var", "criu-work", criu.RestoreLogFilename)
-		logging.LogProcessDiagnostics(procRoot, result.RestoredPID, restoreLogPath, log)
-		return 0, fmt.Errorf("restored process failed post-restore validation: %w", err)
+	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
+		return 0, err
 	}
 
 	log.Info("=== External restore completed ===",
@@ -102,6 +123,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	)
 
 	return snap.PlaceholderPID, nil
+}
+
+func mountBundle(ctx context.Context, mounter Mounter, pid int) (nsmount.MountPoint, error) {
+	mp, err := mounter.Mount(ctx, pid)
+	if err != nil {
+		return nil, fmt.Errorf("mount agent bundle into placeholder: %w", err)
+	}
+	return mp, nil
+}
+
+func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger) error {
+	procRoot := filepath.Join(targetRoot, "proc")
+	if err := snapshotruntime.ValidateProcessState(procRoot, restoredPID); err != nil {
+		restoreLogPath := filepath.Join(targetRoot, "var", "criu-work", criu.RestoreLogFilename)
+		logging.LogProcessDiagnostics(procRoot, restoredPID, restoreLogPath, log)
+		return fmt.Errorf("restored process failed post-restore validation: %w", err)
+	}
+	return nil
 }
 
 func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
@@ -192,7 +231,21 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+//
+// Security hardening in place:
+//
+//  1. Mount-namespace pinning: mp.NsFd() is the /proc/<pid>/ns/mnt fd opened at
+//     mount time. Passing it via --mount=/proc/self/fd/N to nsenter pins the mount
+//     namespace against PID reuse. The remaining four namespaces (uts, ipc, net,
+//     pid) are still resolved via -t <pid> and are not protected against reuse.
+//
+//  2. nsrestore binary fd: we open nsrestore from the agent host side (SnapshotBinSrc)
+//     before entering any namespace and exec it via /proc/self/fd/N. This protects
+//     the nsrestore binary itself against path-based substitution inside the
+//     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
+//     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
+//     mount namespace.
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint) (*RestoreInNamespaceResult, error) {
 	checkpointPath := req.ContainerCheckpointLocation
 	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
 		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
@@ -200,14 +253,45 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
-	args := []string{
-		"-t", strconv.Itoa(snap.PlaceholderPID),
-		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
-		// from the host-visible hierarchy so --cgroup-root remap works.
-		"-m", "-u", "-i", "-n", "-p",
-		"--", req.NSRestorePath,
-		"--checkpoint-path", checkpointPath,
+
+	// Open nsrestore from the agent host side before entering the container
+	// namespace, so the binary fd is immune to rename attacks inside the container.
+	binaryFile, err := os.Open(filepath.Join(nsmount.SnapshotBinSrc, "nsrestore"))
+	if err != nil {
+		return nil, fmt.Errorf("open nsrestore from agent bundle: %w", err)
 	}
+	defer binaryFile.Close()
+
+	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4.
+	// These constants mirror nsFdChildNum in mount.go (ExtraFiles[0] = fd 3).
+	const (
+		nsFdChild     = 3 // mp.NsFd() passed as ExtraFiles[0]
+		binaryFdChild = 4 // binaryFile passed as ExtraFiles[1]
+	)
+
+	bundleDir := nsmount.SnapshotBinDst // bundle root as seen inside the container
+	var args []string
+
+	nsFd := mp.NsFd()
+	if nsFd != nil {
+		// Use the pinned ns fd for the mount namespace; keep -t for the other
+		// namespaces (user, ipc, net, pid). This decouples mount-ns entry from
+		// PID liveness.
+		args = []string{
+			fmt.Sprintf("--mount=/proc/self/fd/%d", nsFdChild),
+			"-t", strconv.Itoa(snap.PlaceholderPID),
+			// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
+			// from the host-visible hierarchy so --cgroup-root remap works.
+			"-u", "-i", "-n", "-p",
+			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
+		}
+	} else {
+		return nil, fmt.Errorf("execNSRestore: mp.NsFd() is nil; mount point was not properly initialized")
+	}
+	args = append(args,
+		"--checkpoint-path", checkpointPath,
+		"--bundle-dir", bundleDir,
+	)
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
@@ -221,6 +305,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
+	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

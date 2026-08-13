@@ -33,7 +33,7 @@ func TestRunActionCancellationIsBounded(t *testing.T) {
 	defer cancel()
 
 	started := time.Now()
-	err := runAction(ctx, 11, actionRestore, "", logr.Discard())
+	err := runAction(ctx, 11, actionRestore, "", cudaCheckpointHelperBinary, logr.Discard())
 	duration := time.Since(started)
 	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
 		t.Fatalf("runAction() error = %v", err)

@@ -26,8 +26,13 @@ It is a standalone Rust executable.
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
+- Image URL and data-URI inputs, including media UUIDs
 
-The protocol does not support multimodal input, LoRA, encode workers, beam search, or `n > 1`.
+The protocol does not support LoRA, encode workers, beam search, `n > 1`,
+preprocessed multimodal features, audio/video media, or Dynamo tool-call and
+reasoning parsers. Parser defaults returned by Control are intentionally not
+advertised to the Dynamo frontend because the current inference protocol does
+not preserve all parser-related request semantics.
 
 ## Run
 
@@ -51,7 +56,7 @@ dynamo-vllm-sidecar \
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
 provided through the environment.
 
-The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
+The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates.
 
 The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
 

@@ -185,6 +185,13 @@ const (
 	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
 	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
 
+	// VLLMDPMasterIPEnvVar is the env var that tells vLLM which IP hosts the data-parallel master.
+	VLLMDPMasterIPEnvVar = "VLLM_DP_MASTER_IP"
+
+	// PodIPEnvVar carries the pod's own IP from the downward API, for launch
+	// commands that must name an address rather than let a library guess one.
+	PodIPEnvVar = "POD_IP"
+
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection
