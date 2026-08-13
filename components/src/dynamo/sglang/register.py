@@ -192,6 +192,10 @@ async def _register_model_with_runtime_config(
         )
 
     aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
+    # Built before the try: an invalid advertised configuration must fail
+    # startup, not be swallowed by the registration handler below and logged as
+    # a failed registration.
+    advertised_router_config = build_router_config(dynamo_args.router_advertisement)
     try:
         await register_model(
             input_type,
@@ -210,7 +214,7 @@ async def _register_model_with_runtime_config(
             # None inherits the frontend's global config. Combined with
             # worker_type, this is what lets a disaggregated deployment route to
             # its prefill and decode tiers differently.
-            router_config=build_router_config(dynamo_args.router_advertisement),
+            router_config=advertised_router_config,
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
             model_aliases=aliases or None,

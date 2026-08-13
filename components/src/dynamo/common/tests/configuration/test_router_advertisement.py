@@ -8,6 +8,7 @@ import argparse
 import pytest
 
 from dynamo.common.configuration.groups.router_args import (
+    RouterArgGroup,
     add_worker_router_arguments,
     build_router_config,
     parse_worker_router_config,
@@ -80,8 +81,6 @@ def test_router_arg_group_refuses_to_guess_its_caller():
     ignores the operator. Requiring both arguments makes that a startup
     TypeError instead.
     """
-    from dynamo.common.configuration.groups.router_args import RouterArgGroup
-
     with pytest.raises(TypeError):
         RouterArgGroup()  # type: ignore[call-arg]
 
