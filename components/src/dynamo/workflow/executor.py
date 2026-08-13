@@ -178,6 +178,8 @@ class WorkflowExecutor:
         )
 
         async def execute() -> dict[str, Any]:
+            result: Mapping[str, Any]
+            output_specs: Mapping[str, ValueSpec]
             if isinstance(definition, WorkflowIR):
                 result = await GraphScheduler(definition, self._dispatcher).run(
                     MappingProxyType(input_values), attempt
