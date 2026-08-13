@@ -51,12 +51,16 @@ fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
 
-fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
+fn invalidate_selected_on_non_cancellation(
+    operation: &mut Option<AffinityAcquire>,
+    selected_target: AffinityTarget,
+    error: &Error,
+) {
     if is_cancelled(error) {
         return;
     }
     if let Some(operation) = operation.take() {
-        operation.invalidate();
+        operation.invalidate_selected(selected_target);
     }
 }
 
@@ -181,7 +185,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
-        affinity_worker: Option<WorkerWithDpRank>,
+        affinity_target: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
@@ -199,7 +203,7 @@ where
                 phase,
                 is_query_only,
                 SelectionOptions {
-                    affinity_worker,
+                    affinity_target,
                     policy_class,
                     session_context,
                 },
@@ -232,9 +236,10 @@ where
         let explicit = explicit_target(request, phase)?;
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
-            let worker = target.and_then(affinity_worker);
+            let affinity_target = target.and_then(affinity_worker);
             return Ok((
-                self.select_request(request, phase, true, worker).await?,
+                self.select_request(request, phase, true, affinity_target)
+                    .await?,
                 None,
             ));
         }
@@ -243,32 +248,11 @@ where
         let operation = affinity
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
-        let worker = operation.target().and_then(affinity_worker);
-        match self.select_request(request, phase, false, worker).await {
-            Ok(selection) => Ok((selection, Some(operation))),
-            Err(error) if is_cancelled(&error) => Err(error),
-            Err(_) if operation.target().is_some() && explicit.is_none() => {
-                operation.invalidate();
-                let retry = affinity
-                    .acquire_with_context(&session_id, None, request_context.as_ref())
-                    .await?;
-                let retry_worker = retry.target().and_then(affinity_worker);
-                match self
-                    .select_request(request, phase, false, retry_worker)
-                    .await
-                {
-                    Ok(selection) => Ok((selection, Some(retry))),
-                    Err(retry_error) => {
-                        retry.invalidate();
-                        Err(retry_error)
-                    }
-                }
-            }
-            Err(error) => {
-                operation.invalidate();
-                Err(error)
-            }
-        }
+        let affinity_target = operation.target().and_then(affinity_worker);
+        let selection = self
+            .select_request(request, phase, false, affinity_target)
+            .await?;
+        Ok((selection, Some(operation)))
     }
 
     async fn track_selection(
@@ -499,7 +483,11 @@ where
         {
             Ok(guard) => guard,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(
+                    &mut operation,
+                    route_target(selection.worker),
+                    &error,
+                );
                 return Err(error);
             }
         };
@@ -508,7 +496,7 @@ where
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(&mut operation, selected_target, &error);
                 return Err(error);
             }
         };
@@ -519,7 +507,7 @@ where
         {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(&mut operation, selected_target, &error);
                 return Err(error);
             }
         };
@@ -618,7 +606,11 @@ where
         let guard = match self.track_selection(&request, &mut selection, false).await {
             Ok(guard) => guard,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(
+                    &mut operation,
+                    route_target(selection.worker),
+                    &error,
+                );
                 return Err(error);
             }
         };
@@ -630,7 +622,7 @@ where
         {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(&mut operation, selected_target, &error);
                 return Err(error);
             }
         };
@@ -1050,7 +1042,7 @@ mod tests {
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
         let cancellation = cancellation::cancelled_error("cancelled-after-selection-request");
-        invalidate_on_non_cancellation(&mut operation, &cancellation);
+        invalidate_selected_on_non_cancellation(&mut operation, original_target, &cancellation);
         assert!(operation.is_some());
         drop(operation);
         assert_eq!(
@@ -1060,7 +1052,7 @@ mod tests {
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
         let failure = anyhow::anyhow!("dispatch failed");
-        invalidate_on_non_cancellation(&mut operation, &failure);
+        invalidate_selected_on_non_cancellation(&mut operation, original_target, &failure);
         assert!(operation.is_none());
         assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 

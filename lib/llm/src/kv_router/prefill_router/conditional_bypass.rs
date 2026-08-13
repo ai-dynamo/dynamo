@@ -147,8 +147,8 @@ where
                 return Ok(None);
             }
         };
-        let pinned_worker = match request_pinned_worker {
-            Some(worker) => Some(worker),
+        let affinity_target = match request_pinned_worker {
+            Some(_) => None,
             None => match decode_affinity_target {
                 Some(target) => {
                     let Some(dp_rank) = target
@@ -187,7 +187,8 @@ where
                 policy_class.clone(),
                 session_context,
                 expected_output_tokens,
-                pinned_worker,
+                affinity_target,
+                request_pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -345,7 +346,7 @@ where
         if let Some(session_affinity) = session_affinity {
             probe_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
         }
-        let pinned_worker = router
+        let affinity_target = router
             .query_affinity_worker(&probe_context, RequestPhase::Prefill)
             .ok()
             .flatten();
@@ -367,7 +368,8 @@ where
                     .as_ref()
                     .map(to_worker_selection_session_context),
                 expected_output_tokens,
-                pinned_worker,
+                affinity_target,
+                None,
                 allowed_worker_ids,
                 routing_constraints,
             )

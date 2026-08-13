@@ -28,7 +28,7 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
-The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`. Other turns preserve an eligible `affinity_target()`, then select the lowest cost when no affinity target remains.
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
 

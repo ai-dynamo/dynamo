@@ -15,13 +15,15 @@ This feature replaces the worker-ranking part of Dynamo's routing pipeline. A `W
 
 ```mermaid
 flowchart LR
-    Request["Incoming request"] --> Eligibility["Dynamo eligibility filters"]
+    Request["Incoming request"] --> Required{"Explicit target?"}
+    Required -->|"Yes"| Validate["Validate and reserve exact target"]
+    Required -->|"No"| Eligibility["Dynamo eligibility filters"]
     Eligibility --> Filters["WorkerFilter(s)<br/>keep or reject each worker"]
     Filters --> Scorers["WorkerScorer(s)<br/>one cost per worker"]
     Scorers --> Sum["Dynamo sums scorer costs"]
     Sum --> Picker["WorkerPicker<br/>one candidate row"]
-    Picker --> Validate["Dynamo validates the row"]
-    Validate --> Reserve["Accounting and reservation"]
+    Picker --> ValidateRow["Dynamo validates the row"]
+    ValidateRow --> Reserve["Accounting and reservation"]
 ```
 
 For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
@@ -316,6 +318,7 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
+| `affinity_target()` | Optional preferred worker and data-parallel rank for session affinity |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
@@ -335,6 +338,18 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
+
+### Session Affinity
+
+`affinity_target()` returns the session target that the request host resolved before selection. The value remains fixed for every policy callback in one selection attempt.
+
+Session affinity is a preference, not an eligibility constraint. Dynamo keeps all host-eligible workers in the policy candidate table. The affinity target can be absent when the worker is unavailable, overloaded, disallowed, or rejected by a filter.
+
+Dynamo's built-in policy selects an eligible affinity target. A custom filter, scorer, or picker can retain or replace it. The frontend rebinds the session only after it dispatches successfully to a different worker.
+
+An explicit target is different. Dynamo validates and reserves that exact worker without calling custom filters, scorers, or pickers.
+
+The standalone selection service does not own a session-affinity store. Its `select` and `select_and_reserve` requests accept an optional `affinity_target` that an external controller resolved.
 
 ### Worker Identity and Cost
 

@@ -134,7 +134,8 @@ Select a worker without booking active load:
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512,
-  "session_id": "session-abc"
+  "session_id": "session-abc",
+  "affinity_target": {"worker_id": 1, "dp_rank": 0}
 }
 ```
 
@@ -151,7 +152,8 @@ globally unique `selection_id`, or allow the service to generate one:
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512,
-  "session_id": "session-abc"
+  "session_id": "session-abc",
+  "affinity_target": {"worker_id": 1, "dp_rank": 0}
 }
 ```
 
@@ -210,14 +212,12 @@ Both `POST /select` and `POST /select_and_reserve` accept an optional
 `session_id` string. It defaults to absent. Under the built-in selector,
 omitting it does not change selection; a custom policy that reads the field can
 select differently depending on whether it is present. The selector carries the
-value through scheduling and exposes it to worker-selection policy as
-`WorkerSelectionContext::session_id()`, so a custom picker or scorer can
-implement session affinity by preferring the worker a session used previously.
+value through scheduling and exposes it through
+`WorkerSelectionContext::session_context()`.
 
 > [!NOTE]
-> `session_id` is an input to policy, not an affinity mechanism in itself. The
-> built-in selector ignores it, so it changes the chosen worker only when you
-> supply a custom picker or scorer that reads it. See
+> `session_id` is session metadata, not an affinity mechanism. The built-in
+> selector ignores it. See
 > [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
 > It is also distinct from the frontend's own session affinity, which binds
 > sessions from request headers rather than from this API; see
@@ -226,6 +226,17 @@ implement session affinity by preferring the worker a session used previously.
 The selection service does not persist, replicate, or expire `session_id`
 bindings. It is not part of the selection response and is not retained by the
 pending-selection cache, so a `POST /reservations` replay does not carry it.
+
+### `affinity_target`
+
+Both selection endpoints accept an optional `affinity_target` with a `worker_id`
+and `dp_rank`. The built-in selector uses this target while it remains eligible.
+A custom policy receives it through `WorkerSelectionContext::affinity_target()`
+and can select another eligible worker.
+
+The selection service does not resolve, persist, replicate, or expire affinity
+targets. An external controller must supply the current target on each request
+and update its binding after a successful selection or dispatch.
 
 ## Ray Select-Then-Reserve Flow
 

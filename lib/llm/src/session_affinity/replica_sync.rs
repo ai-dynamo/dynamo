@@ -19,7 +19,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::coordinator::{AffinityCoordinatorInner, AffinityTarget};
+use super::coordinator::{AffinityCoordinatorInner, AffinityRevision, AffinityTarget};
 use crate::direct_zmq_fan_in::{
     ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in,
 };
@@ -34,6 +34,8 @@ pub(super) struct SessionAffinityUpdate {
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
     pub router_id: u64,
+    #[serde(default)]
+    pub revision: u64,
 }
 
 #[derive(Clone)]
@@ -43,12 +45,13 @@ struct ReplicaUpdateSender {
 }
 
 impl ReplicaUpdateSender {
-    fn publish(&self, session_id: &str, target: AffinityTarget) {
+    fn publish(&self, session_id: &str, target: AffinityTarget, revision: AffinityRevision) {
         let update = SessionAffinityUpdate {
             session_id: session_id.to_string(),
             worker_id: target.worker_id,
             dp_rank: target.dp_rank,
             router_id: self.router_id,
+            revision: revision.sequence,
         };
         if let Err(error) = self.tx.try_send(update) {
             tracing::trace!(
@@ -83,7 +86,14 @@ impl ReplicaUpdateApplier {
             worker_id: update.worker_id,
             dp_rank: update.dp_rank,
         };
-        let outcome = coordinator.apply_replica_update(update.session_id, target);
+        let outcome = coordinator.apply_replica_update(
+            update.session_id,
+            target,
+            AffinityRevision {
+                sequence: update.revision,
+                router_id: update.router_id,
+            },
+        );
         drop(coordinator);
         tracing::trace!(
             worker_id = target.worker_id,
@@ -231,8 +241,17 @@ impl ReplicaSyncRuntime {
         })
     }
 
-    pub(super) fn publish(&self, session_id: &str, target: AffinityTarget) {
-        self.sender.publish(session_id, target);
+    pub(super) fn router_id(&self) -> u64 {
+        self.sender.router_id
+    }
+
+    pub(super) fn publish(
+        &self,
+        session_id: &str,
+        target: AffinityTarget,
+        revision: AffinityRevision,
+    ) {
+        self.sender.publish(session_id, target, revision);
     }
 
     pub(super) fn shutdown_now(&mut self) {
@@ -296,6 +315,7 @@ mod tests {
             worker_id,
             dp_rank: Some(0),
             router_id,
+            revision: 1,
         }
     }
 
@@ -313,6 +333,16 @@ mod tests {
         assert!(!should_use_direct_sync(EventTransportKind::Nats, false));
     }
 
+    #[test]
+    fn replica_update_without_revision_defaults_to_legacy_zero() {
+        let update: SessionAffinityUpdate = serde_json::from_str(
+            r#"{"session_id":"session","worker_id":10,"dp_rank":0,"router_id":7}"#,
+        )
+        .unwrap();
+
+        assert_eq!(update.revision, 0);
+    }
+
     #[tokio::test]
     async fn replica_update_backpressure_is_nonfatal() {
         let (runtime, mut rx) = ReplicaSyncRuntime::for_test(7, 1);
@@ -322,12 +352,20 @@ mod tests {
                 worker_id: 10,
                 dp_rank: Some(0),
             },
+            AffinityRevision {
+                sequence: 1,
+                router_id: 7,
+            },
         );
         runtime.publish(
             "second",
             AffinityTarget {
                 worker_id: 11,
                 dp_rank: Some(0),
+            },
+            AffinityRevision {
+                sequence: 2,
+                router_id: 7,
             },
         );
 
