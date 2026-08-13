@@ -7,24 +7,25 @@ from __future__ import annotations
 
 import asyncio
 import math
-import uuid
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import Any, Mapping, Optional, Protocol, cast, runtime_checkable
+from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
 from dynamo.workflow.builder import StageDefinition
-from dynamo.workflow.ir import StageIR
-from dynamo.workflow.plan import ExecutionPlan, LocalBinding
-from dynamo.workflow.types import (
-    StageContract,
-    ValueRef,
-    ValueSpec,
-    WorkflowValidationError,
-)
+from dynamo.workflow.types import StageContract, ValueSpec
 
 
 class WorkflowExecutionError(RuntimeError):
     """Raised when runtime values do not honor the authored workflow."""
+
+
+@dataclass(frozen=True)
+class WorkflowAttempt:
+    """Shared attempt identity, deadline, and cancellation state."""
+
+    attempt_id: str
+    deadline: Optional[float]
+    cancelled: asyncio.Event
+    request_context: Any = None
 
 
 @dataclass(frozen=True)
@@ -34,8 +35,10 @@ class StageContext:
     workflow_name: str
     stage_id: str
     attempt_id: str
+    invocation_id: str
     deadline: Optional[float]
     _cancelled: asyncio.Event
+    request_context: Any = None
 
     @property
     def cancelled(self) -> bool:
@@ -83,162 +86,6 @@ class _TensorValue(Protocol):
 class _ImageValue(Protocol):
     mode: str
     size: Any
-
-
-class WorkflowExecutor:
-    """Bind runtime resources and execute one compiled workflow plan."""
-
-    def __init__(
-        self,
-        plan: ExecutionPlan,
-        local_runners: Mapping[str, StageRunner],
-    ) -> None:
-        if not isinstance(plan, ExecutionPlan):
-            raise TypeError("plan must use ExecutionPlan")
-        if not isinstance(local_runners, Mapping):
-            raise TypeError("local_runners must be a mapping")
-
-        expected_keys = {
-            binding.runner_key
-            for binding in plan.bindings.values()
-            if isinstance(binding, LocalBinding)
-        }
-        actual_keys = set(local_runners)
-        if actual_keys != expected_keys:
-            raise WorkflowValidationError(
-                "local runners differ from execution plan; "
-                f"missing={sorted(expected_keys - actual_keys)}, "
-                f"extra={sorted(actual_keys - expected_keys)}"
-            )
-
-        runners = dict(local_runners)
-        for stage in plan.workflow.stages:
-            binding = plan.bindings[stage.id]
-            if not isinstance(binding, LocalBinding):
-                raise WorkflowValidationError(
-                    f"executor does not support binding for stage {stage.id!r}"
-                )
-            runner = runners[binding.runner_key]
-            if not isinstance(runner, StageRunner):
-                raise WorkflowValidationError(
-                    f"runner {binding.runner_key!r} must implement StageRunner"
-                )
-            if runner.contract != stage.contract:
-                raise WorkflowValidationError(
-                    f"runner {binding.runner_key!r} for stage {stage.id!r} "
-                    "does not match its authored contract"
-                )
-
-        self._plan = plan
-        self._local_runners = MappingProxyType(runners)
-
-    @property
-    def plan(self) -> ExecutionPlan:
-        """Return the physical plan hydrated by this executor."""
-
-        return self._plan
-
-    async def run(
-        self,
-        inputs: Mapping[str, Any],
-        *,
-        timeout: Optional[float] = None,
-        attempt_id: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Execute one request, scheduling independent branches concurrently."""
-
-        if timeout is not None and timeout <= 0:
-            raise ValueError("timeout must be positive")
-        input_values = dict(inputs)
-        workflow = self._plan.workflow
-        expected_inputs = set(workflow.inputs)
-        actual_inputs = set(input_values)
-        if actual_inputs != expected_inputs:
-            raise WorkflowExecutionError(
-                "workflow inputs differ from the authored graph; "
-                f"missing={sorted(expected_inputs - actual_inputs)}, "
-                f"extra={sorted(actual_inputs - expected_inputs)}"
-            )
-        for name, spec in workflow.inputs.items():
-            _validate_value(spec, input_values[name], f"workflow input {name!r}")
-
-        loop = asyncio.get_running_loop()
-        deadline = None if timeout is None else loop.time() + timeout
-        cancelled = asyncio.Event()
-        resolved_attempt_id = attempt_id or uuid.uuid4().hex
-
-        async def execute() -> dict[str, Any]:
-            tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
-
-            async def run_stage(stage: StageIR) -> dict[str, Any]:
-                stage_inputs: dict[str, Any] = {}
-                for port_name, reference in stage.inputs.items():
-                    stage_inputs[port_name] = await resolve(reference)
-                context = StageContext(
-                    workflow_name=workflow.name,
-                    stage_id=stage.id,
-                    attempt_id=resolved_attempt_id,
-                    deadline=deadline,
-                    _cancelled=cancelled,
-                )
-                binding = self._plan.bindings[stage.id]
-                if not isinstance(binding, LocalBinding):
-                    raise WorkflowExecutionError(
-                        f"unsupported binding for stage {stage.id!r}"
-                    )
-                result = await self._local_runners[binding.runner_key].run(
-                    MappingProxyType(stage_inputs), context
-                )
-                if not isinstance(result, Mapping):
-                    raise WorkflowExecutionError(
-                        f"stage {stage.id!r} returned a non-mapping result"
-                    )
-                expected_outputs = set(stage.contract.outputs)
-                actual_outputs = set(result)
-                if actual_outputs != expected_outputs:
-                    raise WorkflowExecutionError(
-                        f"stage {stage.id!r} outputs differ from its contract; "
-                        f"missing={sorted(expected_outputs - actual_outputs)}, "
-                        f"extra={sorted(actual_outputs - expected_outputs)}"
-                    )
-                outputs = dict(result)
-                for output_name, spec in stage.contract.outputs.items():
-                    _validate_value(
-                        spec,
-                        outputs[output_name],
-                        f"stage {stage.id!r} output {output_name!r}",
-                    )
-                return outputs
-
-            async def resolve(reference: ValueRef) -> Any:
-                if reference.input_name is not None:
-                    return input_values[reference.input_name]
-                stage_id = cast(str, reference.stage_id)
-                output_name = cast(str, reference.output_name)
-                stage_outputs = await asyncio.shield(tasks[stage_id])
-                return stage_outputs[output_name]
-
-            for stage in workflow.stages:
-                tasks[stage.id] = asyncio.create_task(
-                    run_stage(stage), name=f"workflow:{stage.id}"
-                )
-
-            try:
-                output_values = await asyncio.gather(
-                    *(resolve(reference) for reference in workflow.outputs.values())
-                )
-                return dict(zip(workflow.outputs, output_values))
-            except BaseException:
-                cancelled.set()
-                for task in tasks.values():
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks.values(), return_exceptions=True)
-                raise
-
-        if timeout is None:
-            return await execute()
-        return await asyncio.wait_for(execute(), timeout=timeout)
 
 
 def _validate_value(spec: ValueSpec, value: Any, location: str) -> None:
