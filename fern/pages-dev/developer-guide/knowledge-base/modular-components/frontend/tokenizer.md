@@ -31,7 +31,7 @@ Use this backend for supported `tokenizer.json` models when you need Baseten Tok
 #### Compatibility notes:
 
 - Works with standard BPE `tokenizer.json` files (Qwen, LLaMA, GPT-family, Mistral, DeepSeek, etc.).
-- If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace; requests are never dropped.
+- If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace by default. Use `--no-tokenizer-fallback` to reject incompatible tokenizers during model initialization.
 - Special tokens declared only in a sibling `tokenizer_config.json` are preserved for Baseten encoding and decoding and for Dynamo's L1 prefix-cache boundaries.
 - Has no effect on TikToken-format tokenizers (`.model` / `.tiktoken` files), which always use the TikToken backend.
 
@@ -39,9 +39,15 @@ Use this backend for supported `tokenizer.json` models when you need Baseten Tok
 
 Set the backend with a CLI flag or environment variable. The CLI flag takes precedence.
 
+<Warning>
+Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
+Set `--no-tokenizer-fallback` or `DYN_TOKENIZER_FALLBACK=false` to adopt the future behavior now.
+</Warning>
+
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
 | `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens`, `basetenkenizer` | `default` |
+| `--tokenizer-fallback` / `--no-tokenizer-fallback` | `DYN_TOKENIZER_FALLBACK` | `true`/`false`, `1`/`0`, `on`/`off`, `yes`/`no` | `true` |
 
 **Examples:**
 
@@ -55,6 +61,9 @@ python -m dynamo.frontend
 
 # Baseten Tokenizer
 python -m dynamo.frontend --tokenizer basetenkenizer
+
+# Require Baseten Tokenizer instead of falling back to HuggingFace
+python -m dynamo.frontend --tokenizer basetenkenizer --no-tokenizer-fallback
 ```
 
 ## Dynamo Frontend Behavior
@@ -64,5 +73,5 @@ When a non-default backend is selected:
 1. The frontend resolves `--tokenizer` / `DYN_TOKENIZER` and passes the selected backend to the Rust runtime.
 2. `ModelDeploymentCard::tokenizer()` loads the HuggingFace tokenizer first for fallback behavior and L1 cache special-token metadata.
 3. Dynamo constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from the same `tokenizer.json` file.
-4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace.
+4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
 5. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the same special-token boundary metadata and cache metrics used by the default path.
