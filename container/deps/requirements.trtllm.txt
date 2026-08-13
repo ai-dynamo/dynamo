@@ -9,11 +9,16 @@
 # GPL-encumbered ffmpeg binary that has CVE exposure; we point imageio at the
 # in-tree LGPL ffmpeg CLI via IMAGEIO_FFMPEG_EXE instead.
 --no-binary imageio-ffmpeg
+# The upstream tensorrt-llm/release image bundles gitpython and jupyterlab at
+# older releases than PyPI currently publishes; floor them so the --no-deps
+# install refreshes the bundled copies in place.
+gitpython>=3.1.58
 
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
 # Upstream tensorrt-llm/release does not ship them.
 imageio>=2.37.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
+jupyterlab>=4.5.10
 # Required by ai_dynamo_runtime + gpu_memory_service. Upstream tensorrt-llm/release
 # does not ship them; vllm/vllm-openai does (which is why DYN-2204's vllm path
 # does not need this).
