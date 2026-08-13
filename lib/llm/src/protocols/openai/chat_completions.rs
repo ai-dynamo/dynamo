@@ -246,6 +246,40 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 
+/// Clear everything that describes the *original* chunk's generation from a
+/// chunk that was cloned off it.
+///
+/// A synthetic chunk is built by cloning a real chunk, because that is the only
+/// way to carry buffered bytes out on a correctly-shaped response. The clone is
+/// not a new generation: it produced no tokens and re-channels bytes the parser
+/// was already holding. So everything describing the original chunk's
+/// generation has to go, or it is reported twice:
+///
+/// - `event` / `comment` — the annotation channel carries per-chunk payloads
+///   such as generated `token_ids`.
+/// - `error` — an error annotation must not be replayed on a later chunk.
+/// - `usage` / `llm_metrics` — `metrics.rs` sums `chunk_tokens` and samples an
+///   ITL point per chunk carrying `llm_metrics`.
+/// - `nvext` — per-chunk NVIDIA extensions. `merge_response_nvext` append-merges
+///   `completion_token_ids`, so a repeat turns `[42]` into `[42, 42]`, and
+///   fields it does not append (such as `prompt_logprobs`) are overwritten.
+///
+/// Kept as one function so the call sites — the two end-of-stream flushes in
+/// `preprocessor.rs` and [`stream_choice_chunk_from_template`] — cannot drift
+/// apart: they already did, which is how `nvext` survived on all three.
+pub(crate) fn scrub_synthetic_chunk_metadata(
+    response: &mut Annotated<NvCreateChatCompletionStreamResponse>,
+) -> Option<()> {
+    response.event = None;
+    response.comment = None;
+    response.error = None;
+    let data = response.data.as_mut()?;
+    data.inner.usage = None;
+    data.llm_metrics = None;
+    data.nvext = None;
+    Some(())
+}
+
 /// Build one synthetic stream choice from an existing response template.
 ///
 /// Both streaming tool-call paths use this constructor when an engine omits a
@@ -259,8 +293,6 @@ pub(super) fn stream_choice_chunk_from_template(
     finish_reason: Option<FinishReason>,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
     let mut response = template.clone();
-    response.inner.usage = None;
-    response.llm_metrics = None;
     #[allow(deprecated)]
     let choice = ChatChoiceStream {
         index,
@@ -276,13 +308,15 @@ pub(super) fn stream_choice_chunk_from_template(
         logprobs: None,
     };
     response.inner.choices = vec![choice];
-    Annotated {
+    let mut annotated = Annotated {
         data: Some(response),
         id: None,
         event: None,
         comment: None,
         error: None,
-    }
+    };
+    scrub_synthetic_chunk_metadata(&mut annotated);
+    annotated
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
@@ -1400,5 +1434,43 @@ mod tests {
                 serde_json::from_value(json_str).expect("Failed to deserialize request");
             assert!(request.normalize_reasoning_template_args().is_err());
         }
+    }
+
+    /// The synthetic chunk clones a real chunk, so every field describing that
+    /// chunk's own generation must be cleared — including `nvext`, which
+    /// `merge_response_nvext` append-merges (a repeat turns `[42]` into
+    /// `[42, 42]` during non-streaming aggregation).
+    #[test]
+    fn test_stream_choice_chunk_from_template_scrubs_per_chunk_metadata() {
+        let mut template: NvCreateChatCompletionStreamResponse = serde_json::from_value(json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "test-model",
+            "choices": [],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+            "nvext": {"completion_token_ids": [42]}
+        }))
+        .expect("Failed to deserialize template");
+        template.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+            chunk_tokens: 1,
+            ..Default::default()
+        });
+        assert!(template.nvext.is_some(), "template must carry nvext");
+
+        let chunk = stream_choice_chunk_from_template(
+            &template,
+            0,
+            Some(ChatCompletionMessageContent::Text("hi".to_string())),
+            None,
+            Some(FinishReason::Stop),
+        );
+
+        let data = chunk.data.expect("synthetic chunk must carry data");
+        assert_eq!(data.nvext, None, "nvext must not be replayed");
+        assert_eq!(data.inner.usage, None);
+        assert!(data.llm_metrics.is_none());
+        assert!(chunk.event.is_none() && chunk.comment.is_none() && chunk.error.is_none());
+        assert_eq!(data.inner.choices.len(), 1);
     }
 }

@@ -79,7 +79,10 @@ use crate::protocols::{
     },
     openai::{
         DeltaGeneratorExt,
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+            scrub_synthetic_chunk_metadata,
+        },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
@@ -323,40 +326,6 @@ struct ChoiceReasoningState {
     // parser had already handed over. Draining again is fine; finalizing again
     // is not.
     parser_finished: bool,
-}
-
-/// Strip every per-chunk field from a response that is being reused as the
-/// envelope for a synthetic end-of-stream chunk.
-///
-/// Both end-of-stream flushes build their chunk by cloning the last chunk they
-/// saw, because that is the only way to carry the buffered bytes out on a
-/// correctly-shaped response. The clone is not a new generation: it produced no
-/// tokens and re-channels bytes the parser was already holding. So everything
-/// describing the *original* chunk's generation has to go, or it is reported
-/// twice:
-///
-/// - `event` / `comment` — the annotation channel carries per-chunk payloads
-///   such as generated `token_ids`.
-/// - `error` — an error annotation must not be replayed on a later chunk.
-/// - `usage` / `llm_metrics` — `metrics.rs` sums `chunk_tokens` and samples an
-///   ITL point per chunk carrying `llm_metrics`.
-/// - `nvext` — per-chunk NVIDIA extensions. `merge_response_nvext` append-merges
-///   `completion_token_ids`, so a repeat turns `[42]` into `[42, 42]`, and
-///   fields it does not append (such as `prompt_logprobs`) are overwritten.
-///
-/// Kept as one function so the two call sites cannot drift apart: they already
-/// did, which is how `nvext` survived on both.
-fn scrub_synthetic_chunk_metadata(
-    response: &mut Annotated<NvCreateChatCompletionStreamResponse>,
-) -> Option<()> {
-    response.event = None;
-    response.comment = None;
-    response.error = None;
-    let data = response.data.as_mut()?;
-    data.inner.usage = None;
-    data.llm_metrics = None;
-    data.nvext = None;
-    Some(())
 }
 
 /// Drain what a choice still holds on the `defer_reasoning_for_nonempty_content`
@@ -4018,12 +3987,14 @@ impl OpenAIPreprocessor {
                     );
                     let mut rec = nv_chunk.clone();
                     rec.id = None;
-                    rec.event = None;
-                    rec.comment = None;
-                    rec.error = None;
+                    // Same synthetic-clone contract as the end-of-stream flushes:
+                    // this chunk produced no tokens, it only re-channels the tail
+                    // the jail was already holding. `nvext` is already `None` on
+                    // every `nv_chunk` built above, so clearing it here is a
+                    // no-op today — routed through the shared scrub anyway so
+                    // this copy of the field list cannot drift from the others.
+                    scrub_synthetic_chunk_metadata(&mut rec)?;
                     let rd = rec.data.as_mut()?;
-                    rd.inner.usage = None;
-                    rd.llm_metrics = None;
                     rd.inner.choices.retain(|c| c.index == choice_idx);
                     for rc in &mut rd.inner.choices {
                         rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
