@@ -222,10 +222,13 @@ HandleConnection(int connection, Broker& broker)
     if (!ReadAll(connection, message.data(), size) || !request.ParseFromString(message) || !request.IsInitialized()) {
       response = InvalidRequest();
     } else {
+      const auto request_start = std::chrono::steady_clock::now();
       response = broker.HandleRequest(request);
+      const auto duration =
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - request_start);
       std::osyncstream(std::cerr) << "transaction=" << request.transaction_id()
                                   << " command=" << CommandName(request.command_case())
-                                  << " result=" << ResultName(response)
+                                  << " result=" << ResultName(response) << " duration_ms=" << duration.count()
                                   << (response.has_failure() ? " error=" + response.failure().message() : "") << '\n';
     }
   }

@@ -66,6 +66,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	transactionID := ""
 	var broker pagebroker.Client
 	committed := false
+	var pageBrokerStageDuration time.Duration
+	var pageBrokerStagingMountDuration time.Duration
+	var pageBrokerStagingUnmountDuration time.Duration
+	var pageBrokerCommitDuration time.Duration
 	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
 	if brokered {
 		transactionID = uuid.NewString()
@@ -77,7 +81,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 				_ = broker.Abort(abortCtx, transactionID)
 			}
 		}()
+		stageStart := time.Now()
 		staged, err := broker.StagedRestore(ctx, transactionID, req.CheckpointLocation)
+		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
 			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
 		}
@@ -100,6 +106,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	injectDuration := time.Since(injectStart)
 	defer func() {
+		unmountStart := time.Now()
 		// Pass a background context: mp.Unmount has its own internal timeout
 		// (nsmount.unmountTimeout) around the ns-bind-mount subprocess.
 		if cleanupErr := mp.Unmount(context.Background()); cleanupErr != nil {
@@ -109,10 +116,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			// already restored successfully. Log it and let the pod continue.
 			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
 		}
+		log.Info("Agent bundle unmount timing", "duration", time.Since(unmountStart))
 	}()
 
 	var mountedStaging nsmount.MountPoint
 	if brokered {
+		stagingMountStart := time.Now()
 		stagingMounter, err := nsmount.New(req.CheckpointLocation, nsmount.PageBrokerDst, log)
 		if err != nil {
 			return 0, fmt.Errorf("create PageBroker staging mount: %w", err)
@@ -121,36 +130,51 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		if err != nil {
 			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
 		}
+		pageBrokerStagingMountDuration = time.Since(stagingMountStart)
 		req.ContainerCheckpointLocation = nsmount.PageBrokerDst
 	}
 
 	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
 	result, err := execNSRestore(ctx, log, req, snap, mp)
 	if mountedStaging != nil {
+		stagingUnmountStart := time.Now()
 		if cleanupErr := mountedStaging.Unmount(context.Background()); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to unmount PageBroker staging from placeholder namespace")
 		}
+		pageBrokerStagingUnmountDuration = time.Since(stagingUnmountStart)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	if brokered {
+		commitStart := time.Now()
 		if err := broker.Commit(ctx, transactionID); err != nil {
 			log.Error(err, "failed to commit PageBroker restore")
 		} else {
 			committed = true
 		}
+		pageBrokerCommitDuration = time.Since(commitStart)
 	}
-	restoreDuration := hostInspectDuration + injectDuration + result.TotalDuration()
+
+	validationStart := time.Now()
+	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
+		return 0, err
+	}
+	validationDuration := time.Since(validationStart)
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
-			"duration": restoreDuration.String(),
+			"duration": time.Since(restoreStart).String(),
 			"phases": map[string]string{
-				"host_inspect_duration":    hostInspectDuration.String(),
-				"inject_duration":          injectDuration.String(),
-				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
-				"criu_restore_duration":    result.CRIURestoreDuration.String(),
-				"cuda_duration":            result.CUDADuration.String(),
+				"pagebroker_stage_duration":           pageBrokerStageDuration.String(),
+				"host_inspect_duration":               hostInspectDuration.String(),
+				"inject_duration":                     injectDuration.String(),
+				"pagebroker_staging_mount_duration":   pageBrokerStagingMountDuration.String(),
+				"nsrestore_setup_duration":            result.NSRestoreSetupDuration.String(),
+				"criu_restore_duration":               result.CRIURestoreDuration.String(),
+				"cuda_duration":                       result.CUDADuration.String(),
+				"pagebroker_staging_unmount_duration": pageBrokerStagingUnmountDuration.String(),
+				"pagebroker_commit_duration":          pageBrokerCommitDuration.String(),
+				"validation_duration":                 validationDuration.String(),
 			},
 		},
 	)
@@ -160,15 +184,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		)
 	}
 
-	validationStart := time.Now()
-	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
-		return 0, err
-	}
-
 	log.Info("=== External restore completed ===",
 		"restored_pid", result.RestoredPID,
 		"placeholder_host_pid", snap.PlaceholderPID,
-		"validation_duration", time.Since(validationStart),
+		"validation_duration", validationDuration,
 		"total_duration", time.Since(restoreStart),
 	)
 
