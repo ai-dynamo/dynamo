@@ -622,7 +622,7 @@ mod tests {
     use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
     #[test]
-    fn default_policy_components_match_default_selector() {
+    fn default_policy_matches_default_selector() {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let workers = HashMap::from([
@@ -640,12 +640,7 @@ mod tests {
         let expected = DefaultWorkerSelector::new(Some(config.clone()), "test")
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
-        let policy = WorkerSelectionPolicy::new(
-            config.clone(),
-            "test",
-            vec![Box::new(DefaultWorkerScorer::new(config, "test"))],
-            Box::new(DefaultWorkerPicker::new(0.0)),
-        );
+        let policy = WorkerSelectionPolicy::default(config, "test");
         let actual = policy
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
