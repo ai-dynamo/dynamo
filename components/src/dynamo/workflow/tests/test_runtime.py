@@ -4,6 +4,7 @@
 import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -57,12 +58,14 @@ def _workflow() -> Workflow:
     return workflow
 
 
-def _compile_local(workflow: Workflow, **runners: StageRunner) -> WorkflowExecutor:
+async def _compile_local(
+    workflow: Workflow, **runners: StageRunner
+) -> WorkflowExecutor:
     plan = compile_workflow(
         workflow,
         DeploymentSpec.local(**{stage_id: stage_id for stage_id in runners}),
     )
-    return WorkflowExecutor(plan, runners)
+    return await WorkflowExecutor.bind(plan, local_runners=runners)
 
 
 @dataclass
@@ -97,7 +100,7 @@ class _Generator:
 
 async def test_concise_compile_and_run_preserve_fanout_value_identity():
     embedding = object()
-    plan = _compile_local(
+    plan = await _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
@@ -147,7 +150,7 @@ class _BarrierGenerator:
 async def test_independent_branches_run_concurrently_before_join():
     embedding = object()
     barrier = _BranchBarrier(2)
-    plan = _compile_local(
+    plan = await _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BarrierClassifier(barrier),
@@ -193,7 +196,7 @@ async def test_first_worker_failure_cancels_and_awaits_sibling():
     embedding = object()
     barrier = _BranchBarrier(2)
     cancelled = asyncio.Event()
-    plan = _compile_local(
+    plan = await _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_FailingClassifier(barrier),
@@ -226,7 +229,7 @@ async def test_timeout_cancels_and_awaits_running_stages():
     embedding = object()
     started = asyncio.Event()
     cancelled = asyncio.Event()
-    plan = _compile_local(
+    plan = await _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BlockingClassifier(started, cancelled),
@@ -244,7 +247,7 @@ async def test_caller_cancellation_cleans_up_running_stages():
     embedding = object()
     started = asyncio.Event()
     cancelled = asyncio.Event()
-    plan = _compile_local(
+    plan = await _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BlockingClassifier(started, cancelled),
@@ -260,13 +263,13 @@ async def test_caller_cancellation_cleans_up_running_stages():
     assert cancelled.is_set()
 
 
-def test_compile_requires_exact_bindings_and_matching_contracts():
+async def test_compile_requires_exact_bindings_and_matching_contracts():
     with pytest.raises(WorkflowValidationError, match="missing"):
         compile_workflow(_workflow(), DeploymentSpec.local(encoder="encoder"))
 
     wrong = SimpleNamespace(contract=CLASSIFIER, run=_Generator(object()).run)
     with pytest.raises(WorkflowValidationError, match="does not match"):
-        WorkflowExecutor(
+        await WorkflowExecutor.bind(
             compile_workflow(
                 _workflow(),
                 DeploymentSpec.local(
@@ -275,7 +278,7 @@ def test_compile_requires_exact_bindings_and_matching_contracts():
                     generator="generator",
                 ),
             ),
-            {
+            local_runners={
                 "encoder": _Encoder(object()),
                 "classifier": _Classifier(object()),
                 "generator": wrong,
@@ -285,7 +288,7 @@ def test_compile_requires_exact_bindings_and_matching_contracts():
 
 async def test_runtime_rejects_bad_inputs_and_worker_outputs():
     embedding = object()
-    plan = _compile_local(
+    plan = await _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
@@ -302,7 +305,7 @@ async def test_runtime_rejects_bad_inputs_and_worker_outputs():
         async def run(self, inputs, context):
             return {"wrong": "value"}
 
-    bad_plan = _compile_local(
+    bad_plan = await _compile_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
@@ -316,7 +319,7 @@ async def test_runtime_enforces_json_data_model() -> None:
     workflow = Workflow("json-values")
     value = workflow.input("value", type="json")
     workflow.output("value", value)
-    plan = _compile_local(workflow)
+    plan = await _compile_local(workflow)
 
     shared = [1, 2]
     valid = {"none": None, "bool": True, "number": 1.5, "shared": [shared, shared]}
@@ -357,9 +360,230 @@ async def test_tensor_and_image_constraints_are_checked_without_framework_import
         async def run(self, inputs, context):
             return {"image": SimpleNamespace(mode="RGB", size=(10, 10))}
 
-    plan = _compile_local(workflow, convert=Converter())
+    plan = await _compile_local(workflow, convert=Converter())
     value = SimpleNamespace(dtype="float32", shape=(2, 4))
 
     assert (await plan.run({"tensor": value}))["image"].mode == "RGB"
     with pytest.raises(WorkflowExecutionError, match="shape"):
         await plan.run({"tensor": SimpleNamespace(dtype="float32", shape=(2, 3))})
+
+
+ECHO = StageContract(
+    id="echo-worker",
+    inputs={"text": ValueSpec(type="text")},
+    outputs={"text": ValueSpec(type="text")},
+)
+
+
+class _Echo:
+    contract = ECHO
+
+    def __init__(self) -> None:
+        self.contexts: list[StageContext] = []
+
+    async def run(self, inputs, context: StageContext):
+        self.contexts.append(context)
+        return {"text": inputs["text"]}
+
+
+class _SometimesFailingEcho(_Echo):
+    async def run(self, inputs, context: StageContext):
+        self.contexts.append(context)
+        if inputs["text"] == "fail":
+            raise WorkerFailure("requested failure")
+        return {"text": inputs["text"]}
+
+
+async def test_handler_supports_branches_loops_and_catchable_stage_errors() -> None:
+    workflow = Workflow("imperative-local")
+    echo = workflow.use("echo", ECHO)
+
+    @workflow.handler(
+        inputs={"request": ValueSpec(type="json")},
+        outputs={"result": ValueSpec(type="text")},
+    )
+    async def run(inputs, context):
+        request = inputs["request"]
+        if request["fallback"]:
+            try:
+                await context.call(echo, text="fail")
+            except WorkerFailure:
+                return {"result": (await context.call(echo, text="fallback"))["text"]}
+
+        result = ""
+        for index in range(request["count"]):
+            result = (await context.call(echo, text=f"step-{index}"))["text"]
+        return {"result": result}
+
+    runner = _SometimesFailingEcho()
+    executor = await _compile_local(workflow, echo=runner)
+
+    assert await executor.run(
+        {"request": {"fallback": False, "count": 3}}, attempt_id="loop"
+    ) == {"result": "step-2"}
+    assert await executor.run(
+        {"request": {"fallback": True, "count": 0}}, attempt_id="fallback"
+    ) == {"result": "fallback"}
+    assert [context.invocation_id for context in runner.contexts] == [
+        "loop:1",
+        "loop:2",
+        "loop:3",
+        "fallback:1",
+        "fallback:2",
+    ]
+
+
+async def test_handler_rejects_foreign_stage_reference() -> None:
+    workflow = Workflow("owner")
+    workflow.use("echo", ECHO)
+    other = Workflow("other-owner")
+    foreign = other.use("echo", ECHO)
+
+    @workflow.handler(inputs={}, outputs={"result": ValueSpec(type="text")})
+    async def run(inputs, context):
+        return {"result": (await context.call(foreign, text="bad"))["text"]}
+
+    executor = await _compile_local(workflow, echo=_Echo())
+    with pytest.raises(WorkflowExecutionError, match="different workflow"):
+        await executor.run({})
+
+
+class _BlockingEcho:
+    contract = ECHO
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def run(self, inputs, context: StageContext):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert context.cancelled
+            self.cancelled.set()
+            raise
+
+
+async def test_handler_return_cancels_unfinished_child_invocations() -> None:
+    workflow = Workflow("handler-cleanup")
+    echo = workflow.use("echo", ECHO)
+    runner = _BlockingEcho()
+
+    @workflow.handler(inputs={}, outputs={"result": ValueSpec(type="text")})
+    async def run(inputs, context):
+        asyncio.create_task(context.call(echo, text="background"))
+        await runner.started.wait()
+        return {"result": "done"}
+
+    executor = await _compile_local(workflow, echo=runner)
+    assert await executor.run({}) == {"result": "done"}
+    assert runner.cancelled.is_set()
+
+
+@dataclass
+class _ConcurrentEcho:
+    contract = ECHO
+    barrier: _BranchBarrier
+    contexts: list[StageContext]
+
+    async def run(self, inputs, context: StageContext):
+        self.contexts.append(context)
+        await self.barrier.enter()
+        return {"text": inputs["text"]}
+
+
+async def test_handler_runs_concurrent_calls_with_unique_invocation_ids() -> None:
+    workflow = Workflow("handler-concurrency")
+    echo = workflow.use("echo", ECHO)
+
+    @workflow.handler(inputs={}, outputs={"result": ValueSpec(type="json")})
+    async def run(inputs, context):
+        left, right = await asyncio.gather(
+            context.call(echo, text="left"),
+            context.call(echo, text="right"),
+        )
+        return {"result": [left["text"], right["text"]]}
+
+    contexts: list[StageContext] = []
+    executor = await _compile_local(
+        workflow,
+        echo=_ConcurrentEcho(_BranchBarrier(2), contexts),
+    )
+
+    assert await executor.run({}, attempt_id="parallel") == {
+        "result": ["left", "right"]
+    }
+    assert {context.invocation_id for context in contexts} == {
+        "parallel:1",
+        "parallel:2",
+    }
+
+
+async def test_handler_timeout_signals_and_awaits_active_call() -> None:
+    workflow = Workflow("handler-timeout")
+    echo = workflow.use("echo", ECHO)
+    runner = _BlockingEcho()
+
+    @workflow.handler(inputs={}, outputs={"result": ValueSpec(type="text")})
+    async def run(inputs, context):
+        return {"result": (await context.call(echo, text="wait"))["text"]}
+
+    executor = await _compile_local(workflow, echo=runner)
+    with pytest.raises(asyncio.TimeoutError):
+        await executor.run({}, timeout=0.01)
+    assert runner.started.is_set()
+    assert runner.cancelled.is_set()
+
+
+RICH_VALUES = StageContract(
+    id="rich-values",
+    inputs={
+        "tensor": ValueSpec(type="tensor"),
+        "image": ValueSpec(type="image"),
+        "object": ValueSpec(type="object", class_id="opaque"),
+    },
+    outputs={"result": ValueSpec(type="text")},
+)
+
+
+@dataclass
+class _RichValueRunner:
+    contract = RICH_VALUES
+    tensor: Any
+    image: Any
+    opaque: object
+
+    async def run(self, inputs, context: StageContext):
+        assert inputs["tensor"] is self.tensor
+        assert inputs["image"] is self.image
+        assert inputs["object"] is self.opaque
+        return {"result": "same objects"}
+
+
+async def test_local_handler_preserves_rich_value_identity() -> None:
+    workflow = Workflow("rich-local")
+    stage = workflow.use("inspect", RICH_VALUES)
+
+    @workflow.handler(
+        inputs={
+            "tensor": ValueSpec(type="tensor"),
+            "image": ValueSpec(type="image"),
+            "object": ValueSpec(type="object", class_id="opaque"),
+        },
+        outputs={"result": ValueSpec(type="text")},
+    )
+    async def run(inputs, context):
+        return await context.call(stage, **inputs)
+
+    tensor = SimpleNamespace(dtype="float32", shape=(2, 4))
+    image = SimpleNamespace(mode="RGB", size=(10, 10))
+    opaque = object()
+    executor = await _compile_local(
+        workflow,
+        inspect=_RichValueRunner(tensor=tensor, image=image, opaque=opaque),
+    )
+
+    assert await executor.run({"tensor": tensor, "image": image, "object": opaque}) == {
+        "result": "same objects"
+    }
