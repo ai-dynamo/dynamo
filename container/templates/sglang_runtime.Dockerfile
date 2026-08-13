@@ -23,6 +23,7 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
 ENV PATH=/usr/local/bin/etcd:$PATH
 
+{% if device == "cuda" %}
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
 # no new packages are added; versions are left unpinned so each rebuild picks
@@ -42,6 +43,7 @@ RUN apt-get update && \
         libssl3t64 \
         openssl && \
     rm -rf /var/lib/apt/lists/*
+{% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
