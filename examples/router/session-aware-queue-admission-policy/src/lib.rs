@@ -1,5 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+//! A queue-admission policy that runs one request at a time for each session.
+//!
+//! A worker-selection factory can attach this policy with
+//! `policy.with_admission_policy(Box::new(SessionAdmissionPolicy::default()))`.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -14,9 +19,9 @@ struct SessionState {
     waiting: VecDeque<QueueAdmissionId>,
 }
 
-/// Admit at most one request per session while allowing different sessions to run concurrently.
+/// Admits one active request per session and preserves FIFO order within each session.
 #[derive(Default)]
-pub(crate) struct SessionAdmissionPolicy {
+pub struct SessionAdmissionPolicy {
     sessions: HashMap<String, SessionState>,
     request_sessions: HashMap<String, String>,
     admission_requests: HashMap<QueueAdmissionId, String>,
@@ -95,24 +100,28 @@ impl QueueAdmissionPolicy for SessionAdmissionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::QueueAdmissionWorkerSnapshot;
+    use dynamo_kv_router::{QueueAdmissionWorkerSnapshot, SessionContext};
 
     use super::*;
-    use dynamo_kv_router::SessionContext;
 
     fn request<'a>(
         id: u64,
         request_id: &'a str,
-        session: &'a SessionContext,
+        session: Option<&'a SessionContext>,
         snapshot: &'a QueueAdmissionWorkerSnapshot,
     ) -> QueueAdmissionRequest<'a> {
-        QueueAdmissionRequest::new(
-            QueueAdmissionId::new(id),
-            request_id,
-            16,
-            Some(session),
-            snapshot,
-        )
+        QueueAdmissionRequest::new(QueueAdmissionId::new(id), request_id, 16, session, snapshot)
+    }
+
+    #[test]
+    fn requests_without_a_session_bypass_the_policy() {
+        let snapshot = QueueAdmissionWorkerSnapshot::new(1, Vec::new());
+        let mut policy = SessionAdmissionPolicy::default();
+
+        assert_eq!(
+            policy.admit(request(1, "request-a", None, &snapshot)),
+            QueueAdmissionDecision::Bypass
+        );
     }
 
     #[test]
@@ -121,11 +130,11 @@ mod tests {
         let snapshot = QueueAdmissionWorkerSnapshot::new(1, Vec::new());
         let mut policy = SessionAdmissionPolicy::default();
         assert_eq!(
-            policy.admit(request(1, "request-a", &session, &snapshot)),
+            policy.admit(request(1, "request-a", Some(&session), &snapshot)),
             QueueAdmissionDecision::Ready
         );
         assert_eq!(
-            policy.admit(request(2, "request-b", &session, &snapshot)),
+            policy.admit(request(2, "request-b", Some(&session), &snapshot)),
             QueueAdmissionDecision::Defer
         );
 
