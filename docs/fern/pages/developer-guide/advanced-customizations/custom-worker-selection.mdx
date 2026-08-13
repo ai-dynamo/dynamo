@@ -272,14 +272,22 @@ Create `$POLICY_DIR/worker-selection.yaml`:
 ```yaml
 worker_selection:
   default: least-busy
+  prefill: prefill-least-busy
+  decode: least-busy
   instances:
     - name: least-busy
       type: least-busy
       parameters:
         min_device_overlap_blocks: 0
+    - name: prefill-least-busy
+      type: least-busy
+      parameters:
+        min_device_overlap_blocks: 1
 ```
 
-The `type` selects a registered provider. The `name` identifies one configured instance. `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides `worker_selection.default` by instance name. Set the override to `default` to select Dynamo's built-in policy.
+The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.prefill` and `worker_selection.decode` select separate instances for those worker pools. Both stage selections fall back to `worker_selection.default` when omitted.
+
+The selection order for each stage is the stage CLI flag, the matching `DYN_ROUTER_PREFILL_POLICY` or `DYN_ROUTER_DECODE_POLICY` environment variable, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the YAML stage selection, the YAML default, and then Dynamo's built-in policy. Set any selection to `default` to use the built-in policy for that scope.
 
 ### Check the Policy and Catalog
 
@@ -381,7 +389,9 @@ uv pip install -e .
 # Start the frontend with the policy configuration.
 python3 -m dynamo.frontend \
   --router-mode kv \
-  --router-policy-config "$POLICY_DIR/worker-selection.yaml"
+  --router-policy-config "$POLICY_DIR/worker-selection.yaml" \
+  --router-prefill-policy prefill-least-busy \
+  --router-decode-policy least-busy
 ```
 
 </Tab>
@@ -427,7 +437,7 @@ cd "$POLICY_DIR/epp"
 DYN_EPP_MODE=standalone DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
 ```
 
-Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. A policy that branches on `worker_type` must handle `select`.
+Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. It uses `worker_selection.default`; the prefill and decode selections apply only to the embedded frontend.
 
 </Tab>
 </Tabs>

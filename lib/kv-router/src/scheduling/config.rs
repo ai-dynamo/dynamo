@@ -30,6 +30,19 @@ pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS
 /// The reserved value `default` selects Dynamo's built-in worker selector.
 pub const DYN_ROUTER_WORKER_SELECTION_POLICY: &str = "DYN_ROUTER_WORKER_SELECTION_POLICY";
 
+/// Selects a configured custom worker-selection policy instance for prefill workers.
+pub const DYN_ROUTER_PREFILL_POLICY: &str = "DYN_ROUTER_PREFILL_POLICY";
+
+/// Selects a configured custom worker-selection policy instance for decode workers.
+pub const DYN_ROUTER_DECODE_POLICY: &str = "DYN_ROUTER_DECODE_POLICY";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerSelectionPolicySelections {
+    pub(crate) fallback: Option<String>,
+    pub(crate) prefill: Option<String>,
+    pub(crate) decode: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyConfigError {
     #[error("could not read {DYN_ROUTER_WORKER_SELECTION_POLICY}: {source}")]
@@ -163,6 +176,8 @@ fn log_env_config(config: &KvRouterConfig) {
         router_tracking_key_id = ?config.router_tracking_key_id,
         router_queue_threshold = ?config.router_queue_threshold,
         router_policy_config = ?config.router_policy_config,
+        router_prefill_policy = ?config.router_prefill_policy,
+        router_decode_policy = ?config.router_decode_policy,
         conditional_disagg_enabled = config.conditional_disagg_enabled,
         conditional_disagg_policy = ?config.conditional_disagg_policy,
         conditional_disagg_eff_isl_threshold = config.conditional_disagg_eff_isl_threshold,
@@ -253,6 +268,12 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = get_env("DYN_ROUTER_POLICY_CONFIG") {
         config.router_policy_config = Some(value);
+    }
+    if let Some(value) = get_env(DYN_ROUTER_PREFILL_POLICY) {
+        config.router_prefill_policy = Some(value);
+    }
+    if let Some(value) = get_env(DYN_ROUTER_DECODE_POLICY) {
+        config.router_decode_policy = Some(value);
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG") {
         config.conditional_disagg_enabled = value;
@@ -714,6 +735,18 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub router_policy_config: Option<String>,
 
+    /// Optional prefill worker-selection instance override.
+    ///
+    /// This frontend-only value is not serialized into worker model cards.
+    #[serde(skip)]
+    pub router_prefill_policy: Option<String>,
+
+    /// Optional decode worker-selection instance override.
+    ///
+    /// This frontend-only value is not serialized into worker model cards.
+    #[serde(skip)]
+    pub router_decode_policy: Option<String>,
+
     /// Run-level model selector used by offline and online replay.
     #[serde(skip)]
     #[doc(hidden)]
@@ -838,6 +871,8 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_queue_threshold: None,
             router_policy_config: None,
+            router_prefill_policy: None,
+            router_decode_policy: None,
             policy_model_name: None,
             policy_config_cache: OnceLock::new(),
             router_event_threads: 4,
@@ -899,6 +934,8 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
             router_policy_config: compat.router_policy_config,
+            router_prefill_policy: None,
+            router_decode_policy: None,
             policy_model_name: None,
             policy_config_cache: OnceLock::new(),
             router_event_threads: compat.router_event_threads,
@@ -1040,10 +1077,12 @@ impl KvRouterConfig {
             .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
     }
 
-    /// Return the configured custom worker-selection instance, if any.
+    /// Return one configured custom worker-selection instance, if any.
     ///
     /// `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the YAML default. The reserved value
-    /// `default`, and an absent selection, both use Dynamo's built-in worker selector.
+    /// `default`, and an absent selection, both use Dynamo's built-in worker selector. This method
+    /// also reports a stage-specific instance so stock builds can reject unsupported custom policy
+    /// configuration instead of silently ignoring it.
     pub fn selected_worker_selection_policy_instance(
         &self,
     ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
@@ -1052,26 +1091,78 @@ impl KvRouterConfig {
             Err(VarError::NotPresent) => Ok(None),
             Err(source) => Err(source),
         };
-        self.selected_worker_selection_policy_instance_from(selected)
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(selected.fallback.or(selected.prefill).or(selected.decode))
     }
 
+    #[cfg(test)]
     fn selected_worker_selection_policy_instance_from(
         &self,
         selected: Result<Option<String>, VarError>,
     ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(selected.fallback.or(selected.prefill).or(selected.decode))
+    }
+
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn selected_worker_selection_policy_instances(
+        &self,
+    ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        self.selected_worker_selection_policy_instances_from(selected)
+    }
+
+    fn selected_worker_selection_policy_instances_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
+        fn normalized(value: Option<&str>) -> Option<String> {
+            value
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        }
+
+        fn custom_only(selected: Option<String>) -> Option<String> {
+            selected.filter(|name| name != "default")
+        }
+
         let policy_config = self
             .worker_selection_config()
             .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
-        let selected = selected
+        let global = selected
             .map_err(|source| WorkerSelectionPolicyConfigError::Environment { source })?
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
+            .and_then(|name| normalized(Some(&name)));
+        let yaml_default = policy_config
+            .and_then(|config| config.default_instance())
+            .map(str::to_owned);
+        let fallback = global.clone().or_else(|| yaml_default.clone());
+        let prefill = normalized(self.router_prefill_policy.as_deref())
+            .or_else(|| global.clone())
             .or_else(|| {
                 policy_config
-                    .and_then(|config| config.default_instance())
+                    .and_then(|config| config.prefill_instance())
                     .map(str::to_owned)
-            });
-        Ok(selected.filter(|name| name != "default"))
+            })
+            .or_else(|| yaml_default.clone());
+        let decode = normalized(self.router_decode_policy.as_deref())
+            .or(global)
+            .or_else(|| {
+                policy_config
+                    .and_then(|config| config.decode_instance())
+                    .map(str::to_owned)
+            })
+            .or(yaml_default);
+
+        Ok(WorkerSelectionPolicySelections {
+            fallback: custom_only(fallback),
+            prefill: custom_only(prefill),
+            decode: custom_only(decode),
+        })
     }
 
     pub fn with_policy_model_name(mut self, model_name: Option<String>) -> Self {
@@ -1348,11 +1439,15 @@ mod tests {
             ),
             ("DYN_ROUTER_TRACKING_KEY_ID", "2026-01"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+            (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
+            (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
         assert_eq!(config.overlap_score_credit_decay, 0.75);
         assert_eq!(config.prefill_load_scale, 2.5);
+        assert_eq!(config.router_prefill_policy.as_deref(), Some("prefill-cli"));
+        assert_eq!(config.router_decode_policy.as_deref(), Some("decode-cli"));
         assert_eq!(config.decode_active_request_weight, 32.0);
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
@@ -1668,6 +1763,60 @@ worker_selection:
     }
 
     #[test]
+    fn selected_worker_selection_policy_instances_apply_stage_precedence() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  default: yaml-default
+  prefill: yaml-prefill
+  decode: yaml-decode
+  instances:
+    - name: yaml-default
+      type: acme
+    - name: yaml-prefill
+      type: acme
+    - name: yaml-decode
+      type: acme
+    - name: global
+      type: acme
+    - name: cli-prefill
+      type: acme
+"#,
+        )
+        .unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(None))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                fallback: Some("yaml-default".to_string()),
+                prefill: Some("yaml-prefill".to_string()),
+                decode: Some("yaml-decode".to_string()),
+            }
+        );
+
+        config.router_prefill_policy = Some("cli-prefill".to_string());
+        config.router_decode_policy = Some("default".to_string());
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(Some("global".to_string())))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                fallback: Some("global".to_string()),
+                prefill: Some("cli-prefill".to_string()),
+                decode: None,
+            }
+        );
+    }
+
+    #[test]
     fn removed_missing_isl_queue_config_is_rejected_as_unknown() {
         for value in [
             serde_json::json!(null),
@@ -1714,6 +1863,15 @@ worker_selection:
         ] {
             assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
         }
+
+        let frontend_config = KvRouterConfig {
+            router_prefill_policy: Some("prefill-policy".to_string()),
+            router_decode_policy: Some("decode-policy".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(frontend_config).unwrap();
+        assert!(value.get("router_prefill_policy").is_none());
+        assert!(value.get("router_decode_policy").is_none());
 
         let error = serde_json::from_value::<KvRouterConfig>(serde_json::json!({
             "durable_kv_events": true,

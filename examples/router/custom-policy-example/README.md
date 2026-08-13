@@ -144,6 +144,8 @@ Create a YAML file outside the source tree:
 ```yaml
 worker_selection:
   default: simple-filter-score-pick
+  prefill: disagg-prefill
+  decode: disagg-decode
   instances:
     - name: simple-filter-score-pick
       type: simple-filter-score-pick
@@ -153,7 +155,11 @@ worker_selection:
       type: simple-filter-score-pick
       parameters:
         min_device_overlap_blocks: 8
-    - name: disagg-filter-score-pick
+    - name: disagg-prefill
+      type: disagg-filter-score-pick
+      parameters:
+        min_device_overlap_blocks: 0
+    - name: disagg-decode
       type: disagg-filter-score-pick
       parameters:
         min_device_overlap_blocks: 0
@@ -165,7 +171,10 @@ worker_selection:
 - `type` selects a registered provider.
 - `name` identifies one configured instance.
 - `worker_selection.default` selects an instance at startup.
-- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the selected instance by name.
+- `worker_selection.prefill` and `worker_selection.decode` select separate instances for the embedded frontend's worker pools.
+- `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections.
+- `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.
+- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the YAML selections for both stages.
 - The override value `default` selects Dynamo's built-in policy.
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.
@@ -310,16 +319,19 @@ Send the same request. This time, `logit` is the sum of the active-request and u
 
 ### Disaggregated Policy
 
-Stop the frontend and Mocker processes. Start the frontend with the disaggregated policy:
+Stop the frontend and Mocker processes. Start the frontend with separate named prefill and decode policy instances:
 
 ```bash
-DYN_ROUTER_WORKER_SELECTION_POLICY=disagg-filter-score-pick \
 python -m dynamo.frontend \
   --router-mode kv \
   --router-policy-config /tmp/worker-selection.yaml \
+  --router-prefill-policy disagg-prefill \
+  --router-decode-policy disagg-decode \
   --discovery-backend file \
   --http-port 8000
 ```
+
+The two flags override `worker_selection.prefill` and `worker_selection.decode`. Omit the flags to use the YAML selections.
 
 In the second terminal, start two prefill Mocker workers:
 
