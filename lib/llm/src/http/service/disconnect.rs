@@ -57,7 +57,7 @@ pub fn backend_stream_timeout() -> Option<Duration> {
 }
 
 /// Read the hard wall-clock cap for a single streaming response.
-/// Returns `None` if unset or zero (disabled).
+/// Returns `None` if unset, zero, or unrepresentable (disabled).
 ///
 /// Unlike [`backend_stream_timeout`], this is **not** an inactivity timer: it does
 /// not reset when tokens arrive, and it applies **no** 2x multiplier. It exists for
@@ -70,6 +70,13 @@ pub fn stream_max_duration() -> Option<Duration> {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&ms| ms > 0)
         .map(Duration::from_millis)
+        // The caller forms the deadline as `Instant::now() + d`, which panics if the
+        // sum is unrepresentable. Whether any `u64` millisecond value can overflow
+        // depends on how the platform represents `Instant` — a `timespec` absorbs the
+        // whole range, a tick counter need not — so validate instead of relying on
+        // that. A value this large is a misconfiguration; disable the cap rather than
+        // turn it into a request-time panic.
+        .filter(|d| std::time::Instant::now().checked_add(*d).is_some())
 }
 
 #[derive(Clone, Copy)]
@@ -536,6 +543,18 @@ mod tests {
         // Valid -> parsed as milliseconds, with no 2x multiplier.
         temp_env::with_var(STREAM_MAX_DURATION_ENV, Some("265000"), || {
             assert_eq!(stream_max_duration(), Some(Duration::from_millis(265000)));
+        });
+        // Parses as u64 but cannot be turned into a deadline -> disabled, never a
+        // panic. On platforms whose `Instant` absorbs the whole millisecond range
+        // this still yields a duration; either way the handler must not panic.
+        temp_env::with_var(STREAM_MAX_DURATION_ENV, Some(&u64::MAX.to_string()), || {
+            match stream_max_duration() {
+                None => {}
+                Some(d) => assert!(
+                    std::time::Instant::now().checked_add(d).is_some(),
+                    "returned a duration that cannot be added to Instant::now()"
+                ),
+            }
         });
     }
 
