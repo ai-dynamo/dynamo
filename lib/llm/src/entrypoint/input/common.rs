@@ -16,7 +16,6 @@ use crate::{
     kv_router::{
         EncoderRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
     },
-    lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -181,37 +180,28 @@ where
     )?;
 
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-            router, affinity, true,
-        )),
-        RouterMode::Random | RouterMode::RoundRobin => {
-            match model_manager.lora_filter_for(endpoint_id) {
-                Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
-                    router,
-                    lora_filter,
-                    model_manager.lora_load_estimator_for(endpoint_id),
-                    router_mode,
-                )),
-                None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                    router, affinity, false,
-                )),
-            }
-        }
-        RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => {
-            Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                router,
-                affinity,
-                router_mode.is_direct_routing(),
-            ))
-        }
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
             Arc::new(KvPushRouter::new_with_coordinator(
                 router, chooser, affinity,
+            ))
+        }
+        RouterMode::Direct
+        | RouterMode::Random
+        | RouterMode::RoundRobin
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded
+        | RouterMode::DeviceAwareWeighted => {
+            let lora = model_manager
+                .lora_filter_for(endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
+            Arc::new(SessionAffinityPushRouter::new_with_coordinator_and_lora(
+                router,
+                affinity,
+                router_mode.is_direct_routing(),
+                lora,
             ))
         }
     };

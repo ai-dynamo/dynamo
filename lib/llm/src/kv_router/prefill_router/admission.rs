@@ -44,7 +44,8 @@ where
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>)>
     where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M>,
+        M: Send,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M> + Send,
     {
         match self {
             InnerPrefillRouter::KvRouter(router) => {

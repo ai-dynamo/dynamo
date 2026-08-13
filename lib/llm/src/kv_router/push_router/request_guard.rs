@@ -344,6 +344,12 @@ where
         self.observability.record_prefill_start();
     }
 
+    pub(super) fn record_resolved_worker(&self, worker_id: u64, dp_rank: Option<u32>) {
+        if let Some(tracker) = self.observability.tracker.as_ref() {
+            tracker.record_worker(worker_id, dp_rank, self.cleanup.chooser.worker_type());
+        }
+    }
+
     pub(super) fn mark_dispatched(&mut self) {
         self.observability.mark_dispatched();
     }

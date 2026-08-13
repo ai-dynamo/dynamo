@@ -34,9 +34,19 @@ use crate::protocols::common::timing::{
 };
 
 /// Decrements the [`LoadEstimator`] counter for a LoRA when dropped.
-struct LoadGuard {
+pub(crate) struct LoadGuard {
     estimator: Arc<LoadEstimator>,
     lora_name: String,
+}
+
+impl LoadGuard {
+    pub(crate) fn new(estimator: Arc<LoadEstimator>, lora_name: String) -> Self {
+        estimator.increment_load(&lora_name);
+        Self {
+            estimator,
+            lora_name,
+        }
+    }
 }
 
 impl Drop for LoadGuard {
@@ -49,6 +59,16 @@ impl Drop for LoadGuard {
 struct LoadTrackingStream<S> {
     inner: S,
     _guard: LoadGuard,
+}
+
+pub(crate) fn track_response(
+    stream: ManyOut<Annotated<LLMEngineOutput>>,
+    guard: LoadGuard,
+) -> ManyOut<Annotated<LLMEngineOutput>> {
+    Box::pin(LoadTrackingStream {
+        inner: stream,
+        _guard: guard,
+    })
 }
 
 impl<S> std::fmt::Debug for LoadTrackingStream<S> {
@@ -189,11 +209,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(stream);
         };
 
-        self.load_estimator.increment_load(&lora_name);
-        let guard = LoadGuard {
-            estimator: self.load_estimator.clone(),
-            lora_name: lora_name.clone(),
-        };
+        let guard = LoadGuard::new(self.load_estimator.clone(), lora_name.clone());
 
         // Stage 1: narrow to the LoRA's replica set against the FULL routable set, so the
         // intended replicas are always represented even when they are currently busy.
@@ -266,10 +282,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             )
             .await?;
         Self::record_worker(tracker.as_deref(), worker_id);
-        let tracking = LoadTrackingStream {
-            inner: response_stream,
-            _guard: guard,
-        };
-        Ok(Box::pin(tracking))
+        Ok(track_response(response_stream, guard))
     }
 }
