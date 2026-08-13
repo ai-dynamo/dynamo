@@ -869,9 +869,11 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 
 	// A synthesized elastic-EP follower carries the leader's serve command but must
 	// launch as a Ray-join (RoleFollower); every other single-pod Deployment is a
-	// RoleMain serve. The operator sets this marker; users never do.
+	// RoleMain serve. The marker lives on the DCD's own metadata (set by
+	// synthesizeElasticEPFollowerDCD) -- read it there, not via GetDCDKubeAnnotations,
+	// which returns pod-template annotations. The operator sets this marker; users never do.
 	role := dynamo.RoleMain
-	if annotations[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
+	if opt.dynamoComponentDeployment.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
 		role = dynamo.RoleFollower
 	}
 

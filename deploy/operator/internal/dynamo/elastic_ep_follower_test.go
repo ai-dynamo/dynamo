@@ -88,6 +88,10 @@ func leaderDCD() *v1beta1.DynamoComponentDeployment {
 func TestSynthesizeElasticEPFollowerDCD(t *testing.T) {
 	leader := leaderDCD()
 	leader.Name = "mydgd-decode"
+	// generateSingleDCD sets both Spec.ComponentName and the label; GetDCDComponentName
+	// prefers Spec.ComponentName, so the follower must override it too or the worker-hash
+	// computation sees two DCDs named "decode" and fails.
+	leader.Spec.ComponentName = "decode"
 	leader.Labels = map[string]string{commonconsts.KubeLabelDynamoComponent: "decode"}
 
 	follower := synthesizeElasticEPFollowerDCD(leader, "decode")
@@ -96,6 +100,10 @@ func TestSynthesizeElasticEPFollowerDCD(t *testing.T) {
 	}
 	if want := "mydgd-decode-" + commonconsts.GroveRoleSuffixFollower; follower.Name != want {
 		t.Errorf("follower Name = %q, want %q", follower.Name, want)
+	}
+	if want := "decode-" + commonconsts.GroveRoleSuffixFollower; GetDCDComponentName(follower) != want {
+		t.Errorf("GetDCDComponentName(follower) = %q, want %q (distinct from the leader for the worker hash)",
+			GetDCDComponentName(follower), want)
 	}
 	if follower.Spec.Replicas == nil || *follower.Spec.Replicas != 0 {
 		t.Errorf("follower Replicas = %v, want 0 (rests at zero, scaled on demand)", follower.Spec.Replicas)

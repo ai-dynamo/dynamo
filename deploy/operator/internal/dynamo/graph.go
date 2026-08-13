@@ -349,13 +349,21 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	if c := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec); c == nil || !IsElasticEPRayLaunch(c) {
 		return nil
 	}
+	followerComponentName := leaderComponentName + "-" + commonconsts.GroveRoleSuffixFollower
 	follower := leaderDCD.DeepCopy()
 	follower.Name = NormalizeKubeResourceName(leaderDCD.Name + "-" + commonconsts.GroveRoleSuffixFollower)
 	follower.Spec.Replicas = ptr.To(int32(0))
+	// Distinct component identity so the follower's Deployment, Service, selector,
+	// and worker hash never collide with the leader's. GetDCDComponentName prefers
+	// Spec.ComponentName over the label, so both must carry the "-flw" name; the
+	// RoleFollower launch trims the suffix to rejoin the leader's Ray head.
+	if follower.Spec.ComponentName != "" {
+		follower.Spec.ComponentName = followerComponentName
+	}
 	if follower.Labels == nil {
 		follower.Labels = map[string]string{}
 	}
-	follower.Labels[commonconsts.KubeLabelDynamoComponent] = leaderComponentName + "-" + commonconsts.GroveRoleSuffixFollower
+	follower.Labels[commonconsts.KubeLabelDynamoComponent] = followerComponentName
 	if follower.Annotations == nil {
 		follower.Annotations = map[string]string{}
 	}
