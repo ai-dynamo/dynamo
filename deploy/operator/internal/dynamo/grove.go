@@ -187,6 +187,12 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 		if err != nil {
 			return false, "", "", nil, fmt.Errorf("component %q runtime namespace: %w", componentName, err)
 		}
+		if !ok && IsWorkerComponent(string(component.ComponentType)) {
+			// Keep routing consumers on the previously active worker namespace until Grove cuts over.
+			if previousNamespace := dgd.Status.Components[componentName].RuntimeNamespace; previousNamespace != "" {
+				runtimeNamespace = previousNamespace
+			}
+		}
 		componentStatus.RuntimeNamespace = runtimeNamespace
 		componentStatuses[componentName] = componentStatus
 		if !ok {

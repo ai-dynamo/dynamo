@@ -1325,6 +1325,117 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 	}
 }
 
+func TestEvaluateGroveReadinessRetainsPreviousWorkerRuntimeNamespaceUntilReady(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		hasPrevious    bool
+		previousSuffix string
+		ready          bool
+	}{
+		{
+			name:  "new worker reports desired namespace while initial rollout is pending",
+			ready: false,
+		},
+		{
+			name:        "legacy base namespace remains active while suffix migration is pending",
+			hasPrevious: true,
+			ready:       false,
+		},
+		{
+			name:        "legacy base namespace switches after suffix migration completes",
+			hasPrevious: true,
+			ready:       true,
+		},
+		{
+			name:           "previous suffix remains active while the next suffix rollout is pending",
+			hasPrevious:    true,
+			previousSuffix: "oldhash",
+			ready:          false,
+		},
+		{
+			name:           "next suffix is published after the later rollout completes",
+			hasPrevious:    true,
+			previousSuffix: "oldhash",
+			ready:          true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			t.Log("Build a DGD that requires a worker namespace suffix.")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+					Annotations: map[string]string{
+						commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
+					},
+				},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "prefill",
+						ComponentType: v1beta1.ComponentTypePrefill,
+					}},
+				},
+			}
+			component := dgd.GetComponentByName("prefill")
+			desiredNamespace, err := GetGroveRuntimeNamespace(dgd, component)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			t.Log("Record the namespace published by the previous worker generation.")
+			previousNamespace := ""
+			if tt.hasPrevious {
+				previousNamespace = dgd.GetDynamoNamespaceForComponent(component)
+				if tt.previousSuffix != "" {
+					previousNamespace = ComponentRuntimeNamespace(previousNamespace, string(component.ComponentType), tt.previousSuffix)
+				}
+				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
+					component.ComponentName: {RuntimeNamespace: previousNamespace},
+				}
+			}
+
+			t.Log("Seed the Grove worker at the requested rollout state.")
+			updatedReplicas := int32(0)
+			if tt.ready {
+				updatedReplicas = 1
+			}
+			podClique := &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       GroveComponentResourceName(dgd, component.ComponentName),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           1,
+					ReadyReplicas:      1,
+					UpdatedReplicas:    updatedReplicas,
+					ScheduledReplicas:  1,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			}
+			reader := newFakeGroveClient(g, podClique)
+
+			t.Log("Evaluate the current Grove status.")
+			readiness, err := EvaluateGroveReadiness(ctx, reader, dgd)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(readiness.Ready).To(gomega.Equal(tt.ready))
+
+			t.Log("Keep the old namespace until the new worker generation is ready.")
+			wantNamespace := desiredNamespace
+			if !tt.ready && previousNamespace != "" {
+				wantNamespace = previousNamespace
+			}
+			g.Expect(readiness.ComponentStatuses[component.ComponentName].RuntimeNamespace).To(gomega.Equal(wantNamespace))
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Ready-reason classification tests (merged from classification_test.go).
 // These exercise the DGD-level Ready reason returned as the 4th value of
