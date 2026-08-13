@@ -285,7 +285,9 @@ class StageDispatcher:
 
                 fanout = NixlTensorFanout.from_dict(outputs[output_name])
                 expected_transfers = set(
-                    self._output_transfers.get(stage_id, {}).get(output_name, ())
+                    self._output_transfers.get(stage_id, MappingProxyType({})).get(
+                        output_name, ()
+                    )
                 )
                 if set(fanout.transfers) != expected_transfers:
                     raise WorkflowExecutionError(
