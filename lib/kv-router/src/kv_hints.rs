@@ -4,40 +4,101 @@
 //! Typed KV-cache hints attached to selected backend requests.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
 pub const KV_HINT_TRANSFER_CAPABILITY_KEY: &str = "kv_hint.transfer.v1";
 
+/// Current version of the Dynamo-to-engine KV hint envelope.
+pub const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
+
+/// Action discriminator for a point-to-point KV source location.
+pub const KV_SOURCE_LOCATIONS_ACTION_TYPE: &str = "kv.source_locations";
+
+/// Current payload version for [`KvSourceLocationsPayload`].
+pub const KV_SOURCE_LOCATIONS_ACTION_VERSION: &str = "1.0";
+
 /// Worker runtime-data keys used to build transfer hints.
 pub const KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str = "kv_hint_transfer_worker_type";
 pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "kv_hint_transfer_source_control_endpoints";
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KvHintProtocolVersion {
+    #[default]
+    #[serde(rename = "0.1")]
+    V0_1,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KvSourceLocationsActionVersion {
+    #[serde(rename = "1.0")]
+    V1_0,
+}
+
+/// Typed payload for the `kv.source_locations@1.0` point-to-point action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TransferHint {
+pub struct KvSourceLocationsPayload {
     pub source_control_endpoint: String,
     /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
-/// Typed hints for the selected backend request.
-///
-/// Engines advertise support with one versioned capability key per hint.
-/// Dynamo materializes only fields that the selected engine supports. The
-/// fields are independent, so one engine can consume multiple hints from the
-/// same request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// One typed action in a [`KvHints`] envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action_type")]
+pub enum KvHintAction {
+    #[serde(rename = "kv.source_locations")]
+    SourceLocations {
+        action_id: String,
+        action_version: KvSourceLocationsActionVersion,
+        payload: KvSourceLocationsPayload,
+    },
+}
+
+impl KvHintAction {
+    pub fn source_locations(payload: KvSourceLocationsPayload) -> Self {
+        Self::source_locations_with_id(format!("a-{}", Uuid::new_v4().simple()), payload)
+    }
+
+    pub fn source_locations_with_id(
+        action_id: impl Into<String>,
+        payload: KvSourceLocationsPayload,
+    ) -> Self {
+        Self::SourceLocations {
+            action_id: action_id.into(),
+            action_version: KvSourceLocationsActionVersion::V1_0,
+            payload,
+        }
+    }
+}
+
+/// Versioned actions for the selected backend request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvHints {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transfer: Option<TransferHint>,
+    pub protocol_version: KvHintProtocolVersion,
+    pub message_id: String,
+    pub actions: Vec<KvHintAction>,
 }
 
 impl KvHints {
+    pub fn new(actions: Vec<KvHintAction>) -> Self {
+        Self::with_message_id(format!("msg-{}", Uuid::new_v4().simple()), actions)
+    }
+
+    pub fn with_message_id(message_id: impl Into<String>, actions: Vec<KvHintAction>) -> Self {
+        Self {
+            protocol_version: KvHintProtocolVersion::V0_1,
+            message_id: message_id.into(),
+            actions,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.transfer.is_none()
+        self.actions.is_empty()
     }
 }
 
@@ -76,6 +137,40 @@ impl KvTransferCandidates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serializes_versioned_source_locations_action() {
+        let hints = KvHints::with_message_id(
+            "msg-123",
+            vec![KvHintAction::source_locations_with_id(
+                "a1",
+                KvSourceLocationsPayload {
+                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                    block_hashes: vec![
+                        ExternalSequenceBlockHash(11),
+                        ExternalSequenceBlockHash(22),
+                    ],
+                },
+            )],
+        );
+
+        assert_eq!(
+            serde_json::to_value(hints).unwrap(),
+            serde_json::json!({
+                "protocol_version": KV_HINT_PROTOCOL_VERSION,
+                "message_id": "msg-123",
+                "actions": [{
+                    "action_id": "a1",
+                    "action_type": KV_SOURCE_LOCATIONS_ACTION_TYPE,
+                    "action_version": KV_SOURCE_LOCATIONS_ACTION_VERSION,
+                    "payload": {
+                        "source_control_endpoint": "tcp://127.0.0.1:23280",
+                        "block_hashes": [11, 22],
+                    },
+                }],
+            })
+        );
+    }
 
     #[test]
     fn best_source_selects_longest_eligible_prefix() {
