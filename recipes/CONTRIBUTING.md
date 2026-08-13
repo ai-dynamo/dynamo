@@ -156,11 +156,12 @@ expected, use `base.dynamographdeployment | only`; this fails clearly if the
 source changes to contain zero or multiple such resources. Templates may use
 embedded patches or ordinary local Kustomize source paths. `unfold` materializes
 the complete template directory beneath the generated Component, so its local
-paths remain valid under Kustomize's load restrictions; additional `*.j2` files
-are rendered without their suffix. A template can select shared Components; when
-it does, `unfold` rebases those external Component paths for its generated
-location. Jinja rendering uses strict, immutable sandboxed values: undefined
-names and attempts to mutate data are errors.
+paths remain valid under Kustomize's load restrictions. It copies every template
+file except `values.yaml`; files ending in `*.j2` are rendered without that
+suffix. A template can select shared Components; when it does, `unfold` rebases
+those external Component paths for its generated location. Jinja rendering uses
+strict, immutable sandboxed values: undefined names and attempts to mutate data
+are errors.
 
 Regenerate derived artifacts in order: `unfold` writes every checked-in Level-2
 public overlay `kustomization.yaml` file for the matrix; `render` invokes
