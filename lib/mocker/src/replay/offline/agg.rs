@@ -3227,8 +3227,12 @@ mod tests {
             right.admission.pending_requests()
         );
         assert_eq!(
-            left.placement.pending_count(),
-            right.placement.pending_count()
+            <AggregatedRoundRobinPlacement<()> as PlacementPolicy<ReplayRequestPayload>>::pending_count(
+                &left.placement,
+            ),
+            <AggregatedRoundRobinPlacement<()> as PlacementPolicy<ReplayRequestPayload>>::pending_count(
+                &right.placement,
+            )
         );
         let mut left_events = left
             .events
