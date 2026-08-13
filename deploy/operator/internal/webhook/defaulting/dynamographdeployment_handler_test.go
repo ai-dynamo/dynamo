@@ -486,6 +486,9 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				},
 			}
 			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			if tt.op == admissionv1.Update {
+				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, dgd.DeepCopy())
+			}
 			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
 
 			t.Log("Apply level-based component defaults")
@@ -655,6 +658,21 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 	}
 }
 
+func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUpdateWithoutOldDGD(t *testing.T) {
+	t.Log("Build an immutable Grove DGD without an admission old object")
+	dgd := groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
+	ctx := admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	ctx = features.WithGate(ctx, features.Gates{Grove: true})
+
+	t.Log("Default the malformed update admission")
+	err := NewDGDDefaulter("0.9.0").Default(ctx, dgd)
+
+	t.Log("Reject the update because its operator-owned migration state is unknown")
+	if err == nil {
+		t.Fatal("Default() error = nil, want error for UPDATE without old DynamoGraphDeployment")
+	}
+
+}
 func groveWorkerHashSuffixTestDGD(provider string) *nvidiacomv1beta1.DynamoGraphDeployment {
 	component := func(
 		name string,
