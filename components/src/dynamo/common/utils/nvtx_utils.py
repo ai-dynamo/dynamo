@@ -3,7 +3,13 @@
 """
 Lightweight NVTX wrappers for Dynamo profiling.
 
-Set DYN_NVTX=1 to enable markers; default is disabled (zero overhead).
+Set DYN_NVTX to 1/true/yes to enable markers; default is disabled (zero overhead).
+
+The `nvtx` package is an optional dependency (`pip install ai-dynamo[profiling]`,
+already present in the container images). It is imported only when DYN_NVTX=1,
+so call sites below cost nothing and require nothing when profiling is off.
+Setting DYN_NVTX=1 without the package installed raises at import rather than
+silently recording nothing.
 
 Usage — same syntax as the bare nvtx module:
 
@@ -33,12 +39,32 @@ or domain cache lookups on the hot path.
 """
 import functools
 import inspect
-import os
 
-ENABLED: bool = bool(int(os.getenv("DYN_NVTX", "0")))
+from dynamo.common.utils.env import env_bool
+
+# env_bool, not bool(int(...)): DYN_NVTX's Rust-side twin DYN_ENABLE_RUST_NVTX
+# goes through config::env_is_truthy, which accepts 1/true/yes. Parsing this one
+# as an int made `DYN_NVTX=true` raise a bare ValueError at import — the exact
+# confusing failure the fail-fast ImportError below exists to avoid.
+#
+# `nvtx` is not a dependency of ai-dynamo — it ships in the optional
+# `ai-dynamo[profiling]` extra and in the container images. It is imported only
+# under DYN_NVTX=1, so the marker call sites carry no dependency on it.
+ENABLED: bool = env_bool("DYN_NVTX")
 
 if ENABLED:
-    import nvtx as _nvtx_lib
+    # Fail fast and loud. Silently degrading to no-ops would mean discovering at
+    # the end of a profiling run that nothing was recorded; raising at import
+    # tells the user immediately that either DYN_NVTX is set by mistake or the
+    # profiling extra is missing.
+    try:
+        import nvtx as _nvtx_lib
+    except ImportError as exc:
+        raise ImportError(
+            "DYN_NVTX=1 requires the `nvtx` package, which is not installed. "
+            "Install it with `pip install ai-dynamo[profiling]`, or unset "
+            "DYN_NVTX to run without NVTX markers."
+        ) from exc
 
     # Named domain + pre-allocated EventAttributes: no per-call object
     # allocation or domain cache lookups on the hot path.
