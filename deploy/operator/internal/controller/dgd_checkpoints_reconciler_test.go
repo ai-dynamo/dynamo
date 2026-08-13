@@ -430,6 +430,35 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	require.NotNil(t, controllerRef)
 	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
 	assert.Equal(t, ckpt.Name, controllerRef.Name)
+
+	t.Log("Render the same GMS checkpoint contract for SGLang V1")
+	sglangDGD := dgd.DeepCopy()
+	sglangDGD.Name = "test-sglang-dgd"
+	sglangDGD.UID = types.UID("sglang-dgd-uid")
+	sglangComponent := component.DeepCopy()
+	sglangComponent.Failover = nil
+	sglangComponent.Checkpoint.Identity.BackendFramework = string(dynamo.BackendFrameworkSGLang)
+	sglangComponent.ExtraPodSpec.MainContainer.Args = []string{"-m", "dynamo.sglang", "--tp", "1"}
+
+	sglangCheckpoint, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(
+		ctx, sglangDGD, "worker", betaComponent(t, sglangComponent),
+	)
+	require.NoError(t, err)
+	sglangMain := findContainer(
+		sglangCheckpoint.Spec.Job.PodTemplateSpec.Spec.Containers,
+		commonconsts.MainContainerName,
+	)
+	require.NotNil(t, sglangMain)
+	assert.Contains(t, sglangMain.Env, corev1.EnvVar{
+		Name:  "DYN_SGL_ENABLE_GMS_V1",
+		Value: "true",
+	})
+	sglangServer := findContainer(
+		sglangCheckpoint.Spec.Job.PodTemplateSpec.Spec.InitContainers,
+		gms.ServerContainerName,
+	)
+	require.NotNil(t, sglangServer)
+	assert.Equal(t, []string{"--use-v1"}, sglangServer.Args)
 }
 
 func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOwner(t *testing.T) {
