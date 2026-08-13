@@ -32,6 +32,7 @@ pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod service_v2;
+pub mod sglang_generate;
 
 pub use axum;
 pub use frontend_extension::{

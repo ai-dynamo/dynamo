@@ -2470,6 +2470,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-example-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-custom-policy-example-disagg-filter-score-pick",
+ "dynamo-custom-policy-example-simple-filter-score-pick",
+ "dynamo-custom-policy-example-simple-stacked-score-pick",
+ "dynamo-kv-router",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-disagg-filter-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-epp"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "dynamo-custom-policy-example-catalog",
+ "dynamo-ext-proc",
+ "dynamo-kv-router",
+ "tokio",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-simple-filter-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-simple-stacked-score-pick"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
 name = "dynamo-data-gen"
 version = "1.4.0"
 dependencies = [
@@ -2592,8 +2637,6 @@ dependencies = [
  "async-nats 0.49.1",
  "async-stream",
  "async-trait",
- "aws-config",
- "aws-sdk-s3",
  "axum 0.8.4",
  "axum-server",
  "base64 0.22.1",
@@ -2891,13 +2934,14 @@ dependencies = [
  "educe",
  "either",
  "etcd-client",
+ "fastrand",
  "figment",
+ "fs4",
  "futures",
  "humantime",
  "jsonschema",
  "k8s-openapi",
  "kube",
- "libc",
  "local-ip-address",
  "log",
  "lru 0.16.4",
@@ -3111,6 +3155,13 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
 ]
 
 [[package]]

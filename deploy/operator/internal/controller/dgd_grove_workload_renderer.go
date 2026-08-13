@@ -43,14 +43,14 @@ type groveWorkloadRenderer struct {
 	reader                client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commoncontroller.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
 }
 
 func newGroveWorkloadRenderer(
 	reader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *groveWorkloadRenderer {
 	return &groveWorkloadRenderer{
 		reader:                reader,

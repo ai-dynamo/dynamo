@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent, StorageTier,
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, ResidencyDomain,
+    RouterEvent, StorageTier,
 };
 
 use super::dedup::EventDedupFilter;
@@ -21,6 +22,7 @@ pub(super) struct BatchingState {
     pub(super) next_publish_id: u64,
     pub(super) last_dp_rank: u32,
     pub(super) last_storage_tier: StorageTier,
+    pub(super) last_residency_domain: ResidencyDomain,
     pub(super) last_flush_time: Instant,
 }
 
@@ -32,6 +34,7 @@ impl BatchingState {
             next_publish_id: 1,
             last_dp_rank: 0,
             last_storage_tier: StorageTier::Device,
+            last_residency_domain: ResidencyDomain::Worker,
             last_flush_time: Instant::now(),
         }
     }
@@ -83,12 +86,18 @@ impl BatchingState {
         let dp_rank = self.last_dp_rank;
         let mut emitted = false;
         if let Some(data) = self.pending_removed.take()
-            && let Some(filtered) = dedup.filter_remove(dp_rank, self.last_storage_tier, data)
+            && let Some(filtered) = dedup.filter_remove_in_domain(
+                dp_rank,
+                self.last_storage_tier,
+                self.last_residency_domain,
+                data,
+            )
         {
-            emit(
+            let _ = emit(
                 local_indexer,
                 worker_id,
                 self.last_storage_tier,
+                self.last_residency_domain,
                 KvCacheEvent {
                     event_id: self.next_publish_id,
                     data: KvCacheEventData::Removed(filtered),
@@ -100,11 +109,17 @@ impl BatchingState {
             emitted = true;
         }
         if let Some(data) = self.pending_stored.take() {
-            dedup.track_store(dp_rank, self.last_storage_tier, &data);
-            emit(
+            dedup.track_store_in_domain(
+                dp_rank,
+                self.last_storage_tier,
+                self.last_residency_domain,
+                &data,
+            );
+            let _ = emit(
                 local_indexer,
                 worker_id,
                 self.last_storage_tier,
+                self.last_residency_domain,
                 KvCacheEvent {
                     event_id: self.next_publish_id,
                     data: KvCacheEventData::Stored(data),

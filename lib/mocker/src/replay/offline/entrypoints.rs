@@ -146,6 +146,7 @@ pub fn run_offline_handoff_conformance(
     let request = DirectRequest {
         tokens: (0..8).collect(),
         max_output_tokens: 2,
+        output_token_ids: Some(vec![7, 8]),
         uuid: Some(uuid::Uuid::from_u128(1)),
         arrival_timestamp_ms: Some(0.0),
         ..Default::default()

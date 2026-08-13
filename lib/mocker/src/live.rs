@@ -297,10 +297,7 @@ impl LiveEngine {
             !self.inner.cancel.is_cancelled(),
             "live Mocker engine is not running"
         );
-        let output_length = request
-            .output_token_ids
-            .as_ref()
-            .map_or(request.max_output_tokens, Vec::len);
+        let output_length = request.effective_max_output_tokens();
         anyhow::ensure!(
             self.inner.allow_zero_output || output_length > 0,
             "live requests must generate at least one output token"

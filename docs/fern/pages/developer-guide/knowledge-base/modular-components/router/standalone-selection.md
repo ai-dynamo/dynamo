@@ -54,7 +54,7 @@ invalid configuration. Production integrations should use
 `SelectionServiceBuilder` so startup recovery, readiness, and background-task
 lifecycle remain consistent with the standalone service.
 
-To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Custom Worker Selection](../../../advanced-customizations/custom-worker-selection.md).
+To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
 
 The C and Go bindings do not currently expose `SelectionService`. An EPP
 integration requires separate FFI lifecycle, error-mapping, worker, and peer
@@ -133,7 +133,8 @@ Select a worker without booking active load:
   "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
-  "isl_tokens": 512
+  "isl_tokens": 512,
+  "session_id": "session-abc"
 }
 ```
 
@@ -149,7 +150,8 @@ globally unique `selection_id`, or allow the service to generate one:
   "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
-  "isl_tokens": 512
+  "isl_tokens": 512,
+  "session_id": "session-abc"
 }
 ```
 
@@ -201,6 +203,29 @@ lookups. Requests that instead supply `block_hashes`, `sequence_hashes`, and
 `isl_tokens` remain trusted precomputed inputs. The service does not reject,
 rewrite, or label those identities in keyed mode. Configure every precomputed
 hash producer with the same algorithm, key, and key ID as the selector.
+
+### `session_id`
+
+Both `POST /select` and `POST /select_and_reserve` accept an optional
+`session_id` string. It defaults to absent. Under the built-in selector,
+omitting it does not change selection; a custom policy that reads the field can
+select differently depending on whether it is present. The selector carries the
+value through scheduling and exposes it to worker-selection policy as
+`WorkerSelectionContext::session_id()`, so a custom picker or scorer can
+implement session affinity by preferring the worker a session used previously.
+
+> [!NOTE]
+> `session_id` is an input to policy, not an affinity mechanism in itself. The
+> built-in selector ignores it, so it changes the chosen worker only when you
+> supply a custom picker or scorer that reads it. See
+> [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
+> It is also distinct from the frontend's own session affinity, which binds
+> sessions from request headers rather than from this API; see
+> [Configuration and Tuning](configuration-and-tuning.md).
+
+The selection service does not persist, replicate, or expire `session_id`
+bindings. It is not part of the selection response and is not retained by the
+pending-selection cache, so a `POST /reservations` replay does not carry it.
 
 ## Ray Select-Then-Reserve Flow
 

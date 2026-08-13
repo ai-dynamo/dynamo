@@ -2303,8 +2303,6 @@ dependencies = [
  "async-nats 0.49.1",
  "async-stream",
  "async-trait",
- "aws-config",
- "aws-sdk-s3",
  "axum",
  "axum-server",
  "base64 0.22.1",
@@ -2525,6 +2523,7 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-runtime",
  "dynamo-sglang-sidecar",
+ "dynamo-worker-selection-policy-catalog",
  "futures",
  "once_cell",
  "opentelemetry",
@@ -2604,12 +2603,13 @@ dependencies = [
  "educe",
  "either",
  "etcd-client",
+ "fastrand",
  "figment",
+ "fs4",
  "futures",
  "humantime",
  "k8s-openapi",
  "kube",
- "libc",
  "local-ip-address",
  "log",
  "lru 0.16.4",
@@ -2716,6 +2716,13 @@ name = "dynamo-truthy"
 version = "1.4.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.4.0"
+dependencies = [
+ "dynamo-kv-router",
 ]
 
 [[package]]

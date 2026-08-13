@@ -311,11 +311,15 @@ fn decode_rejects_a_handoff_missing_the_opacity_sentinel() {
 async fn unary_generate_accumulates_output_and_terminal_metadata() {
     let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
 
-    let response =
-        pb::inference_server::Inference::generate(&service, Request::new(request("unary")))
-            .await
-            .unwrap()
-            .into_inner();
+    let mut routed_request = Request::new(request("unary"));
+    routed_request.metadata_mut().insert(
+        "x-data-parallel-rank",
+        tonic::metadata::MetadataValue::from(DP_RANK),
+    );
+    let response = pb::inference_server::Inference::generate(&service, routed_request)
+        .await
+        .unwrap()
+        .into_inner();
 
     assert!(response.prompt_info.is_some());
     let outputs = response
@@ -333,6 +337,16 @@ async fn unary_generate_accumulates_output_and_terminal_metadata() {
     );
     assert_eq!(finish.num_output_tokens, 2);
     assert_eq!(service.active_request_count(), 0);
+
+    let mut wrong_rank_request = Request::new(request("wrong-rank"));
+    wrong_rank_request.metadata_mut().insert(
+        "x-data-parallel-rank",
+        tonic::metadata::MetadataValue::from(DP_RANK + 1),
+    );
+    let error = pb::inference_server::Inference::generate(&service, wrong_rank_request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]

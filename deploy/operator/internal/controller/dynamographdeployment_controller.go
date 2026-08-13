@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -72,8 +72,8 @@ type DynamoGraphDeploymentReconciler struct {
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
-	Recorder              record.EventRecorder
-	DockerSecretRetriever dockerSecretRetriever
+	Recorder              events.EventRecorder
+	DockerSecretRetriever DockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
@@ -189,7 +189,7 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 	}
 	if r.Recorder != nil {
 		for _, event := range result.Events {
-			r.Recorder.Event(dgd, event.Type, event.Reason, event.Message)
+			r.Recorder.Eventf(dgd, nil, event.Type, event.Reason, "Update", "%s", event.Message)
 		}
 	}
 	return nil
@@ -279,7 +279,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	return ctrlBuilder.Complete(observedReconciler)
 }
 
-func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
+func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 

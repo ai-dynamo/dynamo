@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from tests.utils.inference_endpoint import InferenceEndpoint
 
 from tests.utils.constants import DefaultPort
-from tests.utils.prometheus import sum_metric_samples
+from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
 logger = logging.getLogger(__name__)
@@ -1409,6 +1409,211 @@ class EmbeddingPayload(BasePayload):
 
 
 @dataclass
+class ClassifyPayload(BasePayload):
+    """Payload for the ``/v1/classify`` endpoint."""
+
+    endpoint: str = "/v1/classify"
+    expected_prompt_tokens: Optional[int] = None
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert result.get("data"), "Empty classification data"
+
+        for index, item in enumerate(result["data"]):
+            assert item.get("index") == index
+            probs = item.get("probs")
+            assert isinstance(probs, list) and probs, "probs must be a non-empty list"
+            assert item.get("num_classes") == len(probs)
+            assert all(isinstance(prob, (int, float)) for prob in probs)
+            assert item.get("label") is None or isinstance(item["label"], str)
+
+        usage = result.get("usage")
+        assert isinstance(usage, dict), "Missing usage in classification response"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        assert usage.get("completion_tokens") == 0
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Classified {len(result['data'])} inputs"
+
+
+@dataclass
+class PoolingPayload(BasePayload):
+    """Payload for JSON and binary ``/v1/pooling`` responses."""
+
+    endpoint: str = "/v1/pooling"
+    expected_prompt_tokens: Optional[int] = None
+
+    # Tasks whose output is one vector per token, so the response must stay a
+    # matrix. Validating only ``data[0]`` would accept a flattened vector here,
+    # which is the exact regression these cases exist to catch.
+    _TOKEN_WISE_TASKS = frozenset(("token_embed", "token_classify"))
+
+    _DTYPE_WIDTHS = {
+        "float32": 4,
+        "float16": 2,
+        "bfloat16": 2,
+        "fp8_e4m3": 1,
+        "fp8_e5m2": 1,
+    }
+
+    def _validate_json_data(self, data: Any) -> None:
+        assert isinstance(data, list) and data, "pooling data must be non-empty"
+
+        if self.body.get("task") in self._TOKEN_WISE_TASKS:
+            self._validate_token_wise_data(data)
+            return
+
+        self._validate_sequence_wise_data(data)
+
+    @staticmethod
+    def _validate_sequence_wise_data(data: Any) -> None:
+        """Require a flat numeric vector: exactly one vector per input.
+
+        Sequence-level tasks (``embed``, ``classify``) return one vector per
+        input, which the worker enforces itself. Accepting a matrix here and
+        validating only ``data[0]`` would let a rank regression pass while
+        clients can no longer read the result as a vector.
+        """
+        assert all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in data
+        ), f"sequence-level output must be a flat numeric vector, got {data!r}"
+
+    @staticmethod
+    def _validate_token_wise_data(data: Any) -> None:
+        """Require a non-empty matrix of numeric rows with a consistent width.
+
+        Rejects a flattened vector, ragged rows, empty rows, and non-numeric
+        values — every row is checked, not just the first.
+        """
+        assert all(
+            isinstance(row, list) for row in data
+        ), f"token-wise output must be a list of rows, got {data!r}"
+
+        width = len(data[0])
+        assert width, "token-wise rows must be non-empty"
+        for position, row in enumerate(data):
+            assert len(row) == width, (
+                f"token-wise rows must have a consistent width; row {position} "
+                f"has {len(row)}, expected {width}"
+            )
+            assert all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in row
+            ), f"token-wise row {position} has non-numeric values: {row!r}"
+
+    def _handle_json_response(self, response: Any) -> str:
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert result.get("data"), "Empty pooling data"
+
+        encoding_format = self.body.get("encoding_format", "float")
+        dtype_width = self._DTYPE_WIDTHS[self.body.get("embed_dtype", "float32")]
+        for index, item in enumerate(result["data"]):
+            assert item.get("index") == index
+            assert item.get("object") == "pooling"
+            data = item.get("data")
+            if encoding_format == "base64":
+                assert isinstance(data, str)
+                decoded = base64.b64decode(data, validate=True)
+                assert decoded and len(decoded) % dtype_width == 0
+            else:
+                self._validate_json_data(data)
+
+        usage = result.get("usage")
+        assert isinstance(usage, dict), "Missing usage in pooling response"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        assert usage.get("completion_tokens") == 0
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Pooled {len(result['data'])} inputs as {encoding_format}"
+
+    def _handle_binary_response(self, response: Any) -> str:
+        assert response.headers.get("content-type") == "application/octet-stream"
+        assert response.content, "Empty binary pooling response"
+
+        encoding_format = self.body["encoding_format"]
+        metadata_header = response.headers.get("metadata")
+        if encoding_format == "bytes_only":
+            assert metadata_header is None
+            return f"Pooled bytes_only response with {len(response.content)} bytes"
+
+        assert metadata_header is not None, "bytes response is missing metadata"
+        metadata = json.loads(metadata_header)
+        assert metadata.get("data"), "bytes metadata has no tensor entries"
+
+        # A client reconstructs each tensor from (start, end, shape, dtype,
+        # endianness) alone, so metadata that merely stays in bounds is not
+        # enough — it must agree with the body byte-for-byte. Checking only
+        # bounds lets an offset/shape serialization regression pass here while
+        # clients cannot reconstruct anything.
+        dtype_width = self._DTYPE_WIDTHS[self.body.get("embed_dtype", "float32")]
+        expected_start = 0
+        for index, item in enumerate(metadata["data"]):
+            assert item.get("index") == index
+            assert item.get("embed_dtype") == self.body.get("embed_dtype", "float32")
+            assert item.get("endianness") == self.body.get("endianness", "native")
+            assert item["start"] < item["end"] <= len(response.content)
+
+            shape = item.get("shape")
+            assert shape, "bytes metadata entry is missing shape"
+            assert all(
+                isinstance(dim, int) and dim > 0 for dim in shape
+            ), f"tensor {index} has a non-positive shape: {shape!r}"
+
+            # Rank matters as much as the byte count: [2, 2] and [4] cover the
+            # same span, but only one is the shape the task promises.
+            expected_rank = 2 if self.body.get("task") in self._TOKEN_WISE_TASKS else 1
+            assert len(shape) == expected_rank, (
+                f"tensor {index} has rank {len(shape)} (shape {shape!r}), "
+                f"expected rank {expected_rank} for task "
+                f"{self.body.get('task', 'embed')!r}"
+            )
+
+            element_count = math.prod(shape)
+            expected_bytes = element_count * dtype_width
+            actual_bytes = item["end"] - item["start"]
+            assert actual_bytes == expected_bytes, (
+                f"tensor {index} span is {actual_bytes} bytes but shape {shape} "
+                f"at {dtype_width} bytes/element needs {expected_bytes}"
+            )
+
+            # Spans must tile the body in order: contiguous and non-overlapping.
+            assert item["start"] == expected_start, (
+                f"tensor {index} starts at {item['start']}, expected "
+                f"{expected_start} (spans must be contiguous and non-overlapping)"
+            )
+            expected_start = item["end"]
+
+        assert expected_start == len(response.content), (
+            f"metadata spans cover {expected_start} bytes but the body is "
+            f"{len(response.content)} bytes"
+        )
+
+        usage = metadata.get("usage")
+        assert isinstance(usage, dict), "bytes metadata is missing usage"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Pooled {len(metadata['data'])} binary tensors"
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        if self.body.get("encoding_format") in ("bytes", "bytes_only"):
+            return self._handle_binary_response(response)
+        return self._handle_json_response(response)
+
+
+@dataclass
 class EmbeddingMultiWorkerDispatchPayload(BasePayload):
     """Send ``repeat_count`` embedding requests to the frontend, capturing a
     per-worker ``/metrics`` snapshot on the FIRST iteration and on the LAST
@@ -1611,12 +1816,28 @@ class KvEventMetricsPayload(BasePayload):
             f"event_type={self.event_type!r}, got {accepted:g}"
         )
 
+        # Regression guard: this counter silently failed to register
+        # because it declared `worker_id` as a variable label, which
+        # collides with the const label the runtime auto-injects under the same
+        # name. It only increments on an event_id gap, so a healthy run leaves it
+        # at zero -- assert that it is exposed at all, not that it has a value.
+        dropped_metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ENGINES_DROPPED_EVENTS_TOTAL}"
+        )
+        assert find_metric_samples(content, dropped_metric_name), (
+            f"{dropped_metric_name} is absent from /metrics. The KV publisher "
+            "registers it unconditionally at startup, so absence means it never "
+            "reached the metrics registry"
+        )
+
         logger.info(
             "SUCCESS: KV event metrics found for event_type=%s: "
-            "received=%s accepted=%s",
+            "received=%s accepted=%s; %s is registered",
             self.event_type,
             received,
             accepted,
+            dropped_metric_name,
         )
 
 

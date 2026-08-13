@@ -59,6 +59,7 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .engine_generate import publish_engine_generate_capability
 from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -689,6 +690,10 @@ async def register_vllm_model(
         runtime_config, config.engine_args, worker_type, dp_range
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    if publish_engine_generate_capability(
+        runtime_config, model_input, model_type, worker_type
+    ):
+        logging.info("Published vLLM engine-native generate capability")
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len
@@ -780,7 +785,7 @@ async def register_vllm_model(
         model_aliases=config.served_model_aliases or None,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
-        # lifecycle registration; embeddings still do not.
+        # lifecycle registration; embeddings and classify still do not.
         max_gpu_lora_count=_base_model_lora_capacity(config, model_type),
     )
 
@@ -788,7 +793,15 @@ async def register_vllm_model(
 def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
     if not getattr(config.engine_args, "enable_lora", False):
         return None
-    if model_type == ModelType.Embedding:
+    # Pooling-family workers (embedding, classify|pooling) do not serve the
+    # LoRA load endpoints, so they must not advertise adapter capacity. Use
+    # capability checks, not identity: the classify worker registers the
+    # combined ModelType.Classify | ModelType.Pooling bits.
+    if (
+        model_type.supports_embedding()
+        or model_type.supports_classify()
+        or model_type.supports_pooling()
+    ):
         return None
     return config.engine_args.max_loras
 

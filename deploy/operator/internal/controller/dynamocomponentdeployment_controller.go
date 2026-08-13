@@ -48,7 +48,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -71,10 +71,10 @@ const (
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
 type DynamoComponentDeploymentReconciler struct {
 	client.Client
-	Recorder              record.EventRecorder
+	Recorder              events.EventRecorder
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commonController.RuntimeConfig
-	DockerSecretRetriever dockerSecretRetriever
+	DockerSecretRetriever DockerSecretRetriever
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -163,7 +163,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 		reconcileErr := err
 		logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
-		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "ReconcileError",
+		r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeWarning, "ReconcileError", "Reconcile",
 			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
@@ -185,7 +185,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	if len(dynamoComponentDeployment.Status.Conditions) == 0 {
 		logs.Info("Starting to reconcile DynamoComponentDeployment")
 		logs.Info("Initializing DynamoComponentDeployment status")
-		r.Recorder.Event(dynamoComponentDeployment, corev1.EventTypeNormal, "Reconciling", "Starting to reconcile DynamoComponentDeployment")
+		r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeNormal, "Reconciling", "Reconcile", "Starting to reconcile DynamoComponentDeployment")
 		dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
@@ -263,11 +263,11 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	if !modified {
-		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "UpdateDynamoGraphDeployment", "No changes to dynamo deployment %s", dynamoComponentDeployment.Name)
+		r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeNormal, "UpdateDynamoGraphDeployment", "Update", "No changes to dynamo deployment %s", dynamoComponentDeployment.Name)
 	}
 
 	logs.Info("Finished reconciling.")
-	r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
+	r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeNormal, "Update", "Update", "All resources updated!")
 
 	err = r.setStatusConditionAndServiceReplicaStatus(ctx, dynamoComponentDeployment, componentReconcileResult)
 	if err != nil {
@@ -936,6 +936,6 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 	return m.Complete(observedReconciler)
 }
 
-func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {
+func (r *DynamoComponentDeploymentReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }

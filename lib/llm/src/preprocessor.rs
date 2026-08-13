@@ -29,7 +29,7 @@ use dynamo_protocols::types::{
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
-use dynamo_runtime::config::is_truthy;
+use dynamo_runtime::config::{is_truthy, parse_bool_opt};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use either::Either;
 use futures::Stream;
@@ -62,7 +62,8 @@ use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{
-    ReasoningParser, ReasoningParserType, tool_calling::parsers::get_tool_parser_map,
+    ReasoningParser, ReasoningParserType, reasoning::ParserResult,
+    tool_calling::parsers::get_tool_parser_map,
 };
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
@@ -299,6 +300,115 @@ where
 struct ChoiceReasoningState {
     parser: Box<dyn ReasoningParser>,
     guided_json_bypass_decision: Option<bool>,
+    // Reasoning text held back while it is still ambiguous. Only used on the
+    // `defer_reasoning_for_nonempty_content` path — see the buffering note on
+    // `ReasoningState`.
+    pending_reasoning: String,
+    // Whitespace-only normal text seen while still ambiguous. Held rather than
+    // emitted so the streaming path agrees with the aggregator, which counts
+    // whitespace-only content as empty.
+    pending_content: String,
+    // Set once this choice's parser has produced normal text, which for these
+    // force-reasoning parsers means it left the reasoning block. From then on
+    // the ambiguity is gone and deltas pass straight through.
+    left_reasoning: bool,
+    // Set once this choice has been drained, so the terminal-chunk drain and the
+    // end-of-stream fallback cannot both emit the same bytes. Reopened if the
+    // backend keeps sending content after `finish_reason`, so those bytes still
+    // get a destination.
+    drained: bool,
+    // Set the first time this choice's parser is finalized and NEVER reset, even
+    // when `drained` is reopened. `ReasoningParser::finish_reasoning_stream` is
+    // not documented to be idempotent, so calling it twice could re-emit text a
+    // parser had already handed over. Draining again is fine; finalizing again
+    // is not.
+    parser_finished: bool,
+}
+
+/// Strip every per-chunk field from a response that is being reused as the
+/// envelope for a synthetic end-of-stream chunk.
+///
+/// Both end-of-stream flushes build their chunk by cloning the last chunk they
+/// saw, because that is the only way to carry the buffered bytes out on a
+/// correctly-shaped response. The clone is not a new generation: it produced no
+/// tokens and re-channels bytes the parser was already holding. So everything
+/// describing the *original* chunk's generation has to go, or it is reported
+/// twice:
+///
+/// - `event` / `comment` — the annotation channel carries per-chunk payloads
+///   such as generated `token_ids`.
+/// - `error` — an error annotation must not be replayed on a later chunk.
+/// - `usage` / `llm_metrics` — `metrics.rs` sums `chunk_tokens` and samples an
+///   ITL point per chunk carrying `llm_metrics`.
+/// - `nvext` — per-chunk NVIDIA extensions. `merge_response_nvext` append-merges
+///   `completion_token_ids`, so a repeat turns `[42]` into `[42, 42]`, and
+///   fields it does not append (such as `prompt_logprobs`) are overwritten.
+///
+/// Kept as one function so the two call sites cannot drift apart: they already
+/// did, which is how `nvext` survived on both.
+fn scrub_synthetic_chunk_metadata(
+    response: &mut Annotated<NvCreateChatCompletionStreamResponse>,
+) -> Option<()> {
+    response.event = None;
+    response.comment = None;
+    response.error = None;
+    let data = response.data.as_mut()?;
+    data.inner.usage = None;
+    data.llm_metrics = None;
+    data.nvext = None;
+    Some(())
+}
+
+/// Drain what a choice still holds on the `defer_reasoning_for_nonempty_content`
+/// path, returning `(content, reasoning_content)` to add to its delta. Shared by
+/// the terminal-chunk drain and the end-of-stream fallback so the two cannot
+/// disagree about which channel the leftover bytes belong to.
+fn drain_deferred_reasoning(state: &mut ChoiceReasoningState) -> (Option<String>, Option<String>) {
+    if state.drained {
+        return (None, None);
+    }
+    state.drained = true;
+    let pending = std::mem::take(&mut state.pending_reasoning);
+    let pending_content = std::mem::take(&mut state.pending_content);
+    // Finalize at most once per choice; see `parser_finished`.
+    let result = if state.parser_finished {
+        ParserResult::default()
+    } else {
+        state.parser_finished = true;
+        state.parser.finish_reasoning_stream()
+    };
+
+    if state.left_reasoning {
+        // An answer already streamed as content, so the non-empty-content
+        // promise is met and the parser's own split stands: a later truncated
+        // reasoning block stays reasoning instead of being appended to the
+        // answer. `pending_content` is empty here — it was released with the
+        // answer when the choice left reasoning.
+        let mut content = pending_content;
+        content.push_str(&result.normal_text);
+        (
+            (!content.is_empty()).then_some(content),
+            (!result.reasoning_text.is_empty()).then_some(result.reasoning_text),
+        )
+    } else {
+        // No real answer ever arrived, so everything held is all the response
+        // has and must land in content — including a truncated `<think>` prefix,
+        // which the parser reports as reasoning or normal text depending on
+        // where it stopped. Held whitespace is dropped rather than prepended when
+        // there is reasoning to surface, matching the aggregator, which replaces
+        // whitespace-only content with the reasoning text instead of
+        // concatenating.
+        let mut text = pending;
+        text.push_str(&result.reasoning_text);
+        text.push_str(&result.normal_text);
+        if text.is_empty() {
+            // ...but if whitespace is genuinely all the turn produced, it is the
+            // whole response. Returning nothing here would hand back an empty
+            // `content` to a request that explicitly asked for non-empty content.
+            text = pending_content;
+        }
+        ((!text.is_empty()).then_some(text), None)
+    }
 }
 
 struct ReasoningState {
@@ -307,6 +417,55 @@ struct ReasoningState {
     prompt_injected_reasoning: bool,
     bypass_bare_guided_json: bool,
     choices: HashMap<u32, ChoiceReasoningState>,
+    // Last emitted content-bearing response, reused as the envelope to carry any
+    // text the parsers are still buffering when the upstream stream ends. Only
+    // retained when `defer_reasoning_for_nonempty_content` is set, to keep the
+    // per-token clone off the common reasoning hot path. Chunks with no choices
+    // (the trailing usage-only chunk) are never retained — that envelope has no
+    // delta slot to attach the flushed bytes to, so the flush would be dropped.
+    last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
+    // Nemotron force-reasoning parsers start inside the reasoning block, so
+    // leading model output with no `<think>` is reported as reasoning even when
+    // it is really the whole answer. Under `force_nonempty_content=true` the
+    // chat template promises non-empty `content`, so emitting that text as
+    // `reasoning_content` would leave `content` empty — the exact failure the
+    // flag exists to prevent.
+    //
+    // When this is set, reasoning deltas are held in each choice's
+    // `pending_reasoning` until the ambiguity resolves:
+    //   - the parser produces normal text (it left the reasoning block), so the
+    //     buffer really was reasoning: emit it as `reasoning_content` and stream
+    //     the answer as `content` from then on; or
+    //   - the stream ends first, so no answer is coming: emit the buffer (plus
+    //     anything `finish_reasoning_stream` still holds, e.g. a truncated
+    //     `<think>` prefix) as `content`.
+    //
+    // The cost is real and worth stating plainly: everything held is delivered
+    // in one delta rather than token by token. For a turn that does reason, that
+    // is the `reasoning_content` up to `</think>`, after which the answer streams
+    // normally. For a turn with no `</think>` at all the held text IS the answer,
+    // so the whole answer lands in a single delta on the terminal chunk — on
+    // `main` (parser off, leading `<think>` stripped) that case streamed
+    // incrementally.
+    //
+    // There is no cheaper split available: these parsers emit reasoning with no
+    // opening `<think>` (see the `nemotron_nano` mapping in dynamo-parsers), so
+    // until `</think>` arrives the same bytes are equally consistent with
+    // reasoning and with a plain answer. Emitting eagerly is what leaked reasoning
+    // into `content` in the first place. Scoped to the flag so no other parser
+    // pays it.
+    defer_reasoning_for_nonempty_content: bool,
+    // Set once the backend has sent an error annotation. The end-of-stream
+    // flush must not run after that: an error is terminal, and emitting
+    // recovered reasoning as ordinary `content` after it would put text on the
+    // wire that the generation never successfully produced.
+    //
+    // This matters because the flush is the only place bytes can arrive after
+    // the last upstream chunk. `/v1/chat/completions` ends its SSE on the error
+    // and never sees it, but `/v1/responses` and `/v1/messages` both record the
+    // error and keep consuming (`saw_error = true; continue;`), so without this
+    // latch they emit the synthetic content chunk and only then report failure.
+    saw_terminal_error: bool,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -431,6 +590,104 @@ fn attach_agent_context_from_context(
     }
 }
 
+/// Thin wrapper that normalizes `function.arguments` in historical tool-calls
+/// from a JSON string to an object before passing messages to a MiniJinja
+/// template.  Only used when `OpenAIPreprocessor::normalize_tool_call_args` is
+/// true (e.g. GLM-5.2); all other trait methods delegate directly to the inner
+/// request so routing, sampling, and annotation behavior is unchanged.
+struct NormalizedArgsRequest<'a, R>(&'a R);
+
+impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
+    fn model(&self) -> String {
+        self.0.model()
+    }
+
+    fn messages(&self) -> minijinja::value::Value {
+        let mut json =
+            serde_json::to_value(self.0.typed_messages().unwrap_or_default()).unwrap_or_default();
+        if let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json) {
+            tracing::error!(
+                error = %e,
+                "tool_call arguments normalization failed; template rendering may fail \
+                 if it calls .items() on a string"
+            );
+        }
+        minijinja::value::Value::from_serialize(&json)
+    }
+
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
+        self.0.typed_messages()
+    }
+
+    fn tools(&self) -> Option<minijinja::value::Value> {
+        self.0.tools()
+    }
+
+    fn tool_choice(&self) -> Option<minijinja::value::Value> {
+        self.0.tool_choice()
+    }
+
+    fn response_format(&self) -> Option<minijinja::value::Value> {
+        self.0.response_format()
+    }
+
+    fn should_add_generation_prompt(&self) -> bool {
+        self.0.should_add_generation_prompt()
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        self.0.extract_text()
+    }
+
+    fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.0.chat_template_args()
+    }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.0.mm_processor_kwargs()
+    }
+}
+
+impl<R: AnnotationsProvider> AnnotationsProvider for NormalizedArgsRequest<'_, R> {
+    fn annotations(&self) -> Option<Vec<String>> {
+        self.0.annotations()
+    }
+}
+
+impl<R: SamplingOptionsProvider> SamplingOptionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_sampling_options(
+        &self,
+    ) -> anyhow::Result<crate::protocols::common::SamplingOptions> {
+        self.0.extract_sampling_options()
+    }
+}
+
+impl<R: StopConditionsProvider> StopConditionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_stop_conditions(&self) -> anyhow::Result<crate::protocols::common::StopConditions> {
+        self.0.extract_stop_conditions()
+    }
+}
+
+impl<R: OutputOptionsProvider> OutputOptionsProvider for NormalizedArgsRequest<'_, R> {
+    fn extract_output_options(&self) -> anyhow::Result<crate::protocols::common::OutputOptions> {
+        self.0.extract_output_options()
+    }
+}
+
+impl<R: NvExtProvider> NvExtProvider for NormalizedArgsRequest<'_, R> {
+    fn nvext(&self) -> Option<&crate::protocols::common::extensions::NvExt> {
+        self.0.nvext()
+    }
+
+    fn raw_prompt(&self) -> Option<String> {
+        self.0.raw_prompt()
+    }
+
+    fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.0.unsupported_fields()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
@@ -447,6 +704,11 @@ pub struct OpenAIPreprocessor {
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
+    /// Normalize historical tool-call `function.arguments` from a JSON string
+    /// to an object before MiniJinja rendering.  Enabled for GLM-5.2 (glm47
+    /// parser) and any model that sets `normalize_tool_call_args: true` in its
+    /// ModelRuntimeConfig; disabled for all other models.
+    normalize_tool_call_args: bool,
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
@@ -708,13 +970,16 @@ impl OpenAIPreprocessor {
         })
     }
 
+    fn request_has_client_thinking_control(request: &NvCreateChatCompletionRequest) -> bool {
+        request.thinking.is_some()
+            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
+    }
+
     fn apply_default_thinking_mode_from_runtime_config(
         runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
         request: &mut NvCreateChatCompletionRequest,
     ) {
-        if request.thinking.is_some()
-            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
-        {
+        if Self::request_has_client_thinking_control(request) {
             return;
         }
 
@@ -762,14 +1027,7 @@ impl OpenAIPreprocessor {
             return false;
         }
 
-        let is_guided_tool_choice = request.tool_choice().is_some_and(|tool_choice| {
-            match tool_choice.as_str() {
-                Some("required") => true,
-                Some(_) => false,
-                // The only supported non-string tool choice is a named function.
-                None => true,
-            }
-        });
+        let is_guided_tool_choice = Self::has_guided_tool_choice(request);
         let is_structured_response = Self::has_structured_response_format(request);
         let structured_response_requires_reasoning = is_structured_response
             && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
@@ -861,23 +1119,79 @@ impl OpenAIPreprocessor {
         default_enabled
     }
 
+    #[cfg(test)]
     fn normalize_thinking_arg(
         request: &mut NvCreateChatCompletionRequest,
         reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
     ) {
-        let normalized = request
+        let thinking_control_from_client = Self::request_has_client_thinking_control(request);
+        Self::normalize_thinking_arg_with_source(
+            request,
+            reasoning_parser,
+            tool_call_parser,
+            thinking_control_from_client,
+        );
+    }
+
+    fn normalize_thinking_arg_with_source(
+        request: &mut NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
+        thinking_control_from_client: bool,
+    ) {
+        let normalized = Self::normalize_thinking_aliases(request, reasoning_parser);
+
+        if Self::is_minimax_m3_family(reasoning_parser, tool_call_parser) {
+            Self::normalize_minimax_m3_thinking_mode(
+                request,
+                normalized,
+                thinking_control_from_client,
+            );
+            return;
+        }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
+    }
+
+    fn normalize_thinking_aliases(
+        request: &NvCreateChatCompletionRequest,
+        reasoning_parser: Option<&str>,
+    ) -> Option<bool> {
+        request
             .chat_template_args
             .as_ref()
             .and_then(|args| {
-                // Match thinking_bool_from_args precedence: when both aliases
-                // are present, `thinking` wins and its normalized value is
-                // written back to both keys below.
-                for key in ["thinking", "enable_thinking"] {
+                // Normalize public aliases in array order: `thinking`,
+                // `enable_thinking`, then `thinking_mode`.
+                // Preserve "adaptive" as tri-state by returning None.
+                for key in ["thinking", "enable_thinking", "thinking_mode"] {
                     match args.get(key) {
-                        Some(serde_json::Value::Bool(_)) => {
+                        Some(serde_json::Value::Bool(b)) => {
+                            // `thinking_bool_from_args` ignores `thinking_mode`,
+                            // so read that bool directly.
+                            if key == "thinking_mode" {
+                                return Some(*b);
+                            }
                             return dynamo_renderer::thinking_bool_from_args(Some(args));
                         }
                         Some(serde_json::Value::String(value)) => {
+                            // Parse `thinking_mode` explicitly so
+                            // "enabled"/"disabled" and boolean spellings
+                            // behave predictably. Preserve unrecognized strings
+                            // such as "adaptive" or DeepSeek's "chat"/"thinking".
+                            if key == "thinking_mode" {
+                                if value.eq_ignore_ascii_case("enabled") {
+                                    return Some(true);
+                                }
+                                if value.eq_ignore_ascii_case("disabled") {
+                                    return Some(false);
+                                }
+                                if let Some(b) = parse_bool_opt(value) {
+                                    return Some(b);
+                                }
+                                return None;
+                            }
                             return Some(is_truthy(value));
                         }
                         Some(serde_json::Value::Number(value)) => {
@@ -892,8 +1206,60 @@ impl OpenAIPreprocessor {
             })
             .or_else(|| {
                 matches!(reasoning_parser, Some("kimi_k25" | "kimi_k3" | "kimi-k3")).then_some(true)
-            });
+            })
+    }
 
+    fn normalize_minimax_m3_thinking_mode(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+        thinking_control_from_client: bool,
+    ) {
+        // MiniMax M3 defaults `thinking_mode` to "adaptive", which breaks
+        // constrained JSON/schema and forced-tool generation. If the client
+        // did not set thinking controls, force "disabled" for those requests.
+        let explicit_thinking_mode_is_adaptive = request
+            .chat_template_args
+            .as_ref()
+            .and_then(|args| args.get("thinking_mode"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("adaptive"));
+        if !thinking_control_from_client && Self::has_minimax_m3_constrained_generation(request) {
+            let args = request.chat_template_args.get_or_insert_default();
+            args.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("disabled".to_string()),
+            );
+            args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            args.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            return;
+        }
+
+        Self::apply_normalized_thinking_aliases(request, normalized);
+
+        let Some(normalized) = normalized else {
+            return;
+        };
+
+        // Canonicalize for M3 because its template only treats exact
+        // "disabled" as off. Preserve explicit "adaptive" as client intent.
+        if !explicit_thinking_mode_is_adaptive {
+            let args = request.chat_template_args.get_or_insert_default();
+            args.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String(
+                    if normalized { "enabled" } else { "disabled" }.to_string(),
+                ),
+            );
+        }
+    }
+
+    fn apply_normalized_thinking_aliases(
+        request: &mut NvCreateChatCompletionRequest,
+        normalized: Option<bool>,
+    ) {
         let Some(normalized) = normalized else {
             return;
         };
@@ -903,6 +1269,39 @@ impl OpenAIPreprocessor {
             "enable_thinking".to_string(),
             serde_json::Value::Bool(normalized),
         );
+    }
+
+    /// True when the deployment renders MiniMax M3's `thinking_mode` template.
+    /// Either parser is sufficient, and tool-call aliases include `_nom`.
+    fn is_minimax_m3_family(
+        reasoning_parser: Option<&str>,
+        tool_call_parser: Option<&str>,
+    ) -> bool {
+        matches!(reasoning_parser, Some("minimax_m3") | Some("minimax-m3"))
+            || matches!(
+                tool_call_parser,
+                Some("minimax_m3")
+                    | Some("minimax-m3")
+                    | Some("minimax_m3_nom")
+                    | Some("minimax-m3-nom")
+            )
+    }
+
+    fn has_minimax_m3_constrained_generation<R: OAIChatLikeRequest>(request: &R) -> bool {
+        Self::has_structured_response_format(request) || Self::has_guided_tool_choice(request)
+    }
+
+    /// True when `tool_choice` forces a tool call.
+    /// Shared by guided-output reasoning checks and the M3 default.
+    fn has_guided_tool_choice<R: OAIChatLikeRequest>(request: &R) -> bool {
+        request.tool_choice().is_some_and(|tool_choice| {
+            match tool_choice.as_str() {
+                Some("required") => true,
+                Some(_) => false,
+                // The only supported non-string tool choice is a named function.
+                None => true,
+            }
+        })
     }
 
     /// Apply Moonshot's named-tool exception for Kimi K3.
@@ -969,6 +1368,9 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
+            == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
+            || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -1172,6 +1574,7 @@ impl OpenAIPreprocessor {
             runtime_config,
             kv_cache_block_size,
             tool_call_parser,
+            normalize_tool_call_args,
             media_loader,
             token_budget,
             #[cfg(feature = "mm-routing")]
@@ -1621,6 +2024,23 @@ impl OpenAIPreprocessor {
     }
 
     pub fn apply_template<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<Option<RenderedPrompt>> {
+        if self.normalize_tool_call_args {
+            return self.apply_template_inner(&NormalizedArgsRequest(request));
+        }
+        self.apply_template_inner(request)
+    }
+
+    fn apply_template_inner<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -2729,12 +3149,20 @@ impl OpenAIPreprocessor {
                 Box::pin(stream)
             };
 
+        // Only a force_nonempty_content request needs the deferral and the EOF
+        // flush of a truncated `<think>` prefix; gating on the request keeps the
+        // per-token clone and the finish_reasoning_stream() flush off every
+        // other request's path. Same predicate the aggregator uses, so the
+        // streaming and non-streaming paths cannot disagree.
+        let defer_reasoning_for_nonempty_content =
+            Self::wants_reasoning_as_content_when_empty(request.chat_template_args.as_ref());
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
                 bypass_reasoning_for_bare_guided_json,
+                defer_reasoning_for_nonempty_content,
             ))
         } else if should_strip_disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
@@ -2743,6 +3171,12 @@ impl OpenAIPreprocessor {
         } else {
             Box::pin(stream)
         };
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if defer_reasoning_for_nonempty_content || should_strip_disabled_reasoning_start {
+                Box::pin(Self::hold_usage_until_stream_end(stream))
+            } else {
+                stream
+            };
 
         // Check if tools are present and if we should apply jail
         let has_tools = request
@@ -3359,12 +3793,70 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Buffers raw input and tracks what the jail emitted per choice.index
+        // so n > 1 is handled correctly and double-emit is avoided.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+            emitted_text: String,
+            recovered: bool,
+        }
+        // Named so the bool in the recoveries tuple is legible at each use site.
+        struct PendingRecovery {
+            choice_idx: u32,
+            tail: String,
+            tail_already_emitted: bool,
+        }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
+        // Token strings from the parser config so recovery matches the parser
+        // even if the defaults are ever overridden.
+        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+        let glm47_start = glm47_cfg.tool_call_start;
+        let glm47_end = glm47_cfg.tool_call_end;
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
+        let glm47_start_jail = glm47_start.clone();
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Buffer input content only for glm47 (truncation recovery).
+            // Only retain from the last <tool_call> marker onward to bound
+            // memory on long responses.
+            if is_glm47 && let Some(data) = &a.data {
+                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
+                    {
+                        let state = cr.entry(choice.index).or_default();
+                        state.input_text.push_str(content);
+                        // Drop everything before the last marker to keep
+                        // the buffer small. Walk back to a char boundary
+                        // before draining so a multi-byte char split
+                        // across chunks never triggers a panic.
+                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
+                        {
+                            Some(pos) => pos,
+                            // No marker yet — keep enough tail to
+                            // catch a marker split across two chunks.
+                            None => state
+                                .input_text
+                                .len()
+                                .saturating_sub(glm47_start_jail.len() - 1),
+                        };
+                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
+                            keep_from -= 1;
+                        }
+                        state.input_text.drain(..keep_from);
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -3383,7 +3875,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -3395,7 +3887,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -3405,7 +3897,145 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // glm47: on finish_reason=length, recover the last incomplete
+            // <tool_call> block. rfind skips complete blocks so earlier parsed
+            // calls are never duplicated. Recovered content WILL contain raw
+            // markup — callers that require "no tool tags in content" must
+            // filter on finish_reason=length.
+            //
+            // TODO: this recovery runs inside apply_tool_calling_jail, which
+            // the v2 path bypasses (use_parsers_v2 branch above). Adding
+            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+            // streaming recovery while aggregator.rs keeps running. At that
+            // point hoist this above the jail/v2 branch — it only needs
+            // buffered input text + finish_reason, both available there.
+            // Pass 1 (immutable): compute the recovery tail per choice and
+            // whether the jail already released it as content on this chunk.
+            // We collect into a Vec so we can release the immutable borrow on
+            // nv_chunk before mutating it in pass 2.
+            let recoveries: Vec<PendingRecovery> = if is_glm47 {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                nv_chunk
+                    .data
+                    .iter()
+                    .flat_map(|data| data.inner.choices.iter())
+                    .filter_map(|choice| {
+                        let state = cr.entry(choice.index).or_default();
+                        if !state.recovered
+                            && let Some(ChatCompletionMessageContent::Text(t)) =
+                                &choice.delta.content
+                        {
+                            state.emitted_text.push_str(t);
+                            // Bound like input_text: retain only the suffix from
+                            // the last marker onward — all the contains(&tail)
+                            // check needs.
+                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
+                            {
+                                Some(pos) => pos,
+                                None => state
+                                    .emitted_text
+                                    .len()
+                                    .saturating_sub(glm47_start.len() - 1),
+                            };
+                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
+                                keep_from -= 1;
+                            }
+                            state.emitted_text.drain(..keep_from);
+                        }
+                        if state.recovered
+                            || !matches!(
+                                choice.finish_reason,
+                                Some(dynamo_protocols::types::FinishReason::Length)
+                            )
+                        {
+                            return None;
+                        }
+                        let tail =
+                            state
+                                .input_text
+                                .rfind(glm47_start.as_str())
+                                .and_then(|pos| {
+                                    let t = &state.input_text[pos..];
+                                    if !t.contains(glm47_end.as_str()) {
+                                        Some(t.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })?;
+                        let tail_already_emitted = state.emitted_text.contains(&tail);
+                        state.recovered = true;
+                        Some(PendingRecovery {
+                            choice_idx: choice.index,
+                            tail,
+                            tail_already_emitted,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            // Pass 2 (mutable): when the jail already released the tail verbatim,
+            // suppress the finish chunk's content entirely. The recovery chunk
+            // carries just the marker-onwards tail, matching the non-streaming
+            // path (rfind result only, no post-call prose).
+            for pr in &recoveries {
+                if !pr.tail_already_emitted {
+                    continue;
+                }
+                if let Some(ref mut data) = nv_chunk.data {
+                    for rc in data
+                        .inner
+                        .choices
+                        .iter_mut()
+                        .filter(|c| c.index == pr.choice_idx)
+                    {
+                        // The jail released the truncated block verbatim as content
+                        // on this chunk, potentially preceded by post-call prose.
+                        // glm47's parser drops post-call prose deliberately, so
+                        // suppress the whole content here and let the recovery
+                        // chunk carry just the marker-onwards tail — matching batch.
+                        rc.delta.content = None;
+                    }
+                }
             }
+
+            // Pass 3: emit a recovery chunk per affected choice carrying just
+            // the truncated tail (marker onwards, no post-call prose).
+            let recovery_chunks: Vec<_> = recoveries
+                .into_iter()
+                .filter_map(|pr| {
+                    let PendingRecovery {
+                        choice_idx, tail, ..
+                    } = pr;
+                    tracing::warn!(
+                        choice_index = choice_idx,
+                        recovered_bytes = tail.len(),
+                        "glm47 streaming: partial <tool_call> emitted as content \
+                         on length finish"
+                    );
+                    let mut rec = nv_chunk.clone();
+                    rec.id = None;
+                    rec.event = None;
+                    rec.comment = None;
+                    rec.error = None;
+                    let rd = rec.data.as_mut()?;
+                    rd.inner.usage = None;
+                    rd.llm_metrics = None;
+                    rd.inner.choices.retain(|c| c.index == choice_idx);
+                    for rc in &mut rd.inner.choices {
+                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
+                        rc.delta.tool_calls = None;
+                        rc.finish_reason = None;
+                        rc.logprobs = None;
+                    }
+                    Some(rec)
+                })
+                .collect();
+
+            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
         })
     }
 
@@ -3485,6 +4115,71 @@ impl OpenAIPreprocessor {
             reasoning_parser,
             Some("nemotron_nano" | "nemotron3" | "nemotron_v3")
         )
+    }
+
+    /// Whether a request should surface parsed `reasoning_content` as `content`
+    /// when no content was generated: any request carrying
+    /// `force_nonempty_content=true`.
+    ///
+    /// Deliberately NOT keyed on the model or its reasoning parser. The flag is a
+    /// request-level contract — "this response will have non-empty content" — so
+    /// it is honored generically after parsing and before the response is sent,
+    /// rather than being reimplemented inside each model-specific parser. Keying
+    /// it on a parser allow-list means every new alias silently loses the
+    /// behavior until someone edits the list.
+    ///
+    /// Note it rides in on `chat_template_args` but is NOT consumed by the chat
+    /// template: the Nemotron template never reads `force_nonempty_content`, and
+    /// rendering with it set produces a byte-identical prompt. It is a
+    /// serving-layer flag that upstream happens to transport through the template
+    /// kwargs, which is why the check belongs in postprocessing and not in a
+    /// parser. So a client can set it on any model, and doing so is an explicit
+    /// request for non-empty content — honoring it generically is the intent, not
+    /// an accident of where the flag is declared.
+    ///
+    /// Drives both paths. The chat and Anthropic HTTP handlers pass it to the
+    /// aggregator via `ParsingOptions::move_reasoning_to_content_when_empty` for
+    /// non-streaming, and `postprocessor_parsing_stream` passes it as
+    /// `defer_reasoning_for_nonempty_content` so the streaming path can hold
+    /// reasoning back and reach the same answer at the terminal chunk. Both must
+    /// use this one predicate or the two paths would disagree on the same input.
+    ///
+    /// `enable_thinking` is intentionally not consulted here: when thinking is
+    /// off, reasoning parsing is disabled, so `reasoning_content` is always empty
+    /// and the move is vacuous rather than suppressed.
+    pub(crate) fn wants_reasoning_as_content_when_empty(
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        chat_template_args.is_some_and(|args| {
+            args.get("force_nonempty_content") == Some(&serde_json::Value::Bool(true))
+        })
+    }
+
+    /// Whether this request's stream can withhold every data frame while it
+    /// buffers, which is the only reason to force SSE keep-alive frames on.
+    ///
+    /// The HTTP handlers used to gate the heartbeat on
+    /// `wants_reasoning_as_content_when_empty && reasoning_parser.is_some()`,
+    /// but that is broader than the deferral it describes: the buffering only
+    /// runs when `postprocessor_parsing_stream` takes its `should_parse_reasoning`
+    /// branch. A `force_nonempty_content=true` request with reasoning disabled
+    /// (`enable_thinking=false`) defers nothing, yet still got heartbeats — and
+    /// the configured interval is opt-in precisely because some
+    /// OpenAI-compatible clients do not ignore SSE comment frames.
+    ///
+    /// Known gap: `skip_reasoning_for_guided_json` also suppresses the deferral,
+    /// but it is derived from guided-output inspection that is not available at
+    /// the HTTP layer, so a guided-JSON bypass still enables the heartbeat when
+    /// nothing is withheld. That direction is conservative — extra comment
+    /// frames on an opt-in path rather than a silent stream — and closing it
+    /// needs the guided-output derivation lifted out of the stream builder.
+    pub(crate) fn stream_can_defer_all_output(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        reasoning_parser.is_some()
+            && Self::wants_reasoning_as_content_when_empty(chat_template_args)
+            && !Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args)
     }
 
     /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
@@ -3595,7 +4290,10 @@ impl OpenAIPreprocessor {
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25/K3: disabled when chat_template_args contains "thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
-    ///   contains "enable_thinking": false or "force_nonempty_content": true.
+    ///   contains "enable_thinking": false. "force_nonempty_content": true does
+    ///   NOT disable parsing (streaming or non-streaming): the parser stays on so
+    ///   reasoning is split from the answer, and reasoning is surfaced as content
+    ///   only when no content was generated (non-streaming, in the aggregator).
     /// For DeepSeek: follows the same effective mode used by the prompt renderer.
     /// For Mistral: disabled unless `reasoning_effort` is present and not `none`.
     /// For gemma4: disabled when chat_template_args contains "enable_thinking": false.
@@ -3615,16 +4313,22 @@ impl OpenAIPreprocessor {
                 dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
             }
             parser if Self::is_nemotron_force_reasoning(parser) => {
-                if dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false) {
-                    return true;
-                }
-                if let Some(args) = chat_template_args
-                    && let Some(force_nonempty) = args.get("force_nonempty_content")
-                    && force_nonempty == &serde_json::Value::Bool(true)
-                {
-                    return true;
-                }
-                false
+                // `enable_thinking=false` turns reasoning off entirely (streaming
+                // and non-streaming). `force_nonempty_content=true` does NOT
+                // disable parsing: keeping the parser on splits reasoning from the
+                // answer, so a reasoning+answer turn no longer leaks the reasoning
+                // text and `</think>` into `content`.
+                //
+                // The reasoning-*only* move (surface reasoning as content when the
+                // answer is empty) happens on both paths, by different means.
+                // Non-streaming uses the aggregator flag
+                // ParsingOptions::move_reasoning_to_content_when_empty. Streaming
+                // cannot retract a reasoning_content delta already sent, so it
+                // instead holds reasoning back until it knows whether an answer
+                // follows — see `defer_reasoning_for_nonempty_content` and
+                // `drain_deferred_reasoning`. Both end with the same contract: a
+                // reasoning-only turn surfaces its text as `content`.
+                dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
             }
             Some("deepseek_v3" | "deepseek_v3_1") => {
                 !Self::deepseek_renderer_reasoning_enabled(chat_template_args, false)
@@ -3676,6 +4380,7 @@ impl OpenAIPreprocessor {
             parser_name,
             prompt_injected_reasoning,
             false,
+            false,
         )
     }
 
@@ -3684,6 +4389,7 @@ impl OpenAIPreprocessor {
         parser_name: String,
         prompt_injected_reasoning: bool,
         bypass_bare_guided_json: bool,
+        defer_reasoning_for_nonempty_content: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -3696,10 +4402,21 @@ impl OpenAIPreprocessor {
             prompt_injected_reasoning,
             bypass_bare_guided_json,
             choices: HashMap::new(),
+            last_response: None,
+            defer_reasoning_for_nonempty_content,
+            saw_terminal_error: false,
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
+                // An error is terminal for the flush: latch it so the
+                // end-of-stream branch below stays quiet. The chunk still takes
+                // the normal path — `is_error()` keys on the annotation event,
+                // not on `data`, so short-circuiting here would change how a
+                // data-carrying error chunk is processed.
+                if response.is_error() {
+                    state.saw_terminal_error = true;
+                }
                 // Split disjoint field borrows so the per-choice map and the
                 // parser-factory inputs can be used together inside map_data.
                 // Scoped in a block so the borrows end before `state` moves.
@@ -3709,11 +4426,13 @@ impl OpenAIPreprocessor {
                         prompt_injected_reasoning,
                         bypass_bare_guided_json,
                         choices,
+                        defer_reasoning_for_nonempty_content,
                         ..
                     } = &mut state;
                     let parser_name = &*parser_name;
                     let prompt_injected_reasoning = *prompt_injected_reasoning;
                     let bypass_bare_guided_json = *bypass_bare_guided_json;
+                    let defer_reasoning = *defer_reasoning_for_nonempty_content;
 
                     response.map_data(|mut data| {
                         for choice in data.inner.choices.iter_mut() {
@@ -3728,7 +4447,13 @@ impl OpenAIPreprocessor {
                                 }
                                 ChoiceReasoningState {
                                     parser,
-                                    guided_json_bypass_decision: None,
+                                    guided_json_bypass_decision: (!bypass_bare_guided_json)
+                                        .then_some(false),
+                                    pending_reasoning: String::new(),
+                                    pending_content: String::new(),
+                                    left_reasoning: false,
+                                    drained: false,
+                                    parser_finished: false,
                                 }
                             });
 
@@ -3774,22 +4499,230 @@ impl OpenAIPreprocessor {
                                 let parser_result = choice_state
                                     .parser
                                     .parse_reasoning_streaming_incremental(text, &[]);
-                                choice.delta.content = parser_result
-                                    .get_some_normal_text()
-                                    .map(ChatCompletionMessageContent::Text);
-                                choice.delta.reasoning_content = parser_result.get_some_reasoning();
+
+                                // A backend that keeps sending content after this
+                                // choice's `finish_reason` is out of protocol, but
+                                // it has still fed bytes to the parser. Reopen the
+                                // drain so they have somewhere to go at EOF instead
+                                // of being stranded in parser state.
+                                choice_state.drained = false;
+
+                                if defer_reasoning && !choice_state.left_reasoning {
+                                    // Still ambiguous: this text may be reasoning
+                                    // followed by an answer, or the answer itself
+                                    // reported as reasoning because the parser
+                                    // starts inside the reasoning block. Hold it.
+                                    choice_state
+                                        .pending_reasoning
+                                        .push_str(&parser_result.reasoning_text);
+                                    // Whitespace-only normal text does not settle
+                                    // anything: the aggregator treats such content
+                                    // as empty (matching vLLM's
+                                    // `not final_content.strip()`), so releasing
+                                    // here would make streaming and non-streaming
+                                    // disagree on the same turn. Hold it with the
+                                    // reasoning until real answer text arrives.
+                                    if parser_result.normal_text.trim().is_empty() {
+                                        choice_state
+                                            .pending_content
+                                            .push_str(&parser_result.normal_text);
+                                        choice.delta.content = None;
+                                        choice.delta.reasoning_content = None;
+                                    } else {
+                                        // Real answer text means the parser left
+                                        // the reasoning block, so everything held
+                                        // so far really was reasoning.
+                                        choice_state.left_reasoning = true;
+                                        choice.delta.reasoning_content = (!choice_state
+                                            .pending_reasoning
+                                            .is_empty())
+                                        .then(|| {
+                                            std::mem::take(&mut choice_state.pending_reasoning)
+                                        });
+                                        let mut text =
+                                            std::mem::take(&mut choice_state.pending_content);
+                                        text.push_str(&parser_result.normal_text);
+                                        choice.delta.content =
+                                            Some(ChatCompletionMessageContent::Text(text));
+                                    }
+                                } else {
+                                    choice.delta.content = parser_result
+                                        .get_some_normal_text()
+                                        .map(ChatCompletionMessageContent::Text);
+                                    choice.delta.reasoning_content =
+                                        parser_result.get_some_reasoning();
+                                }
+                            }
+
+                            // This choice is finishing, so drain what it holds
+                            // onto THIS delta. Emitting it as a later chunk
+                            // would put content after `finish_reason` (and
+                            // after the trailing usage chunk), where a client
+                            // that stops at the terminal chunk never sees it.
+                            // A parts delta has no text slot to append to, so
+                            // draining onto it would leave the recovered text
+                            // nowhere to go. Leave the choice undrained and let
+                            // the end-of-stream fallback emit it as its own
+                            // chunk instead of dropping it.
+                            let terminal_carries_parts = matches!(
+                                choice.delta.content,
+                                Some(ChatCompletionMessageContent::Parts(_))
+                            );
+                            // Also require that this choice was actually parsed.
+                            // A guided-JSON choice that bypassed the parser never
+                            // fed it anything, so finishing that parser could only
+                            // contribute text the choice never generated.
+                            if defer_reasoning
+                                && choice.finish_reason.is_some()
+                                && !terminal_carries_parts
+                                && bypass_decision == Some(false)
+                            {
+                                let (content, reasoning) = drain_deferred_reasoning(choice_state);
+                                if let Some(content) = content {
+                                    let merged = match choice.delta.content.take() {
+                                        Some(ChatCompletionMessageContent::Text(existing)) => {
+                                            existing + &content
+                                        }
+                                        Some(other) => {
+                                            // Unreachable: guarded above.
+                                            choice.delta.content = Some(other);
+                                            content
+                                        }
+                                        None => content,
+                                    };
+                                    if choice.delta.content.is_none() {
+                                        choice.delta.content =
+                                            Some(ChatCompletionMessageContent::Text(merged));
+                                    }
+                                }
+                                if let Some(reasoning) = reasoning {
+                                    choice.delta.reasoning_content = Some(
+                                        choice.delta.reasoning_content.take().unwrap_or_default()
+                                            + &reasoning,
+                                    );
+                                }
                             }
                         }
                         Ok(data)
                     })
                 };
 
+                // Retain a spare envelope only when an EOF flush may follow, so
+                // the common reasoning path avoids a full per-token clone. Skip
+                // chunks with no choices (the trailing usage-only chunk): they
+                // carry no delta slot, so using one as the flush envelope would
+                // drop the very bytes the flush exists to preserve.
+                if state.defer_reasoning_for_nonempty_content
+                    && processed_response
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| !data.inner.choices.is_empty())
+                {
+                    state.last_response = Some(processed_response.clone());
+                }
                 Some((processed_response, state))
-            } else {
+            } else if !state.defer_reasoning_for_nonempty_content || state.saw_terminal_error {
+                // After a backend error the buffered bytes are dropped rather
+                // than surfaced: the request failed, so there is no answer to
+                // complete. See `saw_terminal_error`.
                 None
+            } else {
+                // Upstream ended with no answer for the choices still holding a
+                // pending buffer. Normally the terminal chunk already drained
+                // them, so this is the fallback for a stream that ends without
+                // any `finish_reason` — an aborted or truncated generation.
+                // The synthetic chunk it builds is the only case where recovered
+                // bytes arrive after the last upstream chunk, which is
+                // unavoidable when there was no terminal chunk to attach them
+                // to. Only the force_nonempty_content path reaches this branch;
+                // every other parser took the `None` branch above and keeps its
+                // original no-flush EOF behavior. Taking the envelope below
+                // rather than cloning it makes this branch one-shot: once it is
+                // gone the next poll ends the stream.
+                // Sorted so the emitted choice order is deterministic rather
+                // than following HashMap iteration order.
+                let mut indices: Vec<u32> = state.choices.keys().copied().collect();
+                indices.sort_unstable();
+                #[allow(clippy::type_complexity)]
+                let flushed: Vec<(u32, Option<String>, Option<String>)> = indices
+                    .into_iter()
+                    .filter_map(|index| {
+                        let choice_state = state.choices.get_mut(&index)?;
+                        if choice_state.guided_json_bypass_decision != Some(false) {
+                            return None;
+                        }
+                        let (content, reasoning) = drain_deferred_reasoning(choice_state);
+                        (content.is_some() || reasoning.is_some())
+                            .then_some((index, content, reasoning))
+                    })
+                    .collect();
+                if flushed.is_empty() {
+                    return None;
+                }
+                let mut response = state.last_response.take()?;
+                // See `scrub_synthetic_chunk_metadata`: this chunk produced no
+                // tokens, so every per-chunk field from the envelope it was
+                // cloned from has to be dropped rather than reported twice.
+                scrub_synthetic_chunk_metadata(&mut response)?;
+                let data = response.data.as_mut()?;
+                // Rebuild the choice list from the flushed indices rather than
+                // reusing the envelope's own choices: with `n > 1` the last
+                // content-bearing chunk carries only the choices that happened
+                // to be interleaved into it, which need not be the set that has
+                // buffered bytes.
+                let template = data.inner.choices.first()?.clone();
+                data.inner.choices = flushed
+                    .into_iter()
+                    .map(|(index, content, reasoning)| {
+                        let mut choice = template.clone();
+                        choice.index = index;
+                        choice.delta.role = None;
+                        choice.delta.tool_calls = None;
+                        choice.delta.function_call = None;
+                        choice.delta.refusal = None;
+                        choice.finish_reason = None;
+                        choice.logprobs = None;
+                        choice.delta.content = content.map(ChatCompletionMessageContent::Text);
+                        choice.delta.reasoning_content = reasoning;
+                        choice
+                    })
+                    .collect();
+                Some((response, state))
             }
         })
         .fuse()
+    }
+
+    /// Hold the trailing usage-only chunk until every parser recovery chunk has
+    /// been emitted. A truncated upstream stream can end without
+    /// `finish_reason`, so reasoning recovery happens at EOF; forwarding usage
+    /// immediately would put that recovered content after the chunk clients
+    /// treat as the stream trailer.
+    fn hold_usage_until_stream_end<S>(
+        stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        async_stream::stream! {
+            tokio::pin!(stream);
+            let mut pending_usage = None;
+            while let Some(response) = stream.next().await {
+                let is_usage_only = response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.is_empty() && data.inner.usage.is_some()
+                });
+                if is_usage_only {
+                    if let Some(previous) = pending_usage.replace(response) {
+                        yield previous;
+                    }
+                } else {
+                    yield response;
+                }
+            }
+            if let Some(usage) = pending_usage {
+                yield usage;
+            }
+        }
     }
 
     // Motivation: when Nemotron reasoning is disabled by request flags, the
@@ -3896,35 +4829,49 @@ impl OpenAIPreprocessor {
                 }
 
                 response.data = Some(data);
-                state.last_response = Some(response.clone());
+                if response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| !data.inner.choices.is_empty())
+                {
+                    state.last_response = Some(response.clone());
+                }
 
                 Some((response, state))
             } else if state.eof_flushed {
                 None
             } else {
                 state.eof_flushed = true;
-                let mut flushed = drain_undecided_buffers(&mut state.choices);
+                let flushed = drain_undecided_buffers(&mut state.choices);
                 if flushed.is_empty() {
                     None
                 } else {
                     let mut response = state.last_response.clone()?;
+                    // Same envelope problem as the reasoning-stream flush: this
+                    // is a clone of an already-counted chunk, so it goes through
+                    // the shared scrub rather than repeating a partial copy of
+                    // it here.
+                    scrub_synthetic_chunk_metadata(&mut response)?;
                     let data = response.data.as_mut()?;
-                    data.inner.usage = None;
-                    data.inner.choices.retain_mut(|choice| {
-                        if let Some(buffer) = flushed.remove(&choice.index) {
-                            choice.delta.role = None;
+                    let mut template = data.inner.choices.first()?.clone();
+                    template.delta.role = None;
+                    template.delta.tool_calls = None;
+                    template.delta.function_call = None;
+                    template.delta.refusal = None;
+                    template.delta.reasoning_content = None;
+                    template.finish_reason = None;
+                    template.logprobs = None;
+                    let mut flushed: Vec<_> = flushed.into_iter().collect();
+                    flushed.sort_unstable_by_key(|(index, _)| *index);
+                    data.inner.choices = flushed
+                        .into_iter()
+                        .map(|(index, buffer)| {
+                            let mut choice = template.clone();
+                            choice.index = index;
                             choice.delta.content = Some(ChatCompletionMessageContent::Text(buffer));
-                            choice.delta.tool_calls = None;
-                            choice.delta.function_call = None;
-                            choice.delta.refusal = None;
-                            choice.delta.reasoning_content = None;
-                            choice.finish_reason = None;
-                            choice.logprobs = None;
-                            true
-                        } else {
-                            false
-                        }
-                    });
+                            choice
+                        })
+                        .collect();
 
                     if data.inner.choices.is_empty() {
                         None
@@ -3996,10 +4943,13 @@ impl
         // Apply the deployment default before parser-specific normalization so
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
+        let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
         self.apply_default_thinking_mode(&mut request);
-        Self::normalize_thinking_arg(
+        Self::normalize_thinking_arg_with_source(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
+            self.tool_call_parser.as_deref(),
+            thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
 
@@ -4403,6 +5353,9 @@ mod strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::extensions::{
+        AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext,
+    };
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
@@ -5196,7 +6149,7 @@ mod tests {
             &runtime_config,
             &mut request,
         );
-        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), None);
 
         let args = request.chat_template_args.as_ref().unwrap();
         assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
@@ -5695,6 +6648,33 @@ mod tests {
     }
 
     #[test]
+    fn attach_agent_context_forwards_compaction() {
+        let agent_context = AgentContext {
+            session_id: "codex-thread".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            compaction: Some(AgentCompaction {
+                trigger: Some("manual".to_string()),
+                ..Default::default()
+            }),
+            kv_hints: None,
+            input_trigger: None,
+        };
+        let mut context = PipelineContext::new(());
+        context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
+        let mut request = preprocessed_budget_request(None);
+
+        attach_agent_context_from_context(&mut request, &context);
+
+        assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire["agent_context"]["compaction"]["trigger"],
+            serde_json::json!("manual")
+        );
+    }
+
+    #[test]
     fn test_preprocessed_completion_budget_validation_and_deferral() {
         let text_request = preprocessed_budget_request(Some(8));
         let reject = token_budget(10, true, true);
@@ -5910,7 +6890,7 @@ mod tests {
                     )]));
                 }
 
-                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"));
+                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), None);
                 let args = request.chat_template_args.as_ref();
                 assert_eq!(
                     dynamo_renderer::thinking_bool_from_args(args),
@@ -5923,7 +6903,7 @@ mod tests {
                     "SGLang gate mismatch for {description}"
                 );
                 assert_eq!(
-                    !OpenAIPreprocessor::is_reasoning_disabled_by_request(Some("kimi_k25"), args),
+                    !OpenAIPreprocessor::is_reasoning_disabled_by_request(Some("kimi_k25"), args,),
                     expected,
                     "postprocessor gate mismatch for {description}"
                 );
@@ -5954,7 +6934,7 @@ mod tests {
                     "model": "moonshotai/Kimi-K3"
                 }))
                 .unwrap();
-            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
             assert_eq!(
                 dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
                 Some(true),
@@ -5972,7 +6952,11 @@ mod tests {
                 }
             }))
             .unwrap();
-        OpenAIPreprocessor::normalize_thinking_arg(&mut conflicting_request, Some("kimi_k25"));
+        OpenAIPreprocessor::normalize_thinking_arg(
+            &mut conflicting_request,
+            Some("kimi_k25"),
+            None,
+        );
         let args = conflicting_request.chat_template_args.as_ref().unwrap();
         assert_eq!(args.get("thinking"), Some(&serde_json::Value::Bool(true)));
         assert_eq!(
@@ -6017,7 +7001,7 @@ mod tests {
                 .unwrap();
 
             request.normalize_reasoning_template_args().unwrap();
-            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
             OpenAIPreprocessor::normalize_kimi_k3_named_tool_choice(&mut request, Some(parser));
 
             let args = request.chat_template_args.as_ref().unwrap();
@@ -6065,6 +7049,431 @@ mod tests {
                 dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
                 Some(true),
                 "parser {parser:?} must retain its existing policy"
+            );
+        }
+    }
+
+    fn minimax_m3_request(body: serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut base = serde_json::json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let base_obj = base.as_object_mut().unwrap();
+        for (k, v) in body.as_object().unwrap() {
+            base_obj.insert(k.clone(), v.clone());
+        }
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_json_schema() {
+        for parser in ["minimax_m3", "minimax-m3"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "s", "schema": {"type": "object"}}
+                }
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled"))
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_tool_choice_required() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+            "tool_choice": "required"
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_defaults_disabled_for_named_tool_choice() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+            "tool_choice": {"type": "function", "function": {"name": "f"}}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_tool_call_only_deployment_gets_default() {
+        // Tool-call-only M3 deployments still render the M3 template.
+        // Guided-output requests therefore still need "adaptive" overridden.
+        for tool_call_parser in [
+            "minimax_m3",
+            "minimax-m3",
+            "minimax_m3_nom",
+            "minimax-m3-nom",
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                "tool_choice": "required"
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, None, Some(tool_call_parser));
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled")),
+                "tool_call_parser={tool_call_parser:?} + tool_choice=required with no reasoning parser must still default thinking_mode=disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_preserves_client_adaptive() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "s", "schema": {"type": "object"}}
+            },
+            "chat_template_kwargs": {"thinking_mode": "adaptive"}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("adaptive"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_bridges_thinking_bool_to_mode() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "chat_template_kwargs": {"thinking": true}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_bridges_enable_thinking_to_mode() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "chat_template_kwargs": {"enable_thinking": false}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_enabled_is_thinking_on() {
+        // `thinking_mode` strings must bypass `is_truthy`, which would map
+        // "enabled" to false. M3 inputs are canonicalized to exact values.
+        for value in ["enabled", "ENABLED", "Enabled"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking"),
+                Some(&serde_json::json!(true)),
+                "thinking_mode={value:?} must map to thinking=true"
+            );
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("enabled"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_disabled_is_thinking_off() {
+        for value in ["disabled", "DISABLED"] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_canonicalizes_non_canonical_thinking_mode() {
+        // M3 only treats exact "disabled" as off.
+        // Canonicalize falsy aliases so `thinking=false` and the template gate agree.
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!("false"),
+            serde_json::json!("no"),
+            serde_json::json!("off"),
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value.clone()}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("disabled")),
+                "input={value} must canonicalize to \"disabled\""
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        }
+
+        // Truthy non-canonical values must canonicalize to "enabled".
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!("true"),
+            serde_json::json!("yes"),
+            serde_json::json!("on"),
+        ] {
+            let mut request = minimax_m3_request(serde_json::json!({
+                "chat_template_kwargs": {"thinking_mode": value.clone()}
+            }));
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!("enabled")),
+                "input={value} must canonicalize to \"enabled\""
+            );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_deepseek_thinking_mode_words_preserved() {
+        // DeepSeek V3.1 uses `thinking_mode` values "chat" and "thinking".
+        // Preserve them verbatim without writing boolean aliases.
+        for value in ["thinking", "chat"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "deepseek/DeepSeek-V3.1",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"thinking_mode": value}
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v3_1"), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode").and_then(|v| v.as_str()),
+                Some(value),
+                "DeepSeek {value:?} must survive verbatim"
+            );
+            assert!(
+                !args.contains_key("thinking"),
+                "no boolean coercion for DeepSeek {value:?}"
+            );
+            assert!(!args.contains_key("enable_thinking"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_not_written_for_non_m3_parsers() {
+        // Only M3-family templates use the "enabled"/"disabled" vocabulary.
+        // Other parsers may treat an injected value as out-of-vocabulary.
+        for parser in [
+            "deepseek_v3_1",
+            "deepseek_v3_2",
+            "minimax_m2",
+            "qwen3",
+            "kimi_k25",
+            "kimi_k3",
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"thinking": true}
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+            assert!(
+                !args.contains_key("thinking_mode"),
+                "parser {parser:?} must not receive an injected thinking_mode value"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_kimi_or_else_does_not_write_thinking_mode() {
+        // Kimi parsers synthesize `Some(true)` with no client input.
+        // Write boolean aliases only; Kimi does not read `thinking_mode`.
+        for parser in ["kimi_k25", "kimi_k3", "kimi-k3"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser), None);
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+            assert!(!args.contains_key("thinking_mode"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_leaves_plain_chat_untouched() {
+        let mut request = minimax_m3_request(serde_json::json!({}));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        assert!(request.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_non_m3_adaptive_is_no_op() {
+        // Preserve non-M3 `thinking_mode: "adaptive"` verbatim by leaving
+        // normalization as `None`.
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"thinking_mode": "adaptive"}
+            }))
+            .unwrap();
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("qwen3"), None);
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("adaptive"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_operator_default_forces_m3_constrained_disabled() {
+        // Runtime defaults are operator policy, not client intent. When the
+        // client sends no thinking control, constrained M3 requests force
+        // "disabled" even if the operator default is "enabled" — otherwise
+        // the deployment default silently propagates a mode M3 cannot honor
+        // with a constrained decoder attached.
+        let runtime_config = runtime_config_with_default_thinking_mode("enabled");
+        let mut request = minimax_m3_request(serde_json::json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "s", "schema": {"type": "object"}}
+            }
+        }));
+        let thinking_control_from_client =
+            OpenAIPreprocessor::request_has_client_thinking_control(&request);
+        assert!(
+            !thinking_control_from_client,
+            "no chat_template_kwargs → not client intent"
+        );
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+        OpenAIPreprocessor::normalize_thinking_arg_with_source(
+            &mut request,
+            Some("minimax_m3"),
+            None,
+            thinking_control_from_client,
+        );
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_preserves_explicit_thinking_for_constrained() {
+        // Explicit client thinking intent is respected for constrained M3
+        // requests. The runtime attempts the combination even though the
+        // template's adaptive/enabled path is known to conflict with the
+        // constrained decoder — this is the client's opt-in, and returning
+        // possibly-degraded content is preferred to a hard reject at the
+        // API boundary (which would break provider-compatibility probes
+        // that expect the request to be attempted).
+        for (body, expected_mode, desc) in [
+            (
+                serde_json::json!({
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "s", "schema": {"type": "object"}}
+                    },
+                    "chat_template_kwargs": {"thinking_mode": "enabled"}
+                }),
+                "enabled",
+                "json_schema + explicit thinking_mode=enabled",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": "required",
+                    "chat_template_kwargs": {"thinking_mode": "adaptive"}
+                }),
+                "adaptive",
+                "required tool + explicit thinking_mode=adaptive",
+            ),
+            (
+                serde_json::json!({
+                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                    "tool_choice": {"type": "function", "function": {"name": "f"}},
+                    "chat_template_kwargs": {"thinking": true}
+                }),
+                "enabled",
+                "named tool + explicit thinking=true",
+            ),
+        ] {
+            let mut request = minimax_m3_request(body);
+            let thinking_control_from_client =
+                OpenAIPreprocessor::request_has_client_thinking_control(&request);
+            assert!(
+                thinking_control_from_client,
+                "{desc} must be classified as client thinking intent"
+            );
+            OpenAIPreprocessor::normalize_thinking_arg_with_source(
+                &mut request,
+                Some("minimax_m3"),
+                None,
+                thinking_control_from_client,
+            );
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&serde_json::json!(expected_mode)),
+                "{desc} must preserve explicit client thinking"
             );
         }
     }
@@ -6308,8 +7717,8 @@ mod tests {
             (
                 Some("nemotron3"),
                 Some(&force_nonempty_content_true),
-                true,
-                "nemotron3 + force_nonempty_content=true → disabled",
+                false,
+                "nemotron3 + force_nonempty_content=true → NOT disabled (parser stays on)",
             ),
             (
                 Some("nemotron_v3"),
@@ -6320,8 +7729,8 @@ mod tests {
             (
                 Some("nemotron_v3"),
                 Some(&force_nonempty_content_true),
-                true,
-                "nemotron_v3 + force_nonempty_content=true → disabled",
+                false,
+                "nemotron_v3 + force_nonempty_content=true → NOT disabled (parser stays on)",
             ),
             // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
             // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.
@@ -6442,6 +7851,8 @@ mod tests {
             ),
         ];
 
+        // The disable decision no longer depends on streaming — `enable_thinking`
+        // and the per-family signals decide it identically for both paths.
         for (parser, args, expected, desc) in cases {
             assert_eq!(
                 OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
@@ -6449,6 +7860,37 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+
+        // force_nonempty_content=true does NOT disable reasoning parsing for
+        // either path: the parser stays on so reasoning is split from the answer
+        // (no leak). Non-streaming additionally moves reasoning into content when
+        // no content was generated (the aggregator); streaming skips that move.
+        assert!(
+            !OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("nemotron3"),
+                Some(&force_nonempty_content_true),
+            ),
+            "nemotron3 + force_nonempty_content=true → NOT disabled",
+        );
+        assert!(
+            !OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("nemotron_v3"),
+                Some(&force_nonempty_content_true),
+            ),
+            "nemotron_v3 + force_nonempty_content=true → NOT disabled",
+        );
+        // enable_thinking=false disables entirely (user turned thinking off).
+        assert!(
+            OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("nemotron3"),
+                Some(&enable_thinking_false),
+            ),
+            "nemotron3 + enable_thinking=false → disabled",
+        );
+
+        // The force_nonempty_content=true → NOT disabled behavior is what lets a
+        // reasoning-only non-streaming turn surface reasoning as content; verify
+        // the aggregator half in test_move_reasoning_to_content_when_empty.
     }
 
     /// Different query strings must produce different hashes. `?v=1` and

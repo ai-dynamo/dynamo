@@ -2182,6 +2182,13 @@ body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-
     font-weight: 600;
 }
 
+/* Engine axis: hide blocks that do not match the checked inference engine */
+body:has(input[name="recipe-engine"][value="vllm"]:checked) [data-engine]:not([data-engine~="vllm"]),
+body:has(input[name="recipe-engine"][value="sglang"]:checked) [data-engine]:not([data-engine~="sglang"]),
+body:has(input[name="recipe-engine"][value="trtllm"]:checked) [data-engine]:not([data-engine~="trtllm"]) {
+    display: none;
+}
+
 /* Picker dimension extensions: hopper/blackwell SKUs and a generic
    recipe-variant axis for single-dimension pickers (topology, build, etc.) */
 body:has(input[name="recipe-sku"][value="hopper"]:checked) [data-sku]:not([data-sku~="hopper"]),
@@ -2218,12 +2225,28 @@ body:has(input[name="recipe-variant"][value="kvbm"]:checked) tr[data-variant~="k
     font-weight: 600;
 }
 
-/* Combined sku x variant row highlighting (Hopper/Blackwell matrix pages) */
+/* Combined sku x variant row highlighting (matrix pages) */
 body:has(input[name="recipe-sku"]:checked):has(input[name="recipe-variant"]:checked) tr[data-sku][data-variant] {
     opacity: 0.55;
     font-weight: 400;
 }
 
+body:has(input[name="recipe-sku"][value="b200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="b200"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="b200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-sku~="b200"][data-variant~="disagg"],
+body:has(input[name="recipe-sku"][value="b200"]:checked):has(input[name="recipe-variant"][value="vllm-disagg"]:checked) tr[data-sku~="b200"][data-variant~="vllm-disagg"],
+body:has(input[name="recipe-sku"][value="b200"]:checked):has(input[name="recipe-variant"][value="trtllm-agg"]:checked) tr[data-sku~="b200"][data-variant~="trtllm-agg"],
+body:has(input[name="recipe-sku"][value="h100"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="h100"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="h100"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-sku~="h100"][data-variant~="disagg"],
+body:has(input[name="recipe-sku"][value="h100"]:checked):has(input[name="recipe-variant"][value="vllm-disagg"]:checked) tr[data-sku~="h100"][data-variant~="vllm-disagg"],
+body:has(input[name="recipe-sku"][value="h100"]:checked):has(input[name="recipe-variant"][value="trtllm-agg"]:checked) tr[data-sku~="h100"][data-variant~="trtllm-agg"],
+body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="h200"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-sku~="h200"][data-variant~="disagg"],
+body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-variant"][value="vllm-disagg"]:checked) tr[data-sku~="h200"][data-variant~="vllm-disagg"],
+body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-variant"][value="trtllm-agg"]:checked) tr[data-sku~="h200"][data-variant~="trtllm-agg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="gb200"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-sku~="gb200"][data-variant~="disagg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="vllm-disagg"]:checked) tr[data-sku~="gb200"][data-variant~="vllm-disagg"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked):has(input[name="recipe-variant"][value="trtllm-agg"]:checked) tr[data-sku~="gb200"][data-variant~="trtllm-agg"],
 body:has(input[name="recipe-sku"][value="hopper"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="hopper"][data-variant~="agg"],
 body:has(input[name="recipe-sku"][value="hopper"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-sku~="hopper"][data-variant~="disagg"],
 body:has(input[name="recipe-sku"][value="blackwell"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="blackwell"][data-variant~="agg"],
