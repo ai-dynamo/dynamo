@@ -364,6 +364,27 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
 
 
 @pytest.mark.asyncio
+async def test_gms_v1_enables_memory_saver_before_resolution(
+    monkeypatch, mock_sglang_cli
+):
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.enable_memory_saver is True
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli("--model", "/tmp", "--enable-gms-v1")
+
+    await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
 async def test_parse_args_applies_dynamo_defaults_before_resolution(
     monkeypatch, mock_sglang_cli
 ):
