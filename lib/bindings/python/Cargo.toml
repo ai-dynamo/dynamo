@@ -130,6 +130,11 @@ dynamo-llm = { path = "../../llm", default-features = false }
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
+[profile.release]
+# This excluded workspace does not inherit the root release profile.
+codegen-units = 1
+lto = "thin"
+
 [profile.profiling]
 inherits = "release"
 debug = true
