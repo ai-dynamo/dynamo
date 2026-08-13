@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Queue admission policy scaling benchmark.
+//! Trivial queue admission policy overhead benchmark.
 //!
 //! Run with: `cargo bench -p dynamo-kv-router --bench policy_queue_admission --features bench`
 
@@ -15,19 +15,26 @@ use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, ScheduleRequest
 use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, KvRouterConfig, LocalScheduler, QueueAdmissionDecision,
-    QueueAdmissionPolicy, QueueAdmissionRequest, RouterQueuePolicy, WorkerInputView, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy, QueueAdmissionRequest,
+    RouterQueuePolicy, WorkerInputView, WorkerPicker, WorkerSelectionContext,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-struct BypassPolicy;
+/// Minimal full-lifecycle plugin: every request is immediately ready and every
+/// lifecycle event is observed without keeping policy state.
+struct TrivialReadyPolicy;
 
-impl QueueAdmissionPolicy for BypassPolicy {
+impl QueueAdmissionPolicy for TrivialReadyPolicy {
     fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
-        black_box(request.workers());
-        QueueAdmissionDecision::Bypass
+        let _ = black_box(request.id());
+        QueueAdmissionDecision::Ready
+    }
+
+    fn on_event(&mut self, event: QueueAdmissionEvent<'_>, _ready: &mut Vec<QueueAdmissionId>) {
+        let _ = black_box(event);
     }
 }
 
@@ -78,7 +85,7 @@ fn scheduler(worker_count: usize, admission_enabled: bool) -> (BenchScheduler, C
         Box::new(FirstPicker),
     );
     let selector = if admission_enabled {
-        selector.with_admission_policy(Box::new(BypassPolicy))
+        selector.with_admission_policy(Box::new(TrivialReadyPolicy))
     } else {
         selector
     };
@@ -131,7 +138,11 @@ fn policy_queue_admission(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
 
     for admission_enabled in [false, true] {
-        let mode = if admission_enabled { "on" } else { "off" };
+        let mode = if admission_enabled {
+            "trivial_ready"
+        } else {
+            "disabled"
+        };
         for worker_count in [32, 1_024, 10_000] {
             let (scheduler, cancellation_token) =
                 runtime.block_on(async { scheduler(worker_count, admission_enabled) });
