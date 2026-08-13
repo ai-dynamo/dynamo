@@ -58,6 +58,18 @@ class DynamoSGLangArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--enable-gms-v1",
+            env_var="DYN_SGL_ENABLE_GMS_V1",
+            default=False,
+            help=(
+                "Enable GMS V1 for Dynamo Snapshot. Requires "
+                "DYN_SNAPSHOT_CONTROL_DIR and cannot be combined with "
+                "--load-format gms."
+            ),
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--use-sglang-tokenizer",
             env_var="DYN_SGL_USE_TOKENIZER",
             default=False,
@@ -178,6 +190,7 @@ class DynamoSGLangArgGroup(ArgGroup):
 class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
+    enable_gms_v1: bool = False
     use_sglang_tokenizer: bool
     # Internal roles derived from the canonical multimodal arguments in args.py.
     multimodal_encode_worker: bool = False
