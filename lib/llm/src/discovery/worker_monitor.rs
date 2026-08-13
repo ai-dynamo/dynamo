@@ -755,17 +755,18 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let endpoint = &self.client.endpoint;
         let cancellation_token = self.lifecycle.cancellation_token.child_token();
 
-        let decode_configs_rx = match runtime_config_watch(endpoint, cancellation_token.clone()).await {
-            Ok(rx) => rx,
-            Err(error) => {
-                tracing::error!(
-                    endpoint = %endpoint.id(),
-                    %error,
-                    "KvWorkerMonitor: failed to watch endpoint runtime configs"
-                );
-                return Err(error);
-            }
-        };
+        let decode_configs_rx =
+            match runtime_config_watch(endpoint, cancellation_token.clone()).await {
+                Ok(rx) => rx,
+                Err(error) => {
+                    tracing::error!(
+                        endpoint = %endpoint.id(),
+                        %error,
+                        "KvWorkerMonitor: failed to watch endpoint runtime configs"
+                    );
+                    return Err(error);
+                }
+            };
 
         // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
         // This is optional - if NATS isn't available, we skip KV metrics but still do TTFT/ITL cleanup
