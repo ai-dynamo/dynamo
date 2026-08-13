@@ -38,7 +38,11 @@ WORKDIR /workspace
 # `COPY --from=wheel_builder /opt/dynamo/rust-licenses` never fails, even for
 # targets that build no wheels. runtime_wheel_builder populates it post-build.
 RUN mkdir -p /opt/dynamo/rust-licenses
-{% if device == "xpu" or device == "cpu" %}
+{% if device == "tpu" %}
+{# This base's /bin/sh is dash; later stages use bash builtins (`source`). #}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+{% endif %}
+{% if device == "xpu" or device == "cpu" or device == "tpu" %}
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl ca-certificates zip unzip git lsb-release numactl wget vim \
@@ -48,6 +52,17 @@ RUN apt clean && apt-get update -y && \
     libgl1 \
     libaio-dev \
     linux-libc-dev
+{% endif %}
+
+{% if device == "tpu" %}
+{# bindgen needs libclang; the xpu/cpu block below bundles it with NIXL deps. #}
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        clang \
+        libclang-dev \
+        protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 {% if device == "cuda" %}
@@ -218,7 +233,7 @@ ENV PROTOC=/usr/local/bin/protoc
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
-{% if device == "xpu" or device == "cpu" %}
+{% if device == "xpu" or device == "cpu" or device == "tpu" %}
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}
 {% else %}
 ENV CUDA_PATH=/usr/local/cuda \
@@ -300,6 +315,8 @@ RUN mkdir -p /tmp/native-sources
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
+{# Skipped on TPU: nothing consumes ffmpeg there and the base ships no compiler. #}
+{% if device != "tpu" %}
 # Build FFmpeg for every framework's video-encode path, SGLang included. The
 # build is VP9-only (libvpx) — it contains no H.264, H.265, or AAC encoder in
 # any form — so SGLang's video-generation handler gets a VP9 encoder to write
@@ -422,7 +439,10 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     mkdir -p /usr/local/src/ffmpeg && \
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
+{% endif %}
 
+{# Skipped on TPU: no NIXL backend exists for it, so nothing links UCX. #}
+{% if device != "tpu" %}
 # Build and install UCX
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -488,6 +508,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
      echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
+{% endif %}
 
 {% if device == "cuda" %}
 ARG NIXL_LIBFABRIC_REPO
@@ -707,7 +728,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if "nixl_ref" in context[framework] or device == "xpu" %}
+{% if device != "tpu" and ("nixl_ref" in context[framework] or device == "xpu") %}
 # Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
 # consolidates all wheels.
 # Runtime templates COPY from this stage.

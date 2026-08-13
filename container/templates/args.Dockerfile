@@ -34,7 +34,7 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
 
 # wheel builder image selection
-{% if device == "xpu" or device == "cpu" %}
+{% if device == "xpu" or device == "cpu" or device == "tpu" %}
 ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
 {% elif platform == "multi" %}
 {# Multi-arch: manylinux selection is handled via --platform-pinned stage aliases   #}
@@ -44,7 +44,7 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
-ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
+ARG ENABLE_KVBM={{ "false" if device == "tpu" else context[framework].enable_kvbm }}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}

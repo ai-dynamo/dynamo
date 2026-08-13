@@ -30,13 +30,13 @@ WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
-{% if device != "cuda" %}
+{% if device not in ("cuda", "tpu") %}
 ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 {% else %}
 ENV PATH=/usr/local/bin/etcd:${PATH}
 {% endif %}
 
-{% if device != "cuda" %}
+{% if device not in ("cuda", "tpu") %}
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
@@ -54,7 +54,7 @@ ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-{% else %}
+{% elif device == "cuda" %}
 # Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
 # stable prefix so non-Python consumers use the same NIXL copy that Python imports.
 # This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
@@ -123,7 +123,7 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
         find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
     fi
 
-{% if device != "cuda" %}
+{% if device not in ("cuda", "tpu") %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
 # (CUDA devices use NIXL from upstream vLLM wheels)
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
@@ -174,9 +174,11 @@ RUN apt-get update && \
 COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-{% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
-{% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
+{% set pip_target = "--system" if device in ("cuda", "tpu") else "--python /opt/venv/bin/python" %}
+{% set python_executable = "python3" if device in ("cuda", "tpu") else "/opt/venv/bin/python" %}
 
+{# Skipped on TPU: its base is not a vllm-openai 0.27.1 image and it layers no vLLM-Omni. #}
+{% if device != "tpu" %}
 # The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
 # `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
 # heterogeneous per-layer configs, but vLLM's corresponding support missed
@@ -187,8 +189,9 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
         "transformers==${TRANSFORMERS_VERSION}"
+{% endif %}
 
-{% if device != "cuda" %}
+{% if device not in ("cuda", "tpu") %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
 #
@@ -208,7 +211,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
-{% if device != "cuda" %}
+{% if device not in ("cuda", "tpu") %}
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
@@ -251,6 +254,8 @@ RUN set -eux; \
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
+{# Skipped on TPU: no media/omni path on that base. #}
+{% if device != "tpu" %}
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
@@ -258,6 +263,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -391,7 +397,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     uv pip install {{ pip_target }} \
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
         --no-deps --requirement /tmp/requirements.vllm.txt
-{% else %}
+{% elif device != "tpu" %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
 # unusable NVIDIA codec wheel in, for example, the Intel XPU image. The pattern
@@ -410,6 +416,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
     ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null
+{% endif %}
+
+{% if device == "tpu" %}
+# This base installs vLLM and tpu_inference editable from /workspace, so
+# site-packages holds neither package and each tree shadows its own package
+# whenever /workspace is the cwd. Reinstall both from that same source,
+# non-editable and with --no-deps so the tested dependency set is untouched,
+# putting them in site-packages like every other device. vllm_test_utils is a
+# test helper whose source lives inside the vLLM tree removed below.
+RUN cd /workspace/vllm && VLLM_TARGET_DEVICE=tpu uv pip install {{ pip_target }} --no-deps --no-build-isolation . && \
+    cd /workspace/tpu_inference && uv pip install {{ pip_target }} --no-deps --no-build-isolation . && \
+    uv pip uninstall {{ pip_target }} vllm_test_utils && \
+    rm -rf /workspace/tpu_inference
 {% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
@@ -481,6 +500,7 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 # silently replace the vLLM 0.27.1-compatible Transformers release. A global
 # `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
 # deliberate --no-deps layers contain unrelated package-metadata conflicts.
+{% if device != "tpu" %}
 RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
 import importlib.metadata as md
 import sys
@@ -490,6 +510,7 @@ expected = sys.argv[1]
 if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
+{% endif %}
 
 USER dynamo
 
@@ -523,13 +544,15 @@ ENTRYPOINT []
 
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
    ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
-   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
-{% if target not in ("dev", "local-dev") %}
+   already skips them, and their pre_runtime carries no dynamo venv to scan.
+   Also skipped on TPU, matching the sglang/xpu precedent: libtpu ships no
+   license metadata, which policy.licenses.unknown = 'deny' rejects. #}
+{% if target not in ("dev", "local-dev") and device != "tpu" %}
 {% include "templates/compliance.Dockerfile" %}
 {% endif %}
 
 
 FROM pre_runtime AS runtime
-{% if target not in ("dev", "local-dev") %}
+{% if target not in ("dev", "local-dev") and device != "tpu" %}
 COPY --from=licenses /legal /legal
 {% endif %}
