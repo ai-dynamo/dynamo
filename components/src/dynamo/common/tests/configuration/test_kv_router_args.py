@@ -342,7 +342,7 @@ def test_stage_policy_help_describes_frontend_pool_roles() -> None:
     assert "Frontend-only" in help_by_dest["router_prefill_policy"]
     assert "disaggregated prefill workers" in help_by_dest["router_prefill_policy"]
     assert "Frontend-only" in help_by_dest["router_decode_policy"]
-    assert "aggregated deployments" in help_by_dest["router_decode_policy"]
+    assert "disaggregated deployment" in help_by_dest["router_decode_policy"]
 
 
 def test_load_aware_clears_predicted_ttl() -> None:
