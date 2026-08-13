@@ -13,6 +13,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_tokens::{BlockHash, SequenceHash};
 use rustc_hash::FxHashSet;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::cache::vllm_block_pool::{BlockCopyId, BlockReservation, ReserveOutcome, VllmBlockPool};
@@ -176,16 +177,15 @@ pub(crate) struct VllmKvManager {
 
 #[derive(Clone)]
 pub(crate) struct NativePrefixSnapshot {
-    resident_hashes: FxHashSet<SequenceHash>,
+    resident_hashes: Option<Arc<FxHashSet<SequenceHash>>>,
     block_size: usize,
-    enabled: bool,
 }
 
 impl NativePrefixSnapshot {
     pub(crate) fn overlap_tokens(&self, tokens: &[u32]) -> usize {
-        if !self.enabled {
+        let Some(resident_hashes) = self.resident_hashes.as_ref() else {
             return 0;
-        }
+        };
         let (_, identities) = RequestSequence::new(
             tokens.to_vec(),
             0,
@@ -199,7 +199,7 @@ impl NativePrefixSnapshot {
         let overlap_blocks = identities
             .iter()
             .map_while(|identity| identity.sequence_hash)
-            .take_while(|hash| self.resident_hashes.contains(hash))
+            .take_while(|hash| resident_hashes.contains(hash))
             .count();
         (overlap_blocks * self.block_size).min(tokens.len())
     }
@@ -635,9 +635,10 @@ impl VllmKvManager {
 
     pub(crate) fn prefix_snapshot(&self) -> NativePrefixSnapshot {
         NativePrefixSnapshot {
-            resident_hashes: self.pool.resident_hashes(),
+            resident_hashes: self
+                .enable_prefix_caching
+                .then(|| self.pool.resident_hashes()),
             block_size: self.block_size,
-            enabled: self.enable_prefix_caching,
         }
     }
 
@@ -855,6 +856,61 @@ mod tests {
             VllmAcquire::Ready(value) => value,
             _ => panic!("unexpected allocation failure"),
         }
+    }
+
+    #[test]
+    fn prefix_snapshot_matches_live_overlap_and_disabled_semantics() {
+        let tokens = (0..8).collect::<Vec<u32>>();
+        let (mut sequence, identities) =
+            RequestSequence::new(tokens.clone(), 0, 0, 4, true, true, false, None);
+        let owner = Uuid::from_u128(1);
+        let mut lease = BlockRequestLease::new(owner, identities);
+        let mut manager =
+            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        ready(manager.allocate_lease(owner, &mut lease, tokens.len(), 0));
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 0, tokens.len());
+
+        let snapshot = manager.prefix_snapshot();
+        let live_overlap = manager.prefix_overlap_tokens(&tokens);
+        assert!(live_overlap > 0);
+        assert_eq!(snapshot.overlap_tokens(&tokens), live_overlap);
+
+        manager.finish_lease(owner, lease);
+        let replacement_tokens = (100..108).collect::<Vec<u32>>();
+        let (mut replacement_sequence, replacement_identities) =
+            RequestSequence::new(replacement_tokens.clone(), 0, 0, 4, true, true, false, None);
+        let replacement_owner = Uuid::from_u128(2);
+        let mut replacement_lease =
+            BlockRequestLease::new(replacement_owner, replacement_identities);
+        ready(manager.allocate_lease(
+            replacement_owner,
+            &mut replacement_lease,
+            replacement_tokens.len(),
+            0,
+        ));
+        manager.finalize_lease_computed_prefix(
+            replacement_owner,
+            &mut replacement_sequence,
+            &mut replacement_lease,
+            0,
+            replacement_tokens.len(),
+        );
+        assert_eq!(manager.prefix_overlap_tokens(&tokens), 0);
+        assert_eq!(
+            snapshot.overlap_tokens(&tokens),
+            live_overlap,
+            "a retained snapshot must preserve its pre-pass membership"
+        );
+
+        let disabled =
+            VllmKvManager::new_with_event_sink(2, 4, false, KvEventPublishers::default(), 0);
+        let disabled_snapshot = disabled.prefix_snapshot();
+        assert!(disabled_snapshot.resident_hashes.is_none());
+        assert_eq!(disabled_snapshot.overlap_tokens(&tokens), 0);
+        assert_eq!(
+            disabled_snapshot.overlap_tokens(&tokens),
+            disabled.prefix_overlap_tokens(&tokens)
+        );
     }
 
     #[test]

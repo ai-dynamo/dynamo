@@ -10,7 +10,10 @@
 use dynamo_tokens::SequenceHash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
-use std::collections::{VecDeque, hash_map::Entry};
+use std::{
+    collections::{VecDeque, hash_map::Entry},
+    sync::{Arc, OnceLock},
+};
 
 new_key_type! {
     pub(crate) struct BlockCopyId;
@@ -133,6 +136,9 @@ pub(crate) struct VllmBlockPool {
     capacity: usize,
     copies: SlotMap<BlockCopyId, BlockCopy>,
     by_hash: FxHashMap<SequenceHash, HashCopies>,
+    /// Immutable view of the exact `by_hash` key set. Prefix snapshots may
+    /// retain an older `Arc` while an eager scheduler pass mutates the pool.
+    resident_hashes: OnceLock<Arc<FxHashSet<SequenceHash>>>,
     /// Intrusive ordinary LRU: head is evicted first, tail was released last.
     inactive_head: Option<BlockCopyId>,
     inactive_tail: Option<BlockCopyId>,
@@ -147,6 +153,7 @@ impl VllmBlockPool {
             capacity,
             copies: SlotMap::with_key(),
             by_hash: FxHashMap::default(),
+            resident_hashes: OnceLock::new(),
             inactive_head: None,
             inactive_tail: None,
             inactive_len: 0,
@@ -165,8 +172,15 @@ impl VllmBlockPool {
         })
     }
 
-    pub(crate) fn resident_hashes(&self) -> FxHashSet<SequenceHash> {
-        self.by_hash.keys().copied().collect()
+    pub(crate) fn resident_hashes(&self) -> Arc<FxHashSet<SequenceHash>> {
+        Arc::clone(
+            self.resident_hashes
+                .get_or_init(|| Arc::new(self.by_hash.keys().copied().collect())),
+        )
+    }
+
+    fn invalidate_resident_hashes(&mut self) {
+        self.resident_hashes.take();
     }
 
     /// Atomically pins `prefix` and reserves `fresh` additional copies.
@@ -367,7 +381,7 @@ impl VllmBlockPool {
             inactive_prev: None,
             inactive_next: None,
         };
-        match self.by_hash.entry(hash) {
+        let became_visible = match self.by_hash.entry(hash) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().push(id);
                 false
@@ -376,7 +390,11 @@ impl VllmBlockPool {
                 entry.insert(HashCopies::new(id));
                 true
             }
+        };
+        if became_visible {
+            self.invalidate_resident_hashes();
         }
+        became_visible
     }
 
     /// Release one request-owned reference. Private copies return capacity
@@ -689,6 +707,20 @@ impl VllmBlockPool {
 
     #[cfg(test)]
     fn assert_hash_index_consistent(&self) {
+        if let Some(resident_hashes) = self.resident_hashes.get() {
+            assert_eq!(
+                resident_hashes.len(),
+                self.by_hash.len(),
+                "resident-hash snapshot has the wrong cardinality"
+            );
+            assert!(
+                self.by_hash
+                    .keys()
+                    .all(|hash| resident_hashes.contains(hash)),
+                "resident-hash snapshot differs from the hash index"
+            );
+        }
+
         let mut indexed = FxHashSet::default();
         for (&expected_hash, copies) in &self.by_hash {
             for id in copies.iter() {
@@ -754,6 +786,7 @@ impl VllmBlockPool {
         };
         if remove_hash {
             self.by_hash.remove(&hash);
+            self.invalidate_resident_hashes();
             Some(hash)
         } else {
             None
@@ -799,6 +832,48 @@ mod tests {
         assert_eq!(outcome.reservation.prefix.capacity(), 0);
         assert_eq!(outcome.reservation.fresh_len(), 3);
         pool.cancel(outcome.reservation);
+    }
+
+    #[test]
+    fn resident_hash_snapshot_changes_only_with_hash_membership() {
+        let mut pool = VllmBlockPool::new(2);
+        let empty = pool.resident_hashes();
+        assert!(Arc::ptr_eq(&empty, &pool.resident_hashes()));
+
+        let mut first = reserve(&mut pool, &[], 1).reservation;
+        let first_id = pool.allocate_private(&mut first);
+        assert!(pool.cache_private(first_id, 7));
+        let visible = pool.resident_hashes();
+        assert!(!Arc::ptr_eq(&empty, &visible));
+        assert!(empty.is_empty(), "older snapshots must remain frozen");
+        assert_eq!(visible.len(), 1);
+        assert!(visible.contains(&7));
+        assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
+
+        let mut duplicate = reserve(&mut pool, &[], 1).reservation;
+        let duplicate_id = pool.allocate_private(&mut duplicate);
+        assert!(!pool.cache_private(duplicate_id, 7));
+        assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
+
+        let pinned = reserve(&mut pool, &[7], 0);
+        assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
+        pool.cancel(pinned.reservation);
+        assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
+
+        pool.release(duplicate_id);
+        assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
+        assert_eq!(pool.evict_one(), None, "one duplicate must remain visible");
+        assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
+
+        pool.release(first_id);
+        assert!(Arc::ptr_eq(&visible, &pool.resident_hashes()));
+        assert_eq!(pool.evict_one(), Some(7));
+        let removed = pool.resident_hashes();
+        assert!(!Arc::ptr_eq(&visible, &removed));
+        assert!(removed.is_empty());
+        assert!(visible.contains(&7), "older snapshots must remain frozen");
+        pool.assert_lru_consistent();
+        pool.assert_hash_index_consistent();
     }
 
     #[test]
