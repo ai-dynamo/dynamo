@@ -53,6 +53,14 @@ def test_mamba_cache_align_block_size_from_local_config(tmp_path) -> None:
             2048,
         ),
         (
+            {
+                "model_type": "llama",
+                "rope_scaling": {"type": "linear", "factor": 4.0},
+                "text_config": {"max_position_embeddings": 2048},
+            },
+            8192,
+        ),
+        (
             {"max_position_embeddings": 8192, "model_max_length": 131072},
             131072,
         ),

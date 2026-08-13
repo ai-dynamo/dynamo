@@ -355,7 +355,15 @@ def get_model_context_length(
         rope_params = _get_config_value(candidate, "rope_parameters")
         if rope_params is None:
             rope_params = _get_config_value(candidate, "rope_scaling")
-        model_type = str(_get_config_value(candidate, "model_type") or "")
+        if rope_params is None and candidate is not config:
+            rope_params = _get_config_value(config, "rope_parameters")
+            if rope_params is None:
+                rope_params = _get_config_value(config, "rope_scaling")
+        model_type = str(
+            _get_config_value(candidate, "model_type")
+            or _get_config_value(config, "model_type")
+            or ""
+        )
         if isinstance(rope_params, dict) and "gemma3" not in model_type:
             if any(isinstance(value, dict) for value in rope_params.values()):
                 rope_configs = [
