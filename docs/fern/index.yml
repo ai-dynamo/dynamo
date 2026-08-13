@@ -453,6 +453,9 @@ navigation:
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
+          - page: Qwen3.8-2.4T-A95B
+            path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b.mdx
+            slug: qwen-3-8-2-4t-a95b
           - page: GLM-5.2
             path: pages/recipes/model-recipes/glm-5-2.mdx
             slug: glm-5-2
@@ -462,6 +465,9 @@ navigation:
           - page: Kimi-K2.6
             path: pages/recipes/model-recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
+          - page: Nemotron-3.5-Lightning
+            path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
+            slug: nemotron-3-5-lightning
           - page: Nemotron 3 Ultra
             path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
             slug: nemotron-3-ultra
@@ -486,6 +492,9 @@ navigation:
           - page: Qwen3-32B
             path: pages/recipes/model-recipes/qwen3-32b.mdx
             slug: qwen3-32b
+          - page: Qwen3.5-122B-A10B
+            path: pages/recipes/model-recipes/qwen3-5-122b.mdx
+            slug: qwen3-5-122b
           - page: Qwen3-235B-A22B FP8
             path: pages/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
             slug: qwen3-235b-a22b-fp8

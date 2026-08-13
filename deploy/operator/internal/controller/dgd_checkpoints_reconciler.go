@@ -58,14 +58,14 @@ type dgdCheckpointsReconciler struct {
 	dgdResourceSyncer
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commoncontroller.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
 }
 
 func newDGDCheckpointsReconciler(
 	syncer dgdResourceSyncer,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *dgdCheckpointsReconciler {
 	return &dgdCheckpointsReconciler{
 		dgdResourceSyncer:     syncer,

@@ -22,10 +22,14 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from dynamo.frontend import prepost as prepost_module
-from dynamo.frontend.prepost import _prepare_request, build_tool_call_guided_decoding
+from dynamo.frontend.prepost import (
+    StreamingPostProcessor,
+    _prepare_request,
+    build_tool_call_guided_decoding,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
@@ -92,6 +96,301 @@ TOOL_REQUEST = {
         }
     ],
 }
+
+
+class TestDynamoJsonToolCallFallback:
+    """Dynamo's forced-choice JSON fallback must emit OpenAI tool calls."""
+
+    def _post_processor(
+        self,
+        tokenizer,
+        *,
+        tool_choice,
+        stream_response,
+        parallel_tool_calls=None,
+        tool_parameters=None,
+    ):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            request["parallel_tool_calls"] = parallel_tool_calls
+        if tool_parameters is not None:
+            request["tools"][0]["function"]["parameters"] = tool_parameters
+        request, _, _, _, _ = _prepare_request(
+            request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+            uses_dynamo_json_tool_call_fallback=True,
+        )
+
+    def test_streaming_required_choice_converts_json_to_tool_calls(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=True
+        )
+
+        assert (
+            post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text='[{"name":"get_weather","parameters":',
+                    token_ids=[],
+                    finish_reason=None,
+                    logprobs=None,
+                )
+            )
+            is None
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='{"city":"Paris"}}]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert "content" not in choice["delta"]
+        tool_call = choice["delta"]["tool_calls"][0]
+        assert tool_call["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
+
+    def test_non_streaming_named_choice_converts_json_to_tool_calls(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+            stream_response=False,
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='{"city":"Paris"}',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert "content" not in choice["delta"]
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
+
+    def test_invalid_fallback_output_is_returned_as_content(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=True
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='[{"name":"get_weather","parameters":',
+                token_ids=[],
+                finish_reason="length",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "length"
+        assert choice["delta"] == {
+            "role": "assistant",
+            "content": '[{"name":"get_weather","parameters":',
+        }
+
+    def test_multiple_fallback_tool_calls_respect_parallel_setting(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice="required",
+            stream_response=False,
+            parallel_tool_calls=False,
+        )
+        text = (
+            '[{"name":"get_weather","parameters":{"city":"Paris"}},'
+            '{"name":"get_weather","parameters":{"city":"London"}}]'
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {"role": "assistant", "content": text}
+
+    def test_non_finite_fallback_arguments_are_returned_as_content(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=False
+        )
+        text = '[{"name":"get_weather","parameters":{"temperature":NaN}}]'
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {"role": "assistant", "content": text}
+
+    def test_invalid_fallback_does_not_leave_partial_tool_state(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=False
+        )
+        text = (
+            '[{"name":"get_weather","parameters":{"city":"Paris"}},'
+            '{"name":"unknown","parameters":{}}]'
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {"role": "assistant", "content": text}
+        assert post.in_progress_tool_calls == {}
+
+    def test_named_choice_accepts_array_arguments(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+            stream_response=False,
+            tool_parameters={"type": "array", "items": {"type": "string"}},
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='["Paris","Seoul"]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == (
+            '["Paris","Seoul"]'
+        )
+
+    def test_required_choice_accepts_null_arguments(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice="required",
+            stream_response=False,
+            tool_parameters={"type": "null"},
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='[{"name":"get_weather","parameters":null}]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == "null"
+
+    def test_missing_parameters_are_returned_as_content(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=False
+        )
+        text = '[{"name":"get_weather"}]'
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["delta"] == {"role": "assistant", "content": text}
+
+    def test_streaming_choices_keep_independent_json_buffers(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=True
+        )
+
+        for index in (0, 1):
+            assert (
+                post.process_output(
+                    SimpleNamespace(
+                        index=index,
+                        text='[{"name":"get_weather","parameters":{"city":"',
+                        token_ids=[],
+                        finish_reason=None,
+                        logprobs=None,
+                    )
+                )
+                is None
+            )
+
+        choices = [
+            post.process_output(
+                SimpleNamespace(
+                    index=index,
+                    text=f'{city}"}}}}]',
+                    token_ids=[],
+                    finish_reason="stop",
+                    logprobs=None,
+                )
+            )
+            for index, city in ((1, "Seoul"), (0, "Paris"))
+        ]
+
+        for choice, (index, city) in zip(choices, ((1, "Seoul"), (0, "Paris"))):
+            assert choice is not None
+            assert choice["index"] == index
+            assert choice["finish_reason"] == "tool_calls"
+            assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == (
+                f'{{"city":"{city}"}}'
+            )
 
 
 @pytest.fixture(scope="module")
@@ -1180,6 +1479,20 @@ class TestToolCallGuidedDecoding:
         assert set(guided) == {"json"}
         assert parser.requests == []
 
+    def test_required_choice_disables_parallel_calls_in_json_guidance(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._request(
+                tokenizer,
+                tool_choice="required",
+                parallel_tool_calls=False,
+            ),
+            tool_parser=None,
+        )
+
+        assert guided is not None
+        assert guided["json"]["type"] == "array"
+        assert guided["json"]["maxItems"] == 1
+
     # Parsers that require native tool syntax must not get a forced JSON schema.
     @pytest.mark.parametrize(
         "tool_choice",
@@ -1247,6 +1560,62 @@ class TestToolCallGuidedDecoding:
         )
 
         assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+        assert result.uses_dynamo_json_tool_call_fallback is False
+
+    @pytest.mark.parametrize(
+        "tool_parser_class",
+        [None, _FakePassthroughToolParser],
+        ids=["no-parser", "parser-without-guidance"],
+    )
+    @pytest.mark.asyncio
+    async def test_generic_json_guidance_enables_matching_postprocessor(
+        self, tokenizer, tool_parser_class
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "required"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=tool_parser_class,
+            structural_tag_mode="off",
+        )
+
+        assert result.guided_decoding is not None
+        assert set(result.guided_decoding) == {"json"}
+        assert result.uses_dynamo_json_tool_call_fallback is True
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=result.request_for_sampling,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=result.prompt_token_ids,
+            tool_parser=result.tool_parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs=result.chat_template_kwargs,
+            stream_response=False,
+            uses_dynamo_json_tool_call_fallback=(
+                result.uses_dynamo_json_tool_call_fallback
+            ),
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='[{"name":"get_weather","parameters":{"city":"Paris"}}]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
 
     # Explicit assistant constraints must override automatic tool-call guidance.
     @pytest.mark.parametrize(
@@ -1402,6 +1771,56 @@ class TestToolCallGuidedDecoding:
                 tool_parser_class=_FakePassthroughToolParser,
                 structural_tag_mode="on",
             )
+
+    # On the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path, an already-typed `tools`
+    # list means the request is never re-validated, so `tool_choice` stays a raw
+    # dict. vLLM branches on the typed named param: get_json_schema_from_tools
+    # returns None for a dict (no constraint at all) and get_structural_tag raises
+    # AttributeError on .model_dump(). Normalize once at the validation boundary.
+    def _fast_path_named_request(self, tokenizer):
+        typed_tools = _prepare_request(
+            TOOL_REQUEST, tokenizer=tokenizer, tool_parser_class=None
+        )[0].tools
+        return prepost_module._validate_chat_completion_request(
+            {
+                **TOOL_REQUEST,
+                "tools": typed_tools,
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            }
+        )
+
+    def test_raw_named_tool_choice_is_normalized_at_the_boundary(self, tokenizer):
+        request = self._fast_path_named_request(tokenizer)
+        assert not isinstance(request.tool_choice, dict)
+        assert request.tool_choice.function.name == "get_weather"
+
+    def test_normalized_named_choice_still_builds_json_schema(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._fast_path_named_request(tokenizer), None
+        )
+        assert guided is not None, "named forced choice must still be constrained"
+        assert "json" in guided
+
+    def test_normalized_named_choice_does_not_break_structural_tag(self, tokenizer):
+        # Regression: a raw dict reached vLLM's structural-tag registry and raised
+        # AttributeError on .model_dump(), surfacing as a 500 rather than a
+        # constraint. Uses the REAL hermes parser -- a fake never reaches the
+        # registry, so it cannot reproduce this.
+        from vllm.tool_parsers import ToolParserManager
+
+        hermes_cls = ToolParserManager.get_tool_parser("hermes")
+        request = self._fast_path_named_request(tokenizer)
+        parser = hermes_cls(tokenizer, request.tools)
+
+        guided = build_tool_call_guided_decoding(
+            request, parser, structural_tag_mode="on"
+        )
+
+        assert guided is not None
+        assert "structural_tag" in guided
 
     # A malformed tool_choice object is not a named tool choice, so it must not be
     # treated as forced and must not trigger the forced-choice conflict check.

@@ -932,6 +932,7 @@ impl Client {
                         map.insert(instance.instance_id, instance);
                     }
                     DiscoveryEvent::Added(_) => {}
+                    DiscoveryEvent::ModelTaintsUpdated(_) => {}
                     DiscoveryEvent::Removed(id) => {
                         if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
                             map.remove(&endpoint_id.instance_id);

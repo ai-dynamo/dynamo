@@ -62,6 +62,30 @@ class AbortRequest(msgspec.Struct, tag="abort_request", forbid_unknown_fields=Tr
     pass
 
 
+class PrepareCheckpointRequest(
+    msgspec.Struct, tag="prepare_checkpoint_request", forbid_unknown_fields=True
+):
+    pass
+
+
+class AbortCheckpointRequest(
+    msgspec.Struct, tag="abort_checkpoint_request", forbid_unknown_fields=True
+):
+    token: str
+
+
+class CompleteRestoreRequest(
+    msgspec.Struct, tag="complete_restore_request", forbid_unknown_fields=True
+):
+    token: str
+
+
+class GetCheckpointStateRequest(
+    msgspec.Struct, tag="get_checkpoint_state_request", forbid_unknown_fields=True
+):
+    pass
+
+
 class AllocationRecord(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     allocation_id: str
     aligned_size: int
@@ -83,6 +107,13 @@ class ListAllocationsResponse(
     allocations: tuple[AllocationRecord, ...]
 
 
+class CheckpointStateResponse(
+    msgspec.Struct, tag="checkpoint_state_response", forbid_unknown_fields=True
+):
+    state: str
+    token: str | None
+
+
 class ErrorResponse(msgspec.Struct, tag="error_response", forbid_unknown_fields=True):
     message: str
     out_of_memory: bool = False
@@ -96,10 +127,22 @@ Request: TypeAlias = (
     | CommitRequest
     | AbortRequest
 )
-Response: TypeAlias = (
-    SuccessResponse | ExportResponse | ListAllocationsResponse | ErrorResponse
+CheckpointControlRequest: TypeAlias = (
+    PrepareCheckpointRequest
+    | AbortCheckpointRequest
+    | CompleteRestoreRequest
+    | GetCheckpointStateRequest
 )
-Message: TypeAlias = HandshakeRequest | HandshakeResponse | Request | Response
+Response: TypeAlias = (
+    SuccessResponse
+    | ExportResponse
+    | ListAllocationsResponse
+    | CheckpointStateResponse
+    | ErrorResponse
+)
+Message: TypeAlias = (
+    HandshakeRequest | HandshakeResponse | Request | CheckpointControlRequest | Response
+)
 REQUEST_TYPES = (
     AllocateRequest,
     ExportRequest,
@@ -107,6 +150,12 @@ REQUEST_TYPES = (
     ListAllocationsRequest,
     CommitRequest,
     AbortRequest,
+)
+CHECKPOINT_CONTROL_TYPES = (
+    PrepareCheckpointRequest,
+    AbortCheckpointRequest,
+    CompleteRestoreRequest,
+    GetCheckpointStateRequest,
 )
 
 _encoder = msgspec.msgpack.Encoder()

@@ -174,18 +174,46 @@ class ThunderAgentScheduler:
             program.waiting = program.waiting or asyncio.Event()
             return program.waiting, True
 
-        if not (was_new and program.assigned_worker_id is None):
+        needs_assignment = was_new and program.assigned_worker_id is None
+        stale_replacement = False
+        live_worker_ids: set[int] = set()
+        if program.assigned_worker_id is not None:
+            live_worker_ids = self._capacity.live_worker_ids()
+            if not live_worker_ids or program.assigned_worker_id in live_worker_ids:
+                return None, False
+            stale_worker_id = program.assigned_worker_id
+            program.assigned_worker_id = None
+            needs_assignment = True
+            stale_replacement = True
+            logger.info(
+                "thunderagent.worker stale_pin program=%s old_worker=%s "
+                "available_workers=%s",
+                program_id,
+                stale_worker_id,
+                sorted(live_worker_ids),
+            )
+
+        if not needs_assignment:
             return None, False
 
         capacities = self._capacity.snapshot()
+        if stale_replacement:
+            capacities = {
+                worker_id: capacity
+                for worker_id, capacity in capacities.items()
+                if worker_id in live_worker_ids
+            }
+
         if not capacities:
             # Cold start: MDC hasn't published yet. Let the request flow
             # through with no pin; the chunk-loop callback will populate
             # ``assigned_worker_id`` once the engine picks a worker, and
             # subsequent turns get the sticky pin.
             return None, False
-        worker_id = self._select_worker_for_new_program_locked(
-            capacities, program.token_total
+        worker_id = self._select_worker_for_admission_locked(
+            capacities,
+            program.token_total,
+            queue_behind_paused=not stale_replacement,
         )
         if worker_id is not None:
             program.assigned_worker_id = worker_id
@@ -305,13 +333,15 @@ class ThunderAgentScheduler:
             key=lambda w: capacities[w] - self._worker_used(w, decayed=True),
         )
 
-    def _select_worker_for_new_program_locked(
+    def _select_worker_for_admission_locked(
         self,
         capacities: dict[int, int],
         estimated_tokens: int,
+        *,
+        queue_behind_paused: bool,
     ) -> Optional[int]:
         # Fairness: new programs queue behind any existing paused program.
-        if self._table.paused:
+        if queue_behind_paused and self._table.paused:
             return None
         buffer = self._cfg.buffer_per_program
         required = estimated_tokens + buffer

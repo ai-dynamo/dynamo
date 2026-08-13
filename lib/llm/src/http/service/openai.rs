@@ -33,7 +33,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::{
+        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_activity,
+    },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
@@ -137,6 +140,12 @@ pub(crate) struct ErrorMessage {
     metric_error_type: Option<ErrorType>,
 }
 
+impl ErrorMessage {
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
@@ -198,7 +207,7 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
 /// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
 /// `Backend(InvalidArgument)`; both variants are 400-worthy.
-fn find_invalid_argument_in_chain<'a>(
+pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
     use dynamo_runtime::error::{BackendError, ErrorType};
@@ -2412,9 +2421,13 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
 /// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
 /// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
 /// for correct disambiguation when `n > 1`.
+///
+/// Dedup is keyed by `(choice_index, tool_call_id)`, not by id alone: with `n > 1` the
+/// backend may reuse the same tool call id across choices, and keying on the id alone
+/// would silently drop every choice after the first.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
-    dispatched_ids: &mut HashSet<String>,
+    dispatched_ids: &mut HashSet<(u32, String)>,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
     let Some(data) = &response.data else {
@@ -2435,7 +2448,8 @@ fn streaming_tool_dispatch_events(
             if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
                 // Skip already-dispatched tool calls (dedup guard, matches
                 // the stopped/done flags in Anthropic/Responses converters).
-                if !dispatched_ids.insert(id.clone()) {
+                // Scoped per choice so repeated ids across choices still dispatch.
+                if !dispatched_ids.insert((choice.index, id.clone())) {
                     continue;
                 }
                 let payload = ToolCallDispatchPayload {
@@ -2618,6 +2632,23 @@ async fn chat_completions(
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
 
+    // Any force_nonempty_content=true request: surface reasoning as content when
+    // the turn produced none. See `wants_reasoning_as_content_when_empty`.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Only a stream that can
+    // withhold every data frame needs forced keep-alive frames.
+    let stream_can_defer_all_output =
+        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+            parsing_options.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2689,12 +2720,13 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
-        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
@@ -2723,6 +2755,19 @@ async fn chat_completions(
 
                 // Drop empty chunks from multi-byte token assembly.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
+                    let _ = activity_tx.send(());
+                    // Not forwarded, but the engine still generated these tokens,
+                    // so account for them before discarding. Otherwise the
+                    // real-time output-token counter undercounts and TTFT is
+                    // attributed to the first *renderable* chunk rather than the
+                    // first generated one. This already affected multi-byte token
+                    // assembly; the Nemotron force_nonempty_content deferral makes
+                    // empty chunks common enough to matter.
+                    process_chat_response_and_observe_metrics(
+                        &response,
+                        &mut response_collector,
+                        &mut http_queue_guard,
+                    );
                     continue;
                 }
                 if tool_dispatch_enabled {
@@ -2762,14 +2807,19 @@ async fn chat_completions(
                 }
             }
         };
-        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
+        let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
+        let stream = monitor_for_disconnects_with_activity(
+            stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            activity_rx,
+        );
 
         let mut sse_stream = Sse::new(stream);
-
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = keep_alive {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
-
         Ok(sse_stream.into_response())
     } else {
         // Check first event for backend errors before aggregating (non-streaming only)
@@ -3167,6 +3217,21 @@ async fn responses(
             request.inner.tool_choice.as_ref(),
         ),
     );
+
+    // NOTE: `move_reasoning_to_content_when_empty` is the aggregator flag and is
+    // not set here. A non-streaming Responses request DOES reach the aggregator
+    // (forcing stream=true on the converted request only drives internal
+    // streaming; the client-facing `streaming` flag still selects the aggregating
+    // branch below), so it reaches it with the flag false.
+    //
+    // That is currently unreachable rather than wrong: the Responses-to-chat
+    // conversion hard-codes `chat_template_args: None`, so
+    // `force_nonempty_content` can never be set on this path in the first place.
+    // If that conversion ever forwards chat_template_args, the streaming stage
+    // would still cover the reasoning-only case — `postprocessor_parsing_stream`
+    // gates on the request's own args via `wants_reasoning_as_content_when_empty`
+    // rather than on this flag — but the aggregator backstop should be wired here
+    // too at that point. Tracked as follow-up.
 
     let mut response_collector = state
         .metrics_clone()
@@ -4390,7 +4455,7 @@ mod tests {
     use super::*;
     use crate::discovery::ModelManagerError;
     use crate::protocols::common::StopConditionsProvider;
-    use crate::protocols::common::extensions::NvExt;
+    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -4786,6 +4851,10 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
+                compaction: Some(AgentCompaction {
+                    trigger: Some("automatic".to_string()),
+                    ..Default::default()
+                }),
                 kv_hints: None,
                 input_trigger: None,
             },
@@ -4803,6 +4872,38 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.trigger.as_deref()),
+            Some("automatic")
+        );
+    }
+
+    #[test]
+    fn test_context_from_headers_preserves_codex_compaction() {
+        let mut headers = HeaderMap::new();
+        headers.insert("thread-id", "codex-thread".parse().unwrap());
+        headers.insert(
+            "x-codex-turn-metadata",
+            r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"local","phase":"summary_turn","strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let context = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let agent_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context attached");
+        assert_eq!(agent_context.session_id, "codex-thread");
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.implementation.as_deref()),
+            Some("local")
+        );
     }
 
     #[test]
@@ -6410,6 +6511,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_responses_conversion_errors_are_client_errors() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::InvalidArgument("ambiguous tools".to_string()).into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
+        );
+    }
+
     // ── streaming dispatch tests ──────────────────────────────────────
 
     use std::collections::{HashMap, HashSet};
@@ -6542,7 +6656,7 @@ mod tests {
 
     fn collect_tool_dispatch_events(
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
-        dispatched_ids: &mut HashSet<String>,
+        dispatched_ids: &mut HashSet<(u32, String)>,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
         streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
@@ -6844,17 +6958,17 @@ mod tests {
 
     #[test]
     fn test_tool_dispatch_n_greater_than_1_includes_choice_index() {
-        // Regression test: with n > 1, each choice should carry its own choice_index
-        // so clients can disambiguate which choice the tool call belongs to.
+        // Regression test for #12676: with n > 1, identical tool-call ids from different
+        // choices must each dispatch with their own choice_index.
         let choice_0 = make_choice_with_tool_call(
             0,
-            Some("call_a"),
+            Some("call_1"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         );
         let choice_1 = make_choice_with_tool_call(
             1,
-            Some("call_b"),
+            Some("call_1"),
             Some("get_time"),
             Some(r#"{"tz":"UTC"}"#),
         );
@@ -6865,11 +6979,11 @@ mod tests {
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json0["choice_index"], 0);
-        assert_eq!(json0["tool_call"]["id"], "call_a");
+        assert_eq!(json0["tool_call"]["id"], "call_1");
 
         let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
         assert_eq!(json1["choice_index"], 1);
-        assert_eq!(json1["tool_call"]["id"], "call_b");
+        assert_eq!(json1["tool_call"]["id"], "call_1");
     }
 
     #[test]
