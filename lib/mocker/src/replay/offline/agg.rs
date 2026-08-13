@@ -2917,6 +2917,11 @@ mod tests {
 
     type CompletionAuditRuntime =
         AggRuntimeImpl<CompletionAuditPlacement, NoEngineEvents, (), CompletionAuditAdmission>;
+    type CompletionAuditFixture = (
+        CompletionAuditRuntime,
+        Rc<RefCell<Vec<CompletionPhaseEvent>>>,
+        SmallVec<[WorkerCompletionPayload<()>; 2]>,
+    );
 
     fn output_signal(uuid: Uuid, token_id: Option<u32>, completed: bool) -> OutputSignal {
         OutputSignal {
@@ -3065,11 +3070,7 @@ mod tests {
         progress_release: Option<Placement>,
         terminal_release: Option<Placement>,
         observation_release: Option<Placement>,
-    ) -> (
-        CompletionAuditRuntime,
-        Rc<RefCell<Vec<CompletionPhaseEvent>>>,
-        SmallVec<[WorkerCompletionPayload<()>; 2]>,
-    ) {
+    ) -> CompletionAuditFixture {
         let pending = request_ids
             .iter()
             .enumerate()
