@@ -2403,6 +2403,73 @@ mod tests {
         }
     }
 
+    /// A chunk whose delta renders as nothing is still an accounting event: the
+    /// engine generated those tokens. The chat SSE loop drops such chunks before
+    /// forwarding them (multi-byte token assembly, and the Nemotron
+    /// force_nonempty_content deferral, both produce them), so it observes their
+    /// metrics explicitly before discarding. This pins the helper it calls: an
+    /// empty delta carrying `llm_metrics` must still count.
+    #[test]
+    fn test_empty_delta_with_metrics_is_still_counted() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        };
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "test-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+        let mut guard = None;
+
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: model.to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: Some(LLMMetricAnnotation {
+                input_tokens: 10,
+                output_tokens: 4,
+                chunk_tokens: 4,
+                ..Default::default()
+            }),
+        };
+        let annotated = crate::types::Annotated::from_data(data);
+
+        process_chat_response_and_observe_metrics(&annotated, &mut collector, &mut guard);
+
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model])
+                .get(),
+            4,
+            "tokens on a non-renderable chunk must still be counted"
+        );
+    }
+
     #[test]
     fn test_output_tokens_counter_increments() {
         let metrics = Arc::new(Metrics::new());
