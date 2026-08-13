@@ -2248,7 +2248,7 @@ async def register_model(
     *,
     worker_type: WorkerType,
     kv_cache_block_size: Optional[int] = None,
-    router_mode: Optional[RouterMode] = None,
+    router_config: Optional[RouterConfig] = None,
     runtime_config: Optional[ModelRuntimeConfig] = None,
     tensor_model_config: Optional[Dict[str, Any]] = None,
     user_data: Optional[Dict[str, Any]] = None,
@@ -2280,6 +2280,15 @@ async def register_model(
         peer dependencies. `needs` is a DNF list — each inner list is an
         AND-set, the outer list is OR. `worker_type` is required; backends
         declare it literally at each call site.
+
+    Routing:
+        `router_config` lets a worker set declare how the frontend should route
+        to it, overriding the frontend's global `--router-mode`. Omit it to
+        inherit that global. Combined with `worker_type`, this is how a
+        disaggregated deployment gives its prefill and decode tiers different
+        strategies — for example a prefill tier registered with
+        `RouterConfig(RouterMode.KV)` in front of a decode tier registered with
+        `RouterConfig(RouterMode.RoundRobin)`.
 
     When `ignore_weights` is true, remote HuggingFace model resolution skips
     weight files and downloads only the metadata needed for registration.
