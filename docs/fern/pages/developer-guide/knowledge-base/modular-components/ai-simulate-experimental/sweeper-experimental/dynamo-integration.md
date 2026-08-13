@@ -68,14 +68,12 @@ Each adapter value is a search space, not one concrete Planner or Router config:
 ```yaml
 adapters:
   dynamo.router:
-    search_space:
-      mode: [kv_router, round_robin]
-      overlap_score_credit: [0.0, 0.5, 1.0]
+    mode: [kv_router, round_robin]
+    overlap_score_credit: [0.0, 0.5, 1.0]
   dynamo.planner:
-    search_space:
-      scaling_policy: [disabled, load_180_5]
-      fpm_sampling: [default]
-      load_sensitivity: [default]
+    scaling_policy: [disabled, load_180_5]
+    fpm_sampling: [default]
+    load_sensitivity: [default]
 ```
 
 The Planner provider derives load-predictor parameters from all configured scaling intervals during

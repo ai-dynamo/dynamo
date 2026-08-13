@@ -37,9 +37,7 @@ def _config() -> SmartSearchConfig:
             "deployment_mode": ["agg"],
         },
         adapters={
-            "test.feature": {
-                "search_space": {"modes": ["fast"]},
-            }
+            "test.feature": {"modes": ["fast"]},
         },
         workload={"trace_path": TRACE},
         sweep={"max_rounds": 1, "candidates_per_round": 1, "parallel_evals": 1},
@@ -358,8 +356,8 @@ def test_adapter_reused_output_buffer_is_isolated_per_candidate(monkeypatch) -> 
 def test_adapter_search_contexts_are_isolated() -> None:
     config_data = _config().model_dump(mode="python")
     config_data["adapters"] = {
-        "mutator": {"search_space": {}},
-        "observer": {"search_space": {}},
+        "mutator": {},
+        "observer": {},
     }
     config = SmartSearchConfig.model_validate(config_data)
     observed_backends = []
@@ -466,7 +464,7 @@ def test_adapter_parameter_separator_collisions_are_rejected() -> None:
         search_module._merge_adapter_spaces([branch], {"test.feature": plan})
 
     config_data = _config().model_dump(mode="python")
-    config_data["adapters"] = {"ambiguous::adapter": {"search_space": {}}}
+    config_data["adapters"] = {"ambiguous::adapter": {}}
     config = SmartSearchConfig.model_validate(config_data)
     with pytest.raises(ValueError, match="adapter names.*reserved separator"):
         search_module._prepare_providers(

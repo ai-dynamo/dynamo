@@ -50,11 +50,10 @@ search_space:
   agg_max_num_seqs: [512]
 adapters:
   dynamo.router:
-    search_space:
-      mode: [kv_router, round_robin]
-      overlap_score_credit: [0.0, 0.5, 1.0]
-      prefill_load_scale: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
-      temperature: [0.0, 0.2, 0.5, 1.0]
+    mode: [kv_router, round_robin]
+    overlap_score_credit: [0.0, 0.5, 1.0]
+    prefill_load_scale: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+    temperature: [0.0, 0.2, 0.5, 1.0]
 workload:
   trace_path: <toolagent_trace.jsonl>           # 2k subset for the search; full trace to validate
   trace_format: mooncake

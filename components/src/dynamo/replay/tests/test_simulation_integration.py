@@ -54,22 +54,18 @@ def _config(
     # because it has complete coverage in the GB200 performance database.
     adapters = {
         "dynamo.planner": {
-            "search_space": {
-                "scaling_policy": [scaling_policy],
-                "fpm_sampling": ["default"],
-                "load_sensitivity": ["default"],
-                "load_predictor_candidates": ["constant_last"],
-            }
+            "scaling_policy": [scaling_policy],
+            "fpm_sampling": ["default"],
+            "load_sensitivity": ["default"],
+            "load_predictor_candidates": ["constant_last"],
         }
     }
     if include_router:
         adapters["dynamo.router"] = {
-            "search_space": {
-                "mode": ["kv_router"],
-                "overlap_score_credit": [0.5],
-                "prefill_load_scale": [1.0],
-                "temperature": [0.2],
-            }
+            "mode": ["kv_router"],
+            "overlap_score_credit": [0.5],
+            "prefill_load_scale": [1.0],
+            "temperature": [0.2],
         }
 
     return SmartSearchConfig(
@@ -158,7 +154,7 @@ def _run_one(policy: str):
 
     adapter = create_planner_provider()
     adapter_plan = adapter.generate_search_space(
-        config.adapters["dynamo.planner"].search_space,
+        config.adapters["dynamo.planner"],
         SweepContext(
             core_search_space=config.search_space.model_dump(mode="json"),
             workload=config.workload.model_dump(mode="json"),

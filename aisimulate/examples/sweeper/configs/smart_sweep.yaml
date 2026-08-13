@@ -10,12 +10,10 @@ search_space:
   backend: [vllm]
 adapters:
   dynamo.router:
-    search_space:
-      mode: [kv_router, round_robin]
+    mode: [kv_router, round_robin]
   dynamo.planner:
-    search_space:
-      scaling_policy: [disabled, throughput_180_5, hybrid_180_5]
-      # Other Planner search dimensions use adapter defaults.
+    scaling_policy: [disabled, throughput_180_5, hybrid_180_5]
+    # Other Planner search dimensions use adapter defaults.
 workload:
   trace_path: /data/replay/traffic.jsonl   # or omit and set a synthetic load (see below)
   trace_format: mooncake

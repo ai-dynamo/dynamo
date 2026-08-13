@@ -42,9 +42,8 @@ search_space:
   gpu_budget: 8
 adapters:
   dynamo.planner:
-    search_space:
-      scaling_interval: [5, 10]
-      load_predictor: [default, conservative]
+    scaling_interval: [5, 10]
+    load_predictor: [default, conservative]
 workload:
   isl: 128
   osl: 16
@@ -60,9 +59,15 @@ sweep:
 
     assert config.search_space.deployment_mode == ["agg"]
     assert config.search_space.backend == ["vllm"]
-    assert config.adapters["dynamo.planner"].search_space == {
+    assert config.adapters["dynamo.planner"] == {
         "scaling_interval": [5, 10],
         "load_predictor": ["default", "conservative"],
+    }
+    assert config.model_dump()["adapters"] == {
+        "dynamo.planner": {
+            "scaling_interval": [5, 10],
+            "load_predictor": ["default", "conservative"],
+        }
     }
     assert config.workload.request_rate == 2
     assert config.sweep.max_rounds == 2
@@ -96,7 +101,7 @@ def test_defaults_are_backend_only():
     )
 
 
-def test_extra_fields_are_forbidden_at_each_boundary():
+def test_extra_fields_are_forbidden_on_structured_models():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         SmartSearchConfig(
             search_space=_search_space(bogus=1),
@@ -106,8 +111,20 @@ def test_extra_fields_are_forbidden_at_each_boundary():
         SmartSearchConfig(
             search_space=_search_space(),
             workload=_workload(),
-            adapters={"custom": {"search_space": {}, "bogus": 1}},
+            bogus=1,
         )
+
+
+def test_adapter_mapping_is_passed_through_for_provider_validation():
+    config = SmartSearchConfig(
+        search_space=_search_space(),
+        workload=_workload(),
+        adapters={"custom": {"mode": ["fast", "safe"], "weight": [0.0, 1.0]}},
+    )
+
+    assert config.adapters == {
+        "custom": {"mode": ["fast", "safe"], "weight": [0.0, 1.0]}
+    }
 
 
 @pytest.mark.parametrize(
@@ -125,7 +142,7 @@ def test_extra_fields_are_forbidden_at_each_boundary():
 def test_legacy_planner_fields_point_to_adapter_migration(field):
     with pytest.raises(
         ValidationError,
-        match=r"adapters\['dynamo\.planner'\]\.search_space",
+        match=r"adapters\['dynamo\.planner'\]",
     ):
         SmartSearchConfig(
             search_space=_search_space(**{field: 1}),
@@ -150,7 +167,7 @@ def test_legacy_planner_fields_point_to_adapter_migration(field):
 def test_legacy_router_fields_point_to_adapter_migration(field):
     with pytest.raises(
         ValidationError,
-        match=r"adapters\['dynamo\.router'\]\.search_space",
+        match=r"adapters\['dynamo\.router'\]",
     ):
         SmartSearchConfig(
             search_space=_search_space(**{field: 1}),

@@ -61,12 +61,11 @@ An installed or injected provider owns the schema below its adapter name:
 ```yaml
 adapters:
   example.policy:
-    search_space:
-      mode: [balanced, latency]
+    mode: [balanced, latency]
 ```
 
-The provider receives the complete `search_space` mapping. It does not receive a preselected
-concrete feature configuration.
+The provider receives the complete mapping directly under `example.policy`. It does not receive a
+preselected concrete feature configuration.
 
 ## 5. Run and Inspect
 

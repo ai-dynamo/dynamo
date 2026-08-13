@@ -139,9 +139,7 @@ def _prepare_providers(
             goal=deepcopy(base_context.goal),
             show_progress=base_context.show_progress,
         )
-        plan = provider.generate_search_space(
-            deepcopy(config.adapters[name].search_space), context
-        )
+        plan = provider.generate_search_space(deepcopy(config.adapters[name]), context)
         _validate_search_plan(name, plan)
         # The adapter owns the object it returned and may reuse internal buffers
         # later. Take a complete core-owned snapshot at the ABI boundary.
@@ -672,10 +670,7 @@ class Sweeper:
         cache_context = _freeze(
             {
                 "search_space": config.search_space.model_dump(mode="python"),
-                "adapters": {
-                    name: request.model_dump(mode="python")
-                    for name, request in config.adapters.items()
-                },
+                "adapters": deepcopy(config.adapters),
                 "workload": config.workload.model_dump(mode="python"),
                 "goal": goal.model_dump(mode="python"),
                 "provider_plans": provider_plans,

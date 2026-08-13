@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -489,12 +489,8 @@ class SweepConfig(BaseModel):
     max_eval_seconds: float | None = Field(default=600.0, gt=0)
 
 
-class AdapterSearchConfig(BaseModel):
-    """One optional simulation adapter and the search space it owns."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    search_space: dict[str, Any] = Field(default_factory=dict)
+# The provider-owned search-space mapping for one adapter.
+AdapterSearchConfig: TypeAlias = dict[str, Any]
 
 
 class Candidate(BaseModel):
@@ -518,6 +514,7 @@ class SmartSearchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     search_space: SearchSpace
+    # Each value is the provider-owned search-space mapping for that adapter.
     adapters: dict[str, AdapterSearchConfig] = Field(default_factory=dict)
     workload: Workload
     goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
@@ -573,13 +570,13 @@ class SmartSearchConfig(BaseModel):
         if present_planner:
             raise ValueError(
                 "Planner search fields now belong to an adapter; move "
-                f"{present_planner} to adapters['dynamo.planner'].search_space"
+                f"{present_planner} to adapters['dynamo.planner']"
             )
         present_router = sorted(router_fields.intersection(search_space))
         if present_router:
             raise ValueError(
                 "Router search fields now belong to an adapter; move "
-                f"{present_router} to adapters['dynamo.router'].search_space"
+                f"{present_router} to adapters['dynamo.router']"
             )
         return data
 

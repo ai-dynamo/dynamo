@@ -36,9 +36,9 @@ class ExampleProvider:
         return AdapterReplaySpec(config={"mode": selection["mode"]})
 ```
 
-`generate_search_space` receives the complete adapter-owned search-space mapping plus an isolated
-`SweepContext`. It may validate composite settings, derive dimensions, and store JSON-compatible
-state in `AdapterSearchPlan`.
+`generate_search_space` receives the complete mapping configured directly under the adapter name,
+plus an isolated `SweepContext`. It may validate composite settings, derive dimensions, and store
+JSON-compatible state in `AdapterSearchPlan`.
 
 `materialize_replay` receives that plan, one concrete local selection, and an isolated
 `CandidateContext`. It returns the concrete adapter config and any versioned `RuntimeHookSpec`

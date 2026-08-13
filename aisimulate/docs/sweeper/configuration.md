@@ -23,8 +23,7 @@ search_space:
 
 adapters:
   example.policy:
-    search_space:
-      mode: [balanced, latency]
+    mode: [balanced, latency]
 
 workload:
   isl: 1024
@@ -41,9 +40,9 @@ sweep:
   parallel_evals: 4
 ```
 
-The adapter value is a search space, not one concrete runtime configuration. Its provider validates
-the whole mapping, contributes optimizer dimensions, and later materializes one concrete adapter
-configuration for each candidate.
+The mapping directly under each adapter name is its search space, not one concrete runtime
+configuration. Its provider validates that mapping, contributes optimizer dimensions, and later
+materializes one concrete adapter configuration for each candidate.
 
 ## Backend Fields
 
@@ -81,7 +80,7 @@ KV-feasible, and supported by at least one selected backend.
 
 ## Provider Selection
 
-Adapter names are provider entry-point names. A provider can be installed through the
+Adapter names select matching provider entry points. A provider can be installed through the
 `aisimulate.sweep_config_providers` entry-point group or injected into the `Sweeper` constructor:
 
 ```python

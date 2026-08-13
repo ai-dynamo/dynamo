@@ -67,17 +67,15 @@ search_space:
   agg_max_num_seqs: [512]
 adapters:
   dynamo.router:
-    search_space:
-      mode: [kv_router]
-      overlap_score_credit: [1.0]
-      prefill_load_scale: [4.0]
-      temperature: [0.0]
+    mode: [kv_router]
+    overlap_score_credit: [1.0]
+    prefill_load_scale: [4.0]
+    temperature: [0.0]
   dynamo.planner:
-    search_space:
-      scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
-                       load_180_10, hybrid_180_5, hybrid_600_5]
-      load_sensitivity: [aggressive, default, conservative]
-      fpm_sampling: [small, default, large, fine]
+    scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
+                     load_180_10, hybrid_180_5, hybrid_600_5]
+    load_sensitivity: [aggressive, default, conservative]
+    fpm_sampling: [small, default, large, fine]
 workload:
   trace_path: <toolagent_trace.jsonl>            # open-loop: no replay_concurrency
   trace_format: mooncake
