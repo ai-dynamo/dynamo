@@ -188,8 +188,11 @@ def proportional_clamp_single(
     active, and relaxes only the lower bound. ``max_gpus`` is a hard cap.
 
     Negative ``min_gpus`` or ``max_gpus`` disables the corresponding bound.
-    Returns ``0`` when even ``min_endpoint`` replicas would overshoot the
-    hard ceiling (configuration is infeasible).
+    Returns ``0`` when ``min_endpoint`` replicas cannot fit under the hard
+    ceiling (configuration is infeasible), on either the shrink or the push
+    path. When a floor push rounds up past ``max_gpus``, returns the largest
+    whole-replica count that still fits the ceiling rather than overshooting
+    it.
     """
     if min_gpus < 0 and max_gpus < 0:
         return desired
@@ -215,11 +218,17 @@ def proportional_clamp_single(
     # The floor push rounds up to whole replicas, so it can land above the
     # hard ceiling whenever min_gpus is not a multiple of engine_gpu -- e.g.
     # min_gpus == max_gpus == 5 with a 2-GPU engine needs ceil(5/2) = 3
-    # replicas = 6 GPUs. ``max_gpus`` is never relaxed, so keep the inputs
-    # unchanged and let the caller surface the infeasible band, matching what
-    # proportional_clamp_pair already does on the same path.
+    # replicas = 6 GPUs. ``max_gpus`` is never relaxed, so fall back to the
+    # largest whole-replica count that does fit. Growing to floor(max_gpus /
+    # engine_gpu) = 2 replicas (4 GPUs) lands inside the tolerance band,
+    # whereas abandoning the push would leave the deployment at 1 replica --
+    # under the minimum the operator configured, with a feasible answer
+    # available. This path is only reached when total <= max_gpus, so the
+    # fallback is always >= desired and never a shrink.
     if max_gpus >= 0 and new_replicas * engine_gpu > max_gpus:
-        return desired
+        if max_gpus < min_endpoint * engine_gpu:
+            return 0
+        return max(min_endpoint, math.floor(max_gpus / engine_gpu))
 
     return new_replicas
 
