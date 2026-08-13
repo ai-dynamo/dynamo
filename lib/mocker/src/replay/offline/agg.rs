@@ -2356,6 +2356,91 @@ where
         }
     }
 
+    /// Classify a known stalled interactive state without repeating the
+    /// external-assignment, drained, or next-timestamp probes that established
+    /// it. An open and empty admission source is the only valid no-work pause;
+    /// every other stalled state remains a fail-closed dead end.
+    fn interactive_stalled_status(&self, made_progress: bool) -> anyhow::Result<ReplayStepStatus>
+    where
+        Admission: InteractiveAdmission,
+    {
+        let in_flight = self.cluster_in_flight();
+        let pending_admission = self.admission.pending_requests();
+        if self.admission.is_open() && pending_admission == 0 && in_flight == 0 {
+            return Ok(if made_progress {
+                ReplayStepStatus::Advanced {
+                    now_ms: self.now_ms,
+                }
+            } else {
+                ReplayStepStatus::Quiescent {
+                    now_ms: self.now_ms,
+                }
+            });
+        }
+        bail!(
+            "offline replay reached a dead end with {} in-flight requests, {} pending admission requests, and {} pending placements",
+            in_flight,
+            pending_admission,
+            self.placement.pending_count()
+        )
+    }
+
+    /// Advance the interactive adapter by at most one timestamp and return the
+    /// already-classified public status. The one-shot `run()` kernel remains
+    /// separate: interactive stepping also has open-admission pauses and
+    /// controller-owned placement barriers to preserve.
+    fn interactive_advance_kernel_next(
+        &mut self,
+        initial_progress: bool,
+    ) -> anyhow::Result<ReplayStepStatus>
+    where
+        Admission: InteractiveAdmission,
+    {
+        // Preserve the historical initialization boundary: work settled while
+        // stepping starts is one complete public step, including its status.
+        if initial_progress {
+            return Ok(self.interactive_status(true));
+        }
+
+        // Drained has public-status priority over every other condition. A
+        // pending external placement cannot normally coexist with it, but the
+        // ordering intentionally matches `interactive_status` if invariants
+        // are violated.
+        if self.is_done() {
+            return Ok(ReplayStepStatus::Drained {
+                now_ms: self.now_ms,
+            });
+        }
+        // External placement is a full controller barrier. Do not ask the
+        // admission source for another timestamp while that decision is open.
+        if self.external_assignment_pending() {
+            return Ok(ReplayStepStatus::Quiescent {
+                now_ms: self.now_ms,
+            });
+        }
+        let Some(next_timestamp_ms) = self.next_timestamp() else {
+            return self.interactive_stalled_status(false);
+        };
+
+        self.advance_now_ms(next_timestamp_ms);
+        self.drain_current_timestamp()?;
+
+        // This is the only post-drain state probe. Besides avoiding the prior
+        // repeated `is_done`/barrier/timestamp queries, it retains the exact
+        // fail-closed dead-end check before reporting progress.
+        if self.is_done() {
+            return Ok(ReplayStepStatus::Drained {
+                now_ms: self.now_ms,
+            });
+        }
+        if self.external_assignment_pending() || self.next_timestamp().is_some() {
+            return Ok(ReplayStepStatus::Advanced {
+                now_ms: self.now_ms,
+            });
+        }
+        self.interactive_stalled_status(true)
+    }
+
     fn fail_if_interactive_dead_end(&mut self) -> anyhow::Result<()>
     where
         Admission: InteractiveAdmission,
@@ -2396,15 +2481,7 @@ where
         Admission: InteractiveAdmission,
     {
         let initial_progress = self.ensure_stepping_started()?;
-        if initial_progress {
-            return Ok(self.interactive_status(true));
-        }
-        if self.external_assignment_pending() {
-            return Ok(self.interactive_status(false));
-        }
-        let advanced = self.advance_kernel_next()?;
-        self.fail_if_interactive_dead_end()?;
-        Ok(self.interactive_status(advanced))
+        self.interactive_advance_kernel_next(initial_progress)
     }
 
     pub(in crate::replay::offline) fn interactive_settle_current_time(
@@ -3143,6 +3220,29 @@ mod tests {
     }
 
     fn assert_runtime_visible_state_eq(left: &RoundRobinAggRuntime, right: &RoundRobinAggRuntime) {
+        assert_eq!(left.now_ms.to_bits(), right.now_ms.to_bits());
+        assert_eq!(left.admission.is_open(), right.admission.is_open());
+        assert_eq!(
+            left.admission.pending_requests(),
+            right.admission.pending_requests()
+        );
+        assert_eq!(
+            left.placement.pending_count(),
+            right.placement.pending_count()
+        );
+        let mut left_events = left
+            .events
+            .iter()
+            .map(|event| (event.at_ms.to_bits(), event.seq_no))
+            .collect::<Vec<_>>();
+        let mut right_events = right
+            .events
+            .iter()
+            .map(|event| (event.at_ms.to_bits(), event.seq_no))
+            .collect::<Vec<_>>();
+        left_events.sort_unstable();
+        right_events.sort_unstable();
+        assert_eq!(left_events, right_events);
         let mut left_requests = left
             .requests
             .iter()
@@ -3914,6 +4014,172 @@ mod tests {
             value
         };
         assert_eq!(canonical(&one_shot_report), canonical(&stepped_report));
+    }
+
+    fn interactive_round_robin_runtime(requests: VecDeque<DirectRequest>) -> RoundRobinAggRuntime {
+        let mut runtime = RoundRobinAggRuntime::new_round_robin(
+            &parity_args(EngineType::Vllm),
+            requests,
+            1,
+            ReplayMode::Trace,
+        )
+        .unwrap();
+        runtime.enable_interactive_capture(false, false);
+        runtime
+    }
+
+    fn legacy_interactive_advance_next<PlacementPolicyImpl>(
+        runtime: &mut AggRuntimeImpl<PlacementPolicyImpl, NoEngineEvents, NoReplayMetadata>,
+    ) -> anyhow::Result<ReplayStepStatus>
+    where
+        PlacementPolicyImpl: AggregatedPlacement<(), NoReplayMetadata>,
+    {
+        let initial_progress = runtime.ensure_stepping_started()?;
+        if initial_progress {
+            return Ok(runtime.interactive_status(true));
+        }
+        if runtime.external_assignment_pending() {
+            return Ok(runtime.interactive_status(false));
+        }
+        let advanced = runtime.advance_kernel_next()?;
+        runtime.fail_if_interactive_dead_end()?;
+        Ok(runtime.interactive_status(advanced))
+    }
+
+    #[test]
+    fn interactive_advance_kernel_matches_legacy_advanced_and_drained_statuses() {
+        let requests = VecDeque::from([DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 2,
+            output_token_ids: Some(vec![41, 42]),
+            uuid: Some(Uuid::from_u128(0xa11ce)),
+            arrival_timestamp_ms: Some(10.0),
+            ..Default::default()
+        }]);
+        let mut optimized = interactive_round_robin_runtime(requests.clone());
+        let mut legacy = interactive_round_robin_runtime(requests);
+
+        for _ in 0..32 {
+            let optimized_status = optimized.interactive_advance_next().unwrap();
+            let legacy_status = legacy_interactive_advance_next(&mut legacy).unwrap();
+            assert_eq!(optimized_status, legacy_status);
+            assert_runtime_visible_state_eq(&optimized, &legacy);
+            if matches!(optimized_status, ReplayStepStatus::Drained { .. }) {
+                return;
+            }
+            assert!(matches!(
+                optimized_status,
+                ReplayStepStatus::Advanced { .. }
+            ));
+        }
+        panic!("interactive request did not drain within the step bound");
+    }
+
+    #[test]
+    fn interactive_advance_kernel_matches_legacy_open_admission_quiescence() {
+        let make_runtime = || {
+            let driver = WorkloadDriver::new_open_agentic_without_replay_hashes(4, 4).unwrap();
+            let mut runtime = RoundRobinAggRuntime::new_round_robin_workload(
+                &parity_args(EngineType::Vllm),
+                driver,
+                1,
+                ReplayMode::Trace,
+            )
+            .unwrap();
+            runtime.enable_interactive_capture(false, false);
+            runtime
+        };
+        let mut optimized = make_runtime();
+        let mut legacy = make_runtime();
+
+        let optimized_status = optimized.interactive_advance_next().unwrap();
+        let legacy_status = legacy_interactive_advance_next(&mut legacy).unwrap();
+        assert_eq!(optimized_status, legacy_status);
+        assert_eq!(
+            optimized_status,
+            ReplayStepStatus::Quiescent { now_ms: 0.0 }
+        );
+        assert_runtime_visible_state_eq(&optimized, &legacy);
+    }
+
+    #[test]
+    fn interactive_advance_kernel_matches_legacy_dead_end_error() {
+        let mut optimized = interactive_round_robin_runtime(VecDeque::new());
+        let mut legacy = interactive_round_robin_runtime(VecDeque::new());
+        optimized.stepping_started = true;
+        legacy.stepping_started = true;
+        // A placement released inside an incomplete timestamp contributes to
+        // in-flight ownership but has no independently scheduled wakeup. The
+        // generic kernel must therefore reject this synthetic stalled state.
+        optimized
+            .deferred_timestamp_placements
+            .push(deferred_placement(0xdead));
+        legacy
+            .deferred_timestamp_placements
+            .push(deferred_placement(0xdead));
+
+        let optimized_error = optimized
+            .interactive_advance_next()
+            .unwrap_err()
+            .to_string();
+        let legacy_error = legacy_interactive_advance_next(&mut legacy)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(optimized_error, legacy_error);
+        assert_eq!(
+            optimized_error,
+            "offline replay reached a dead end with 1 in-flight requests, 0 pending admission requests, and 0 pending placements"
+        );
+    }
+
+    #[test]
+    fn interactive_advance_kernel_preserves_external_assignment_barrier() {
+        let uuid = Uuid::from_u128(0xba77e2);
+        let make_runtime = || {
+            let driver = WorkloadDriver::new_open_agentic_without_replay_hashes(4, 4).unwrap();
+            let mut runtime = ExternalAggRuntime::new_external_workload(
+                &parity_args(EngineType::Vllm),
+                driver,
+                1,
+            )
+            .unwrap();
+            runtime.enable_interactive_capture(true, false);
+            runtime.stepping_started = true;
+            runtime
+        };
+        let make_request = || {
+            ReplayRequestPayload::materialized(DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 1,
+                uuid: Some(uuid),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            })
+        };
+        let mut optimized = make_runtime();
+        let mut legacy = make_runtime();
+        for runtime in [&mut optimized, &mut legacy] {
+            assert!(matches!(
+                runtime
+                    .placement
+                    .place(&make_request(), (), None, 0.0)
+                    .unwrap()
+                    .decision,
+                PlacementDecision::Queued
+            ));
+        }
+
+        assert_eq!(
+            optimized.interactive_advance_next().unwrap(),
+            ReplayStepStatus::Quiescent { now_ms: 0.0 }
+        );
+        assert_eq!(
+            legacy_interactive_advance_next(&mut legacy).unwrap(),
+            ReplayStepStatus::Quiescent { now_ms: 0.0 }
+        );
+        assert!(optimized.placement.is_pending(uuid));
+        assert!(legacy.placement.is_pending(uuid));
+        assert_eq!(optimized.now_ms, legacy.now_ms);
     }
 
     fn fast_router_args() -> MockEngineArgs {
