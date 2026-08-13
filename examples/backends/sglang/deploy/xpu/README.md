@@ -35,6 +35,8 @@ docker build -t docker.io/library/dynamo-planner:latest \
   -f container/dynamo-planner-cuda13.0-amd64-rendered.Dockerfile .
 ```
 
+The Planner template uses `optimization_target: sla` and requires Prometheus. Install `kube-prometheus-stack` as described in the [Dynamo Platform installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/install-dynamo.md). Planner uses `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090` by default. If your Prometheus service uses a different address, set `PROMETHEUS_ENDPOINT` in the Planner container.
+
 The manifests use `imagePullPolicy: IfNotPresent`. Load these images on every eligible Kubernetes node, or push them to a registry and update the image references. If you build from a Dynamo version other than 1.4.0, update each `runtimeVersionOverride` to match.
 
 Create the Hugging Face token secret:
