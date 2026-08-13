@@ -50,7 +50,7 @@ spec:
 
 ## DisaggregatedSet Path
 
-Use DS when one object should own multiple multinode worker roles. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.9.0`), then add `nvidia.com/enable-disaggregatedset: "true"` to the DGD. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`.
+Use DS when one object should own multiple multinode worker roles. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`), then add `nvidia.com/enable-disaggregatedset: "true"` to the DGD. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`.
 
 Dynamo keeps the DS pathway selected while the opt-in annotation remains. If the DS API is unavailable or the requested roles are unsupported, including when a selected worker uses `scalingAdapter`, the operator reports `DisaggregatedSetEligible=False` and leaves the current DS workloads in place. Remove the annotation to switch explicitly to the standard DCD pathway.
 

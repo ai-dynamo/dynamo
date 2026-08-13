@@ -17,7 +17,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	"github.com/stretchr/testify/require"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/tools/events"
 )
 
 func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
@@ -53,7 +54,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	}
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        testEnv.Client(),
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: runtimeConfig,
 	}
@@ -62,9 +63,16 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	)
 	desired, err := workloads.generateDisaggregatedSet(t.Context(), dgd, dcds, selection)
 	require.NoError(t, err)
-	modified, _, err := workloads.syncDisaggregatedSet(t.Context(), dgd, desired)
+	_, found, err := unstructured.NestedFieldNoCopy(desired.Object, "spec", "slices")
+	require.NoError(t, err)
+	require.False(t, found, "DGD does not expose slice cardinality before the grouping API lands")
+	modified, current, err := workloads.syncDisaggregatedSet(t.Context(), dgd, desired)
 	require.NoError(t, err)
 	require.True(t, modified)
+	slices, found, err := unstructured.NestedInt64(current.Object, "spec", "slices")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, int64(1), slices, "the LWS v0.10 CRD defaults the transitional pathway to one slice")
 
 	t.Log("Reconcile identical desired state after API defaulting")
 	desired, err = workloads.generateDisaggregatedSet(t.Context(), dgd, dcds, selection)
