@@ -128,7 +128,8 @@ main(int argc, char** argv)
   sockaddr_un address{};
   address.sun_family = AF_UNIX;
   std::strcpy(address.sun_path, socket_path.c_str());
-  if (bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0 || listen(listener.get(), 16) < 0) {
+  if (bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0 ||
+      listen(listener.get(), 16) < 0) {
     std::cerr << "listen: " << std::strerror(errno) << '\n';
     return 1;
   }

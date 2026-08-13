@@ -6,7 +6,8 @@
 namespace snapshot::pagebroker {
 class CheckpointTransactionDescriptor {
  public:
-  CheckpointTransactionDescriptor(Path staging_directory, StorageBackend destination_storage, TransferEngineType engine_type);
+  CheckpointTransactionDescriptor(
+      Path staging_directory, StorageBackend destination_storage, TransferEngineType engine_type);
 
   const Path& staging_directory() const;
   const StorageBackend& destination_storage() const;
