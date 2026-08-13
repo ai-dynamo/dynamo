@@ -238,6 +238,10 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         assert selected["worker_id"] == 1
         assert selected["dp_rank"] == 0
         assert selected["endpoint"] == "http://worker-1:8000"
+
+        # Unknown releases are idempotent, but both terminal paths must be exposed.
+        await service.free_reservation("unknown-completed-selection")
+        await service.abort_reservation("unknown-aborted-selection")
     finally:
         await service.shutdown_async()
 
