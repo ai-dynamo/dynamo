@@ -21,9 +21,17 @@ features — the first is what makes the second possible.
 > embedded Dynamo integration are real and tested. The HTTP/SSE, WebSocket, and
 > gRPC transports and the Redis store are not yet implemented.
 
-`roundhouse` is a **separate Cargo workspace**, deliberately excluded from the
-Dynamo workspace. Extracting it into its own repository means changing the two
-`dynamo-*` path dependencies to versions — nothing else.
+Roundhouse depends on Dynamo but is not part of it. It pins two Dynamo crates
+(`dynamo-kv-router` with the `standalone-selection` feature, and `dynamo-tokens`)
+to an upstream commit of [`ai-dynamo/dynamo`](https://github.com/ai-dynamo/dynamo)
+and builds independently.
+
+Those come from git rather than crates.io because the newest published
+`dynamo-kv-router` (1.3.1) predates DEP #10321: it neither exports the embeddable
+`SelectionService` nor uses `routing_group` (it still says `tenant_id`). The
+pinned git dependency also resolves `dynamo-truthy`, which the workspace needs
+and which is unpublished. When a release carrying the selection service reaches
+crates.io, the pin becomes a plain version.
 
 ## Layout
 
@@ -117,12 +125,15 @@ Requires the Rust toolchain pinned in `rust-toolchain.toml` and system
 `libzmq3-dev` (pulled in transitively by `dynamo-kv-router/standalone-selection`).
 
 ```bash
-apt-get install -y libzmq3-dev
+apt-get install -y libzmq3-dev   # or: brew install zeromq
 cargo test --workspace
 ```
 
-No GPUs, no worker processes, and no network are needed: the selection plane
-runs inside the test binary.
+The first build clones `ai-dynamo/dynamo` to resolve the pinned Dynamo crates,
+so expect it to take a while; later builds reuse the cached checkout.
+
+Once built, the tests need no GPUs, no worker processes, and no network: the
+selection plane runs inside the test binary.
 
 ## What the tests establish
 

@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Independent workspace: deliberately excluded from the top-level Dynamo
-# workspace so this tree can be extracted into its own repository without
-# rewriting anything but the `dynamo-*` path dependencies below.
 [workspace]
 resolver = "3"
 members = [
@@ -23,20 +20,22 @@ roundhouse-core = { path = "crates/roundhouse-core" }
 roundhouse-fleet = { path = "crates/roundhouse-fleet" }
 roundhouse-store-redis = { path = "crates/roundhouse-store-redis" }
 
-# Dynamo crates.
+# Dynamo crates, pinned to an upstream commit of ai-dynamo/dynamo.
 #
-# Path deps while this lives inside the Dynamo tree. On extraction these become
-# `{ version = "1.4" }` from crates.io -- nothing else in the tree changes.
+# Not from crates.io: the newest published `dynamo-kv-router` (1.3.1) predates
+# DEP #10321, so it neither exports the embeddable `SelectionService` nor uses
+# `routing_group` (it still says `tenant_id`). A pinned git dependency also
+# resolves `dynamo-truthy`, which the workspace needs and which is unpublished.
 #
 # Deliberately NOT depending on `dynamo-llm`: its default `block-manager`
 # feature pulls `nixl-sys` and `cudarc`, which would drag CUDA into a service
 # that never touches a GPU. `dynamo-kv-router` under `standalone-selection`
-# carries no `dynamo-runtime` dependency, enforced by
+# carries no `dynamo-runtime` dependency, enforced upstream by
 # `lib/kv-router/src/services/CLAUDE.md`.
-dynamo-kv-router = { path = "../lib/kv-router", version = "1.4.0", default-features = false, features = [
+dynamo-kv-router = { git = "https://github.com/ai-dynamo/dynamo.git", rev = "ac7b7513790ef1d619b46f805aea03c9f21200ba", default-features = false, features = [
     "standalone-selection",
 ] }
-dynamo-tokens = { path = "../lib/tokens", version = "1.4.0" }
+dynamo-tokens = { git = "https://github.com/ai-dynamo/dynamo.git", rev = "ac7b7513790ef1d619b46f805aea03c9f21200ba" }
 
 # Pins match the Dynamo workspace so a future move into `lib/` is a no-op.
 anyhow = "1"
