@@ -39,10 +39,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 )
 
 // makeCheckpointReconcilerWithInterceptor mirrors makeCheckpointReconciler but threads
@@ -59,8 +60,8 @@ func makeCheckpointReconcilerWithInterceptor(s *runtime.Scheme, funcs intercepto
 
 // ownedCheckpointSnapshot builds a PodSnapshot carrying the owner search label AND a controller
 // owner ref to ckpt, so findOwnedPodSnapshot matches it.
-func ownedCheckpointSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, name string) *nvidiacomv1alpha1.PodSnapshot {
-	snap := &nvidiacomv1alpha1.PodSnapshot{
+func ownedCheckpointSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, name string) *snapshotv1alpha1.PodSnapshot {
+	snap := &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: testNamespace,
@@ -106,7 +107,7 @@ func TestCheckpointCreatePodSnapshot_CreateErrorEmitsEvent(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
 	funcs := interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, ok := obj.(*nvidiacomv1alpha1.PodSnapshot); ok {
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok {
 				return errors.New("apiserver unavailable")
 			}
 			return c.Create(ctx, obj, opts...)

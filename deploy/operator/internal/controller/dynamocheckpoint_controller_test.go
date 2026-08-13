@@ -23,13 +23,14 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -70,6 +71,7 @@ var defaultCheckpointJobName = snapshotprotocol.GetCheckpointJobName(testHash, s
 func checkpointTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(s)
+	_ = snapshotv1alpha1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
@@ -905,7 +907,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 
-		var snaps nvidiacomv1alpha1.PodSnapshotList
+		var snaps snapshotv1alpha1.PodSnapshotList
 		require.NoError(t, r.List(ctx, &snaps, client.InNamespace(testNamespace)))
 		assert.Empty(t, snaps.Items)
 	})
@@ -918,7 +920,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
-		snap := &nvidiacomv1alpha1.PodSnapshot{}
+		snap := &snapshotv1alpha1.PodSnapshot{}
 		require.NoError(t, r.Get(ctx,
 			types.NamespacedName{Name: podSnapshotName(ckpt), Namespace: testNamespace}, snap))
 		assert.Equal(t, ckpt.Name, snap.Labels[consts.SnapshotOwnerLabel])
@@ -940,7 +942,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
-		var snaps nvidiacomv1alpha1.PodSnapshotList
+		var snaps snapshotv1alpha1.PodSnapshotList
 		require.NoError(t, r.List(ctx, &snaps, client.InNamespace(testNamespace)))
 		assert.Empty(t, snaps.Items)
 
@@ -952,9 +954,9 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 	// ownedSnapshot returns a PodSnapshot owned by ckpt and bound to a PodSnapshotContent,
 	// carrying the given terminal condition (empty type leaves it Pending).
-	ownedSnapshot := func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, condType string) *nvidiacomv1alpha1.PodSnapshot {
+	ownedSnapshot := func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, condType string) *snapshotv1alpha1.PodSnapshot {
 		bound := "podsnapshotcontent-" + testHash
-		snap := &nvidiacomv1alpha1.PodSnapshot{
+		snap := &snapshotv1alpha1.PodSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      podSnapshotName(ckpt),
 				Namespace: testNamespace,
@@ -967,10 +969,10 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 					Controller: ptr.To(true),
 				}},
 			},
-			Spec: nvidiacomv1alpha1.PodSnapshotSpec{
-				Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}},
+			Spec: snapshotv1alpha1.PodSnapshotSpec{
+				Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}},
 			},
-			Status: nvidiacomv1alpha1.PodSnapshotStatus{BoundPodSnapshotContentName: &bound},
+			Status: snapshotv1alpha1.PodSnapshotStatus{BoundPodSnapshotContentName: &bound},
 		}
 		if condType != "" {
 			snap.Status.Conditions = []metav1.Condition{{
@@ -986,7 +988,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 	t.Run("PodSnapshot Ready with JobComplete transitions checkpoint to Ready", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := markCheckpointJobComplete(newCheckpointJob(defaultCheckpointJobName))
-		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
+		snap := ownedSnapshot(ckpt, snapshotv1alpha1.PodSnapshotConditionReady)
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
 		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
@@ -1007,7 +1009,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		// Capture done; helpers (e.g. gms-saver) may still be running.
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := newCheckpointJob(defaultCheckpointJobName)
-		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
+		snap := ownedSnapshot(ckpt, snapshotv1alpha1.PodSnapshotConditionReady)
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
 		result, err := r.handleCreating(ctx, ckpt)
@@ -1028,7 +1030,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Status:  corev1.ConditionTrue,
 			Message: "gms-saver exited 1",
 		}}
-		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
+		snap := ownedSnapshot(ckpt, snapshotv1alpha1.PodSnapshotConditionReady)
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
@@ -1043,7 +1045,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 	t.Run("PodSnapshot Failed transitions checkpoint to Failed", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := newCheckpointJob(defaultCheckpointJobName)
-		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+		snap := ownedSnapshot(ckpt, snapshotv1alpha1.PodSnapshotConditionFailed)
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
@@ -1058,7 +1060,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 	t.Run("unbound PodSnapshot Failed transitions checkpoint to Failed", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := newCheckpointJob(defaultCheckpointJobName)
-		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+		snap := ownedSnapshot(ckpt, snapshotv1alpha1.PodSnapshotConditionFailed)
 		snap.Status.BoundPodSnapshotContentName = nil // failed before binding
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
@@ -1168,7 +1170,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Zero(t, result.RequeueAfter, "watch-driven: Owns(&PodSnapshot) re-enqueues for observation")
 
 		// A missing snapshot is recreated (not treated as terminal), and its name is recorded.
-		snap := &nvidiacomv1alpha1.PodSnapshot{}
+		snap := &snapshotv1alpha1.PodSnapshot{}
 		require.NoError(t, r.Get(ctx,
 			types.NamespacedName{Name: podSnapshotName(ckpt), Namespace: testNamespace}, snap))
 		assert.Equal(t, podNameFromJob(job.Name)+"-uid", string(snap.Spec.Source.PodRef.UID),

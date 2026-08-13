@@ -43,11 +43,12 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 )
 
 const checkpointDisabledMessage = "checkpoint functionality is disabled in the operator configuration"
@@ -453,14 +454,14 @@ func (r *CheckpointReconciler) handleCreatingJobGone(ctx context.Context, ckpt *
 // Ready requires a successful bound PodSnapshot and a live JobComplete. JobFailed wins even
 // after PodSnapshot Ready. If the Job is already gone while still Creating, fail rather than
 // Ready (phase=Ready is the durable success record, set only while the Job is present).
-func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *nvidiacomv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
+func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
 	// Failed can land before bind; Ready is only meaningful once bound.
-	if nvidiacomv1alpha1.IsPodSnapshotFailed(snap) {
-		return r.failCreating(ctx, ckpt, "PodSnapshotFailed", podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionFailed))
+	if snapshotv1alpha1.IsPodSnapshotFailed(snap) {
+		return r.failCreating(ctx, ckpt, "PodSnapshotFailed", podSnapshotConditionMessage(snap, snapshotv1alpha1.PodSnapshotConditionFailed))
 	}
 
 	podSnapshotReady := snap.Status.BoundPodSnapshotContentName != nil &&
-		nvidiacomv1alpha1.IsPodSnapshotSucceeded(snap)
+		snapshotv1alpha1.IsPodSnapshotSucceeded(snap)
 
 	// Helper failure must win even if capture already succeeded (Owns(&Job) watch).
 	if failed, message := checkpointJobFailed(job); failed {
@@ -479,7 +480,7 @@ func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvi
 		return ctrl.Result{}, nil
 	}
 
-	return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionReady))
+	return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, snapshotv1alpha1.PodSnapshotConditionReady))
 }
 
 // failCreating marks the DynamoCheckpoint Failed with a completion-condition reason.
@@ -588,7 +589,7 @@ func checkpointReadyForJobCleanup(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) bool
 }
 
 // podSnapshotConditionMessage returns the message of the named PodSnapshot condition, or "".
-func podSnapshotConditionMessage(snap *nvidiacomv1alpha1.PodSnapshot, condType string) string {
+func podSnapshotConditionMessage(snap *snapshotv1alpha1.PodSnapshot, condType string) string {
 	if cond := meta.FindStatusCondition(snap.Status.Conditions, condType); cond != nil {
 		return cond.Message
 	}
@@ -708,7 +709,7 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		Owns(&nvidiacomv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
+		Owns(&snapshotv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore create (we just created it). Watch update (status mirror) and
 			// delete (re-enqueue to recreate / unblock). Delete is safe: reconcile
 			// exits at the deletion-timestamp guard before reaching observePodSnapshot.

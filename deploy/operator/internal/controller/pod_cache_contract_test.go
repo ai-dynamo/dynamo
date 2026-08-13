@@ -27,7 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 )
 
 func TestProjectedPodSupportsControllerContract(t *testing.T) {
@@ -116,7 +116,8 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, pod.Name, snapshot.Spec.Source.PodRef.Name)
 		assert.Equal(t, pod.UID, snapshot.Spec.Source.PodRef.UID)
-		require.NoError(t, validateSourcePod(snapshot, pod))
+		// Source-pod validation (scheduled, UID match) now lives in the external
+		// Snapshot operator's PodSnapshot reconciler, not here.
 	})
 
 	t.Run("model", func(t *testing.T) {
