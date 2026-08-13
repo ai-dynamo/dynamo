@@ -172,6 +172,7 @@ worker_selection:
 - `type` selects a registered provider.
 - `name` identifies one configured instance.
 - `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select separate instances for their matching worker pools.
+- `worker_selection.encode` applies only to surface-carrying encode worker sets that construct the standard KV chooser. The surface-less multimodal encoder hop uses `EncoderRouter` and round-robin selection instead.
 - Deprecated `worker_selection.default` fills roles without an explicit selection for compatibility with v1.4 policy files. Do not combine it with `worker_selection.aggregated`.
 - `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections.
 - `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.

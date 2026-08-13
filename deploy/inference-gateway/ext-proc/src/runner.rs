@@ -154,7 +154,7 @@ fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()
 fn warn_if_epp_ignores_stage_policies(config: &KvRouterConfig) -> Result<()> {
     if config.has_explicit_stage_worker_selection_policy()? {
         tracing::warn!(
-            "worker_selection.prefill, worker_selection.decode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are ignored by aggregated EPP selection"
+            "worker_selection.prefill, worker_selection.decode, worker_selection.encode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are ignored by aggregated EPP selection"
         );
     }
     Ok(())
