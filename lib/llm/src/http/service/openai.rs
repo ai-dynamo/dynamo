@@ -4512,6 +4512,8 @@ async fn audio_speech(
         .await
         .inspect_err(|error_response| {
             let error_type = match error_response.0 {
+                // Worker-side InvalidArgument messages are not guaranteed to use
+                // the "Validation:" prefix expected by the shared classifier.
                 StatusCode::BAD_REQUEST => ErrorType::Validation,
                 _ => extract_error_type_from_response(error_response),
             };
