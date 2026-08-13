@@ -1404,18 +1404,93 @@ where
 
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
+        let Some(first) = pop_ready_worker_completions(&mut self.events, self.now_ms) else {
+            return Ok(false);
+        };
+        let Some(second) = pop_ready_worker_completions(&mut self.events, self.now_ms) else {
+            match first {
+                ReadyWorkerCompletions::Single(payload) => {
+                    self.settle_worker_completion(payload)?;
+                }
+                ReadyWorkerCompletions::Batch(payloads) => {
+                    self.settle_worker_completion_batch(payloads)?;
+                }
+            }
+            return Ok(true);
+        };
+
         let mut payloads = SmallVec::<[WorkerCompletionPayload<Observation::Batch>; 2]>::new();
+        for completions in [first, second] {
+            match completions {
+                ReadyWorkerCompletions::Single(payload) => payloads.push(payload),
+                ReadyWorkerCompletions::Batch(batch) => payloads.extend(batch),
+            }
+        }
         while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
             match completions {
                 ReadyWorkerCompletions::Single(payload) => payloads.push(payload),
                 ReadyWorkerCompletions::Batch(batch) => payloads.extend(batch),
             }
         }
-        if payloads.is_empty() {
-            return Ok(false);
-        }
         self.settle_worker_completion_batch(payloads)?;
         Ok(true)
+    }
+
+    /// Settle the common singleton completion without staging it or repeatedly
+    /// walking its output signals. Multi-signal payloads retain the timestamp-wide
+    /// phase ordering in [`Self::settle_committed_worker_completion_batch`].
+    #[inline]
+    fn settle_worker_completion(
+        &mut self,
+        payload: WorkerCompletionPayload<Observation::Batch>,
+    ) -> anyhow::Result<()> {
+        let payload = self.commit_worker_completion(payload)?;
+        if payload.output_signals.len() > 1 {
+            let mut settled = SmallVec::new();
+            settled.push(payload);
+            return self.settle_committed_worker_completion_batch(settled);
+        }
+
+        self.traffic.on_accept_length_sample(
+            payload.accept_length_output_tokens,
+            payload.accept_length_decode_forwards,
+        );
+        let mut placements = if let Some(signal) = payload.output_signals.first() {
+            self.process_output_token(signal)?;
+            let mut placements = self.process_output_signal(signal)?;
+            if signal.completed {
+                placements.extend(self.placement.settle_terminal_feedback(self.now_ms)?);
+            }
+            placements
+        } else {
+            Vec::new()
+        };
+        Observation::record_ingestion(
+            &payload.engine_events,
+            WorkerPool::Agg,
+            KvIngestBoundary::PassEnd,
+            self.now_ms,
+        )?;
+        placements.extend(self.placement.observe(payload.engine_events, self.now_ms)?);
+        self.deferred_timestamp_placements.extend(placements);
+        Ok(())
+    }
+
+    /// Commit engine ownership for one completion before any lifecycle or
+    /// observation is published.
+    #[inline]
+    fn commit_worker_completion(
+        &mut self,
+        payload: WorkerCompletionPayload<Observation::Batch>,
+    ) -> anyhow::Result<WorkerCompletionPayload<Observation::Batch>> {
+        debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
+        let mut payload = self.engine.on_scheduled_completion(payload)?;
+        if self.collect_fpm
+            && let Some(fpm) = payload.fpm.take()
+        {
+            self.record_fpm(payload.worker_idx, fpm)?;
+        }
+        Ok(payload)
     }
 
     /// Settle one timestamp-wide completion phase. Engine ownership changes
@@ -1427,16 +1502,17 @@ where
     ) -> anyhow::Result<()> {
         let mut settled = SmallVec::<[WorkerCompletionPayload<Observation::Batch>; 2]>::new();
         for payload in payloads {
-            debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
-            let mut payload = self.engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm.take()
-            {
-                self.record_fpm(payload.worker_idx, fpm)?;
-            }
-            settled.push(payload);
+            settled.push(self.commit_worker_completion(payload)?);
         }
 
+        self.settle_committed_worker_completion_batch(settled)
+    }
+
+    /// Publish an already-committed timestamp-wide completion phase.
+    fn settle_committed_worker_completion_batch(
+        &mut self,
+        settled: SmallVec<[WorkerCompletionPayload<Observation::Batch>; 2]>,
+    ) -> anyhow::Result<()> {
         let mut placements = Vec::new();
         for payload in &settled {
             self.traffic.on_accept_length_sample(
@@ -1464,14 +1540,18 @@ where
         {
             placements.extend(self.process_output_signal(progress)?);
         }
+        let mut had_terminal_feedback = false;
         for terminal in settled
             .iter()
             .flat_map(|payload| payload.output_signals.iter())
             .filter(|signal| signal.completed)
         {
             placements.extend(self.process_output_signal(terminal)?);
+            had_terminal_feedback = true;
         }
-        placements.extend(self.placement.settle_terminal_feedback(self.now_ms)?);
+        if had_terminal_feedback {
+            placements.extend(self.placement.settle_terminal_feedback(self.now_ms)?);
+        }
         for payload in settled {
             Observation::record_ingestion(
                 &payload.engine_events,
@@ -1575,7 +1655,14 @@ where
         }
         self.apply_engine_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
         let had_immediate_completions = !effects.immediate_completions.is_empty();
-        if had_immediate_completions {
+        if effects.immediate_completions.len() == 1 {
+            self.settle_worker_completion(
+                effects
+                    .immediate_completions
+                    .pop()
+                    .expect("singleton completion was checked"),
+            )?;
+        } else if had_immediate_completions {
             self.settle_worker_completion_batch(effects.immediate_completions)?;
         }
         if let Some(scheduled) = effects.scheduled_completion {
@@ -2471,12 +2558,574 @@ mod tests {
     use super::*;
     use crate::common::protocols::{EngineType, G1Backend, SglangArgs};
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+    use crate::replay::offline::core::PlacementEffects;
     use crate::replay::offline::extensions::kv_router::{ReplayKvRouterConfig, RouterQueuePolicy};
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
     use rstest::rstest;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CompletionPhaseEvent {
+        Token(Uuid, u32),
+        Progress(Uuid),
+        TerminalFeedback(Uuid),
+        AdmissionTerminal(Uuid),
+        TerminalSettlement,
+        Observation,
+    }
+
+    struct CompletionAuditAdmission {
+        inner: AdmissionQueue<()>,
+        events: Rc<RefCell<Vec<CompletionPhaseEvent>>>,
+    }
+
+    impl CoreAdmissionSource for CompletionAuditAdmission {
+        type Request = ReplayRequestPayload;
+        type Metadata = ();
+        type TerminalStatus = WorkloadTerminalStatus;
+        type CascadedTerminal = CascadedWorkloadTerminal;
+
+        fn next_internal_event_ms(&mut self) -> Option<f64> {
+            CoreAdmissionSource::next_internal_event_ms(&mut self.inner)
+        }
+
+        fn drain_ready(
+            &mut self,
+            now_ms: f64,
+            cluster_in_flight: usize,
+        ) -> anyhow::Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
+            CoreAdmissionSource::drain_ready(&mut self.inner, now_ms, cluster_in_flight)
+        }
+
+        fn drain_ready_up_to(
+            &mut self,
+            now_ms: f64,
+            cluster_in_flight: usize,
+            limit: usize,
+        ) -> anyhow::Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
+            CoreAdmissionSource::drain_ready_up_to(
+                &mut self.inner,
+                now_ms,
+                cluster_in_flight,
+                limit,
+            )
+        }
+
+        fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> anyhow::Result<()> {
+            self.events
+                .borrow_mut()
+                .push(CompletionPhaseEvent::Token(request_id, token_id));
+            CoreAdmissionSource::on_output_token(&mut self.inner, request_id, token_id)
+        }
+
+        fn on_terminal(
+            &mut self,
+            request_id: Uuid,
+            now_ms: f64,
+            status: WorkloadTerminalStatus,
+        ) -> anyhow::Result<Vec<CascadedWorkloadTerminal>> {
+            self.events
+                .borrow_mut()
+                .push(CompletionPhaseEvent::AdmissionTerminal(request_id));
+            CoreAdmissionSource::on_terminal(&mut self.inner, request_id, now_ms, status)
+        }
+
+        fn is_drained(&self) -> bool {
+            CoreAdmissionSource::is_drained(&self.inner)
+        }
+
+        fn total_requests(&self) -> usize {
+            CoreAdmissionSource::total_requests(&self.inner)
+        }
+    }
+
+    struct CompletionAuditPlacement {
+        events: Rc<RefCell<Vec<CompletionPhaseEvent>>>,
+        next_scheduler: usize,
+        scheduler_count: usize,
+        progress_release: Option<Placement>,
+        terminal_release: Option<Placement>,
+        observation_release: Option<Placement>,
+    }
+
+    impl PlacementPolicy<ReplayRequestPayload> for CompletionAuditPlacement {
+        type Metadata = ();
+        type Observation = ();
+
+        fn place(
+            &mut self,
+            request: &ReplayRequestPayload,
+            _metadata: (),
+            _session_id: Option<String>,
+            _now_ms: f64,
+        ) -> anyhow::Result<PlacementEffects> {
+            let request_id = request
+                .metadata()
+                .uuid
+                .expect("audit request must retain its UUID");
+            let scheduler_id = self.next_scheduler % self.scheduler_count;
+            self.next_scheduler += 1;
+            Ok(PlacementEffects {
+                decision: PlacementDecision::Immediate(Placement {
+                    request_id,
+                    scheduler_id,
+                    reported_overlap_tokens: None,
+                    planner_cache_sample: None,
+                }),
+                released: Vec::new(),
+            })
+        }
+
+        fn observe(&mut self, _observation: (), _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+            self.events
+                .borrow_mut()
+                .push(CompletionPhaseEvent::Observation);
+            Ok(self.observation_release.take().into_iter().collect())
+        }
+
+        fn cancel_pending(&mut self, _request_id: Uuid) -> bool {
+            false
+        }
+
+        fn request_terminal(
+            &mut self,
+            _request_id: Uuid,
+            _now_ms: f64,
+        ) -> anyhow::Result<Vec<Placement>> {
+            Ok(Vec::new())
+        }
+
+        fn request_terminal_feedback(
+            &mut self,
+            request_id: Uuid,
+            _now_ms: f64,
+        ) -> anyhow::Result<()> {
+            self.events
+                .borrow_mut()
+                .push(CompletionPhaseEvent::TerminalFeedback(request_id));
+            Ok(())
+        }
+
+        fn settle_terminal_feedback(&mut self, _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+            self.events
+                .borrow_mut()
+                .push(CompletionPhaseEvent::TerminalSettlement);
+            Ok(self.terminal_release.take().into_iter().collect())
+        }
+
+        fn prefill_completed(
+            &mut self,
+            request_id: Uuid,
+            _now_ms: f64,
+        ) -> anyhow::Result<Vec<Placement>> {
+            self.events
+                .borrow_mut()
+                .push(CompletionPhaseEvent::Progress(request_id));
+            Ok(self.progress_release.take().into_iter().collect())
+        }
+
+        fn pending_count(&self) -> usize {
+            0
+        }
+
+        fn worker_ready(
+            &mut self,
+            _worker: WorkerTopology,
+            _now_ms: f64,
+        ) -> anyhow::Result<Vec<Placement>> {
+            Ok(Vec::new())
+        }
+
+        fn worker_draining(
+            &mut self,
+            _worker: WorkerTopology,
+            _now_ms: f64,
+        ) -> anyhow::Result<Vec<Placement>> {
+            Ok(Vec::new())
+        }
+
+        fn worker_removed(
+            &mut self,
+            _worker: WorkerTopology,
+            _now_ms: f64,
+        ) -> anyhow::Result<Vec<Placement>> {
+            Ok(Vec::new())
+        }
+
+        fn topology_settled(&mut self, _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl AggregatedPlacement<(), ()> for CompletionAuditPlacement {
+        fn is_router(&self) -> bool {
+            false
+        }
+
+        fn debug_router_snapshot(&self, _now_ms: f64) -> Option<OfflineRouterSnapshot> {
+            None
+        }
+    }
+
+    type CompletionAuditRuntime =
+        AggRuntimeImpl<CompletionAuditPlacement, NoEngineEvents, (), CompletionAuditAdmission>;
+
+    fn output_signal(uuid: Uuid, token_id: Option<u32>, completed: bool) -> OutputSignal {
+        OutputSignal {
+            uuid,
+            token_id,
+            completed,
+            rejected: false,
+            handoff_delay_ms: None,
+            cached_tokens: None,
+        }
+    }
+
+    fn completion_payload(
+        worker_idx: usize,
+        output_signals: Vec<OutputSignal>,
+    ) -> WorkerCompletionPayload<()> {
+        WorkerCompletionPayload {
+            stage: SimulationWorkerStage::Aggregated,
+            worker_idx,
+            completed_requests: usize::from(output_signals.iter().any(|signal| signal.completed)),
+            output_signals,
+            lifecycle_events: Vec::new(),
+            engine_events: (),
+            progress: Default::default(),
+            fpm: None,
+            accept_length_output_tokens: 0,
+            accept_length_decode_forwards: 0,
+        }
+    }
+
+    fn completion_test_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .num_gpu_blocks(256)
+            .max_num_batched_tokens(Some(8192))
+            .max_num_seqs(Some(8))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .build()
+            .unwrap()
+    }
+
+    fn runtime_with_busy_requests(
+        request_ids: &[Uuid],
+        num_workers: usize,
+    ) -> RoundRobinAggRuntime {
+        let mut runtime = RoundRobinAggRuntime::new_round_robin(
+            &completion_test_args(),
+            request_ids
+                .iter()
+                .enumerate()
+                .map(|(index, uuid)| DirectRequest {
+                    tokens: vec![index as u32 + 1; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(*uuid),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                })
+                .collect(),
+            num_workers,
+            ReplayMode::Trace,
+        )
+        .unwrap()
+        .with_per_request_records(true);
+        runtime.ensure_stepping_started().unwrap();
+        assert!(
+            runtime
+                .engine
+                .debug_snapshots()
+                .iter()
+                .all(|worker| worker.busy),
+            "test payloads must settle genuinely committed worker passes"
+        );
+        runtime
+    }
+
+    fn deferred_placement(request_id: u128) -> Placement {
+        Placement {
+            request_id: Uuid::from_u128(request_id),
+            scheduler_id: 0,
+            reported_overlap_tokens: None,
+            planner_cache_sample: None,
+        }
+    }
+
+    fn runtime_with_audited_busy_requests(
+        request_ids: &[Uuid],
+        num_workers: usize,
+        progress_release: Option<Placement>,
+        terminal_release: Option<Placement>,
+        observation_release: Option<Placement>,
+    ) -> (
+        CompletionAuditRuntime,
+        Rc<RefCell<Vec<CompletionPhaseEvent>>>,
+    ) {
+        let pending = request_ids
+            .iter()
+            .enumerate()
+            .map(|(index, uuid)| DirectRequest {
+                tokens: vec![index as u32 + 1; 64],
+                max_output_tokens: 2,
+                uuid: Some(*uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            })
+            .collect();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let admission = CompletionAuditAdmission {
+            inner: AdmissionQueue::new_requests(pending, ReplayMode::Trace),
+            events: Rc::clone(&events),
+        };
+        let placement_events = Rc::clone(&events);
+        let mut runtime = CompletionAuditRuntime::new_composed(
+            &completion_test_args(),
+            admission,
+            num_workers,
+            move |_args, topology| {
+                Ok(CompletionAuditPlacement {
+                    events: placement_events,
+                    next_scheduler: 0,
+                    scheduler_count: topology
+                        .iter()
+                        .map(|worker| worker.scheduler_ids.len())
+                        .sum(),
+                    progress_release: None,
+                    terminal_release: None,
+                    observation_release: None,
+                })
+            },
+        )
+        .unwrap();
+        runtime.ensure_stepping_started().unwrap();
+        assert!(
+            runtime
+                .engine
+                .debug_snapshots()
+                .iter()
+                .all(|worker| worker.busy),
+            "test payloads must settle genuinely committed worker passes"
+        );
+        runtime.placement.progress_release = progress_release;
+        runtime.placement.terminal_release = terminal_release;
+        runtime.placement.observation_release = observation_release;
+        events.borrow_mut().clear();
+        (runtime, events)
+    }
+
+    fn request_phase(
+        runtime: &RoundRobinAggRuntime,
+        uuid: Uuid,
+    ) -> Option<(AggRequestPhase, bool)> {
+        runtime
+            .requests
+            .get(&uuid)
+            .map(|state| (state.phase, state.prefill_completed))
+    }
+
+    fn assert_runtime_visible_state_eq(left: &RoundRobinAggRuntime, right: &RoundRobinAggRuntime) {
+        let mut left_requests = left
+            .requests
+            .iter()
+            .map(|(uuid, state)| (*uuid, state.phase, state.prefill_completed))
+            .collect::<Vec<_>>();
+        let mut right_requests = right
+            .requests
+            .iter()
+            .map(|(uuid, state)| (*uuid, state.phase, state.prefill_completed))
+            .collect::<Vec<_>>();
+        left_requests.sort_unstable_by_key(|(uuid, _, _)| *uuid);
+        right_requests.sort_unstable_by_key(|(uuid, _, _)| *uuid);
+        assert_eq!(left_requests, right_requests);
+        assert_eq!(
+            left.engine.debug_snapshots(),
+            right.engine.debug_snapshots()
+        );
+        assert_eq!(
+            left.deferred_timestamp_placements,
+            right.deferred_timestamp_placements
+        );
+        assert_eq!(left.stats, right.stats);
+    }
+
+    #[test]
+    fn singleton_completion_fast_path_matches_atomic_batch_path() {
+        for completed in [false, true] {
+            let uuid = Uuid::from_u128(0x8100 + u128::from(completed));
+            let mut fast = runtime_with_busy_requests(&[uuid], 1);
+            let mut batch = runtime_with_busy_requests(&[uuid], 1);
+            let signal = output_signal(uuid, Some(71), completed);
+
+            fast.settle_worker_completion(completion_payload(0, vec![signal.clone()]))
+                .unwrap();
+            batch
+                .settle_worker_completion_batch([completion_payload(0, vec![signal])])
+                .unwrap();
+
+            assert_runtime_visible_state_eq(&fast, &batch);
+            assert_eq!(
+                fast.collector.snapshot(uuid),
+                batch.collector.snapshot(uuid)
+            );
+            assert_eq!(fast.requests.contains_key(&uuid), !completed);
+            if !completed {
+                assert_eq!(
+                    request_phase(&fast, uuid),
+                    Some((AggRequestPhase::Running, true))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn singleton_fast_path_gates_terminal_settlement_and_defers_placements() {
+        for completed in [false, true] {
+            let uuid = Uuid::from_u128(0x8110 + u128::from(completed));
+            let progress = deferred_placement(0x8112);
+            let terminal = deferred_placement(0x8113);
+            let observation = deferred_placement(0x8114);
+            let (mut runtime, events) = runtime_with_audited_busy_requests(
+                &[uuid],
+                1,
+                (!completed).then_some(progress),
+                completed.then_some(terminal),
+                Some(observation),
+            );
+
+            runtime
+                .settle_worker_completion(completion_payload(
+                    0,
+                    vec![output_signal(uuid, Some(72), completed)],
+                ))
+                .unwrap();
+
+            let expected_events = if completed {
+                vec![
+                    CompletionPhaseEvent::Token(uuid, 72),
+                    CompletionPhaseEvent::TerminalFeedback(uuid),
+                    CompletionPhaseEvent::AdmissionTerminal(uuid),
+                    CompletionPhaseEvent::TerminalSettlement,
+                    CompletionPhaseEvent::Observation,
+                ]
+            } else {
+                vec![
+                    CompletionPhaseEvent::Token(uuid, 72),
+                    CompletionPhaseEvent::Progress(uuid),
+                    CompletionPhaseEvent::Observation,
+                ]
+            };
+            assert_eq!(*events.borrow(), expected_events);
+            assert_eq!(
+                runtime.deferred_timestamp_placements,
+                if completed {
+                    vec![terminal, observation]
+                } else {
+                    vec![progress, observation]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn singleton_multi_signal_completion_preserves_progress_before_terminal() {
+        let uuid = Uuid::from_u128(0x8200);
+        let progress = deferred_placement(0x8201);
+        let terminal = deferred_placement(0x8202);
+        let observation = deferred_placement(0x8203);
+        let (mut runtime, events) = runtime_with_audited_busy_requests(
+            &[uuid],
+            1,
+            Some(progress),
+            Some(terminal),
+            Some(observation),
+        );
+
+        runtime
+            .settle_worker_completion(completion_payload(
+                0,
+                vec![
+                    output_signal(uuid, Some(81), false),
+                    output_signal(uuid, Some(82), true),
+                ],
+            ))
+            .unwrap();
+
+        assert!(!runtime.requests.contains_key(&uuid));
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                CompletionPhaseEvent::Token(uuid, 81),
+                CompletionPhaseEvent::Token(uuid, 82),
+                CompletionPhaseEvent::Progress(uuid),
+                CompletionPhaseEvent::TerminalFeedback(uuid),
+                CompletionPhaseEvent::AdmissionTerminal(uuid),
+                CompletionPhaseEvent::TerminalSettlement,
+                CompletionPhaseEvent::Observation,
+            ]
+        );
+        assert_eq!(
+            runtime.deferred_timestamp_placements,
+            vec![progress, terminal, observation]
+        );
+    }
+
+    #[test]
+    fn same_time_sibling_completion_commits_all_workers_before_terminals() {
+        let first = Uuid::from_u128(0x8301);
+        let second = Uuid::from_u128(0x8302);
+        let terminal = deferred_placement(0x8303);
+        let observation = deferred_placement(0x8304);
+        let (mut runtime, events) = runtime_with_audited_busy_requests(
+            &[first, second],
+            2,
+            None,
+            Some(terminal),
+            Some(observation),
+        );
+
+        runtime
+            .settle_worker_completion_batch([
+                completion_payload(0, vec![output_signal(first, Some(91), true)]),
+                completion_payload(1, vec![output_signal(second, Some(92), true)]),
+            ])
+            .unwrap();
+
+        assert!(runtime.requests.is_empty());
+        assert!(
+            runtime
+                .engine
+                .debug_snapshots()
+                .iter()
+                .all(|worker| !worker.busy),
+            "every sibling ownership commit must precede terminal publication"
+        );
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                CompletionPhaseEvent::Token(first, 91),
+                CompletionPhaseEvent::Token(second, 92),
+                CompletionPhaseEvent::TerminalFeedback(first),
+                CompletionPhaseEvent::AdmissionTerminal(first),
+                CompletionPhaseEvent::TerminalFeedback(second),
+                CompletionPhaseEvent::AdmissionTerminal(second),
+                CompletionPhaseEvent::TerminalSettlement,
+                CompletionPhaseEvent::Observation,
+                CompletionPhaseEvent::Observation,
+            ]
+        );
+        assert_eq!(
+            runtime.deferred_timestamp_placements,
+            vec![terminal, observation]
+        );
+    }
 
     #[derive(Debug, Clone, PartialEq)]
     enum TwoTurnSourceEvent {
