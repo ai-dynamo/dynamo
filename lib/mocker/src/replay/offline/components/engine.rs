@@ -617,6 +617,19 @@ where
         Some((usize::try_from(worker_id).ok()?, dp_rank))
     }
 
+    /// Resolve one rank without materializing the worker's complete topology.
+    pub(in crate::replay::offline) fn scheduler_id(
+        &self,
+        worker_id: usize,
+        dp_rank: usize,
+    ) -> Option<usize> {
+        self.worker_groups
+            .get(worker_id)?
+            .as_ref()?
+            .get(dp_rank)
+            .copied()
+    }
+
     /// Read-only controller view of live worker/rank state. vLLM observations
     /// contain only current scheduler state and materialized sequence tokens;
     /// unsupported backends remain `None` rather than reporting fake zeroes.

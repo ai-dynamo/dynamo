@@ -103,7 +103,7 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         }
     }
 
-    fn resolve_target(&self, target: WorkerTarget) -> Result<usize> {
+    fn resolve_target(&self, target: &WorkerTarget) -> Result<usize> {
         if !self.pool_workers.contains_key(&target.pool_id) {
             bail!(
                 "interactive replay pool {:?} is unavailable",
@@ -170,7 +170,7 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         target: WorkerTarget,
         required_taints: BTreeSet<String>,
     ) -> Result<()> {
-        self.resolve_target(target.clone())?;
+        self.resolve_target(&target)?;
         self.validate_required_taints(&required_taints, &target)?;
         match self.preassigned.entry(request_id) {
             Entry::Vacant(entry) => {
@@ -187,17 +187,15 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
     pub(in crate::replay) fn assign(
         &mut self,
         request_id: Uuid,
-        target: WorkerTarget,
+        target: &WorkerTarget,
     ) -> Result<Placement> {
         if !self.pending.contains(&request_id) {
             bail!("interactive replay request {request_id} is not awaiting placement");
         }
-        let scheduler_id = self
-            .resolve_target(target.clone())
-            .and_then(|scheduler_id| {
-                self.validate_constraints(request_id, &target)?;
-                Ok(scheduler_id)
-            })?;
+        let scheduler_id = self.resolve_target(target).and_then(|scheduler_id| {
+            self.validate_constraints(request_id, target)?;
+            Ok(scheduler_id)
+        })?;
         self.pending.remove(&request_id);
         self.constraints.remove(&request_id);
         self.pending_order
@@ -216,7 +214,7 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
         &mut self,
         request_id: Uuid,
         pool_id: &str,
-    ) -> Result<Placement> {
+    ) -> Result<(Placement, WorkerTarget)> {
         if !self.pending.contains(&request_id) {
             bail!("interactive replay request {request_id} is not awaiting placement");
         }
@@ -227,20 +225,27 @@ impl<Events: EngineEventBatch> ExternalPlacement<Events> {
             .pool_workers
             .get(pool_id)
             .ok_or_else(|| anyhow!("interactive replay pool {pool_id:?} is unavailable"))?;
-        let eligible = workers
+        let eligible_count = workers
             .iter()
             .filter(|target| self.validate_constraints(request_id, target).is_ok())
-            .cloned()
-            .collect::<Vec<_>>();
-        if eligible.is_empty() {
+            .count();
+        if eligible_count == 0 {
             bail!(
                 "interactive replay pool {pool_id:?} has no worker eligible for request {request_id}"
             );
         }
-        let cursor = self.pool_next.entry(pool_id.to_string()).or_default();
-        let target = eligible[*cursor % eligible.len()].clone();
-        *cursor = (*cursor + 1) % eligible.len();
-        self.assign(request_id, target)
+        let cursor = self.pool_next.get(pool_id).copied().unwrap_or_default();
+        let selected = cursor % eligible_count;
+        let target = workers
+            .iter()
+            .filter(|target| self.validate_constraints(request_id, target).is_ok())
+            .nth(selected)
+            .expect("eligible worker count and selected rank diverged")
+            .clone();
+        self.pool_next
+            .insert(pool_id.to_string(), (cursor + 1) % eligible_count);
+        let placement = self.assign(request_id, &target)?;
+        Ok((placement, target))
     }
 
     pub(in crate::replay) fn pending_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
@@ -292,12 +297,10 @@ where
             self.constraints.insert(request_id, required_taints);
         }
         let decision = if let Some(target) = self.preassigned.remove(&request_id) {
-            let scheduler_id = self
-                .resolve_target(target.clone())
-                .and_then(|scheduler_id| {
-                    self.validate_constraints(request_id, &target)?;
-                    Ok(scheduler_id)
-                })?;
+            let scheduler_id = self.resolve_target(&target).and_then(|scheduler_id| {
+                self.validate_constraints(request_id, &target)?;
+                Ok(scheduler_id)
+            })?;
             self.constraints.remove(&request_id);
             PlacementDecision::Immediate(Placement {
                 request_id,

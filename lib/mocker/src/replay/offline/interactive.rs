@@ -150,8 +150,43 @@ pub struct CapturedReplayEventData {
     reused_input_tokens: Option<usize>,
     ttft_ms: Option<f64>,
     e2e_latency_ms: Option<f64>,
-    eligible_pool_ids: Arc<Vec<String>>,
-    candidates: Arc<Vec<ReplayPlacementCandidate>>,
+    placement: Arc<InteractivePlacementObservation>,
+}
+
+/// One causally frozen placement view shared by every internal handoff.
+///
+/// Public adapters still materialize independent owned vectors at their API
+/// boundary, but placement capture, assignment, overlap selection, and the
+/// Routed event all retain this same immutable allocation.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct InteractivePlacementObservation {
+    eligible_pool_ids: Vec<String>,
+    candidates: Vec<ReplayPlacementCandidate>,
+}
+
+impl InteractivePlacementObservation {
+    pub(crate) fn from_candidates(candidates: Vec<ReplayPlacementCandidate>) -> Arc<Self> {
+        let eligible_pool_ids = eligible_pool_ids(&candidates);
+        Arc::new(Self {
+            eligible_pool_ids,
+            candidates,
+        })
+    }
+
+    fn pools_only(eligible_pool_ids: Vec<String>) -> Arc<Self> {
+        Arc::new(Self {
+            eligible_pool_ids,
+            candidates: Vec::new(),
+        })
+    }
+
+    pub(crate) fn eligible_pool_ids(&self) -> &[String] {
+        &self.eligible_pool_ids
+    }
+
+    pub(crate) fn candidates(&self) -> &[ReplayPlacementCandidate] {
+        &self.candidates
+    }
 }
 
 /// Borrowed declaration-order view of one immutable captured event.
@@ -206,8 +241,8 @@ impl CapturedReplayEventData {
             strict_priority: self.metadata.strict_priority,
             policy_class: self.metadata.policy_class.as_deref(),
             routing_constraints: &self.metadata.routing_constraints,
-            eligible_pool_ids: self.eligible_pool_ids.as_slice(),
-            candidates: self.candidates.as_slice(),
+            eligible_pool_ids: self.placement.eligible_pool_ids(),
+            candidates: self.placement.candidates(),
         }
     }
 
@@ -235,8 +270,10 @@ impl CapturedReplayEventData {
             strict_priority: metadata.strict_priority,
             policy_class: metadata.policy_class.clone(),
             routing_constraints: metadata.routing_constraints.clone(),
-            eligible_pool_ids: Arc::unwrap_or_clone(self.eligible_pool_ids),
-            candidates: Arc::unwrap_or_clone(self.candidates),
+            // Public owned events deliberately copy mutable collections so a
+            // caller cannot mutate a later event that shares this observation.
+            eligible_pool_ids: self.placement.eligible_pool_ids.clone(),
+            candidates: self.placement.candidates.clone(),
         }
     }
 }
@@ -489,7 +526,7 @@ struct InteractiveWorkerIdentity {
 pub(crate) struct InteractiveCapture {
     external_placement: bool,
     session_affinity: bool,
-    eligible_pool_ids: Arc<Vec<String>>,
+    default_placement: Arc<InteractivePlacementObservation>,
     identities: FxHashMap<Uuid, InteractiveRequestIdentity>,
     logical_to_uuid: FxHashMap<String, Uuid>,
     session_turn_to_uuid: FxHashMap<(String, usize), Uuid>,
@@ -497,16 +534,17 @@ pub(crate) struct InteractiveCapture {
     /// Exactly one externally controlled request may have a policy-visible
     /// observation at a time. Clearing this after assignment forces the next
     /// same-time request to observe the scheduler state changed by its
-    /// predecessor. Retaining the candidates also makes PlacementNeeded,
-    /// selected overlap, and Routed refer to one causally frozen observation
-    /// instead of rebuilding equivalent scheduler views at each API boundary.
+    /// predecessor. Retaining the placement observation also makes
+    /// PlacementNeeded, selected overlap, and Routed refer to one causally
+    /// frozen allocation instead of rebuilding equivalent scheduler views at
+    /// each API boundary.
     announced_placement: Option<AnnouncedPlacementObservation>,
 }
 
 #[derive(Debug)]
 struct AnnouncedPlacementObservation {
     request_id: Uuid,
-    candidates: Arc<Vec<ReplayPlacementCandidate>>,
+    placement: Arc<InteractivePlacementObservation>,
 }
 
 impl InteractiveCapture {
@@ -518,7 +556,7 @@ impl InteractiveCapture {
         Self {
             external_placement,
             session_affinity,
-            eligible_pool_ids: Arc::new(eligible_pool_ids),
+            default_placement: InteractivePlacementObservation::pools_only(eligible_pool_ids),
             ..Self::default()
         }
     }
@@ -629,8 +667,7 @@ impl InteractiveCapture {
             e2e_latency_ms: identity
                 .terminal_ms
                 .map(|terminal| (terminal - identity.ready_at_ms.unwrap_or(terminal)).max(0.0)),
-            eligible_pool_ids: Arc::clone(&self.eligible_pool_ids),
-            candidates: Arc::default(),
+            placement: Arc::clone(&self.default_placement),
         })
     }
 
@@ -642,69 +679,37 @@ impl InteractiveCapture {
         Ok(())
     }
 
-    pub(crate) fn set_worker(&mut self, uuid: Uuid, target: WorkerTarget) -> anyhow::Result<()> {
+    pub(crate) fn set_worker(&mut self, uuid: Uuid, target: &WorkerTarget) -> anyhow::Result<()> {
         let identity = self.identities.get_mut(&uuid).ok_or_else(|| {
             anyhow::anyhow!("interactive replay has no authored identity for request {uuid}")
         })?;
         identity.worker = Some(InteractiveWorkerIdentity {
-            pool_id: Arc::from(target.pool_id),
+            pool_id: Arc::from(target.pool_id.as_str()),
             worker_id: target.worker_id,
             dp_rank: target.dp_rank,
         });
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn placement_needed_event(
-        &mut self,
-        uuid: Uuid,
-        now_ms: f64,
-        candidates: Vec<ReplayPlacementCandidate>,
-    ) -> anyhow::Result<ReplayEvent> {
-        let (event, retained_candidates) =
-            self.placement_needed_captured_event(uuid, now_ms, candidates)?;
-        let event = event.into_owned();
-        self.mark_shared_placement_observed(uuid, retained_candidates);
-        Ok(event)
-    }
-
     pub(crate) fn placement_needed_captured_event(
         &mut self,
         uuid: Uuid,
         now_ms: f64,
-        candidates: Vec<ReplayPlacementCandidate>,
-    ) -> anyhow::Result<(CapturedReplayEvent, Arc<Vec<ReplayPlacementCandidate>>)> {
-        let candidates = Arc::new(candidates);
+        placement: Arc<InteractivePlacementObservation>,
+    ) -> anyhow::Result<CapturedReplayEvent> {
         let mut data = self.event_data(uuid, now_ms, false)?;
-        data.eligible_pool_ids = Arc::new(eligible_pool_ids(&candidates));
-        data.candidates = Arc::clone(&candidates);
-        Ok((CapturedReplayEvent::PlacementNeeded(data), candidates))
+        data.placement = placement;
+        Ok(CapturedReplayEvent::PlacementNeeded(data))
     }
 
     pub(crate) fn mark_placement_observed(
         &mut self,
         uuid: Uuid,
-        candidates: Vec<ReplayPlacementCandidate>,
-    ) {
-        self.mark_shared_placement_observed(uuid, Arc::new(candidates));
-    }
-
-    pub(crate) fn retain_captured_placement(
-        &mut self,
-        uuid: Uuid,
-        candidates: Arc<Vec<ReplayPlacementCandidate>>,
-    ) {
-        self.mark_shared_placement_observed(uuid, candidates);
-    }
-
-    fn mark_shared_placement_observed(
-        &mut self,
-        uuid: Uuid,
-        candidates: Arc<Vec<ReplayPlacementCandidate>>,
+        placement: Arc<InteractivePlacementObservation>,
     ) {
         self.announced_placement = Some(AnnouncedPlacementObservation {
             request_id: uuid,
-            candidates,
+            placement,
         });
     }
 
@@ -714,14 +719,14 @@ impl InteractiveCapture {
             .is_some_and(|observation| observation.request_id == uuid)
     }
 
-    pub(crate) fn announced_placement_candidates(
+    pub(crate) fn announced_placement(
         &self,
         uuid: Uuid,
-    ) -> Option<&[ReplayPlacementCandidate]> {
+    ) -> Option<&Arc<InteractivePlacementObservation>> {
         self.announced_placement
             .as_ref()
             .filter(|observation| observation.request_id == uuid)
-            .map(|observation| observation.candidates.as_slice())
+            .map(|observation| &observation.placement)
     }
 
     pub(crate) fn validate_placement_assignment(&self, uuid: Uuid) -> anyhow::Result<()> {
@@ -736,18 +741,18 @@ impl InteractiveCapture {
     pub(crate) fn complete_placement_assignment(
         &mut self,
         uuid: Uuid,
-    ) -> anyhow::Result<Vec<ReplayPlacementCandidate>> {
+    ) -> anyhow::Result<Arc<InteractivePlacementObservation>> {
         if !self.placement_is_announced(uuid) {
             anyhow::bail!(
                 "interactive replay request {uuid} is not the current placement boundary"
             );
         }
-        let candidates = self
+        let placement = self
             .announced_placement
             .take()
             .expect("placement observation was validated before consumption")
-            .candidates;
-        Ok(Arc::unwrap_or_clone(candidates))
+            .placement;
+        Ok(placement)
     }
 
     pub(crate) fn cancel_placement_observation(&mut self, uuid: Uuid) {
@@ -760,11 +765,10 @@ impl InteractiveCapture {
         &mut self,
         uuid: Uuid,
         now_ms: f64,
-        candidates: Vec<ReplayPlacementCandidate>,
+        placement: Arc<InteractivePlacementObservation>,
     ) -> anyhow::Result<()> {
         let mut data = self.event_data(uuid, now_ms, false)?;
-        data.eligible_pool_ids = Arc::new(eligible_pool_ids(&candidates));
-        data.candidates = Arc::new(candidates);
+        data.placement = placement;
         self.events.push_back(CapturedReplayEvent::Routed(data));
         Ok(())
     }
@@ -848,7 +852,7 @@ impl InteractiveCapture {
                     strict_priority: identity.metadata.strict_priority,
                     policy_class: identity.metadata.policy_class.clone(),
                     routing_constraints: identity.metadata.routing_constraints.clone(),
-                    eligible_pool_ids: self.eligible_pool_ids.as_ref().clone(),
+                    eligible_pool_ids: Vec::new(),
                     candidates: Vec::new(),
                 })
             })
@@ -1779,8 +1783,7 @@ mod tests {
             reused_input_tokens: Some(4),
             ttft_ms: Some(1.5),
             e2e_latency_ms: Some(2.5),
-            eligible_pool_ids: Arc::new(vec!["pool-a".to_string()]),
-            candidates: Arc::new(vec![candidate]),
+            placement: InteractivePlacementObservation::from_candidates(vec![candidate]),
         };
 
         for ordinal in 0..6 {
@@ -1861,13 +1864,21 @@ mod tests {
             taints: Vec::new(),
             capabilities: Vec::new(),
         };
-        let event = capture.placement_needed_event(uuid, 0.0, vec![candidate])?;
+        let placement = InteractivePlacementObservation::from_candidates(vec![candidate]);
+        let event = capture.placement_needed_captured_event(uuid, 0.0, Arc::clone(&placement))?;
+        assert!(Arc::ptr_eq(&event.data().placement, &placement));
+        let event = event.into_owned();
+        capture.mark_placement_observed(uuid, Arc::clone(&placement));
         let ReplayEvent::PlacementNeeded(data) = event else {
             unreachable!()
         };
         assert_eq!(data.candidates[0].tags, ["stable"]);
-        let candidates = capture.complete_placement_assignment(uuid)?;
-        assert_eq!(candidates[0].tags, ["stable"]);
+        let completed = capture.complete_placement_assignment(uuid)?;
+        assert!(Arc::ptr_eq(&completed, &placement));
+        assert_eq!(completed.candidates()[0].tags, ["stable"]);
+        capture.emit_routed(uuid, 0.0, Arc::clone(&completed))?;
+        let routed = capture.drain_captured_events().pop().unwrap();
+        assert!(Arc::ptr_eq(&routed.data().placement, &placement));
         Ok(())
     }
 

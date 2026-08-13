@@ -21,9 +21,9 @@ use super::evidence::{
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
 use super::interactive::{
-    CapturedReplayEvent, InteractiveCapture, InteractiveRequestIdentity, ReplayEvent,
-    ReplayPendingPlacement, ReplayPlacementCandidate, ReplaySnapshot, ReplayStepStatus,
-    ReplayWorkerSnapshot,
+    CapturedReplayEvent, InteractiveCapture, InteractivePlacementObservation,
+    InteractiveRequestIdentity, ReplayEvent, ReplayPendingPlacement, ReplayPlacementCandidate,
+    ReplaySnapshot, ReplayStepStatus, ReplayWorkerSnapshot,
 };
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -61,6 +61,7 @@ use smallvec::SmallVec;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::{BTreeSet, BinaryHeap, VecDeque};
+use std::sync::Arc;
 use uuid::Uuid;
 
 fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
@@ -95,6 +96,17 @@ struct AggRuntimeSnapshot {
 #[cfg(not(test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(in crate::replay) struct AggRuntimeStats;
+
+/// One validated scheduler assignment with its authored topology identity.
+/// Keeping these facts together avoids repeatedly resolving the rank and
+/// cloning the pool ID between overlap, evidence, and physical dispatch.
+#[derive(Debug)]
+struct ResolvedPlacement {
+    placement: Placement,
+    logical_worker_id: usize,
+    dp_rank: u32,
+    authored_target: WorkerTarget,
+}
 
 pub(in crate::replay) trait AggregatedPlacement<Events, Metadata>:
     PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Events> + Sized
@@ -352,10 +364,11 @@ impl
             "interactive replay request {request_id} is not awaiting placement"
         );
         self.validate_interactive_assignment_boundary(request_id)?;
-        let placement = self.placement.assign(request_id, target)?;
-        let candidates = self.complete_interactive_assignment_boundary(request_id)?;
-        let placement = self.decorate_external_overlap(placement, &candidates)?;
-        self.dispatch_placement(placement, Some(candidates))?;
+        let placement = self.placement.assign(request_id, &target)?;
+        let observation = self.complete_interactive_assignment_boundary(request_id)?;
+        let mut placement = self.resolve_placement(placement, Some(target))?;
+        self.decorate_external_overlap(&mut placement, &observation)?;
+        self.dispatch_resolved_placement(placement, Some(observation))?;
         // The controller action releases the barrier. Settle until either the
         // next external placement boundary or the same-time fixed point so the
         // next observation is both fresh and immediately available.
@@ -373,13 +386,14 @@ impl
             "interactive replay request {request_id} is not awaiting placement"
         );
         self.validate_interactive_assignment_boundary(request_id)?;
-        let placement = self.placement.assign_pool(request_id, pool_id)?;
+        let (placement, target) = self.placement.assign_pool(request_id, pool_id)?;
         // Pool-only placement first selects the worker through the pool's
         // internal router. Only then can the runtime inspect that selected
         // scheduler's committed KV state.
-        let candidates = self.complete_interactive_assignment_boundary(request_id)?;
-        let placement = self.decorate_external_overlap(placement, &candidates)?;
-        self.dispatch_placement(placement, Some(candidates))?;
+        let observation = self.complete_interactive_assignment_boundary(request_id)?;
+        let mut placement = self.resolve_placement(placement, Some(target))?;
+        self.decorate_external_overlap(&mut placement, &observation)?;
+        self.dispatch_resolved_placement(placement, Some(observation))?;
         self.drain_current_timestamp()?;
         Ok(())
     }
@@ -398,32 +412,26 @@ impl
         if placements.is_empty() {
             return placements;
         }
-        let candidates = self
+        let placement_observation = self
             .interactive
             .as_ref()
-            .and_then(|capture| capture.announced_placement_candidates(request_id))
-            .map(|candidates| candidates.to_vec())
+            .and_then(|capture| capture.announced_placement(request_id))
+            .map(Arc::clone)
             .or_else(|| {
                 self.requests
                     .get(&request_id)
                     .and_then(AggRequestState::queued_request)
                     .map(|request| self.interactive_placement_candidates(request))
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| InteractivePlacementObservation::from_candidates(Vec::new()));
         if let Some(capture) = self.interactive.as_mut()
             && !capture.placement_is_announced(request_id)
         {
-            capture.mark_placement_observed(request_id, candidates.clone());
+            capture.mark_placement_observed(request_id, Arc::clone(&placement_observation));
         }
         if let Some(placement) = placements.first_mut() {
-            placement.eligible_pool_ids = candidates
-                .iter()
-                .filter(|candidate| candidate.eligible)
-                .map(|candidate| candidate.target.pool_id.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            placement.candidates = candidates;
+            placement.eligible_pool_ids = placement_observation.eligible_pool_ids().to_vec();
+            placement.candidates = placement_observation.candidates().to_vec();
         }
         placements
     }
@@ -776,57 +784,100 @@ where
         Ok(())
     }
 
+    fn resolve_placement(
+        &self,
+        placement: Placement,
+        authored_target: Option<WorkerTarget>,
+    ) -> anyhow::Result<ResolvedPlacement> {
+        let (logical_worker_id, dp_rank) = self
+            .engine
+            .rank_identity(placement.scheduler_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "offline replay placement references unknown scheduler {}",
+                    placement.scheduler_id
+                )
+            })?;
+        let authored_target = if let Some(target) = authored_target {
+            let expected = self
+                .interactive_worker_targets
+                .get(logical_worker_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "interactive replay scheduler {} has no authored worker target",
+                        placement.scheduler_id
+                    )
+                })?;
+            anyhow::ensure!(
+                target.pool_id == expected.pool_id
+                    && target.worker_id == expected.worker_id
+                    && target.dp_rank == dp_rank as usize,
+                "interactive replay scheduler {} resolved to pool {:?} worker {} rank {}, not validated target {:?}",
+                placement.scheduler_id,
+                expected.pool_id,
+                expected.worker_id,
+                dp_rank,
+                target
+            );
+            target
+        } else {
+            let mut target = self.accounting_target(logical_worker_id);
+            target.dp_rank = dp_rank as usize;
+            target
+        };
+        Ok(ResolvedPlacement {
+            placement,
+            logical_worker_id,
+            dp_rank,
+            authored_target,
+        })
+    }
+
     /// Deliver a request to a worker and update the runtime's bookkeeping for that assignment.
     fn dispatch_to_worker(
         &mut self,
         request: DirectRequest,
-        uuid: Uuid,
-        worker_idx: usize,
-        route_candidates: Vec<ReplayPlacementCandidate>,
+        resolved: ResolvedPlacement,
+        route_observation: Option<Arc<InteractivePlacementObservation>>,
     ) -> anyhow::Result<()> {
-        let (engine_worker_id, dp_rank) =
-            self.engine.rank_identity(worker_idx).ok_or_else(|| {
-                anyhow::anyhow!("offline replay dispatch references unknown scheduler {worker_idx}")
-            })?;
-        let mut assignment_target = self
-            .interactive_worker_targets
-            .get(engine_worker_id)
-            .cloned()
-            .unwrap_or_else(|| WorkerTarget::default_pool(engine_worker_id, dp_rank as usize));
-        assignment_target.dp_rank = dp_rank as usize;
-        let interactive_target = if let Some(capture) = self.interactive.as_ref() {
+        let uuid = resolved.placement.request_id;
+        let scheduler_id = resolved.placement.scheduler_id;
+        if let Some(capture) = self.interactive.as_ref() {
             capture.identity(uuid).ok_or_else(|| {
                 anyhow::anyhow!("interactive replay has no authored identity for request {uuid}")
             })?;
-            Some(assignment_target.clone())
-        } else {
-            None
-        };
-        self.engine.dispatch(worker_idx, request)?;
-        if let (Some(capture), Some(target)) =
-            (self.interactive.as_mut(), interactive_target.as_ref())
-        {
-            capture.set_worker(uuid, target.clone())?;
-            // `route_candidates` was captured before physical engine dispatch
+            anyhow::ensure!(
+                route_observation.is_some(),
+                "interactive replay dispatch for request {uuid} has no frozen placement observation"
+            );
+        }
+        self.engine.dispatch(scheduler_id, request)?;
+        if let Some(capture) = self.interactive.as_mut() {
+            capture.set_worker(uuid, &resolved.authored_target)?;
+            // `route_observation` was captured before physical engine dispatch
             // and is the observation associated with this effective route.
             // Do not reconstruct it from the post-route snapshot.
-            capture.emit_routed(uuid, self.now_ms, route_candidates)?;
+            capture.emit_routed(
+                uuid,
+                self.now_ms,
+                route_observation.expect("interactive route observation was validated"),
+            )?;
             capture.emit_queued(uuid, self.now_ms)?;
         }
-        self.record_dispatch(uuid, worker_idx);
+        self.record_dispatch(uuid, scheduler_id);
         // Aggregated replay has one execution stage even when it has multiple
         // static pools. Treat the assignment as decode_worker_idx so records
         // carry the serving scheduler; prefill_worker_idx stays None to signal
         // that there is no separate prefill stage.
-        self.collector.on_decode_assigned(uuid, worker_idx);
+        self.collector.on_decode_assigned(uuid, scheduler_id);
         self.collector.on_static_pool_assigned(
             uuid,
-            assignment_target.pool_id,
-            assignment_target.worker_id,
-            assignment_target.dp_rank,
+            resolved.authored_target.pool_id,
+            resolved.authored_target.worker_id,
+            resolved.authored_target.dp_rank,
         );
         #[cfg(test)]
-        self.worker_active_requests[worker_idx].push(uuid);
+        self.worker_active_requests[scheduler_id].push(uuid);
         Ok(())
     }
 
@@ -844,7 +895,9 @@ where
         for snapshot in &mut snapshots {
             let engine_worker_id = snapshot.worker_id;
             if let Some(worker) = self.interactive_workers.get(engine_worker_id) {
-                snapshot.pool_id = worker.target.pool_id.clone();
+                if snapshot.pool_id != worker.target.pool_id {
+                    snapshot.pool_id.clone_from(&worker.target.pool_id);
+                }
                 snapshot.worker_id = worker.target.worker_id;
                 snapshot.tags = worker.tags.iter().cloned().collect();
                 snapshot.taints = worker.taints.iter().cloned().collect();
@@ -857,10 +910,11 @@ where
     fn interactive_placement_candidates(
         &self,
         request: &ReplayRequestPayload,
-    ) -> Vec<ReplayPlacementCandidate> {
+    ) -> Arc<InteractivePlacementObservation> {
         let tokens = request.prompt_tokens();
         let constraints = request.routing_constraints();
-        self.engine
+        let candidates = self
+            .engine
             .interactive_snapshots()
             .into_iter()
             .filter_map(|snapshot| {
@@ -868,10 +922,7 @@ where
                 let worker = self.interactive_workers.get(engine_worker_id)?;
                 let scheduler_id = self
                     .engine
-                    .worker_topology(engine_worker_id)?
-                    .scheduler_ids
-                    .get(snapshot.dp_rank)
-                    .copied()?;
+                    .scheduler_id(engine_worker_id, snapshot.dp_rank)?;
                 let constraint_reason = if snapshot.draining || worker.draining {
                     Some("worker is draining".to_string())
                 } else if !snapshot.active || !worker.active {
@@ -885,8 +936,13 @@ where
                         .collect::<BTreeSet<_>>();
                     (!missing.is_empty()).then(|| format!("missing required taints {missing:?}"))
                 };
-                let mut target = worker.target.clone();
-                target.dp_rank = snapshot.dp_rank;
+                // Reuse the engine snapshot's otherwise-discarded default-pool
+                // allocation for the authored pool carried by the candidate.
+                let mut pool_id = snapshot.pool_id;
+                if pool_id != worker.target.pool_id {
+                    pool_id.clone_from(&worker.target.pool_id);
+                }
+                let target = WorkerTarget::new(pool_id, worker.target.worker_id, snapshot.dp_rank);
                 Some(ReplayPlacementCandidate {
                     target,
                     active: snapshot.active,
@@ -911,7 +967,8 @@ where
                     capabilities: worker.capabilities.iter().cloned().collect(),
                 })
             })
-            .collect()
+            .collect();
+        InteractivePlacementObservation::from_candidates(candidates)
     }
 
     /// Attach the selected worker's scheduler-safe, committed KV overlap from
@@ -920,32 +977,22 @@ where
     /// second native prefix query would be redundant and could not be fresher.
     fn decorate_external_overlap(
         &self,
-        mut placement: Placement,
-        candidates: &[ReplayPlacementCandidate],
-    ) -> anyhow::Result<Placement> {
-        let (engine_worker_id, dp_rank) = self
-            .engine
-            .rank_identity(placement.scheduler_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "interactive replay placement references unknown scheduler {}",
-                    placement.scheduler_id
-                )
-            })?;
-        let mut target = self.accounting_target(engine_worker_id);
-        target.dp_rank = dp_rank as usize;
-        let candidate = candidates
+        placement: &mut ResolvedPlacement,
+        observation: &InteractivePlacementObservation,
+    ) -> anyhow::Result<()> {
+        let candidate = observation
+            .candidates()
             .iter()
-            .find(|candidate| candidate.target == target)
+            .find(|candidate| candidate.target == placement.authored_target)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "interactive replay selected target {:?} was absent from the announced observation for request {}",
-                    target,
-                    placement.request_id
+                    placement.authored_target,
+                    placement.placement.request_id
                 )
             })?;
-        placement.reported_overlap_tokens = candidate.kv_prefix_overlap_tokens;
-        Ok(placement)
+        placement.placement.reported_overlap_tokens = candidate.kv_prefix_overlap_tokens;
+        Ok(())
     }
 
     fn validate_interactive_assignment_boundary(&self, request_id: Uuid) -> anyhow::Result<()> {
@@ -958,7 +1005,7 @@ where
     fn complete_interactive_assignment_boundary(
         &mut self,
         request_id: Uuid,
-    ) -> anyhow::Result<Vec<ReplayPlacementCandidate>> {
+    ) -> anyhow::Result<Arc<InteractivePlacementObservation>> {
         self.interactive
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("offline replay interactive capture is disabled"))?
@@ -972,44 +1019,48 @@ where
     fn dispatch_placement(
         &mut self,
         placement: Placement,
-        route_candidates: Option<Vec<ReplayPlacementCandidate>>,
+        route_observation: Option<Arc<InteractivePlacementObservation>>,
     ) -> anyhow::Result<()> {
-        self.record_placement(placement);
-        let uuid = placement.request_id;
-        let (logical_worker_id, dp_rank) = self
-            .engine
-            .rank_identity(placement.scheduler_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "offline replay placement references unknown scheduler {}",
-                    placement.scheduler_id
-                )
-            })?;
-        self.collector.on_route_released(
-            uuid,
-            ReplayRequestPool::Agg,
-            self.now_ms,
-            logical_worker_id,
-            placement.scheduler_id,
-            dp_rank,
-            placement.reported_overlap_tokens,
-        );
-        let mut authored_target = self.accounting_target(logical_worker_id);
-        authored_target.dp_rank = dp_rank as usize;
-        self.collector.on_route_static_target(
-            uuid,
-            ReplayRequestPool::Agg,
-            authored_target.pool_id,
-            authored_target.worker_id,
-            authored_target.dp_rank,
-        );
-        let route_candidates = route_candidates.unwrap_or_else(|| {
+        let resolved = self.resolve_placement(placement, None)?;
+        let uuid = resolved.placement.request_id;
+        let route_observation = route_observation.or_else(|| {
+            self.interactive.as_ref()?;
             self.requests
                 .get(&uuid)
                 .and_then(AggRequestState::queued_request)
                 .map(|request| self.interactive_placement_candidates(request))
-                .unwrap_or_default()
         });
+        self.dispatch_resolved_placement(resolved, route_observation)
+    }
+
+    fn dispatch_resolved_placement(
+        &mut self,
+        resolved: ResolvedPlacement,
+        route_observation: Option<Arc<InteractivePlacementObservation>>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.interactive.is_none() || route_observation.is_some(),
+            "interactive replay request {} has no frozen placement observation",
+            resolved.placement.request_id
+        );
+        self.record_placement(resolved.placement);
+        let uuid = resolved.placement.request_id;
+        self.collector.on_route_released(
+            uuid,
+            ReplayRequestPool::Agg,
+            self.now_ms,
+            resolved.logical_worker_id,
+            resolved.placement.scheduler_id,
+            resolved.dp_rank,
+            resolved.placement.reported_overlap_tokens,
+        );
+        self.collector.on_route_static_target(
+            uuid,
+            ReplayRequestPool::Agg,
+            resolved.authored_target.pool_id.clone(),
+            resolved.authored_target.worker_id,
+            resolved.authored_target.dp_rank,
+        );
         let request = self
             .requests
             .get_mut(&uuid)
@@ -1017,7 +1068,7 @@ where
                 anyhow::anyhow!("offline replay missing queued request state for {uuid}")
             })?
             .take_queued_request(uuid)?;
-        self.dispatch_to_worker(request, uuid, placement.scheduler_id, route_candidates)
+        self.dispatch_to_worker(request, resolved, route_observation)
     }
 
     /// Materialize policy-released admissions into concrete worker dispatches.
@@ -1079,7 +1130,7 @@ where
         // before selection. External policy observations are constructed only
         // at the later, causally fresh controller boundary; building one here
         // would both be stale and discarded for an ordinary queued request.
-        let native_policy_candidates = self
+        let native_policy_observation = self
             .interactive
             .as_ref()
             .filter(|_| !uses_external_placement)
@@ -1088,52 +1139,46 @@ where
             self.placement
                 .place(&request, metadata, placement_session_id, self.now_ms)?;
         match effects.decision {
-            PlacementDecision::Immediate(mut placement) => {
+            PlacementDecision::Immediate(placement) => {
                 if placement.request_id != uuid {
                     bail!(
                         "offline placement returned request {} while placing {uuid}",
                         placement.request_id
                     );
                 }
-                let policy_candidates = if uses_external_placement {
+                let mut resolved = self.resolve_placement(placement, None)?;
+                let policy_observation = if uses_external_placement {
                     // Authored preassignment routes immediately and therefore
                     // has no announced controller boundary. Build its one
                     // pre-dispatch observation after policy resolution (which
                     // cannot mutate engine state), then reuse it for overlap
                     // and the Routed event.
-                    let candidates = self.interactive_placement_candidates(&request);
-                    placement = self.decorate_external_overlap(placement, &candidates)?;
-                    candidates
+                    let observation = self.interactive_placement_candidates(&request);
+                    self.decorate_external_overlap(&mut resolved, &observation)?;
+                    Some(observation)
                 } else {
-                    native_policy_candidates.unwrap_or_default()
+                    native_policy_observation
                 };
-                self.record_placement(placement);
-                let (logical_worker_id, dp_rank) = self
-                    .engine
-                    .rank_identity(placement.scheduler_id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "offline replay placement references unknown scheduler {}",
-                            placement.scheduler_id
-                        )
-                    })?;
+                anyhow::ensure!(
+                    self.interactive.is_none() || policy_observation.is_some(),
+                    "interactive replay request {uuid} has no frozen placement observation"
+                );
+                self.record_placement(resolved.placement);
                 self.collector.on_route_immediate(
                     uuid,
                     ReplayRequestPool::Agg,
                     self.now_ms,
-                    logical_worker_id,
-                    placement.scheduler_id,
-                    dp_rank,
-                    placement.reported_overlap_tokens,
+                    resolved.logical_worker_id,
+                    resolved.placement.scheduler_id,
+                    resolved.dp_rank,
+                    resolved.placement.reported_overlap_tokens,
                 );
-                let mut authored_target = self.accounting_target(logical_worker_id);
-                authored_target.dp_rank = dp_rank as usize;
                 self.collector.on_route_static_target(
                     uuid,
                     ReplayRequestPool::Agg,
-                    authored_target.pool_id,
-                    authored_target.worker_id,
-                    authored_target.dp_rank,
+                    resolved.authored_target.pool_id.clone(),
+                    resolved.authored_target.worker_id,
+                    resolved.authored_target.dp_rank,
                 );
                 self.requests.insert(
                     uuid,
@@ -1141,9 +1186,8 @@ where
                 );
                 self.dispatch_to_worker(
                     request.into_direct_request(),
-                    uuid,
-                    placement.scheduler_id,
-                    policy_candidates,
+                    resolved,
+                    policy_observation,
                 )?;
             }
             PlacementDecision::Queued => {
@@ -2368,12 +2412,12 @@ where
         else {
             return events;
         };
-        let candidates = self.interactive_placement_candidates(request);
+        let placement = self.interactive_placement_candidates(request);
         if let Some(capture) = self.interactive.as_mut() {
-            let (event, candidates) = capture
-                .placement_needed_captured_event(request_id, self.now_ms, candidates)
+            let event = capture
+                .placement_needed_captured_event(request_id, self.now_ms, Arc::clone(&placement))
                 .expect("pending external placement must retain authored identity");
-            capture.retain_captured_placement(request_id, candidates);
+            capture.mark_placement_observed(request_id, placement);
             // Existing terminal/DAG/lifecycle events retain priority. The one
             // fresh controller boundary is always appended after them.
             events.push(event);
