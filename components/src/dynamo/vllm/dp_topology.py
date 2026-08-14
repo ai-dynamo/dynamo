@@ -3,9 +3,13 @@
 
 """Shared vLLM data-parallel topology helpers."""
 
-import logging
+from __future__ import annotations
 
-from vllm.config import VllmConfig
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = logging.getLogger(__name__)
 
