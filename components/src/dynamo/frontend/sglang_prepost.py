@@ -806,7 +806,29 @@ def preprocess_chat_request(
         if chat_template_kwargs:
             template_kwargs.update(chat_template_kwargs)
 
-        if (reasoning_effort := request.get("reasoning_effort")) is not None:
+        reasoning_effort = request.get("reasoning_effort")
+        is_kimi_k3 = any(
+            _normalize_sglang_parser_name(parser_name) == "kimi_k3"
+            for parser_name in (tool_call_parser_name, reasoning_parser_name)
+        )
+        if is_kimi_k3:
+            # Native SGLang's Kimi K3 encoder names this template argument
+            # thinking_effort and supports only low, high, and max.
+            reasoning_effort = template_kwargs.pop("reasoning_effort", reasoning_effort)
+            if (
+                reasoning_effort in ("low", "high", "max")
+                and "thinking_effort" not in template_kwargs
+            ):
+                template_kwargs["thinking_effort"] = reasoning_effort
+            elif reasoning_effort not in (None, "none", "low", "high", "max"):
+                logger.warning(
+                    "Kimi K3 does not support reasoning_effort=%r; using the "
+                    "encoder default.",
+                    reasoning_effort,
+                )
+            if (response_format := request.get("response_format")) is not None:
+                template_kwargs.setdefault("response_format", response_format)
+        elif reasoning_effort is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
         template_messages = _normalize_messages_for_template(messages, tokenizer)
