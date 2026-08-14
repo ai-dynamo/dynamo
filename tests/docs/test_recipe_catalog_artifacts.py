@@ -66,7 +66,7 @@ _SPEC.loader.exec_module(catalog_validate)
             ("nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1",),
         ),
         (
-            "qwen-3-8-2-4t-a95b",
+            "qwen-3-8-2-4t-a95b-fp8",
             (
                 "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1",
                 "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-qwen-3.8-2.4t-dev.1",
