@@ -26,6 +26,7 @@ def _source_checkout_roots() -> tuple[Path, Path]:
     repo_root = aisimulate_root.parent
     source_tree_markers = (
         aisimulate_root / "pyproject.toml",
+        aisimulate_root / "crates/core/Cargo.toml",
         repo_root / "Cargo.toml",
     )
     if not all(path.is_file() for path in source_tree_markers):
