@@ -1325,189 +1325,246 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 	}
 }
 
+type groveActiveRuntimeNamespace uint8
+
+const (
+	groveNoActiveRuntimeNamespace groveActiveRuntimeNamespace = iota
+	groveBaseRuntimeNamespace
+	grovePreviousSuffixedRuntimeNamespace
+)
+
+type groveExpectedRuntimeNamespace uint8
+
+const (
+	groveDesiredRuntimeNamespace groveExpectedRuntimeNamespace = iota
+	groveExpectedActiveRuntimeNamespace
+)
+
+type groveChildRevision uint8
+
+const (
+	groveChildAtPreviousRevision groveChildRevision = iota
+	groveChildAtTargetRevision
+)
+
+type groveRuntimeNamespaceCutoverCase struct {
+	name                 string
+	activeNamespace      groveActiveRuntimeNamespace
+	pcsAccepted          bool
+	childRevision        groveChildRevision
+	childUpdateEnded     bool
+	childReady           bool
+	wantReady            bool
+	wantRuntimeNamespace groveExpectedRuntimeNamespace
+}
+
+type groveRuntimeNamespaceFixture struct {
+	dgd              *v1beta1.DynamoGraphDeployment
+	reader           client.Reader
+	componentName    string
+	activeNamespace  string
+	desiredNamespace string
+}
+
 func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *testing.T) {
 	ctx := context.Background()
 
-	tests := []struct {
-		name                string
-		hasPrevious         bool
-		previousSuffix      string
-		parentAccepted      bool
-		childAtTarget       bool
-		childUpdateFinished bool
-		ready               bool
-		wantDesired         bool
-	}{
+	tests := []groveRuntimeNamespaceCutoverCase{
 		{
-			name:        "new worker uses the desired namespace before the first cutover",
-			ready:       false,
-			wantDesired: true,
+			name:                 "new worker publishes desired namespace before the first cutover",
+			wantRuntimeNamespace: groveDesiredRuntimeNamespace,
 		},
 		{
-			name:           "legacy base namespace stays active until the parent accepts the target",
-			hasPrevious:    true,
-			previousSuffix: "",
-			ready:          true,
+			name:                 "unaccepted PCS keeps the active namespace despite a completed target child",
+			activeNamespace:      groveBaseRuntimeNamespace,
+			childRevision:        groveChildAtTargetRevision,
+			childUpdateEnded:     true,
+			childReady:           true,
+			wantReady:            true,
+			wantRuntimeNamespace: groveExpectedActiveRuntimeNamespace,
 		},
 		{
-			name:                "legacy base namespace stays active until the parent accepts a completed child revision",
-			hasPrevious:         true,
-			childAtTarget:       true,
-			childUpdateFinished: true,
-			ready:               true,
+			name:                 "target PCS keeps the active namespace while the child reports the previous revision",
+			activeNamespace:      groveBaseRuntimeNamespace,
+			pcsAccepted:          true,
+			childReady:           true,
+			wantReady:            true,
+			wantRuntimeNamespace: groveExpectedActiveRuntimeNamespace,
 		},
 		{
-			name:           "legacy base namespace stays active while the child reports the old revision",
-			hasPrevious:    true,
-			parentAccepted: true,
-			ready:          true,
+			name:                 "target PCS keeps the active namespace while the child update is unfinished",
+			activeNamespace:      groveBaseRuntimeNamespace,
+			pcsAccepted:          true,
+			childRevision:        groveChildAtTargetRevision,
+			childReady:           true,
+			wantReady:            true,
+			wantRuntimeNamespace: groveExpectedActiveRuntimeNamespace,
 		},
 		{
-			name:                "legacy base namespace stays active while the child update is unfinished",
-			hasPrevious:         true,
-			parentAccepted:      true,
-			childAtTarget:       true,
-			childUpdateFinished: false,
-			ready:               true,
+			name:                 "completed target child publishes the desired namespace",
+			activeNamespace:      groveBaseRuntimeNamespace,
+			pcsAccepted:          true,
+			childRevision:        groveChildAtTargetRevision,
+			childUpdateEnded:     true,
+			childReady:           true,
+			wantReady:            true,
+			wantRuntimeNamespace: groveDesiredRuntimeNamespace,
 		},
 		{
-			name:                "legacy base namespace switches after target cutover",
-			hasPrevious:         true,
-			parentAccepted:      true,
-			childAtTarget:       true,
-			childUpdateFinished: true,
-			ready:               true,
-			wantDesired:         true,
+			name:                 "completed target namespace survives later worker health loss",
+			activeNamespace:      grovePreviousSuffixedRuntimeNamespace,
+			pcsAccepted:          true,
+			childRevision:        groveChildAtTargetRevision,
+			childUpdateEnded:     true,
+			wantRuntimeNamespace: groveDesiredRuntimeNamespace,
 		},
 		{
-			name:                "completed target namespace survives later worker health loss",
-			hasPrevious:         true,
-			previousSuffix:      "oldhash",
-			parentAccepted:      true,
-			childAtTarget:       true,
-			childUpdateFinished: true,
-			ready:               false,
-			wantDesired:         true,
+			name:                 "previous suffix remains active while the next target child reports the previous revision",
+			activeNamespace:      grovePreviousSuffixedRuntimeNamespace,
+			pcsAccepted:          true,
+			childReady:           true,
+			wantReady:            true,
+			wantRuntimeNamespace: groveExpectedActiveRuntimeNamespace,
 		},
 		{
-			name:           "previous suffix remains active while the next suffix rollout is pending",
-			hasPrevious:    true,
-			previousSuffix: "oldhash",
-			parentAccepted: true,
-			ready:          true,
-		},
-		{
-			name:                "next suffix is published after the later rollout completes",
-			hasPrevious:         true,
-			previousSuffix:      "oldhash",
-			parentAccepted:      true,
-			childAtTarget:       true,
-			childUpdateFinished: true,
-			ready:               true,
-			wantDesired:         true,
+			name:                 "next completed target child publishes the desired namespace",
+			activeNamespace:      grovePreviousSuffixedRuntimeNamespace,
+			pcsAccepted:          true,
+			childRevision:        groveChildAtTargetRevision,
+			childUpdateEnded:     true,
+			childReady:           true,
+			wantReady:            true,
+			wantRuntimeNamespace: groveDesiredRuntimeNamespace,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := gomega.NewGomegaWithT(t)
+			t.Log("Build the requested Grove worker cutover state.")
+			fixture := newGroveRuntimeNamespaceFixture(t, tt)
 
-			t.Log("Build a DGD that requires a worker namespace suffix.")
-			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-					Annotations: map[string]string{
-						commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
-					},
-				},
-				Spec: v1beta1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-						ComponentName: "prefill",
-						ComponentType: v1beta1.ComponentTypePrefill,
-					}},
-				},
+			t.Log("Evaluate the namespace published for the current Grove state.")
+			readiness, err := EvaluateGroveReadiness(ctx, fixture.reader, fixture.dgd)
+			if err != nil {
+				t.Fatalf("EvaluateGroveReadiness() error = %v", err)
 			}
-			component := dgd.GetComponentByName("prefill")
-			t.Log("Calculate the namespace rendered for the desired worker revision.")
-			workerHash, err := ComputeDGDWorkersSpecHash(dgd)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			desiredNamespace := ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), workerHash)
-
-			t.Log("Record the namespace published by the previous worker generation.")
-			previousNamespace := ""
-			if tt.hasPrevious {
-				previousNamespace = dgd.GetDynamoNamespaceForComponent(component)
-				if tt.previousSuffix != "" {
-					previousNamespace = ComponentRuntimeNamespace(previousNamespace, string(component.ComponentType), tt.previousSuffix)
-				}
-				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-					component.ComponentName: {RuntimeNamespace: previousNamespace},
-				}
+			if readiness.Ready != tt.wantReady {
+				t.Fatalf("EvaluateGroveReadiness().Ready = %t, want %t", readiness.Ready, tt.wantReady)
 			}
 
-			t.Log("Seed the parent and child Grove revision state.")
-			targetRevision := "target-revision"
-			completedAt := metav1.Now()
-			parentObservedGeneration := int64(0)
-			if tt.parentAccepted {
-				parentObservedGeneration = 1
+			gotNamespace := readiness.ComponentStatuses[fixture.componentName].RuntimeNamespace
+			if wantNamespace := fixture.runtimeNamespace(tt.wantRuntimeNamespace); gotNamespace != wantNamespace {
+				t.Fatalf("runtime namespace = %q, want %q", gotNamespace, wantNamespace)
 			}
-			podCliqueSet := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-					Namespace:  dgd.Namespace,
-					Generation: 1,
-				},
-				Status: grovev1alpha1.PodCliqueSetStatus{
-					ObservedGeneration:    &parentObservedGeneration,
-					CurrentGenerationHash: &targetRevision,
-				},
-			}
-			updatedReplicas := int32(0)
-			if tt.ready || tt.childAtTarget {
-				updatedReplicas = 1
-			}
-			readyReplicas := int32(0)
-			if tt.ready {
-				readyReplicas = 1
-			}
-			podClique := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       GroveComponentResourceName(dgd, component.ComponentName),
-					Namespace:  dgd.Namespace,
-					Generation: 1,
-				},
-				Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
-				Status: grovev1alpha1.PodCliqueStatus{
-					Replicas:           1,
-					ReadyReplicas:      readyReplicas,
-					UpdatedReplicas:    updatedReplicas,
-					ScheduledReplicas:  1,
-					ObservedGeneration: ptr.To(int64(1)),
-				},
-			}
-			if tt.childAtTarget {
-				podClique.Status.CurrentPodCliqueSetGenerationHash = &targetRevision
-			}
-			if tt.childUpdateFinished {
-				podClique.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}
-			}
-			reader := newFakeGroveClient(g, podCliqueSet, podClique)
-
-			t.Log("Evaluate the current Grove status.")
-			readiness, err := EvaluateGroveReadiness(ctx, reader, dgd)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(readiness.Ready).To(gomega.Equal(tt.ready))
-
-			t.Log("Publish the previous namespace only until the child completes the accepted PCS revision.")
-			wantNamespace := previousNamespace
-			if tt.wantDesired || previousNamespace == "" {
-				wantNamespace = desiredNamespace
-			}
-			g.Expect(readiness.ComponentStatuses[component.ComponentName].RuntimeNamespace).To(gomega.Equal(wantNamespace))
 		})
+	}
+}
+
+func (f groveRuntimeNamespaceFixture) runtimeNamespace(source groveExpectedRuntimeNamespace) string {
+	switch source {
+	case groveDesiredRuntimeNamespace:
+		return f.desiredNamespace
+	case groveExpectedActiveRuntimeNamespace:
+		return f.activeNamespace
+	default:
+		panic(fmt.Sprintf("unknown expected runtime namespace source %d", source))
+	}
+}
+
+func newGroveRuntimeNamespaceFixture(t *testing.T, testCase groveRuntimeNamespaceCutoverCase) groveRuntimeNamespaceFixture {
+	t.Helper()
+	g := gomega.NewWithT(t)
+
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			Annotations: map[string]string{
+				commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "prefill",
+				ComponentType: v1beta1.ComponentTypePrefill,
+			}},
+		},
+	}
+	component := dgd.GetComponentByName("prefill")
+	baseNamespace := dgd.GetDynamoNamespaceForComponent(component)
+	workerHash, err := ComputeDGDWorkersSpecHash(dgd)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	desiredNamespace := ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), workerHash)
+
+	activeNamespace := ""
+	switch testCase.activeNamespace {
+	case groveNoActiveRuntimeNamespace:
+	case groveBaseRuntimeNamespace:
+		activeNamespace = baseNamespace
+	case grovePreviousSuffixedRuntimeNamespace:
+		activeNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "oldhash")
+	default:
+		t.Fatalf("unknown active runtime namespace source %d", testCase.activeNamespace)
+	}
+	if activeNamespace != "" {
+		dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
+			component.ComponentName: {RuntimeNamespace: activeNamespace},
+		}
+	}
+
+	targetRevision := "target-revision"
+	previousRevision := "previous-revision"
+	childRevision := previousRevision
+	if testCase.childRevision == groveChildAtTargetRevision {
+		childRevision = targetRevision
+	}
+	parentObservedGeneration := int64(0)
+	if testCase.pcsAccepted {
+		parentObservedGeneration = 1
+	}
+	completedAt := metav1.Now()
+	podCliqueSet := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Namespace:  dgd.Namespace,
+			Generation: 1,
+		},
+		Status: grovev1alpha1.PodCliqueSetStatus{
+			ObservedGeneration:    &parentObservedGeneration,
+			CurrentGenerationHash: &targetRevision,
+		},
+	}
+	readyReplicas := int32(0)
+	if testCase.childReady {
+		readyReplicas = 1
+	}
+	podClique := &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       GroveComponentResourceName(dgd, component.ComponentName),
+			Namespace:  dgd.Namespace,
+			Generation: 1,
+		},
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: grovev1alpha1.PodCliqueStatus{
+			Replicas:                          1,
+			ReadyReplicas:                     readyReplicas,
+			UpdatedReplicas:                   1,
+			ScheduledReplicas:                 1,
+			ObservedGeneration:                ptr.To(int64(1)),
+			CurrentPodCliqueSetGenerationHash: &childRevision,
+		},
+	}
+	if testCase.childUpdateEnded {
+		podClique.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}
+	}
+
+	return groveRuntimeNamespaceFixture{
+		dgd:              dgd,
+		reader:           newFakeGroveClient(g, podCliqueSet, podClique),
+		componentName:    component.ComponentName,
+		activeNamespace:  activeNamespace,
+		desiredNamespace: desiredNamespace,
 	}
 }
 
