@@ -26,7 +26,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -39,8 +39,8 @@ type disaggregatedSetWorkloadsReconciler struct {
 	reader                   client.Reader
 	Config                   *configv1alpha1.OperatorConfiguration
 	RuntimeConfig            *commoncontroller.RuntimeConfig
-	Recorder                 record.EventRecorder
-	DockerSecretRetriever    dockerSecretRetriever
+	Recorder                 events.EventRecorder
+	DockerSecretRetriever    DockerSecretRetriever
 	rollout                  *dgdWorkerRolloutReconciler
 	renderer                 *dcdWorkloadRenderer
 	componentWorkloads       *componentWorkloadsReconciler
@@ -99,10 +99,10 @@ func (r *disaggregatedSetCompatibilityCleanup) Reconcile(
 
 func newDisaggregatedSetWorkloadsReconciler(
 	k8sClient client.Client,
-	recorder record.EventRecorder,
+	recorder events.EventRecorder,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 	rollout *dgdWorkerRolloutReconciler,
 ) *disaggregatedSetWorkloadsReconciler {
 	componentWorkloads := newComponentWorkloadsReconciler(k8sClient, recorder, rollout)
@@ -120,7 +120,7 @@ func newDisaggregatedSetWorkloadsReconciler(
 	}
 }
 
-func (r *disaggregatedSetWorkloadsReconciler) GetRecorder() record.EventRecorder {
+func (r *disaggregatedSetWorkloadsReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 
