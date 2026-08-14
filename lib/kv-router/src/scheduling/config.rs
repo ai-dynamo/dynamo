@@ -1903,34 +1903,6 @@ worker_selection:
     }
 
     #[test]
-    fn legacy_default_is_not_reported_as_an_explicit_stage_selection() {
-        let policy_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            policy_file.path(),
-            r#"
-worker_selection:
-  default: legacy
-  instances:
-    - name: legacy
-      type: acme
-"#,
-        )
-        .unwrap();
-        let config = KvRouterConfig {
-            router_policy_config: Some(policy_file.path().display().to_string()),
-            ..Default::default()
-        };
-
-        assert!(!config.has_explicit_stage_worker_selection_policy().unwrap());
-        assert_eq!(
-            config
-                .selected_worker_selection_policy_instance_for(WorkerType::Aggregated)
-                .unwrap(),
-            Some("legacy".to_string())
-        );
-    }
-
-    #[test]
     fn removed_missing_isl_queue_config_is_rejected_as_unknown() {
         for value in [
             serde_json::json!(null),

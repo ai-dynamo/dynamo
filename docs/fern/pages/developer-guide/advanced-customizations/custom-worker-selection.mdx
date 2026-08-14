@@ -290,8 +290,6 @@ The `type` selects a registered provider. The `name` identifies one configured i
 
 `worker_selection.encode` applies only to a surface-carrying encode worker set that constructs the standard KV chooser. It does not configure the surface-less multimodal encoder hop: `EncoderRouter` selects those workers independently with round-robin routing.
 
-For compatibility with v1.4 policy files, deprecated `worker_selection.default` fills every worker type that has no explicit selection. Do not combine it with `worker_selection.aggregated`. New policy files should name each intended worker type explicitly.
-
 For prefill and decode, the selection order is the role-specific CLI or environment override, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then Dynamo's built-in policy. For aggregated and encode, the order is `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then the built-in policy. Set any selection to `default` to use the built-in policy for that scope.
 
 <Note>
