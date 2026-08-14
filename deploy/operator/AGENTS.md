@@ -17,6 +17,8 @@ SPDX-License-Identifier: Apache-2.0
 - Kubernetes Event emission is intentionally edge-based. Derive these edges
   from explicit object state, such as a spec/status difference or a durable
   annotation, never from informer delivery semantics.
+- An operator-only upgrade must not roll or materially alter unchanged
+  workloads unless an explicit, documented migration or opt-in requires it.
 - Admission validation should enforce state invariants independent of the
   request operation. Distinguish between `CREATE` and `UPDATE` only for
   exceptional, intentional API semantics, and document why the distinction is
@@ -29,6 +31,16 @@ SPDX-License-Identifier: Apache-2.0
 - Separate multi-line semantic blocks from surrounding code with one blank
   line. Do not add trailing blank lines before a closing delimiter or between
   a block-leading comment and its code.
+- Getter, resolver, renderer, converter, and hash functions must not mutate
+  their inputs unless mutation is an explicit, documented part of the contract.
+- Avoid forwarding helpers that merely rename or wrap one call. Test-only
+  static resolvers and convenience helpers belong in `_test.go` files, not
+  production code.
+- Do not add production fields, types, or extension points solely for
+  hypothetical future use.
+- An extension point introduced for testability must also be used by production
+  code. Tests may override the value or implementation supplied through that
+  production path; do not add a parallel test-only extension point.
 
 ## Function Preconditions and Nil Handling
 
