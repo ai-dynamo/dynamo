@@ -604,16 +604,43 @@ fn spawn_endpoint_watcher_task(
                 endpoint: endpoint_name.clone(),
             };
 
+            let mut stream = match endpoint
+                .drt()
+                .discovery()
+                .list_and_watch(query.clone(), None)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_name,
+                        "Failed to start instance removal watcher (will retry): {e}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
+                        _ = cancel_token.cancelled() => break 'reconnect,
+                        _ = lifecycle.cancelled() => break 'reconnect,
+                    }
+                }
+            };
+
             // A fresh `list_and_watch` re-lists whatever still exists but never
             // reports what vanished while the previous stream was down, so an
-            // instance that died during the outage would stay in `live` for the
-            // life of the process: replayed as present to every router built
-            // afterwards, and never released. Reconcile against an explicit
-            // listing before resubscribing — taken first, so an instance that
-            // registers in the gap is absent here but still arrives as `Added`
-            // on the new stream.
+            // instance that died during the outage would otherwise stay in
+            // `live` for the life of the process: replayed as present to every
+            // router built afterwards, and never released. Reconcile against an
+            // explicit listing to find those.
+            //
+            // The listing is taken after the watch is established, not before.
+            // Anything that goes away from here on is carried by the stream as a
+            // `Removed`, so the two together leave no window: a removal earlier
+            // than the listing is caught by the listing, a removal later than it
+            // by the stream. An instance retired between the watch's own
+            // snapshot and the listing is pruned here and may still arrive as a
+            // late `Added`, but the stream owes us its `Removed` too, and the
+            // hooks are idempotent by contract.
             if resubscribing {
-                match endpoint.drt().discovery().list(query.clone()).await {
+                match endpoint.drt().discovery().list(query).await {
                     Ok(instances) => {
                         let present: HashSet<u64> = instances
                             .iter()
@@ -646,21 +673,6 @@ fn spawn_endpoint_watcher_task(
                 }
             }
             resubscribing = true;
-
-            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        endpoint = %endpoint_name,
-                        "Failed to start instance removal watcher (will retry): {e}"
-                    );
-                    tokio::select! {
-                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
-                        _ = cancel_token.cancelled() => break 'reconnect,
-                        _ = lifecycle.cancelled() => break 'reconnect,
-                    }
-                }
-            };
 
             loop {
                 tokio::select! {
