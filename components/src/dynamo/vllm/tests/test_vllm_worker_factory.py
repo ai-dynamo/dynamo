@@ -211,9 +211,11 @@ async def test_prefill_startup_failure_withdraws_state_agent_owner():
 
 @pytest.mark.asyncio
 async def test_state_agent_setup_failure_never_falls_back_to_legacy(monkeypatch):
-    from dynamo.vllm import state_agent
+    from dynamo.vllm import worker_factory
 
-    monkeypatch.setattr(state_agent, "state_agent_settings", lambda _config: object())
+    monkeypatch.setattr(
+        worker_factory, "state_agent_settings", lambda _config: object()
+    )
     setup_legacy = Mock(return_value=["legacy"])
     setup_owner = AsyncMock(side_effect=RuntimeError("host is unavailable"))
     factory = _make_factory(
