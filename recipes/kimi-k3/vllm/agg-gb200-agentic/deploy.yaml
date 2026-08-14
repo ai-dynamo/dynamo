@@ -100,8 +100,6 @@ spec:
               --tensor-parallel-size 16 \
               --gpu-memory-utilization 0.92 \
               --kv-cache-dtype fp8 \
-              --mm-encoder-tp-mode data \
-              --mm-encoder-attn-backend TORCH_SDPA \
               --attention-backend FLASHINFER_MLA \
               --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
               --moe-backend auto \
@@ -112,7 +110,6 @@ spec:
               --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048,4096,5120,6144,6656,7168,7680,8192]}' \
               --block-size 64 \
               --no-enable-flashinfer-autotune \
-              --skip-mm-profiling \
               --enable-multimodal \
               --disable-custom-all-reduce \
               --enable-prefix-caching \
@@ -140,8 +137,6 @@ spec:
             value: /tmp/flashinfer
           - name: XDG_CACHE_HOME
             value: /tmp/.cache
-          - name: GP_DISABLE_CUDNN
-            value: '1'
           - name: VLLM_ENGINE_READY_TIMEOUT_S
             value: '7200'
           - name: VLLM_SSM_CONV_STATE_LAYOUT
