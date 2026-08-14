@@ -128,11 +128,11 @@ type RestartStrategy struct {
 	Order []string `json:"order,omitempty"`
 }
 
-// ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
-// (DGDSA). When `scalingAdapter` is set on a component (even as an empty
-// object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
-// field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-// the Scale subresource. Omitting the field opts the component out.
+// ScalingAdapter opts a component into the DynamoGraphDeploymentScalingAdapter (DGDSA).
+// It is a marker struct: setting `scalingAdapter` at all -- even as the empty object
+// `scalingAdapter: {}` -- creates the DGDSA, which owns the `replicas` field so that
+// external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource.
+// Omit the field to opt out.
 type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
@@ -164,6 +164,22 @@ const (
 	GMSModeInterPod GPUMemoryServiceMode = "InterPod"
 )
 
+// GroveSpec groups experimental Grove-specific rendering options.
+type GroveSpec struct {
+	// forceScalingGroup opts a single-node component into rendering as a
+	// PodCliqueScalingGroup with one single-pod PodClique per replica.
+	// Scaling changes the scaling-group replica count. The first
+	// `minAvailable` replicas join the deployment's base PodGang together
+	// with its other base workloads; each replica beyond `minAvailable`
+	// gets its own PodGang, gang-scheduled separately from the rest of the
+	// deployment. `false` or omitted means automatic selection (multi-node
+	// and inter-pod GMS components use a scaling group, other single-node
+	// components a standalone PodClique), not "force PodClique".
+	// Immutable after creation.
+	// +optional
+	ForceScalingGroup bool `json:"forceScalingGroup,omitempty"`
+}
+
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
 // may change in breaking ways between v1beta1 releases (including disappearing
 // without a name-preserving graduation path). Fields placed under
@@ -182,6 +198,10 @@ type ExperimentalSpec struct {
 	// match `gpuMemoryService.mode` (enforced by the validation webhook).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
+
+	// grove groups Grove-specific rendering options.
+	// +optional
+	Grove *GroveSpec `json:"grove,omitempty"`
 
 	// checkpoint configures container-image snapshotting and restore for
 	// this component. Set `checkpoint.enabled: true` to opt in. Without
@@ -216,8 +236,8 @@ type GPUMemoryServiceSpec struct {
 
 	// extraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in service pods. Checkpoint Job clients are declared
-	// under checkpoint.job.gmsClientContainers. In each rendered pod, only
-	// matching container names are wired; absent names are ignored.
+	// under checkpoint.job.gmsClientContainers. Every name must match a container
+	// in the enclosing component's podTemplate.spec.containers.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
@@ -563,6 +583,53 @@ const (
 	DGDStateSuccessful   DGDState = "successful"
 	DGDStateFailed       DGDState = "failed"
 )
+
+// PlacementScoreState describes whether placement score is available and how
+// complete the reported score is for a graph deployment.
+//
+// Every backend must set this field after the first reconciliation:
+//   - Reported:    a score is available for every scored placement unit.
+//   - Partial:     a score is available for some but not all placement units.
+//   - Unsupported: the backend does not surface a placement score at all.
+//   - Unknown:     the backend supports scores but the current value is
+//     indeterminate (e.g. read failure, not yet populated by the
+//     scheduler). When set, PlacementStatus.Score must be cleared.
+//
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
+type PlacementScoreState string
+
+const (
+	PlacementScoreStateReported    PlacementScoreState = "Reported"
+	PlacementScoreStatePartial     PlacementScoreState = "Partial"
+	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
+	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
+)
+
+// PlacementStatus groups DGD-level scheduler placement fields under a single
+// status object so future placement signals (e.g. scheduler contract version,
+// last-report timestamp, per-unit reports) can be added without a schema break.
+//
+// The score source is an open question in DEP #10064 (Grove mirror, typed Grove
+// scheduler API, or unstructured provider). Until a source is selected and
+// implemented, the DGD controller does not write this field; the schema and
+// conversion are landed here so downstream consumers can rely on the shape.
+type PlacementStatus struct {
+	// score is the DGD-level scheduler placement score aggregated from
+	// relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+	// is better and 1.0 represents the best possible placement. Aggregation
+	// uses the minimum across placement units so the value is a worst-placement
+	// signal for the graph. Scores are only comparable across DGDs that share
+	// the same scheduler scoring contract and version.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Score *float64 `json:"score,omitempty"`
+
+	// state indicates placement score reporting state. See PlacementScoreState
+	// for the semantics of each value.
+	// +optional
+	State PlacementScoreState `json:"state,omitempty"`
+}
 
 // RestartPhase enumerates phases of a graph-level restart.
 type RestartPhase string

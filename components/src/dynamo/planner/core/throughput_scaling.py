@@ -14,6 +14,7 @@ import logging
 import math
 from typing import Optional
 
+from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import ScalingDecision
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,10 @@ class ThroughputScalingMixin:
         self._diag_engine_rps_prefill = engine_rps
         self._diag_engine_rps_decode = engine_rps
 
-        desired = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
+        desired = max(
+            math.ceil(demand_rps / engine_rps),
+            resolve_min_endpoint(self._config, "decode"),
+        )
         logger.info(
             f"Agg: {demand_rps:.2f} rps / {engine_rps:.2f} engine_rps = {desired} replicas"
         )
@@ -181,18 +185,16 @@ class ThroughputScalingMixin:
             self._diag_throughput_reason = "model_not_ready"
             return None
         ttft_ms = capacity.ttft_ms or 0.0
-        sla_floor = 1
         if not capacity.eligible or ttft_ms > self._config.ttft_ms:
             logger.warning(
                 f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft_ms:.1f}ms"
             )
-            # Latency-driven floor
-            sla_floor = math.ceil(ttft_ms / self._config.ttft_ms)
 
         self._diag_engine_rps_prefill = engine_rps
 
         result = max(
-            math.ceil(demand_rps / engine_rps), sla_floor, self._config.min_endpoint
+            math.ceil(demand_rps / engine_rps),
+            resolve_min_endpoint(self._config, "prefill"),
         )
         logger.info(
             f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
@@ -224,7 +226,10 @@ class ThroughputScalingMixin:
 
         self._diag_engine_rps_decode = engine_rps
 
-        result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
+        result = max(
+            math.ceil(demand_rps / engine_rps),
+            resolve_min_endpoint(self._config, "decode"),
+        )
         logger.info(
             f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
             f"est_itl={itl_ms:.1f}ms, accept_length={accept_length:.2f}"

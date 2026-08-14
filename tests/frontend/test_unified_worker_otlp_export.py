@@ -13,17 +13,10 @@ with its attributes intact.
 
 from __future__ import annotations
 
-import threading
 import time
-from concurrent import futures
 
-import grpc
 import pytest
 import requests
-from opentelemetry.proto.collector.trace.v1 import (
-    trace_service_pb2,
-    trace_service_pb2_grpc,
-)
 
 from tests.frontend.conftest import (
     SampleUnifiedWorkerProcess,
@@ -32,6 +25,13 @@ from tests.frontend.conftest import (
 from tests.frontend.test_request_tracing_logs import _send_chat_completions
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess
+from tests.utils.otel import (
+    get_engine_generate_roles,
+    get_span_attribute,
+    wait_for_engine_generate_count,
+)
+
+pytest_plugins = ("tests.utils.otel_plugin",)
 
 TEST_MODEL = QWEN
 
@@ -43,62 +43,6 @@ pytestmark = [
     pytest.mark.model(TEST_MODEL),
     pytest.mark.timeout(180),
 ]
-
-
-class InProcOtlpCollector(trace_service_pb2_grpc.TraceServiceServicer):
-    """Minimal in-process OTLP/gRPC trace collector.
-
-    Stores every received Span proto for the test to assert on. Thread-safe;
-    the gRPC server runs on a worker thread pool.
-    """
-
-    def __init__(self):
-        self.spans = []
-        self._lock = threading.Lock()
-
-    def Export(self, request, context):
-        with self._lock:
-            for resource_spans in request.resource_spans:
-                for scope_spans in resource_spans.scope_spans:
-                    self.spans.extend(scope_spans.spans)
-        return trace_service_pb2.ExportTraceServiceResponse()
-
-    def engine_generate_spans(self):
-        with self._lock:
-            return [s for s in self.spans if s.name == "engine.generate"]
-
-    def spans_for_trace_id(self, trace_id_hex):
-        trace_id = bytes.fromhex(trace_id_hex)
-        with self._lock:
-            return [s for s in self.spans if s.trace_id == trace_id]
-
-    def has_span(self, name):
-        with self._lock:
-            return any(s.name == name for s in self.spans)
-
-    def clear(self):
-        with self._lock:
-            self.spans.clear()
-
-    def snapshot(self):
-        """Return a stable copy of `self.spans` for assertions."""
-        with self._lock:
-            return list(self.spans)
-
-
-def _get_attr(span, key):
-    """Return the attribute value as a string, or None if absent.
-    Int/double values are stringified via `str()`."""
-    for attr in span.attributes:
-        if attr.key == key:
-            v = attr.value
-            if v.HasField("string_value"):
-                return v.string_value
-            if v.HasField("int_value"):
-                return str(v.int_value)
-            if v.HasField("double_value"):
-                return str(v.double_value)
-    return None
 
 
 def _send_chat_completions_with_headers(
@@ -120,37 +64,6 @@ def _send_chat_completions_with_headers(
         json=payload,
         timeout=60,
     )
-
-
-def _wait_for_engine_generate_count(
-    collector: InProcOtlpCollector,
-    *,
-    min_count: int,
-    timeout: float = 15.0,
-) -> int:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        count = len(collector.engine_generate_spans())
-        if count >= min_count:
-            return count
-        time.sleep(0.5)
-    return len(collector.engine_generate_spans())
-
-
-@pytest.fixture
-def otlp_collector():
-    """Spin up an in-process OTLP gRPC server on a random port. Yields
-    (collector, port). Cleans up on test exit.
-    """
-    collector = InProcOtlpCollector()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    trace_service_pb2_grpc.add_TraceServiceServicer_to_server(collector, server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    server.start()
-    try:
-        yield collector, port
-    finally:
-        server.stop(grace=1)
 
 
 def test_unified_worker_exports_engine_generate_span_over_otlp(
@@ -223,11 +136,11 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     # Verify auto-span attributes round-tripped through OTLP.
     span = eg_spans[0]
     assert (
-        _get_attr(span, "disagg_role") == "agg"
-    ), f"expected disagg_role=agg, got {_get_attr(span, 'disagg_role')!r}"
-    assert _get_attr(span, "model") is not None, "missing `model` attribute"
+        get_span_attribute(span, "disagg_role") == "agg"
+    ), f"expected disagg_role=agg, got {get_span_attribute(span, 'disagg_role')!r}"
+    assert get_span_attribute(span, "model") is not None, "missing `model` attribute"
     assert (
-        _get_attr(span, "input_tokens") is not None
+        get_span_attribute(span, "input_tokens") is not None
     ), "missing `input_tokens` attribute"
 
 
@@ -361,7 +274,7 @@ def test_traceidratio_sampler_controls_otlp_exports(
                     resp.status_code == 200
                 ), f"curl failed: {resp.status_code} {resp.text!r}"
 
-            count = _wait_for_engine_generate_count(
+            count = wait_for_engine_generate_count(
                 collector,
                 min_count=expected_min if expected_max is None else expected_max + 1,
             )
@@ -444,10 +357,7 @@ def test_disagg_decode_span_links_to_prefill_span(
                 # separate batch and can lag the parent.
                 deadline = time.monotonic() + 30.0
                 while time.monotonic() < deadline:
-                    roles = {
-                        _get_attr(s, "disagg_role")
-                        for s in collector.engine_generate_spans()
-                    }
+                    roles = get_engine_generate_roles(collector)
                     if {"prefill", "decode"}.issubset(roles) and collector.has_span(
                         "sample.tokens"
                     ):
@@ -457,7 +367,7 @@ def test_disagg_decode_span_links_to_prefill_span(
     eg_spans = collector.engine_generate_spans()
     # Single curl ⇒ at most one span per role; if there were retries the
     # last would win, which is fine for this regression test.
-    by_role = {_get_attr(s, "disagg_role"): s for s in eg_spans}
+    by_role = {get_span_attribute(s, "disagg_role"): s for s in eg_spans}
     assert (
         "prefill" in by_role
     ), f"no prefill engine.generate span; got roles {set(by_role)}"

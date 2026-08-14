@@ -139,7 +139,7 @@ jobs:
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -151,11 +151,16 @@ jobs:
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_ENV: ${{ inputs.dd_env }}
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
+        # dynamo tests run product code in subprocesses, so ddtrace's in-process
+        # coverage.py collects nothing ("No data was collected" warnings) and TIA
+        # gets no signal. Disable ITR (skips the settings API, coverage, skipping).
+        DD_CIVISIBILITY_ITR_ENABLED: 'false'
     permissions:
       contents: read
     services:
       minio:
-        image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+        image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin

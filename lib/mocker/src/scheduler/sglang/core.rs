@@ -7,13 +7,17 @@ use std::time::Duration;
 use dynamo_kv_router::protocols::WorkerId;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::cache::radix_cache::KvPageId;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
 use crate::common::utils::prefill_handoff_transfer_timing;
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::SglangDestinationReservation;
+#[cfg(test)]
 use crate::replay::TraceCollector;
+use crate::replay::offline::evidence::record_pressure_readmission;
 
 use super::config::SglangConfig;
 use super::decode::{
@@ -26,8 +30,8 @@ use crate::scheduler::{
     ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedRouterEventBuffer,
     DestinationHolds, EnginePassResult, MockerMetrics, PendingDestinations, RemovedSource,
     RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
-    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, accept_length_sample,
-    build_fpm_snapshot, capture_router_event_sink,
+    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -63,12 +67,8 @@ impl ReservedSglangDecode {
     fn activate(self, kv_manager: &mut SglangKvManager, block_size: usize) -> SglangRequest {
         let Self { mut request, kv } = self;
         let allocated_tokens = kv.allocated_tokens;
-        let prompt_tokens = request.prompt_tokens.clone();
-        let alloc = kv_manager.activate_destination(kv, &prompt_tokens);
-        request.last_node = Some(alloc.last_node);
-        request.kv_indices = alloc.kv_indices;
+        kv_manager.activate_destination_lease(kv, request.prompt_len(), &mut request.kv_lease);
         request.materialized_tokens = request.prompt_len();
-        request.cached_tokens = request.page_aligned_materialized_tokens(block_size);
         request.allocated_tokens = allocated_tokens;
         request.debug_assert_invariants(block_size);
         request
@@ -85,19 +85,24 @@ impl SglangCore {
         Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
     }
 
-    pub(crate) fn new_with_worker_id(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        Self::new_internal(args, 0, worker_id, None, KvEventPublishers::default())
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        Self::new_with_worker_rank(args, worker_id, 0, worker_id, true)
     }
 
-    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let (buffer, sink) = capture_router_event_sink(worker_id);
-        Self::new_internal(
-            args,
-            0,
-            worker_id,
-            Some(buffer),
-            KvEventPublishers::new(Some(sink), None),
-        )
+    pub(crate) fn new_with_worker_rank(
+        args: MockEngineArgs,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        seed_offset: u64,
+        capture_kv_events: bool,
+    ) -> Self {
+        let (buffer, publishers) = if capture_kv_events {
+            let (buffer, sink) = capture_router_event_sink(worker_id);
+            (Some(buffer), KvEventPublishers::new(Some(sink), None))
+        } else {
+            (None, KvEventPublishers::default())
+        };
+        Self::new_internal(args, dp_rank, seed_offset, buffer, publishers)
     }
 
     pub(super) fn new_with_sink(
@@ -111,7 +116,7 @@ impl SglangCore {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        worker_id: WorkerId,
+        seed_offset: u64,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
@@ -122,7 +127,7 @@ impl SglangCore {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
                     .expect("normalized MTP acceptance rates");
-            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(worker_id))
+            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(seed_offset))
         });
 
         Self {
@@ -182,6 +187,18 @@ impl SglangCore {
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
             }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.cancel_active_request(request_id) {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                if allow_destination_admission {
+                    Ok(self.effects_after_capacity_change(result))
+                } else {
+                    Ok(SchedulerCommandEffects::new(result))
+                }
+            }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
                 mut request,
@@ -228,7 +245,7 @@ impl SglangCore {
                 {
                     anyhow::bail!("destination handoff {handoff_id:?} is already active");
                 }
-                let request = SglangRequest::from(request);
+                let request = self.build_request(request);
                 let prompt_footprint = request
                     .prompt_len()
                     .div_ceil(self.config.block_size)
@@ -252,12 +269,12 @@ impl SglangCore {
                 let Some((_, reservation)) = self.destination_holds.remove(handoff_id) else {
                     return Ok(SchedulerCommandEffects::new(SchedulerCommandResult::Noop));
                 };
-                let available_before = self.kv_manager.cache().token_pool.available();
+                let available_before = self.kv_manager.cache().available_tokens();
                 let request = reservation.activate(&mut self.kv_manager, self.config.block_size);
                 self.active_destination_handoffs
                     .insert(handoff_id, request.uuid);
                 self.prebuilt_ready.push_back(request);
-                if self.kv_manager.cache().token_pool.available() > available_before {
+                if self.kv_manager.cache().available_tokens() > available_before {
                     self.bump_capacity_generation();
                 }
                 Ok(self.effects_after_capacity_change(SchedulerCommandResult::Applied))
@@ -308,7 +325,9 @@ impl SglangCore {
         {
             self.destination_reservation_attempts += 1;
         }
-        let reservation = self.kv_manager.reserve_destination(&request.prompt_tokens);
+        let reservation = self
+            .kv_manager
+            .reserve_destination_lease(request.kv_lease.page_hashes(), request.prompt_len());
         self.pending_destinations.mark_front_attempted(generation);
         let Some(kv) = reservation else {
             return Vec::new();
@@ -349,7 +368,7 @@ impl SglangCore {
     }
 
     fn submit(&mut self, request: DirectRequest) -> anyhow::Result<Uuid> {
-        let request = SglangRequest::from(request);
+        let request = self.build_request(request);
         if self.request_is_active(request.uuid) {
             anyhow::bail!("request {} is already active", request.uuid);
         }
@@ -357,6 +376,16 @@ impl SglangCore {
         let uuid = request.uuid;
         self.waiting.push_back(request);
         Ok(uuid)
+    }
+
+    fn build_request(&self, request: DirectRequest) -> SglangRequest {
+        let max_output_tokens = request.effective_max_output_tokens();
+        let output_storage_hint = self.config.output_storage_hint(
+            request.tokens.len(),
+            max_output_tokens,
+            request.output_token_ids.is_some(),
+        );
+        SglangRequest::new(request, self.config.block_size, output_storage_hint)
     }
 
     fn complete_source(&mut self, request: SglangRequest) {
@@ -441,12 +470,7 @@ impl SglangCore {
         let Some(mut request) = request else {
             return false;
         };
-        let capacity_improved = !request.kv_indices.is_empty() || request.last_node.is_some();
-        self.kv_manager
-            .free_indices(&request.kv_indices[request.cached_tokens..]);
-        if let Some(last_node) = request.last_node.take() {
-            self.kv_manager.free_request(last_node);
-        }
+        let capacity_improved = self.kv_manager.abort(std::mem::take(&mut request.kv_lease));
         self.source_holds.remove_request(request_id);
         self.active_destination_handoffs.remove_request(request_id);
         if capacity_improved {
@@ -522,10 +546,10 @@ impl SglangCore {
     }
 
     #[cfg(test)]
-    pub(crate) fn destination_indices(&self, handoff_id: HandoffId) -> Vec<usize> {
+    pub(crate) fn destination_pages(&self, handoff_id: HandoffId) -> Vec<KvPageId> {
         self.destination_holds
             .get(handoff_id)
-            .map(|reservation| reservation.kv.indices())
+            .map(|reservation| reservation.kv.pages())
             .unwrap_or_default()
     }
 
@@ -534,6 +558,27 @@ impl SglangCore {
         self.prebuilt_ready
             .iter()
             .find(|request| request.uuid == uuid)
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_storage_capacities(&self, uuid: Uuid) -> Option<(usize, usize)> {
+        self.waiting
+            .iter()
+            .chain(&self.prebuilt_ready)
+            .chain(&self.running)
+            .find(|request| request.uuid == uuid)
+            .or_else(|| {
+                self.pending_destinations
+                    .payloads()
+                    .find(|request| request.uuid == uuid)
+            })
+            .or_else(|| {
+                self.destination_holds
+                    .payloads()
+                    .map(|reservation| &reservation.request)
+                    .find(|request| request.uuid == uuid)
+            })
+            .map(SglangRequest::storage_capacities)
     }
 
     fn bump_capacity_generation(&mut self) {
@@ -550,23 +595,33 @@ impl SglangCore {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub(crate) fn execute_pass(
         &mut self,
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.execute_pass_internal(Some(collector), now_ms)
+        let pass = self
+            .try_execute_pass(now_ms)
+            .expect("SGLang scheduler pass failed");
+        collector.on_scheduler_pass(&pass, now_ms, Some(pass.token_completion_ms));
+        pass
     }
 
-    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        self.execute_pass_internal(None, now_ms)
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
+        self.try_execute_pass_internal(now_ms)
     }
 
-    pub(super) fn execute_pass_internal(
+    #[cfg(test)]
+    pub(super) fn execute_pass_internal(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_pass_internal(now_ms)
+            .expect("SGLang scheduler pass failed")
+    }
+
+    pub(super) fn try_execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
-    ) -> EnginePassResult {
+    ) -> anyhow::Result<EnginePassResult> {
         let mut admissions = self.promote_prebuilt_ready();
         let materialized_waiting = !self.prebuilt_ready.is_empty();
         apply_schedule_policy(&mut self.waiting, &self.kv_manager, &self.config);
@@ -591,9 +646,7 @@ impl SglangCore {
 
         admissions.append(&mut admit.admissions);
         for admission in &admissions {
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
-            }
+            record_pressure_readmission(admission.uuid, now_ms);
         }
 
         // Capture per-request prefill FPM data before dispersing can_run.
@@ -603,7 +656,7 @@ impl SglangCore {
         let mean_isl = admit.total_isl.checked_div(batch_size).unwrap_or(0);
         let mean_prefix = admit.total_prefix.checked_div(batch_size).unwrap_or(0);
         let prefill_time =
-            simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true);
+            simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true)?;
 
         for mut req in admit.can_run {
             if req.materialized_tokens < req.current_sequence_len() {
@@ -618,6 +671,7 @@ impl SglangCore {
         let scheduled_decode_lens: Vec<u64> = self
             .running
             .iter()
+            .filter(|req| req.remaining_output_tokens() > 0)
             .map(|req| req.current_sequence_len() as u64)
             .collect();
 
@@ -629,16 +683,10 @@ impl SglangCore {
             self.speculative_sampler.as_mut(),
             decode_start_ms,
             true,
-        );
+        )?;
 
         for request in decode.completed_requests.drain(..) {
             self.complete_source(request);
-        }
-
-        if let Some(collector) = collector {
-            for signal in &decode.output_signals {
-                collector.on_token(signal.uuid, decode.end_ms);
-            }
         }
 
         for req in decode.requests.drain(..).rev() {
@@ -696,24 +744,32 @@ impl SglangCore {
                     .map(|reservation| reservation.request.prompt_len() as u64),
             );
         let fpm = build_fpm_snapshot(
-            prefill_fpm.iter().map(|p| {
-                (
-                    p.prompt_len as u64,
-                    p.prefix_tokens as u64,
-                    p.tokens_computed as u64,
-                )
-            }),
+            prefill_fpm
+                .iter()
+                .filter(|p| p.tokens_computed > 0)
+                .map(|p| {
+                    (
+                        p.prompt_len as u64,
+                        p.prefix_tokens as u64,
+                        p.tokens_computed as u64,
+                    )
+                }),
             scheduled_decode_lens.into_iter(),
             queued_prefills,
             ordinary_queued_decodes.chain(preactivation_decodes),
             (decode.end_ms - now_ms) / 1000.0,
         );
 
-        let (accept_length_output_tokens, accept_length_decode_forwards) =
-            accept_length_sample(&decode.output_signals);
+        let accept_length = decode.accept_length;
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            (accept_length.output_tokens, accept_length.decode_forwards),
+            crate::scheduler::accept_length_sample(&decode.output_signals)
+        );
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
-        EnginePassResult {
+        Ok(EnginePassResult {
             end_ms: decode.end_ms,
+            token_completion_ms: decode.end_ms,
             completed_requests: decode
                 .output_signals
                 .iter()
@@ -731,30 +787,15 @@ impl SglangCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
-            accept_length_output_tokens,
-            accept_length_decode_forwards,
-        }
+            accept_length_output_tokens: accept_length.output_tokens,
+            accept_length_decode_forwards: accept_length.decode_forwards,
+        })
     }
 
     fn active_kv_blocks(&self) -> u64 {
-        let active_reserved = self
-            .waiting
-            .iter()
-            .map(SglangRequest::extra_reserved_tokens)
-            .sum::<usize>()
-            + self
-                .prebuilt_ready
-                .iter()
-                .map(SglangRequest::extra_reserved_tokens)
-                .sum::<usize>()
-            + self
-                .running
-                .iter()
-                .map(SglangRequest::extra_reserved_tokens)
-                .sum::<usize>();
         let actual_used =
             self.kv_manager.cache().total_tokens() - self.kv_manager.cache().available_tokens();
-        (actual_used + active_reserved).div_ceil(self.config.block_size) as u64
+        actual_used.div_ceil(self.config.block_size) as u64
     }
 
     fn promote_prebuilt_ready(&mut self) -> Vec<crate::scheduler::AdmissionEvent> {
@@ -779,21 +820,23 @@ fn simulate_prefill_duration(
     mean_prefix: usize,
     config: &SglangConfig,
     apply_speedup: bool,
-) -> Duration {
+) -> anyhow::Result<Duration> {
     if batch_size == 0 || config.worker_type == WorkerType::Decode {
-        return Duration::ZERO;
+        return Ok(Duration::ZERO);
     }
 
     let prefill_time = config
         .perf_model
-        .predict_prefill_time(batch_size, mean_isl, mean_prefix);
+        .predict_prefill_time(batch_size, mean_isl, mean_prefix)?;
     let total_time = Duration::from_secs_f64(prefill_time / 1000.0);
 
     if !apply_speedup || config.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
-        return total_time;
+        return Ok(total_time);
     }
 
-    Duration::from_secs_f64(total_time.as_secs_f64() / config.speedup_ratio)
+    Ok(Duration::from_secs_f64(
+        total_time.as_secs_f64() / config.speedup_ratio,
+    ))
 }
 
 fn debug_assert_sglang_scheduler_state(

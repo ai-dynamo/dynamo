@@ -258,9 +258,9 @@ override once upstream batches `detokenize_top_logprobs_tokens`.
 **Streaming behavior** (`_extract_logprobs`):
 
 Dynamo forces `stream_output=True` (args.py:374), making `output_ids` disjoint per chunk.
-However, SGLang's `meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
-are always **cumulative** — they grow with each chunk. The handler tracks
-`num_output_logprobs_so_far` to slice out only new entries per chunk.
+The pinned SGLang release and its N-1 predecessor align
+`meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
+with those incremental chunks, so the handler forwards each array directly.
 
 SGLang logprob format: `(logprob, token_id, text_or_None)` tuples.
 Dynamo output format: `log_probs` = list of floats, `top_logprobs` = list of lists of
@@ -308,16 +308,17 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
-- **Cumulative logprobs in streaming**: SGLang's `output_token_logprobs`/`output_top_logprobs`
-  in `meta_info` are cumulative even though `output_ids` are disjoint (stream_output=True).
-  Always slice with an offset, don't assume per-chunk logprobs.
+- **Incremental logprobs in streaming**: SGLang's `output_token_logprobs` and
+  `output_top_logprobs` align with each disjoint `output_ids` chunk. Keep the
+  metadata arrays positionally aligned when adapting the response.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session identity**: SGLang 0.5.14 does not support passive session-aware radix
-  ownership. Do not pass `agent_context.session_id` as `session_params.id`;
-  SGLang treats that field as an explicit session lifecycle and rejects IDs that
-  were not created through `open_session`. Session headers remain available for
-  tracing and router affinity.
+- **Session identity**: SGLang 0.5.15 supports passive session-aware radix
+  ownership through the top-level `session_id` request field, but Dynamo does
+  not forward `agent_context.session_id` to it yet. Do not pass that value as
+  `session_params.id`; SGLang treats that field as an explicit session lifecycle
+  and rejects IDs that were not created through `open_session`. Session headers
+  remain available for tracing and router affinity.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
@@ -354,7 +355,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 - **Check nvidia-smi**: If a launch OOMs, check for orphaned GPU processes from prior runs.
 - **SimpleNamespace stubs**: When touching args.py or code that reads server_args, always
   use `getattr(server_args, field, default)` -- image/video workers don't have full ServerArgs.
-- **engine can be None**: Encode-only workers (multimodal-encode-worker)
+- **engine can be None**: Encode-only workers (--disaggregation-mode=encode)
   pass engine=None. Guard any engine access in shared base class code.
 - **Rebuild after Rust changes**: If changing registration (register.py interacts with Rust
   bindings), rebuild: `cd lib/bindings/python && maturin develop --uv && cd <root> && uv pip install -e .`

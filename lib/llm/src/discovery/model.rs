@@ -23,8 +23,9 @@ use crate::types::{
     openai::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
-        completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
+        classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
+        embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
+        images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
         videos::OpenAIVideosStreamingEngine,
     },
 };
@@ -84,6 +85,7 @@ struct NamespaceReadinessEval {
     legacy_live_workers: usize,
     present: std::collections::HashSet<crate::worker_type::WorkerType>,
     missing: std::collections::HashSet<crate::worker_type::WorkerType>,
+    ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
 }
 
 /// A named model backed by one or more WorkerSets.
@@ -164,6 +166,21 @@ impl Model {
             .collect()
     }
 
+    /// Build an immutable membership snapshot for request-plane publication.
+    ///
+    /// WorkerSets themselves are shared because their engines and routing lifecycle are
+    /// long-lived. The membership map is copied so later discovery mutations cannot leak
+    /// through an older published catalog.
+    pub(crate) fn snapshot(&self) -> Self {
+        let snapshot = Self::new(self.name.clone());
+        for entry in &self.worker_sets {
+            snapshot
+                .worker_sets
+                .insert(entry.key().clone(), entry.value().clone());
+        }
+        snapshot
+    }
+
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
     pub fn has_decode_engine(&self) -> bool {
         self.worker_sets
@@ -197,6 +214,20 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_embeddings_engine())
+    }
+
+    /// Check if any WorkerSet has a classify engine.
+    pub fn has_classify_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_classify_engine())
+    }
+
+    /// Check if any WorkerSet has a pooling engine.
+    pub fn has_pooling_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_pooling_engine())
     }
 
     /// Check if any WorkerSet has a tensor engine.
@@ -239,6 +270,14 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_generate_engine())
+    }
+
+    /// Check whether a Generate worker also advertises `capability`.
+    pub fn has_generate_engine_for_capability(&self, capability: &str) -> bool {
+        self.worker_sets.iter().any(|entry| {
+            let worker_set = entry.value();
+            worker_set.has_generate_engine() && worker_set.supports_runtime_capability(capability)
+        })
     }
 
     // -- Model serving readiness --
@@ -292,8 +331,10 @@ impl Model {
     /// and old aggregated workers are indistinguishable on the wire. Rather than
     /// hide the model, we fall back to legacy behavior and report ready as long
     /// as some worker is live. Strict worker-type readiness gating resumes automatically once
-    /// every worker in the namespace carries a `worker_type`. Remove this branch
-    /// when the compat shim is retired.
+    /// every worker in the namespace carries a `worker_type`.
+    ///
+    /// TODO(v1.5): Remove this branch with the legacy MDC topology shims after
+    /// the v1.2 compatibility window expires.
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
         let wsets: Vec<Arc<WorkerSet>> = self
             .worker_sets
@@ -321,6 +362,7 @@ impl Model {
         let mut has_legacy = false;
         let mut legacy_live_workers = 0usize;
         let mut has_live_worker = false;
+        let mut live_sets_by_type = std::collections::HashMap::new();
 
         // First pass: which worker types have a live worker (+ legacy detection).
         for ws in wsets {
@@ -332,6 +374,7 @@ impl Model {
                 Some((wt, _needs)) => {
                     if count > 0 {
                         present.insert(wt);
+                        *live_sets_by_type.entry(wt).or_insert(0usize) += 1;
                     }
                 }
                 // No declared worker_type → legacy card.
@@ -352,8 +395,17 @@ impl Model {
                 legacy_live_workers,
                 present,
                 missing,
+                ambiguous: std::collections::HashSet::new(),
             };
         }
+
+        let ambiguous = live_sets_by_type
+            .into_iter()
+            .filter_map(|(worker_type, count)| {
+                (worker_type != crate::worker_type::WorkerType::Aggregated && count > 1)
+                    .then_some(worker_type)
+            })
+            .collect::<std::collections::HashSet<_>>();
 
         // Strict path: a registered worker type with no live worker anywhere is
         // missing; a *live* WorkerSet whose `needs` DNF is unsatisfied flags its
@@ -383,11 +435,12 @@ impl Model {
         }
 
         NamespaceReadinessEval {
-            ready: has_live_worker && missing.is_empty(),
+            ready: has_live_worker && missing.is_empty() && ambiguous.is_empty(),
             has_legacy,
             legacy_live_workers,
             present,
             missing,
+            ambiguous,
         }
     }
 
@@ -470,6 +523,14 @@ impl Model {
                 }
             } else if eval.has_legacy {
                 Some("legacy worker(s) present but no live worker".to_string())
+            } else if !eval.ambiguous.is_empty() {
+                let mut roles = eval
+                    .ambiguous
+                    .iter()
+                    .map(|worker_type| worker_type.as_str())
+                    .collect::<Vec<_>>();
+                roles.sort_unstable();
+                Some(format!("ambiguous worker types: {}", roles.join(", ")))
             } else {
                 Some(format!("missing worker types: {}", missing_vec.join(", ")))
             };
@@ -557,6 +618,16 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
     }
 
+    pub fn get_classify_engine(&self) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.classify_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_classify_engine()))
+    }
+
+    pub fn get_pooling_engine(&self) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.pooling_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_pooling_engine()))
+    }
+
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_images_engine()))
@@ -585,6 +656,19 @@ impl Model {
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+    /// Get a Generate engine from a worker advertising `capability`.
+    pub fn get_generate_engine_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|worker_set| {
+            worker_set
+                .supports_runtime_capability(capability)
+                .then(|| worker_set.generate_engine.clone())
+                .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -1044,8 +1128,7 @@ mod tests {
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             None,
         );
-        pr.mark_active_for_test();
-        pr.deactivate();
+        pr.set_target(None);
         ws.prefill_router = Some(pr);
         Arc::new(ws)
     }

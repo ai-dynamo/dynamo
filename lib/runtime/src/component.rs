@@ -41,7 +41,9 @@ use crate::{
 
 use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, utils::Duration};
 
-use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
+use crate::pipeline::network::{
+    PushWorkHandler, RequestPlanePayloadCodec, ingress::push_endpoint::PushEndpoint,
+};
 use crate::protocols::EndpointId;
 use async_nats::{
     rustls::quic,
@@ -68,7 +70,7 @@ pub(crate) use client::RoutingInstances;
 pub(crate) use client::RoutingOccupancyState;
 pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use client::{Client, RoutingInstanceCounts};
-pub use endpoint::build_transport_type;
+pub use endpoint::{StartedEndpoint, build_transport_type};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -112,6 +114,10 @@ pub struct Instance {
     pub transport: TransportType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_type: Option<DeviceType>,
+    /// Payload codec accepted by this worker's request-plane endpoint.
+    /// Missing metadata identifies a legacy JSON-only worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_plane_codec: Option<RequestPlanePayloadCodec>,
 }
 
 impl Instance {
@@ -438,6 +444,20 @@ impl Endpoint {
 
     pub async fn client(&self) -> anyhow::Result<client::Client> {
         client::Client::new(self.clone()).await
+    }
+
+    /// Like [`Self::client`], but the returned `Client`'s background
+    /// instance-reconciliation task is bound to `cancel_token` rather than
+    /// the process-wide primary token. Use this when the `Client` itself is
+    /// scoped to something narrower than the process — a monitor bound to
+    /// one `WorkerSet`'s lifecycle, say — since dropping every handle to a
+    /// `Client` built through [`Self::client`] does not stop that task, and
+    /// it otherwise runs, and leaks, until process shutdown.
+    pub async fn client_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<client::Client> {
+        client::Client::with_cancellation(self.clone(), cancel_token).await
     }
 
     pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {

@@ -54,6 +54,47 @@ pub enum KvTokenIds {
     Bigram(Vec<(u32, u32)>),
 }
 
+/// Per-event storage locality emitted by vLLM alongside `medium`. Absent on
+/// legacy events; vLLM never infers it. `Unknown` captures any future value so
+/// deserialization stays forward-compatible and unrecognized values fail closed
+/// downstream.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Locality {
+    Local,
+    Remote,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Semantic producer of one vLLM-enriched placement event.
+///
+/// Missing on the wire is deliberately interpreted as `Framework`; an
+/// explicit unrecognized value remains distinguishable at the state-agent
+/// boundary so CacheOwner routing can fail closed without failing the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvEventSourceKind {
+    Framework,
+    Kvcc,
+}
+
+impl KvEventSourceKind {
+    pub fn from_wire(value: Option<&str>) -> Result<Self, &str> {
+        match value {
+            None | Some("framework") => Ok(Self::Framework),
+            Some("kvcc") => Ok(Self::Kvcc),
+            Some(unknown) => Err(unknown),
+        }
+    }
+
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Framework => "framework",
+            Self::Kvcc => "kvcc",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 pub enum RawKvEvent {
@@ -88,6 +129,10 @@ pub enum RawKvEvent {
         kv_cache_spec_kind: Option<KvCacheSpecKind>,
         #[serde(skip_serializing_if = "Option::is_none")]
         kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_kind: Option<String>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -99,8 +144,15 @@ pub enum RawKvEvent {
         kv_cache_spec_kind: Option<KvCacheSpecKind>,
         #[serde(skip_serializing_if = "Option::is_none")]
         kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_kind: Option<String>,
     },
-    AllBlocksCleared,
+    AllBlocksCleared {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_kind: Option<String>,
+    },
     Ignored,
 }
 
@@ -109,13 +161,51 @@ impl RawKvEvent {
         match self {
             Self::BlockStored { .. } => "stored",
             Self::BlockRemoved { .. } => "removed",
-            Self::AllBlocksCleared => "cleared",
+            Self::AllBlocksCleared { .. } => "cleared",
             Self::Ignored => "ignored",
         }
     }
 
     pub fn is_ignored(&self) -> bool {
         matches!(self, Self::Ignored)
+    }
+
+    /// Wire `medium` string for store/remove events, if present. Lets the
+    /// normalizer and consolidator ingress gate on the storage tier without
+    /// re-matching every variant.
+    pub fn medium(&self) -> Option<&str> {
+        match self {
+            Self::BlockStored { medium, .. } | Self::BlockRemoved { medium, .. } => {
+                medium.as_deref()
+            }
+            Self::AllBlocksCleared { .. } | Self::Ignored => None,
+        }
+    }
+
+    /// Per-event locality, if present. Absent or `Local` is worker-local;
+    /// `Remote` or an unrecognized value is treated as non-local.
+    pub fn locality(&self) -> Option<Locality> {
+        match self {
+            Self::BlockStored { locality, .. } | Self::BlockRemoved { locality, .. } => *locality,
+            Self::AllBlocksCleared { .. } | Self::Ignored => None,
+        }
+    }
+
+    pub fn source_kind(&self) -> Result<KvEventSourceKind, &str> {
+        let wire = match self {
+            Self::BlockStored { source_kind, .. }
+            | Self::BlockRemoved { source_kind, .. }
+            | Self::AllBlocksCleared { source_kind } => source_kind.as_deref(),
+            Self::Ignored => None,
+        };
+        KvEventSourceKind::from_wire(wire)
+    }
+
+    pub fn block_size(&self) -> Option<usize> {
+        match self {
+            Self::BlockStored { block_size, .. } => Some(*block_size),
+            Self::BlockRemoved { .. } | Self::AllBlocksCleared { .. } | Self::Ignored => None,
+        }
     }
 
     pub(crate) fn metadata(&self) -> KvCacheEventMetadata {
@@ -136,7 +226,7 @@ impl RawKvEvent {
                 kv_cache_spec_kind: *kv_cache_spec_kind,
                 kv_cache_spec_sliding_window: *kv_cache_spec_sliding_window,
             },
-            Self::AllBlocksCleared | Self::Ignored => KvCacheEventMetadata::default(),
+            Self::AllBlocksCleared { .. } | Self::Ignored => KvCacheEventMetadata::default(),
         }
     }
 }

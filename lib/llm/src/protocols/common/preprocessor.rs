@@ -2,14 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
+    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
 };
+use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
+
+const KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: &str = "kv_transfer_params";
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
@@ -116,6 +120,77 @@ pub struct TraceLink {
     pub span_id: String,
 }
 
+/// Frontend-local state shared by every attempt from one migration manager.
+/// The selected router records a failed worker before the error is exposed;
+/// later attempts use the accumulated set as an attempt-local exclusion.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MigrationState {
+    inner: Arc<OnceLock<Mutex<MigrationStateInner>>>,
+}
+
+#[derive(Debug, Default)]
+struct MigrationStateInner {
+    excluded_worker_ids: Vec<WorkerId>,
+    last_error: Option<DynamoError>,
+}
+
+impl MigrationState {
+    pub(crate) fn record_failure(&self, worker_id: WorkerId, error: Option<DynamoError>) {
+        let mut inner = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inner.excluded_worker_ids.contains(&worker_id) {
+            inner.excluded_worker_ids.push(worker_id);
+        }
+        if error.is_some() {
+            inner.last_error = error;
+        }
+    }
+
+    pub(crate) fn excluded_worker_ids(&self) -> Vec<WorkerId> {
+        let Some(inner) = self.inner.get() else {
+            return Vec::new();
+        };
+        inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .excluded_worker_ids
+            .clone()
+    }
+
+    pub(crate) fn exhausted_error(&self) -> Option<DynamoError> {
+        let inner = self.inner.get()?;
+        let last_error = inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_error
+            .clone()?;
+        let (error_type, message) = if match_error_chain(
+            &last_error,
+            &[ErrorType::WorkerOverloaded],
+            &[ErrorType::ResourceExhausted],
+        ) {
+            (
+                ErrorType::ResourceExhausted,
+                "all eligible workers rejected the request as overloaded",
+            )
+        } else {
+            (
+                ErrorType::Unavailable,
+                "no untried eligible worker remains after migration",
+            )
+        };
+        Some(
+            DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build(),
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
     /// Disaggregated execution parameters. Engine-owned; the framework
@@ -152,10 +227,15 @@ pub enum MultimodalData {
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
+    /// Payload-free media slot resolved by a backend processor cache.
+    UuidOnly(String),
 }
 
 // multimodal map containing {mm_part_type: [data...]}
 pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
+
+/// Backend cache UUIDs aligned positionally with multimodal data slots.
+pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
@@ -170,6 +250,12 @@ pub struct PreprocessedRequest {
     #[serde(default)]
     pub model: String,
 
+    /// Attempt-local migration state. Frontend-only: it is neither serialized
+    /// to workers nor exposed as a caller-controlled routing hint.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) migration_state: Option<MigrationState>,
+
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
@@ -183,6 +269,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// User-provided backend cache identities aligned with `multi_modal_data`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_uuids: Option<MultimodalUuidMap>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]
@@ -365,6 +456,22 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
+    pub fn attach_router_hint(&mut self, hint: &RouterHint) -> serde_json::Result<()> {
+        let hint_value = serde_json::to_value(hint)?;
+        let mut map = extra_args_object(self.extra_args.take());
+        let mut kv_transfer_params = match map.remove(KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY) {
+            Some(serde_json::Value::Object(params)) => params,
+            Some(_) | None => serde_json::Map::new(),
+        };
+        kv_transfer_params.insert(ROUTER_HINT_EXTRA_ARGS_KEY.to_string(), hint_value);
+        map.insert(
+            KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY.to_string(),
+            serde_json::Value::Object(kv_transfer_params),
+        );
+        self.extra_args = Some(serde_json::Value::Object(map));
+        Ok(())
+    }
+
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
@@ -376,6 +483,15 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
+}
+
+fn extra_args_object(
+    extra_args: Option<serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    match extra_args {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
     }
 }
 
@@ -450,6 +566,88 @@ mod tests {
         let explicit = serde_json::to_value(&request).unwrap();
         assert_eq!(explicit["encoding_format"], "float");
         assert_eq!(explicit["truncate_prompt_tokens"], -1);
+    }
+
+    #[test]
+    fn attach_router_hint_preserves_extra_args_object() {
+        use dynamo_kv_router::{
+            protocols::ExternalSequenceBlockHash,
+            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+        };
+
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .extra_args(Some(serde_json::json!({
+                "caller": "kept",
+                "kv_transfer_params": {"existing": "kept"}
+            })))
+            .build()
+            .unwrap();
+        let hint = RouterHint {
+            source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+            block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
+        };
+
+        req.attach_router_hint(&hint).unwrap();
+
+        let extra_args = req.extra_args.unwrap();
+        assert_eq!(extra_args["caller"], "kept");
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY]["existing"],
+            "kept"
+        );
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["source_control_endpoint"],
+            "tcp://127.0.0.1:23280"
+        );
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
+            serde_json::json!([11, 22])
+        );
+    }
+
+    #[test]
+    fn attach_router_hint_replaces_non_object_kv_transfer_params() {
+        use dynamo_kv_router::{
+            protocols::ExternalSequenceBlockHash,
+            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+        };
+
+        for invalid_params in [
+            serde_json::Value::Null,
+            serde_json::json!("invalid"),
+            serde_json::json!(["invalid"]),
+        ] {
+            let mut req = PreprocessedRequest::builder()
+                .model("t".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .extra_args(Some(serde_json::json!({
+                    "caller": "kept",
+                    "kv_transfer_params": invalid_params
+                })))
+                .build()
+                .unwrap();
+            let hint = RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                block_hashes: vec![ExternalSequenceBlockHash(33)],
+            };
+
+            req.attach_router_hint(&hint).unwrap();
+
+            let extra_args = req.extra_args.unwrap();
+            assert_eq!(extra_args["caller"], "kept");
+            assert_eq!(
+                extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
+                serde_json::json!([33])
+            );
+        }
     }
 
     #[test]

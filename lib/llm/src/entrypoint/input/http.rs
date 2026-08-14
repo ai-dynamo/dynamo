@@ -9,22 +9,134 @@ use crate::{
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
-    http::service::service_v2::{self, HttpService},
-    local_model::runtime_config::TokenizerBackend,
+    http::service::{
+        FrontendRouteExtension,
+        service_v2::{self, HttpService},
+    },
+    kv_router::WorkerSelectorFactory,
+    local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
     namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_kv_router::{
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy,
+    selector::{DefaultWorkerSelector, WorkerSelector},
+};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
+
+/// Dynamo's complete discovery-backed HTTP frontend.
+///
+/// The default frontend uses [`DefaultWorkerSelector`]. A statically linked external crate can
+/// replace only worker selection with [`Self::worker_selection_policy_factory`].
+#[derive(Default)]
+pub struct HttpFrontend {
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
+    worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
+}
+
+impl HttpFrontend {
+    /// Add system route extensions to the frontend.
+    pub fn frontend_route_extensions(
+        mut self,
+        frontend_route_extensions: Vec<FrontendRouteExtension>,
+    ) -> Self {
+        self.frontend_route_extensions = frontend_route_extensions;
+        self
+    }
+
+    /// Replace the default worker selector with a statically linked native policy.
+    ///
+    /// The factory is called when each decode or prefill worker set is constructed, not per
+    /// request. Dynamo continues to own discovery, scheduling, validation, and accounting.
+    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
+    where
+        F: for<'a> Fn(
+                &KvRouterConfig,
+                &'static str,
+                RoutingPartitionRef<'a>,
+            ) -> WorkerSelectionPolicy
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.worker_selection_policy_factory = Some(Arc::new(factory));
+        self
+    }
+
+    /// Run the frontend until it exits.
+    pub async fn run(
+        self,
+        distributed_runtime: DistributedRuntime,
+        engine_config: EngineConfig,
+    ) -> anyhow::Result<()> {
+        if self.worker_selection_policy_factory.is_some()
+            && !matches!(&engine_config, EngineConfig::Dynamic { .. })
+        {
+            anyhow::bail!("custom worker-selection policies require a dynamic engine");
+        }
+
+        super::initialize_input(&distributed_runtime, &engine_config).await;
+
+        match self.worker_selection_policy_factory {
+            Some(factory) => {
+                run_with_worker_selector_factory(
+                    distributed_runtime,
+                    engine_config,
+                    self.frontend_route_extensions,
+                    factory,
+                )
+                .await
+            }
+            None => {
+                run_with_worker_selector_factory(
+                    distributed_runtime,
+                    engine_config,
+                    self.frontend_route_extensions,
+                    Arc::new(|config, worker_type, _partition| {
+                        DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                    }),
+                )
+                .await
+            }
+        }
+    }
+}
 
 /// Build and run an HTTP service
 pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    HttpFrontend::default()
+        .run(distributed_runtime, engine_config)
+        .await
+}
+
+/// Build and run an HTTP service with additional system route extensions.
+pub async fn run_with_frontend_route_extensions(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
+) -> anyhow::Result<()> {
+    HttpFrontend::default()
+        .frontend_route_extensions(frontend_route_extensions)
+        .run(distributed_runtime, engine_config)
+        .await
+}
+
+async fn run_with_worker_selector_factory<Sel>(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
+    worker_selector_factory: WorkerSelectorFactory<Sel>,
+) -> anyhow::Result<()>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
         (Some(tls_cert_path), Some(tls_key_path)) => {
@@ -69,6 +181,9 @@ pub async fn run(
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
     http_service_builder =
         http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    for extension in frontend_route_extensions {
+        http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
+    }
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {
@@ -92,7 +207,7 @@ pub async fn run(
             );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
-            let generate_engine_enabled = http_service.generate_api_enabled();
+            let generate_engine_capabilities = http_service.generate_engine_capabilities();
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -106,7 +221,9 @@ pub async fn run(
                 prefill_load_estimator.clone(),
                 local_model_path,
                 model.runtime_config().tokenizer_backend,
-                generate_engine_enabled,
+                model.runtime_config().tokenizer_fallback_enabled,
+                generate_engine_capabilities,
+                worker_selector_factory.clone(),
             )
             .await?;
             http_service
@@ -119,10 +236,7 @@ pub async fn run(
             manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
             manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
 
-            // Enable all endpoints
-            for endpoint_type in EndpointType::all() {
-                http_service.enable_model_endpoint(endpoint_type, true);
-            }
+            enable_in_process_model_endpoints(&http_service)?;
             http_service
         }
         EngineConfig::InProcessTokens {
@@ -148,10 +262,7 @@ pub async fn run(
             >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
-            // Enable all endpoints
-            for endpoint_type in EndpointType::all() {
-                http_service.enable_model_endpoint(endpoint_type, true);
-            }
+            enable_in_process_model_endpoints(&http_service)?;
             http_service
         }
     };
@@ -172,10 +283,19 @@ pub async fn run(
     Ok(())
 }
 
+fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Result<()> {
+    for endpoint_type in EndpointType::all() {
+        if endpoint_type != EndpointType::Batch {
+            http_service.enable_model_endpoint(endpoint_type, true)?;
+        }
+    }
+    Ok(())
+}
+
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
-async fn run_watcher(
+async fn run_watcher<Sel>(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
@@ -188,8 +308,13 @@ async fn run_watcher(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
-    generate_engine_enabled: bool,
-) -> anyhow::Result<()> {
+    tokenizer_fallback_enabled: Option<bool>,
+    generate_engine_capabilities: Vec<&'static str>,
+    worker_selector_factory: WorkerSelectorFactory<Sel>,
+) -> anyhow::Result<()>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
     // Start the LoRA allocation controller when LoRA serving is enabled. The
     // controller itself is additionally gated on the allocation config
     // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
@@ -198,7 +323,7 @@ async fn run_watcher(
         let _controller_handle = model_manager.start_lora_controller(cancel_token);
     }
 
-    let mut watch_obj = ModelWatcher::new(
+    let mut watch_obj = ModelWatcher::new_with_worker_selector_factory(
         runtime.clone(),
         model_manager,
         router_config,
@@ -207,10 +332,12 @@ async fn run_watcher(
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
+        worker_selector_factory,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
-    watch_obj.set_generate_engine_enabled(generate_engine_enabled);
+    watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
+    watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -228,7 +355,9 @@ async fn run_watcher(
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_update) = rx.recv().await {
-            update_http_endpoints(http_service.clone(), model_update.clone());
+            if let Err(error) = update_http_endpoints(http_service.clone(), model_update.clone()) {
+                tracing::error!(%error, "failed to update HTTP endpoints");
+            }
             update_model_metrics(model_update, metrics.clone());
         }
     });
@@ -242,7 +371,7 @@ async fn run_watcher(
 }
 
 /// Updates HTTP service endpoints based on available model types
-fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
+fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> anyhow::Result<()> {
     tracing::debug!(
         "Updating HTTP service endpoints for model type: {:?}",
         model_type
@@ -254,7 +383,7 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 .model_type
                 .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
-                service.enable_model_endpoint(endpoint_type, true);
+                service.enable_model_endpoint(endpoint_type, true)?;
             }
         }
         ModelUpdate::Removed(card) => {
@@ -263,10 +392,11 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 .model_type
                 .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
-                service.enable_model_endpoint(endpoint_type, false);
+                service.enable_model_endpoint(endpoint_type, false)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Updates metrics for model type changes

@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,15 +32,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -61,7 +66,8 @@ func makeSnapshotReconcilerWithInterceptor(s *runtime.Scheme, funcs interceptor.
 		Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
 			WithStatusSubresource(&nvidiacomv1alpha1.PodSnapshot{}, &nvidiacomv1alpha1.PodSnapshotContent{}).
 			WithInterceptorFuncs(funcs).Build(),
-		Recorder: record.NewFakeRecorder(10),
+		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+		Recorder:      events.NewFakeRecorder(10),
 	}
 }
 
@@ -122,6 +128,7 @@ func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
 func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
+	snap.Spec.Source.PodRef.Containers = []string{"main"}
 	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
 
 	// Creation path records the binding and returns without a requeue; conditions are mirrored on the
@@ -140,6 +147,8 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Empty(t, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
+	assert.Equal(t, []string{"main"}, content.Spec.Source.PodRef.Containers,
+		"target containers propagate from PodSnapshot to PodSnapshotContent")
 
 	updated := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
@@ -149,6 +158,36 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	// absent — don't deref a nil condition); conditions appear on the next bound-path reconcile.
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSnapshotReconciler_DisabledCheckpointGateDoesNotCreateContent(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
+	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	var contents nvidiacomv1alpha1.PodSnapshotContentList
+	require.NoError(t, r.List(context.Background(), &contents))
+	assert.Empty(t, contents.Items)
+	updated := &nvidiacomv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	condition := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, "CheckpointDisabled", condition.Reason)
+}
+
+func TestSnapshotReconciler_BuildPodSnapshotContentCopiesContainersVerbatim(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	r := makeSnapshotReconciler(s)
+	snap := makeSnapshotForReconcile()
+	snap.Spec.Source.PodRef.Containers = []string{"engine-0"}
+	pod := scheduledPod("abc123")
+
+	content := r.buildPodSnapshotContent(snap, "content-x", pod)
+	assert.Equal(t, []string{"engine-0"}, content.Spec.Source.PodRef.Containers,
+		"containers are copied verbatim, never defaulted to main")
 }
 
 func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
@@ -436,6 +475,7 @@ func TestSnapshotReconciler_DeleteWithNilBoundDropsFinalizer(t *testing.T) {
 	snap.DeletionTimestamp = &now
 	// status.BoundPodSnapshotContentName is unset → nothing was bound → finalizer is dropped.
 	r := makeSnapshotReconciler(s, snap)
+	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -686,7 +726,7 @@ func TestSnapshotReconciler_ContentCreateErrorEmitsEventAndRequeues(t *testing.T
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 
-	recorder := r.Recorder.(*record.FakeRecorder)
+	recorder := r.Recorder.(*events.FakeRecorder)
 	select {
 	case ev := <-recorder.Events:
 		assert.Contains(t, ev, "SnapshotContentCreateFailed")
@@ -743,4 +783,60 @@ func TestSnapshotReconciler_CascadeDeleteRequeuesUntilContentGone(t *testing.T) 
 	} else {
 		assert.True(t, apierrors.IsNotFound(err))
 	}
+}
+
+// filterExcludedNamespaces implements commonController.ExcludedNamespacesInterface over a fixed list.
+type filterExcludedNamespaces []string
+
+// Contains reports whether namespace is in the stubbed exclusion list.
+func (f filterExcludedNamespaces) Contains(namespace string) bool {
+	return slices.Contains(f, namespace)
+}
+
+// contentWithRefNamespace builds a cluster-scoped PodSnapshotContent bound to a PodSnapshot in ns.
+func contentWithRefNamespace(ns string) *nvidiacomv1alpha1.PodSnapshotContent {
+	return &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-x"},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: ns, Name: "snap-x"},
+		},
+	}
+}
+
+func TestPodSnapshotContentEventFilter(t *testing.T) {
+	tests := []struct {
+		name       string
+		restricted string
+		excluded   []string
+		obj        client.Object
+		want       bool
+	}{
+		{name: "restricted mode admits matching snapshot ref namespace", restricted: "prod", obj: contentWithRefNamespace("prod"), want: true},
+		{name: "restricted mode drops mismatched snapshot ref namespace", restricted: "prod", obj: contentWithRefNamespace("other"), want: false},
+		{name: "restricted mode drops empty snapshot ref namespace", restricted: "prod", obj: contentWithRefNamespace(""), want: false},
+		{name: "cluster-wide drops excluded snapshot ref namespace", excluded: []string{"banned"}, obj: contentWithRefNamespace("banned"), want: false},
+		{name: "cluster-wide drops ephemeral snapshot ref namespace", obj: contentWithRefNamespace("ci-ephemeral-1"), want: false},
+		{name: "cluster-wide admits normal snapshot ref namespace", obj: contentWithRefNamespace("prod"), want: true},
+		{name: "non-content object is dropped", restricted: "prod", obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p"}}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &configv1alpha1.OperatorConfiguration{}
+			config.Namespace.Restricted = tt.restricted
+			runtimeConfig := &commonController.RuntimeConfig{}
+			if tt.excluded != nil {
+				runtimeConfig.ExcludedNamespaces = filterExcludedNamespaces(tt.excluded)
+			}
+			pred := podSnapshotContentEventFilter(config, runtimeConfig)
+			assert.Equal(t, tt.want, pred.Create(event.CreateEvent{Object: tt.obj}))
+		})
+	}
+
+	t.Run("delete event admits matching snapshot ref namespace", func(t *testing.T) {
+		config := &configv1alpha1.OperatorConfiguration{}
+		config.Namespace.Restricted = "prod"
+		pred := podSnapshotContentEventFilter(config, &commonController.RuntimeConfig{})
+		assert.True(t, pred.Delete(event.DeleteEvent{Object: contentWithRefNamespace("prod")}))
+	})
 }

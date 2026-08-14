@@ -205,6 +205,19 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>
                     JsonlGzipRequestTraceSink::from_policy(policy).await?,
                 )),
             },
+            RequestTraceSinkKind::S3 => {
+                #[cfg(feature = "request-trace-s3")]
+                {
+                    use super::s3_sink::S3RequestTraceSink;
+                    sinks.push(Arc::new(S3RequestTraceSink::from_policy(policy).await?));
+                }
+                #[cfg(not(feature = "request-trace-s3"))]
+                {
+                    return Err(anyhow!(
+                        "request trace s3 sink requested but dynamo-llm was built without the \"request-trace-s3\" feature",
+                    ));
+                }
+            }
         }
     }
     Ok(sinks)

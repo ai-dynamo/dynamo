@@ -53,6 +53,7 @@ use crate::common::protocols::{
     G1, KvEventPublishers, MockerEvictionBackend, MoveBlock, PrefillCost,
 };
 use crate::common::sequence::ActiveSequence;
+use crate::kv_manager::{G1Acquire, OffloadDependency};
 #[cfg(feature = "kvbm-offload")]
 use crate::kvbm_offload::{
     G1EvictionOutcome, G2BlockEventMetadata, G2OffloadBlock, G2RouterEvent, MockOffloadEngine,
@@ -109,32 +110,8 @@ enum SwapInSlotReservation {
 /// (it only forgets on explicit `Removed`), so only `NewStore` should emit a
 /// `Stored` KV event. Both hit outcomes still advance the parent cursor so
 /// subsequent `NewStore` batches anchor to the last reused full block.
-#[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
-pub(crate) enum G1Acquire<T> {
-    Ready(T),
-    CapacityExhausted,
-    BlockedOnOffload {
-        offload_id: OffloadId,
-        deadline_ms: Option<f64>,
-    },
-    RetryNow {
-        capacity_generation: u64,
-        released_slots: usize,
-    },
-}
-
-#[cfg(not(feature = "kvbm-offload"))]
-type OffloadId = u64;
-
 #[cfg(not(feature = "kvbm-offload"))]
 enum G1EvictionOutcome {}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[doc(hidden)]
-pub struct OffloadDependency {
-    pub(crate) offload_id: OffloadId,
-    pub(crate) deadline_ms: Option<f64>,
-}
 
 enum PreparedUseBlock {
     /// Already represented in `active_full`; no temporary RAII clone is
@@ -198,6 +175,11 @@ pub struct VllmDestinationReservation {
 impl VllmDestinationReservation {
     pub(crate) fn transferable_prompt_tokens(&self, block_size: usize) -> usize {
         self.unpublished_blocks.len().saturating_mul(block_size)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.cached_prefix.len() + self.unpublished_blocks.len()
     }
 
     #[cfg(test)]
@@ -2168,10 +2150,12 @@ impl KvManager {
         };
 
         let new_blocks = seq_blocks.len() - overlap_blocks;
-        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
-        let active_cached_tokens =
-            (active_overlap_blocks * self.block_size).min(sequence.num_input_tokens());
-        let new_tokens = sequence.num_input_tokens() - cached_tokens;
+        // Preemption resets scheduler progress but retains generated tokens in
+        // the logical request. vLLM performs prefix lookup over that complete
+        // known context (`request.num_tokens`), not only the original prompt.
+        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.len());
+        let active_cached_tokens = (active_overlap_blocks * self.block_size).min(sequence.len());
+        let new_tokens = sequence.len() - cached_tokens;
 
         PrefillCost {
             new_blocks,

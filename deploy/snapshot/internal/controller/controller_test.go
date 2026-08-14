@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,14 +12,14 @@ import (
 
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
-	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -32,12 +33,18 @@ const testContainerID = "test-container"
 type fakeRuntime struct {
 	containerIDByPod     string
 	resolvedContainerIDs []string
+	// resolveContainerPID, when set, is returned by ResolveContainer with no error so the
+	// capture path can advance past container resolution.
+	resolveContainerPID int
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
 func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	r.resolvedContainerIDs = append(r.resolvedContainerIDs, id)
+	if r.resolveContainerPID > 0 {
+		return r.resolveContainerPID, nil, nil
+	}
 	return 0, nil, errors.New("not implemented")
 }
 func (r *fakeRuntime) ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error) {
@@ -51,9 +58,34 @@ func (r *fakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr st
 }
 func (r *fakeRuntime) Close() error { return nil }
 
+// noopInjector is a no-op Mounter used in tests that do not exercise
+// the injection path. It prevents a nil-pointer panic if runRestore is ever
+// reached by a test that was previously relying on Phase 1 failing first.
+type noopInjector struct{}
+
+func (noopInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
+type noopMountPoint struct{}
+
+func (noopMountPoint) Path(name string) (string, error) { return "/noop/" + name, nil }
+func (noopMountPoint) Unmount(_ context.Context) error  { return nil }
+func (noopMountPoint) NsFd() *os.File                   { return nil }
+
+// errorInjector always returns the wrapped error from Mount.
+type errorInjector struct{ err error }
+
+func (e errorInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	return nil, e.err
+}
+
+var _ executor.Mounter = noopInjector{}
+var _ executor.Mounter = errorInjector{}
+
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
-// The fake clientset is empty so any goroutine launched by runCheckpoint/runRestore
-// will fail on the first annotatePod call and exit cleanly.
+// The fake clientset is empty so any goroutine launched by the restore path will fail on
+// the first annotatePod call and exit cleanly.
 func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 	t.Helper()
 	return &NodeController{
@@ -66,6 +98,7 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 		},
 		clientset: fake.NewClientset(objs...),
 		runtime:   &fakeRuntime{},
+		injector:  noopInjector{},
 		log:       testr.New(t),
 		holderID:  "test-holder",
 		inFlight:  make(map[string]struct{}),
@@ -85,23 +118,6 @@ func sawEventReason(clientset *fake.Clientset, reason string) bool {
 		}
 	}
 	return false
-}
-
-func makeLease(namespace, name, holder string, renewTime time.Time) *coordinationv1.Lease {
-	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
-	renewMicroTime := metav1.NewMicroTime(renewTime)
-	return &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       &holder,
-			LeaseDurationSeconds: &leaseDurationSeconds,
-			AcquireTime:          &renewMicroTime,
-			RenewTime:            &renewMicroTime,
-		},
-	}
 }
 
 func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool, labels, annotations map[string]string) *corev1.Pod {
@@ -313,230 +329,6 @@ func TestRestoreCheckpointReady(t *testing.T) {
 			t.Fatalf("expected not-a-directory error, got: %v", err)
 		}
 	})
-}
-
-func TestReconcileCheckpointPod(t *testing.T) {
-	tests := []struct {
-		name       string
-		nodeName   string
-		phase      corev1.PodPhase
-		ready      bool
-		hash       string
-		annotation string
-		lease      *coordinationv1.Lease
-		preSeed    bool // pre-populate inFlight to test deduplication
-		want       bool // true = pod passes filtering and triggers checkpoint
-	}{
-		{
-			name:     "happy path",
-			nodeName: testNodeName,
-			phase:    corev1.PodRunning,
-			ready:    true,
-			hash:     "abc123",
-			want:     true,
-		},
-		{
-			name:     "wrong node",
-			nodeName: "other-node",
-			phase:    corev1.PodRunning,
-			ready:    true,
-			hash:     "abc123",
-			want:     false,
-		},
-		{
-			name:     "not running",
-			nodeName: testNodeName,
-			phase:    corev1.PodPending,
-			ready:    false,
-			hash:     "abc123",
-			want:     false,
-		},
-		{
-			name:     "running but not ready",
-			nodeName: testNodeName,
-			phase:    corev1.PodRunning,
-			ready:    false,
-			hash:     "abc123",
-			want:     false,
-		},
-		{
-			name:     "missing hash label",
-			nodeName: testNodeName,
-			phase:    corev1.PodRunning,
-			ready:    true,
-			hash:     "",
-			want:     false,
-		},
-		{
-			name:       "already completed",
-			nodeName:   testNodeName,
-			phase:      corev1.PodRunning,
-			ready:      true,
-			hash:       "abc123",
-			annotation: "completed",
-			want:       false,
-		},
-		{
-			name:       "already failed",
-			nodeName:   testNodeName,
-			phase:      corev1.PodRunning,
-			ready:      true,
-			hash:       "abc123",
-			annotation: "failed",
-			want:       false,
-		},
-		{
-			name:     "active lease held elsewhere",
-			nodeName: testNodeName,
-			phase:    corev1.PodRunning,
-			ready:    true,
-			hash:     "abc123",
-			lease:    makeLease("default", "checkpoint-job", "other-holder", time.Now()),
-			want:     false,
-		},
-		{
-			name:     "expired lease can be reclaimed",
-			nodeName: testNodeName,
-			phase:    corev1.PodRunning,
-			ready:    true,
-			hash:     "abc123",
-			lease:    makeLease("default", "checkpoint-job", "other-holder", time.Now().Add(-checkpointLeaseDuration-time.Second)),
-			want:     true,
-		},
-		{
-			name:     "duplicate in-flight",
-			nodeName: testNodeName,
-			phase:    corev1.PodRunning,
-			ready:    true,
-			hash:     "abc123",
-			preSeed:  true,
-			want:     false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			labels := map[string]string{
-				snapshotprotocol.CheckpointSourceLabel: "true",
-				"batch.kubernetes.io/job-name":         "checkpoint-job",
-			}
-			if tc.hash != "" {
-				labels[snapshotprotocol.CheckpointIDLabel] = tc.hash
-			}
-
-			job := &batchv1.Job{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "checkpoint-job",
-					Namespace: "default",
-				},
-			}
-			if tc.annotation != "" {
-				job.Annotations = map[string]string{
-					snapshotprotocol.CheckpointStatusAnnotation: tc.annotation,
-				}
-			}
-
-			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, nil)
-			objs := []runtime.Object{job}
-			if tc.lease != nil {
-				objs = append(objs, tc.lease)
-			}
-
-			w := makeTestController(t, objs...)
-			ctx := context.Background()
-
-			if tc.preSeed {
-				w.inFlight["default/test-pod"] = struct{}{}
-			}
-
-			w.reconcileCheckpointPod(ctx, pod)
-
-			triggered := sawEventReason(w.clientset.(*fake.Clientset), "CheckpointRequested")
-
-			if triggered != tc.want {
-				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v, actions=%#v)", triggered, tc.want, len(w.inFlight), tc.preSeed, w.clientset.(*fake.Clientset).Actions())
-			}
-
-			// Let the background goroutine (if any) finish before the test ends
-			if tc.want {
-				time.Sleep(50 * time.Millisecond)
-			}
-		})
-	}
-}
-
-func TestReconcileCheckpointPodFailsWhenAnyRegularContainerFails(t *testing.T) {
-	for _, jobStatus := range []string{"", snapshotprotocol.CheckpointStatusCompleted} {
-		t.Run("job status "+jobStatus, func(t *testing.T) {
-			labels := map[string]string{
-				snapshotprotocol.CheckpointSourceLabel: "true",
-				snapshotprotocol.CheckpointIDLabel:     "abc123",
-				"batch.kubernetes.io/job-name":         "checkpoint-job",
-			}
-			job := &batchv1.Job{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        "checkpoint-job",
-					Namespace:   "default",
-					Annotations: map[string]string{},
-				},
-			}
-			if jobStatus != "" {
-				job.Annotations[snapshotprotocol.CheckpointStatusAnnotation] = jobStatus
-			}
-			pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, labels, nil)
-			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "helper"})
-			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
-				{
-					Name:        "main",
-					Ready:       true,
-					State:       corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-					ContainerID: "containerd://main-id",
-				},
-				{
-					Name: "helper",
-					State: corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
-					},
-					ContainerID: "containerd://helper-id",
-				},
-			}
-
-			w := makeTestController(t, job)
-			rt := &fakeRuntime{}
-			w.runtime = rt
-			w.reconcileCheckpointPod(context.Background(), pod)
-
-			updated, err := w.clientset.BatchV1().Jobs("default").Get(context.Background(), "checkpoint-job", metav1.GetOptions{})
-			if err != nil {
-				t.Fatalf("failed to get checkpoint job: %v", err)
-			}
-			if got := updated.Annotations[snapshotprotocol.CheckpointStatusAnnotation]; got != snapshotprotocol.CheckpointStatusFailed {
-				t.Fatalf("checkpoint status annotation = %q, want %q", got, snapshotprotocol.CheckpointStatusFailed)
-			}
-
-			var sawFailureEvent bool
-			for _, action := range w.clientset.(*fake.Clientset).Actions() {
-				create, ok := action.(clientgotesting.CreateAction)
-				if !ok || create.GetResource().Resource != "events" {
-					continue
-				}
-				event, ok := create.GetObject().(*corev1.Event)
-				if ok && event.Reason == "CheckpointFailed" && strings.Contains(event.Message, `container "helper"`) {
-					sawFailureEvent = true
-					break
-				}
-			}
-			if !sawFailureEvent {
-				t.Fatalf("expected CheckpointFailed event for failed regular container; actions=%#v", w.clientset.(*fake.Clientset).Actions())
-			}
-			if len(w.inFlight) != 0 {
-				t.Fatalf("failed checkpoint pod should not start snapshot worker, got inFlight=%v", w.inFlight)
-			}
-			if len(rt.resolvedContainerIDs) != 1 || rt.resolvedContainerIDs[0] != "main-id" {
-				t.Fatalf("expected to resolve remaining running container before failing job, got %v", rt.resolvedContainerIDs)
-			}
-		})
-	}
 }
 
 func TestReconcileRestorePod(t *testing.T) {
@@ -951,65 +743,35 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 	}
 }
 
-func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-pod",
-			Namespace: "default",
-			Labels: map[string]string{
-				"batch.kubernetes.io/job-name": "checkpoint-job",
-			},
-		},
-	}
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "checkpoint-job",
-			Namespace: "default",
-		},
-	}
-	lease := makeLease("default", "checkpoint-job", "test-holder", time.Now())
+func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
+	checkpointID := "test-checkpoint"
+	pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, true,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID}, nil)
 
-	clientset := fake.NewClientset(pod.DeepCopy(), job, lease)
-	patchCalls := 0
-	clientset.PrependReactor("patch", "jobs", func(clientgotesting.Action) (bool, runtime.Object, error) {
-		patchCalls++
-		return true, nil, errors.New("terminal patch failed")
-	})
-
-	w := &NodeController{
-		config: &types.AgentConfig{
-			NodeName: testNodeName,
-			Storage: types.StorageSpec{
-				Type:     snapshotprotocol.StorageTypePVC,
-				BasePath: t.TempDir(),
-			},
-		},
-		clientset: clientset,
-		runtime:   &fakeRuntime{},
-		log:       testr.New(t),
-		holderID:  "test-holder",
-		inFlight: map[string]struct{}{
-			"default/test-pod": {},
-		},
-		stopCh: make(chan struct{}),
+	// Write a minimal manifest so inspectRestore can load it.
+	checkpointDir := filepath.Join(t.TempDir(), checkpointID)
+	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
+		t.Fatalf("create checkpoint dir: %v", err)
+	}
+	if err := types.WriteManifest(checkpointDir, &types.CheckpointManifest{CheckpointID: checkpointID}); err != nil {
+		t.Fatalf("write manifest: %v", err)
 	}
 
-	err := w.runCheckpoint(context.Background(), pod, job, "abc123", "main", "default/test-pod", time.Now())
-	if err == nil {
-		t.Fatal("expected terminal checkpoint status update to fail")
-	}
-	if _, ok := w.inFlight["default/test-pod"]; !ok {
-		t.Fatal("checkpoint terminal status failure should keep pod in-flight")
-	}
-	if patchCalls != 1 {
-		t.Fatalf("patchCalls = %d, want %d", patchCalls, 1)
-	}
+	injectErr := errors.New("injector unavailable")
+	w := makeTestController(t, pod)
+	// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
+	// returns ESRCH instead of killing the test process.
+	w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
+	w.injector = errorInjector{err: injectErr}
 
-	remainingLease, err := clientset.CoordinationV1().Leases("default").Get(context.Background(), "checkpoint-job", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("expected checkpoint lease to remain after terminal status patch failure: %v", err)
-	}
-	if remainingLease.Spec.HolderIdentity == nil || *remainingLease.Spec.HolderIdentity != "test-holder" {
-		t.Fatalf("unexpected remaining lease holder: %#v", remainingLease.Spec.HolderIdentity)
+	_ = w.runRestore(
+		context.Background(), pod, "main", "ctr-abc", checkpointID,
+		checkpointLocations{HostPath: checkpointDir, ContainerPath: checkpointDir},
+		"default/test-pod/main/ctr-abc",
+		time.Time{},
+	)
+
+	if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
+		t.Fatal("expected RestoreFailed event when injector returns an error")
 	}
 }

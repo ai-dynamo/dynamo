@@ -72,7 +72,10 @@ class GMSRPCServer:
             allocation_retry_timeout=allocation_retry_timeout,
         )
         self._server: Optional[asyncio.Server] = None
-        logger.info("GMSRPCServer initialized: device=%d", device)
+        logger.info(
+            "GMSRPCServer initialized: device=%d",
+            device,
+        )
 
     def _prepare_socket_path(self) -> None:
         if not os.path.exists(self.socket_path):

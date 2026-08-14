@@ -10,6 +10,7 @@
 import asyncio
 import base64
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,7 +45,6 @@ pytestmark = [
 
 def _make_config(
     model: str = "test-model",
-    is_prefill_worker: bool = False,
     enable_multimodal: bool = True,
     multimodal_embedding_cache_capacity_gb: float = 0,
     disaggregation_mode: str | None = None,
@@ -54,11 +54,8 @@ def _make_config(
 
     config = MagicMock()
     config.model = model
-    config.is_prefill_worker = is_prefill_worker
     if disaggregation_mode is not None:
         config.disaggregation_mode = getattr(DisaggregationMode, disaggregation_mode)
-    elif is_prefill_worker:
-        config.disaggregation_mode = DisaggregationMode.PREFILL
     else:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
     # NIXL_WRITE / NIXL_READ modes require GPU, the tests may run in CPU-only environments,
@@ -564,7 +561,7 @@ class TestGenerateDisagg:
     @pytest.mark.asyncio
     async def test_prefills_then_forwards_to_decode(self):
         """_generate_disagg prefills locally, then round-robins to decode worker."""
-        config = _make_config(model="test-model", is_prefill_worker=True)
+        config = _make_config(model="test-model", disaggregation_mode="PREFILL")
         decode_client = MagicMock()
         handler = _make_handler(config=config, decode_worker_client=decode_client)
         handler.engine_client = MagicMock()
@@ -747,7 +744,7 @@ class TestDecodeWorkerMultimodalBranching:
             disaggregation_mode="DECODE",
         )
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
         request = {
             "token_ids": [1, 2, 3],
@@ -770,36 +767,6 @@ class TestDecodeWorkerMultimodalBranching:
         assert len(chunks) == 1
         assert chunks[0]["message"] == "test stop"
 
-    async def test_over_budget_explicit_max_tokens_returns_error_before_engine(self):
-        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
-        handler.model_max_len = 100
-        handler.engine_client = MagicMock()
-
-        request = {
-            "token_ids": [1, 2, 3],
-            "sampling_options": {},
-            "stop_conditions": {"max_tokens": 98},
-            "output_options": {},
-        }
-        context = MagicMock()
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
-
-        assert chunks == [
-            {
-                "finish_reason": (
-                    "error: This model's maximum context length is 100 tokens. "
-                    "However, you requested 101 tokens "
-                    "(3 in the messages, 98 in the completion). "
-                    "Please reduce the length of the messages or completion."
-                ),
-                "index": 0,
-                "token_ids": [],
-            }
-        ]
-        handler.engine_client.generate.assert_not_called()
-
     async def test_aggregated_mode_calls_extract_multimodal_data(self):
         """Aggregated mode delegates media loading to the shared processor."""
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
@@ -810,7 +777,7 @@ class TestDecodeWorkerMultimodalBranching:
         # Return an error from _build_prompt_from_request so _generate_token_mode
         # yields it and returns early — no need to mock the engine.
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
 
         request = {
@@ -830,6 +797,111 @@ class TestDecodeWorkerMultimodalBranching:
         assert len(chunks) == 1
         assert chunks[0]["status"] == "error"
 
+    async def test_decode_only_bypass_annotation_runs_as_agg(self):
+        """Decode worker with conditional-disagg bypass annotation runs as AGG."""
+        handler = _make_decode_handler(
+            model="Qwen/Qwen3-VL-2B-Instruct",
+            disaggregation_mode="DECODE",
+        )
+        handler._multimodal_request_processor.extract_multimodal_data = AsyncMock(
+            return_value=None
+        )
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(None, {"status": "error", "message": "test stop"})
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
+        assert len(chunks) == 1
+        assert chunks[0]["message"] == "test stop"
+
+    async def test_decode_only_bypass_annotation_text_only_does_not_require_prefill_kv_params(
+        self,
+    ):
+        """Text-only bypass does not require incoming prefill KV params."""
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(None, {"status": "error", "message": "stop"})
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0]["message"] == "stop"
+
+    async def test_decode_only_bypass_annotation_text_mode_runs_as_agg(self):
+        """Text-mode conditional-disagg bypass is not treated as decode-only."""
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler.input_param_manager = MagicMock()
+        handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
+        handler.engine_client = MagicMock()
+        handler.default_sampling_params = {}
+
+        async def _empty_generate(*args, **kwargs):
+            if False:
+                yield None
+
+        handler.engine_client.generate = _empty_generate
+
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+        context.trace_headers.return_value = {}
+
+        decode_only_values = []
+
+        @asynccontextmanager
+        async def _capture_guard(
+            engine_client,
+            request_id,
+            is_decode_only,
+            registry=None,
+            on_engine_dead=None,
+        ):
+            decode_only_values.append(is_decode_only)
+            yield None
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+
+        with patch.object(mod, "_deferred_abort_guard", _capture_guard):
+            chunks = []
+            async for chunk in handler._generate_text_mode(request, context, "req-1"):
+                chunks.append(chunk)
+
+        assert chunks == []
+        assert decode_only_values == [False]
+
     @pytest.mark.parametrize(
         "mm_processor_kwargs",
         [None, {"use_audio_in_video": True}],
@@ -839,7 +911,7 @@ class TestDecodeWorkerMultimodalBranching:
     ):
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
 
-        prompt, _, error = handler._build_prompt_from_request(
+        prompt, error = handler._build_prompt_from_request(
             {"token_ids": [1, 2, 3]},
             "request-prompt",
             multi_modal_data=None,
@@ -870,7 +942,7 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
     )
     handler._multimodal_request_processor = processor
     handler._build_prompt_from_request = MagicMock(
-        return_value=(None, None, {"status": "error", "message": "stop"})
+        return_value=(None, {"status": "error", "message": "stop"})
     )
     context = MagicMock()
 
@@ -1163,9 +1235,7 @@ class TestDeferredAbort:
         handler.input_param_manager = MagicMock()
         handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
         handler._resolve_lora_request = MagicMock(return_value=None)
-        handler._build_prompt_from_request = MagicMock(
-            return_value=(MagicMock(), None, None)
-        )
+        handler._build_prompt_from_request = MagicMock(return_value=(MagicMock(), None))
 
         # Capture the guard created inside the handler and wrap close() so
         # the test can assert that the handler awaited it.
@@ -1838,6 +1908,140 @@ class TestRLAdminRouteHardening:
             "finish_weight_update", kwargs={}
         )
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_succeeds_within_timeout(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        resp = await handler.init_weights_update_group(
+            {
+                "engine_rpc": "init_weight_transfer_engine",
+                "init_info": {"master_address": "trainer", "master_port": 29500},
+            }
+        )
+
+        assert resp == {
+            "status": "ok",
+            "message": "Weight update group initialized",
+        }
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "init_weight_transfer_engine",
+            kwargs={
+                "init_info": {
+                    "master_address": "trainer",
+                    "master_port": 29500,
+                }
+            },
+        )
+        assert not handler._pause_lock.locked()
+
+    def test_init_weights_update_group_timeout_defaults_to_30_seconds(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", raising=False)
+
+        assert mod._rl_init_weights_timeout_s() == 30.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_init_weights_update_group_timeout_exits_worker(self, monkeypatch):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+
+        rpc_cancelled = asyncio.Event()
+
+        async def blocked_rpc(*_args, **_kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                rpc_cancelled.set()
+                raise
+
+        handler.engine_client.collective_rpc = AsyncMock(side_effect=blocked_rpc)
+        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", "0.01")
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
+        assert rpc_cancelled.is_set()
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_inner_timeout_error(
+        self, monkeypatch
+    ):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=TimeoutError("transport timed out")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "transport timed out"}
+        handler.runtime.shutdown.assert_not_called()
+        exit_mock.assert_not_called()
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_engine_dead_exits_worker(
+        self, monkeypatch
+    ):
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=EngineDeadError("engine dead")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_ordinary_errors(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("init failed")
+        )
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "init failed"}
+        handler.runtime.shutdown.assert_not_called()
+        assert not handler._pause_lock.locked()
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):

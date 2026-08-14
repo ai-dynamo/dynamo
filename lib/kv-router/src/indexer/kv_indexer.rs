@@ -23,7 +23,7 @@ fn apply_event_with_counters(
     trie: &mut RadixTree,
     event: RouterEvent,
     counters: &PreBoundEventCounters,
-) {
+) -> bool {
     let kind = EventKind::of(&event.event.data);
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
@@ -36,6 +36,7 @@ fn apply_event_with_counters(
         );
     }
     counters.inc(kind, result);
+    result_is_ok
 }
 
 fn apply_routing_decision_with_prune_tracking(
@@ -119,10 +120,78 @@ fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_
 }
 
 struct PendingMutationReceivers<'a> {
-    event_rx: &'a mut mpsc::Receiver<RouterEvent>,
+    mutation_rx: &'a mut mpsc::Receiver<MutationRequest>,
     remove_worker_rx: &'a mut mpsc::Receiver<WorkerId>,
     remove_worker_dp_rank_rx: &'a mut mpsc::Receiver<(WorkerId, DpRank)>,
     routing_rx: &'a mut mpsc::Receiver<RoutingDecisionRequest>,
+}
+
+enum MutationRequest {
+    Event(RouterEvent),
+    EventWithAck {
+        event: RouterEvent,
+        resp: oneshot::Sender<bool>,
+    },
+    ResetWorkerDpRank {
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        resp: oneshot::Sender<()>,
+    },
+}
+
+/// Cloneable sender for the indexer's FIFO mutation queue.
+#[derive(Clone)]
+pub struct KvEventSender {
+    mutation_tx: mpsc::Sender<MutationRequest>,
+}
+
+impl KvEventSender {
+    pub async fn send(
+        &self,
+        event: RouterEvent,
+    ) -> Result<(), mpsc::error::SendError<RouterEvent>> {
+        self.mutation_tx
+            .send(MutationRequest::Event(event))
+            .await
+            .map_err(|error| match error.0 {
+                MutationRequest::Event(event) => mpsc::error::SendError(event),
+                MutationRequest::EventWithAck { .. }
+                | MutationRequest::ResetWorkerDpRank { .. } => {
+                    unreachable!("event sender only submits event mutations")
+                }
+            })
+    }
+
+    pub async fn closed(&self) {
+        self.mutation_tx.closed().await;
+    }
+}
+
+fn apply_mutation(
+    trie: &mut RadixTree,
+    mutation: MutationRequest,
+    counters: &PreBoundEventCounters,
+    prune_manager: &Option<WorkerPruneManager>,
+) {
+    match mutation {
+        MutationRequest::Event(event) => {
+            apply_event_with_counters(trie, event, counters);
+        }
+        MutationRequest::EventWithAck { event, resp } => {
+            let _ = resp.send(apply_event_with_counters(trie, event, counters));
+        }
+        MutationRequest::ResetWorkerDpRank {
+            worker_id,
+            dp_rank,
+            resp,
+        } => {
+            trie.remove_worker_dp_rank(worker_id, dp_rank);
+            if let Some(pm) = prune_manager {
+                pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+            }
+            let _ = resp.send(());
+        }
+    }
 }
 
 fn drain_pending_mutations(
@@ -146,8 +215,8 @@ fn drain_pending_mutations(
         }
     }
 
-    while let Ok(event) = receivers.event_rx.try_recv() {
-        apply_event_with_counters(trie, event, counters);
+    while let Ok(mutation) = receivers.mutation_rx.try_recv() {
+        apply_mutation(trie, mutation, counters, prune_manager);
     }
 
     while let Ok(routing_req) = receivers.routing_rx.try_recv() {
@@ -170,8 +239,8 @@ fn drain_pending_mutations(
 pub struct KvIndexer {
     /// A `CancellationToken` for managing shutdown.
     cancel: CancellationToken,
-    /// A sender for `RouterEvent`s.
-    event_tx: mpsc::Sender<RouterEvent>,
+    /// The FIFO sender shared by events and acknowledged rank resets.
+    mutation_tx: mpsc::Sender<MutationRequest>,
     /// A sender for `MatchRequest`s.
     match_tx: mpsc::Sender<MatchRequest>,
     /// A sender for `MatchDetailsRequest`s.
@@ -214,7 +283,7 @@ impl KvIndexer {
     ) -> Self {
         super::warn_on_unit_block_size("single", kv_block_size);
 
-        let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(16384);
+        let (mutation_tx, mutation_rx) = mpsc::channel::<MutationRequest>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (match_details_tx, match_details_rx) = mpsc::channel::<MatchDetailsRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
@@ -238,7 +307,7 @@ impl KvIndexer {
                     let cancel = cancel_clone;
                     let mut match_rx = match_rx;
                     let mut match_details_rx = match_details_rx;
-                    let mut event_rx = event_rx;
+                    let mut mutation_rx = mutation_rx;
                     let mut remove_worker_rx = remove_worker_rx;
                     let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
                     let mut get_workers_rx = get_workers_rx;
@@ -274,8 +343,8 @@ impl KvIndexer {
                                 }
                             }
 
-                            Some(event) = event_rx.recv() => {
-                                apply_event_with_counters(&mut trie, event, &counters);
+                            Some(mutation) = mutation_rx.recv() => {
+                                apply_mutation(&mut trie, mutation, &counters, &prune_manager);
                             }
 
                             Some(get_workers_req) = get_workers_rx.recv() => {
@@ -284,10 +353,16 @@ impl KvIndexer {
                             }
 
                             Some(dump_req) = dump_rx.recv() => {
+                                // NOTE: Dump requests use a separate channel from mutations, so the
+                                // actor may observe one while already-accepted mutations are still
+                                // queued. Drain them before reading the tree to guarantee the snapshot
+                                // is at least as advanced as its advertised recovery watermark.
+                                // Including later queued mutations is allowed because recovery replays
+                                // the complete tail.
                                 drain_pending_mutations(
                                     &mut trie,
                                     PendingMutationReceivers {
-                                        event_rx: &mut event_rx,
+                                        mutation_rx: &mut mutation_rx,
                                         remove_worker_rx: &mut remove_worker_rx,
                                         remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
                                         routing_rx: &mut routing_rx,
@@ -304,7 +379,7 @@ impl KvIndexer {
                                 drain_pending_mutations(
                                     &mut trie,
                                     PendingMutationReceivers {
-                                        event_rx: &mut event_rx,
+                                        mutation_rx: &mut mutation_rx,
                                         remove_worker_rx: &mut remove_worker_rx,
                                         remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
                                         routing_rx: &mut routing_rx,
@@ -370,7 +445,11 @@ impl KvIndexer {
                             }
 
                             Some(req) = match_details_rx.recv() => {
-                                let matches = trie.find_match_details(req.sequence, req.early_exit);
+                                let matches = trie.find_match_details_with_options(
+                                    req.sequence,
+                                    req.early_exit,
+                                    req.retain_router_hint_chain,
+                                );
                                 let _ = req.resp.send(matches);
                             }
 
@@ -394,7 +473,7 @@ impl KvIndexer {
 
         Self {
             cancel: token,
-            event_tx,
+            mutation_tx,
             match_tx,
             match_details_tx,
             remove_worker_tx,
@@ -420,22 +499,51 @@ impl KvIndexer {
         Self::new_with_pruning(token, kv_block_size, metrics, None)
     }
 
-    /// Get a sender for `RouterEvent`s.
+    /// Get a sender that serializes `RouterEvent`s with cold-path reset barriers.
     ///
     /// ### Returns
     ///
-    /// A `mpsc::Sender` for `RouterEvent`s.
-    pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
-        self.event_tx.clone()
+    /// A [`KvEventSender`] for `RouterEvent`s.
+    pub fn event_sender(&self) -> KvEventSender {
+        KvEventSender {
+            mutation_tx: self.mutation_tx.clone(),
+        }
+    }
+
+    /// Wait until all mutations accepted before this call have been applied.
+    pub async fn flush_and_wait(&self) -> Result<usize, KvRouterError> {
+        let curr_size = self.mutation_tx.max_capacity() - self.mutation_tx.capacity();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.flush_tx
+            .send(FlushRequest { resp: resp_tx })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        Ok(curr_size)
     }
 
     pub async fn find_match_details(
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<MatchDetails, KvRouterError> {
+        self.find_match_details_with_options(sequence, false).await
+    }
+
+    pub async fn find_match_details_with_options(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        retain_router_hint_chain: bool,
+    ) -> Result<MatchDetails, KvRouterError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.match_details_tx
-            .send(MatchDetailsRequest::new(sequence, false, resp_tx))
+            .send(MatchDetailsRequest::new(
+                sequence,
+                false,
+                retain_router_hint_chain,
+                resp_tx,
+            ))
             .await
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
@@ -534,7 +642,7 @@ impl KvIndexerInterface for KvIndexer {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        self.event_tx.send(event).await.unwrap();
+        self.event_sender().send(event).await.unwrap();
     }
 
     async fn remove_worker(&self, worker: WorkerId) {
@@ -546,6 +654,25 @@ impl KvIndexerInterface for KvIndexer {
             .send((worker, dp_rank))
             .await
             .unwrap();
+    }
+
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.mutation_tx
+            .send(MutationRequest::ResetWorkerDpRank {
+                worker_id,
+                dp_rank,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
     fn shutdown(&self) {
@@ -578,21 +705,36 @@ impl KvIndexerInterface for KvIndexer {
             .await
     }
     async fn flush(&self) -> usize {
-        let curr_size = self.event_tx.max_capacity() - self.event_tx.capacity();
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let flush_req = FlushRequest { resp: resp_tx };
-
-        if let Err(error) = self.flush_tx.send(flush_req).await {
-            tracing::error!("Failed to send flush request: {:?}", error);
-            return curr_size;
+        match self.flush_and_wait().await {
+            Ok(curr_size) => curr_size,
+            Err(error) => {
+                tracing::error!(%error, "Failed to flush KV indexer");
+                0
+            }
         }
-
-        let _ = resp_rx.await;
-        curr_size
     }
 }
 
 impl KvIndexer {
+    /// Apply one event on the mutation queue and wait for its backend result.
+    pub async fn apply_event_and_wait(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.mutation_tx
+            .send(MutationRequest::EventWithAck {
+                event,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        if !resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+        {
+            return Err(KvRouterError::IndexerDroppedRequest);
+        }
+        Ok(())
+    }
+
     /// Process a routing decision with pre-computed hashes.
     pub async fn process_routing_decision_with_hashes(
         &self,
@@ -619,5 +761,57 @@ impl Drop for KvIndexer {
         if Arc::strong_count(&self._ref_count) == 1 {
             self.shutdown();
         }
+    }
+}
+
+#[cfg(test)]
+mod fifo_reset_tests {
+    use super::*;
+    use crate::test_utils::make_store_event_with_dp_rank;
+
+    #[tokio::test]
+    async fn post_reset_event_survives_fifo_rank_reset() {
+        let indexer = KvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        indexer
+            .mutation_tx
+            .send(MutationRequest::Event(make_store_event_with_dp_rank(
+                7,
+                &[1],
+                0,
+            )))
+            .await
+            .unwrap();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        indexer
+            .mutation_tx
+            .send(MutationRequest::ResetWorkerDpRank {
+                worker_id: 7,
+                dp_rank: 0,
+                resp: resp_tx,
+            })
+            .await
+            .unwrap();
+        indexer
+            .mutation_tx
+            .send(MutationRequest::Event(make_store_event_with_dp_rank(
+                7,
+                &[2],
+                0,
+            )))
+            .await
+            .unwrap();
+
+        resp_rx.await.unwrap();
+        indexer.flush().await;
+
+        let worker = WorkerWithDpRank::new(7, 0);
+        let old_scores = indexer.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
+        let new_scores = indexer.find_matches(vec![LocalBlockHash(2)]).await.unwrap();
+        assert!(!old_scores.scores.contains_key(&worker));
+        assert_eq!(new_scores.scores.get(&worker), Some(&1));
     }
 }

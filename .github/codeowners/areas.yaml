@@ -46,9 +46,11 @@ areas:
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
+  - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/global_router/
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
+  - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-router/
   - lib/kv-router/src/indexer/
@@ -64,15 +66,16 @@ areas:
   - lib/llm/src/kv_router/publisher/
   - tests/router/
   - tests/router/configs/
+  - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
+  - examples/router/custom-policy-example/
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
-  - lib/vllm-rs-backend/Cargo.toml
-  - lib/vllm-rs-backend/src/
+  - lib/sidecar/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -85,6 +88,7 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
@@ -92,6 +96,8 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
+  - lib/mocker/servers/sglang/
+  - lib/sidecar/sglang/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -210,6 +216,8 @@ areas:
   - components/src/dynamo/profiler/tests/
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
+  - aisimulate/
+  - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -227,6 +235,8 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
+  - lib/sidecar/README.md
+  - lib/sidecar/common/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -259,6 +269,7 @@ areas:
   - lib/runtime/src/transports/
   - lib/runtime/src/utils/
   - lib/runtime/tests/
+  - lib/truthy/
   - tests/
   - tests/CLAUDE.md
   - tests/README.md
@@ -346,8 +357,6 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
-  - fern/
-  - fern/components/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:
@@ -425,7 +434,8 @@ areas:
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
-  - components/src/dynamo/common/utils/snapshot.py
+  - benchmarks/cuda_custom_storage/
+  - components/src/dynamo/common/snapshot/
   - deploy/helm/charts/snapshot/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
@@ -558,19 +568,27 @@ shared:
   owners:
   - process
   - agents
+- glob: .github/workflows/fern-docs.yml
+  owners:
+  - ops
+  - docs
+- glob: .lycheeignore
+  owners:
+  - ops
+  - docs
 - glob: lib/llm/src/protocols/agents.rs
   owners:
   - frontend
   - agents
-- glob: docs/agents/
+- glob: docs/fern/agents/
   owners:
   - docs
   - agents
-- glob: docs/digest/agentic-inference/
+- glob: docs/fern/digest/agentic-inference/
   owners:
   - docs
   - agents
-- glob: docs/backends/sglang/agents.md
+- glob: docs/fern/backends/sglang/agents.md
   owners:
   - docs
   - agents
@@ -650,14 +668,6 @@ shared:
   owners:
   - backend-trtllm
   - observability
-- glob: components/src/dynamo/vllm/logits_processing/
-  owners:
-  - backend-vllm
-  - frontend
-- glob: components/src/dynamo/sglang/logits_processing/
-  owners:
-  - backend-sglang
-  - frontend
 - glob: components/src/dynamo/trtllm/logits_processing/
   owners:
   - backend-trtllm
@@ -839,7 +849,7 @@ shared:
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/planner/connectors/kubernetes_api.py
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
   - planner
   - operator
@@ -1033,6 +1043,10 @@ shared:
   owners:
   - performance
   - kv-memory
+- glob: lib/mocker/servers/sglang/
+  owners:
+  - performance
+  - backend-sglang
 - glob: lib/mocker/src/replay/planner_handle.rs
   owners:
   - performance
@@ -1065,91 +1079,6 @@ shared:
   owners:
   - gms
 classify:
-  keyword_rules:
-  - match: multimodal_handlers
-    area: multimodal
-  - match: multimodal_utils
-    area: multimodal
-  - match: image_diffusion
-    area: diffusion
-  - match: video_generation
-    area: diffusion
-  - match: video_diffusion
-    area: diffusion
-  - match: diffus
-    area: diffusion
-  - match: multimodal
-    area: multimodal
-  - match: /omni
-    area: multimodal
-  - match: kv_connector
-    area: kv-memory
-  - match: block_manager
-    area: kv-memory
-  - match: kvbm
-    area: kv-memory
-  - match: nixl
-    area: kv-memory
-  - match: kv_event
-    area: kv-memory
-    coowner: observability
-  - match: kv_router
-    area: router
-  - match: /router
-    area: router
-  - match: planner
-    area: planner
-  - match: profiler
-    area: planner
-  - match: prometheus
-    area: observability
-  - match: telemetry
-    area: observability
-  - match: grafana
-    area: observability
-  - match: metrics
-    coowner: observability
-  - match: /rl/
-    area: rl
-  - match: weight_update
-    area: rl
-  - match: logits
-    coowner: frontend
-  - match: tokeniz
-    area: frontend
-  - match: preprocess
-    area: frontend
-  - match: recipes/
-    area: performance
-  - match: benchmark
-    area: performance
-  - match: /bench
-    area: performance
-  - match: mocker
-    area: performance
-  - match: tokenspeed
-    area: tokenspeed
-  - match: /vllm
-    area: backend-vllm
-  - match: /sglang
-    area: backend-sglang
-  - match: /trtllm
-    area: backend-trtllm
-  - match: operator
-    area: operator
-  - match: /helm
-    area: operator
-  - match: snapshot
-    area: gms
-  - match: inference-gateway
-    area: epp
-  - match: fault_tolerance
-    area: fault-tolerance
-  - match: /fern/
-    area: docs
-  - match: docs/
-    area: docs
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops
-    advisory: false

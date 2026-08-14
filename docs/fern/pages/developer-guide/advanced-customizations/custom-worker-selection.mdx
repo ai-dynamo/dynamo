@@ -1,0 +1,448 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Write Custom Routing Strategies
+subtitle: Build Rust filters, scorers, and pickers for the Dynamo frontend or EPP
+---
+
+<Warning>
+**Experimental.** A custom worker-selection policy controls how Dynamo filters and scores eligible workers, then selects one. Dynamo still owns discovery, eligibility, queueing, reservations, accounting, and metrics.
+</Warning>
+
+## How It Works
+
+This feature replaces the worker-ranking part of Dynamo's routing pipeline. A `WorkerFilter` can exclude a host-eligible worker, a `WorkerScorer` assigns a finite cost to each remaining worker, Dynamo adds costs from all configured scorers, and a `WorkerPicker` chooses one row from the scored candidates. Filters run in declaration order before scoring, and rejecting every worker returns an error. Lower costs rank first by convention, but the picker can implement deterministic selection, sampling, tie-breaking, or policy-local state. Dynamo continues to own discovery, eligibility, score validation, accounting, and reservation.
+
+```mermaid
+flowchart LR
+    Request["Incoming request"] --> Eligibility["Dynamo eligibility filters"]
+    Eligibility --> Filters["WorkerFilter(s)<br/>keep or reject each worker"]
+    Filters --> Scorers["WorkerScorer(s)<br/>one cost per worker"]
+    Scorers --> Sum["Dynamo sums scorer costs"]
+    Sum --> Picker["WorkerPicker<br/>one candidate row"]
+    Picker --> Validate["Dynamo validates the row"]
+    Validate --> Reserve["Accounting and reservation"]
+```
+
+For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
+
+## Choose the Policy Stage
+
+| Stage | Input | Output | Use this stage for |
+|---|---|---|---|
+| `WorkerFilter` | Request context and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
+| `WorkerScorer` | Request context and one eligible worker | One finite cost | The rule ranks workers or adds a penalty |
+| `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
+| Policy factory | Router configuration, worker type, and routing partition | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
+
+An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
+
+## Build the Policy
+
+### Create the Policy and Catalog Crates
+
+Set the Dynamo checkout and policy project paths:
+
+```bash
+# Set the source and destination paths used by the remaining commands.
+export DYNAMO_DIR=/work/dynamo
+export POLICY_DIR=/work/acme-routing
+
+# Create one crate for the policy and one crate for policy registration.
+mkdir -p "$POLICY_DIR"
+cargo init --lib --name acme-routing-policy "$POLICY_DIR/policy"
+cargo init --lib --name acme-routing-catalog "$POLICY_DIR/catalog"
+```
+
+Add `dynamo-kv-router` from the same checkout that builds the frontend or EPP:
+
+```bash
+# Add the worker-selection API to the policy crate.
+cargo add \
+  --manifest-path "$POLICY_DIR/policy/Cargo.toml" \
+  --path "$DYNAMO_DIR/lib/kv-router" \
+  --features standalone-selection \
+  dynamo-kv-router
+
+# Add parameter deserialization to the policy crate.
+cargo add \
+  --manifest-path "$POLICY_DIR/policy/Cargo.toml" \
+  --features derive serde
+
+# Add the policy crate to the catalog.
+cargo add \
+  --manifest-path "$POLICY_DIR/catalog/Cargo.toml" \
+  --path "$POLICY_DIR/policy" \
+  acme-routing-policy
+
+# Add the registry API to the catalog.
+cargo add \
+  --manifest-path "$POLICY_DIR/catalog/Cargo.toml" \
+  --path "$DYNAMO_DIR/lib/kv-router" \
+  --features standalone-selection \
+  dynamo-kv-router
+```
+
+### Filter Workers
+
+A filter answers a hard yes-or-no question about one worker that already passed Dynamo's eligibility checks. Return `true` to keep the worker or `false` to remove it. Use a filter only when the worker must not receive the request; use a scorer for preferences.
+
+This filter keeps workers with at least the configured number of device-resident overlap blocks:
+
+```rust
+use dynamo_kv_router::{
+    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
+};
+
+struct MinimumDeviceOverlapFilter {
+    minimum_blocks: f64,
+}
+
+impl WorkerFilter for MinimumDeviceOverlapFilter {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE
+    }
+
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        let cache = candidate
+            .cache()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+        Ok(cache.device_overlap_blocks() >= self.minimum_blocks)
+    }
+}
+```
+
+Dynamo runs filters in declaration order before scoring. A worker must pass every configured filter. If no workers remain, selection returns an error.
+
+Pass filters to `WorkerSelectionPolicy::new_with_filters`. If the policy has no hard requirement, omit filters and use `WorkerSelectionPolicy::new`.
+
+### Score Workers
+
+A scorer expresses a preference without excluding a worker. It returns one finite cost for one worker. Lower total cost is better by convention.
+
+This scorer uses the current number of active requests as its cost:
+
+```rust
+use dynamo_kv_router::{
+    WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
+};
+
+struct ActiveRequestsScorer;
+
+impl WorkerScorer for ActiveRequestsScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
+    }
+
+    fn score(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        let load = candidate
+            .load()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+        Ok(load.active_requests() as f64)
+    }
+}
+```
+
+A policy can stack multiple scorers. Dynamo calls them in declaration order and adds their costs. Dynamo rejects a non-finite contribution or total.
+
+### Pick a Worker
+
+A picker makes the final choice after filtering and scoring. It sees every remaining worker and its total cost, then returns one row index. Most policies pick the lowest cost, but a picker can instead sample, break ties, or use policy-local state.
+
+This picker selects the lowest-cost row:
+
+```rust
+use dynamo_kv_router::{
+    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+};
+
+struct LowestCostPicker;
+
+impl WorkerPicker for LowestCostPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        input
+            .candidates()
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+            .map(|(row, _)| row)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+    }
+}
+```
+
+Candidate order is unspecified, so inspect explicit values instead of relying on row order. Dynamo rejects an out-of-range index before accounting or reservation.
+
+### Parse Parameters and Create the Factory
+
+The provider runs once at startup. Parse and validate all parameters there, then capture the validated values in the factory:
+
+```rust
+use std::sync::Arc;
+
+use dynamo_kv_router::services::selection::{
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
+    WorkerSelectionPolicyProviderError,
+};
+use dynamo_kv_router::{WorkerFilter, WorkerScorer, WorkerSelectionPolicy};
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Parameters {
+    min_device_overlap_blocks: f64,
+}
+
+fn provider(
+    parameters: &WorkerSelectionPolicyParameters,
+) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
+    let parameters: Parameters = parameters.deserialize()?;
+    if !parameters.min_device_overlap_blocks.is_finite()
+        || parameters.min_device_overlap_blocks < 0.0
+    {
+        return Err(WorkerSelectionPolicyProviderError::new(
+            "min_device_overlap_blocks must be a finite non-negative number",
+        ));
+    }
+    let minimum_blocks = parameters.min_device_overlap_blocks;
+
+    Ok(Arc::new(move |config, worker_type, _partition| {
+        let filters: Vec<Box<dyn WorkerFilter>> = vec![
+            Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
+        ];
+        let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
+        WorkerSelectionPolicy::new_with_filters(
+            config.clone(),
+            worker_type,
+            filters,
+            scorers,
+            Box::new(LowestCostPicker),
+        )
+    }))
+}
+```
+
+Dynamo calls the returned factory once per routing partition. If prefill, decode, or standalone `select` workers need different components, branch on `worker_type`. Use the partition identity for distinct model or routing-group state.
+
+### Register the Policy
+
+Expose a registration function from the policy crate:
+
+```rust
+use dynamo_kv_router::services::selection::{
+    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
+};
+
+pub fn register(
+    registry: &mut WorkerSelectionPolicyRegistry,
+) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    registry.register("least-busy", Arc::new(provider))
+}
+```
+
+Call this function from the catalog:
+
+```rust
+pub fn register(
+    registry: &mut WorkerSelectionPolicyRegistry,
+) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    acme_routing_policy::register(registry)
+}
+```
+
+Choose a stable, unique type name. Unknown types, duplicate registrations, and invalid parameters stop startup.
+
+### Configure an Instance
+
+Create `$POLICY_DIR/worker-selection.yaml`:
+
+```yaml
+worker_selection:
+  default: least-busy
+  instances:
+    - name: least-busy
+      type: least-busy
+      parameters:
+        min_device_overlap_blocks: 0
+```
+
+The `type` selects a registered provider. The `name` identifies one configured instance. `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides `worker_selection.default` by instance name. Set the override to `default` to select Dynamo's built-in policy.
+
+### Check the Policy and Catalog
+
+```bash
+cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
+```
+
+Add one focused test for each policy decision and one registration test for every type name.
+
+## Available Signals
+
+Request context and worker identity are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
+
+### Request Context
+
+| Accessor | Meaning |
+|---|---|
+| `request_blocks()` | Incoming prompt size in KV blocks |
+| `block_size()` | Tokens in one KV block |
+| `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
+| `session_context()` | Optional session metadata described below |
+| `expected_output_tokens()` | Optional expected output length |
+| `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
+| `strict_priority()` | Strict integer priority. The queue orders larger values first |
+| `router_temperature_override()` | Optional per-request router temperature override |
+
+### Session Context
+
+`session_context()` returns `None` when the request has no session metadata. This policy-facing view contains selected session metadata; it is not Dynamo's internal request envelope. When present, it provides:
+
+| Accessor | Meaning |
+|---|---|
+| `session_id()` | Stable reasoning or tool-session identifier |
+| `parent_session_id()` | Optional parent session for subagents |
+| `session_final()` | Optional terminal marker for lifecycle-aware policies |
+| `kv_hints()` | Optional KV lifecycle hints |
+| `kv_hints().evict_session()` | Whether the request asks consumers to evict session state |
+| `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
+
+The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
+
+### Worker Identity and Cost
+
+| Accessor | Meaning |
+|---|---|
+| `WorkerCandidate::worker()` | Candidate worker ID and data-parallel rank |
+| `ScoredWorkerCandidate::worker()` | Picker row worker ID and data-parallel rank |
+| `ScoredWorkerCandidate::cost()` | Sum of all scorer contributions for the picker row |
+
+### Optional Worker Inputs
+
+If a component needs no optional worker data, return `WorkerInputs::NONE`. Combine exact groups with `|`, such as `WorkerInputs::CACHE | WorkerInputs::LOAD`.
+
+| Group | Accessor | Meaning |
+|---|---|---|
+| `CACHE` | `device_overlap_blocks()` | Device-resident prefix overlap in blocks |
+| `CACHE` | `host_overlap_blocks()` | Host-pinned prefix overlap in blocks |
+| `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
+| `CACHE` | `shared_beyond_device_blocks()` | Shared-cache hits beyond the device-resident prefix |
+| `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
+| `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
+| `LOAD` | `active_requests()` | Requests currently active on the worker |
+| `ROUTING` | `preferred_taint_multiplier()` | Optional cost multiplier from preferred routing constraints |
+
+The cache accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
+
+A filter or scorer reads requested groups through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every group that it reads.
+
+## Link the Policy Into Dynamo
+
+Both paths use the same policy crate, catalog, and YAML file. Choose the process that owns worker selection.
+
+<Tabs>
+<Tab title="Python Frontend">
+
+Add the catalog to the Python binding manifest. Keep the dependency alias `dynamo-worker-selection-policy-catalog`:
+
+```bash
+# Link the policy catalog into the Python extension.
+cargo add \
+  --manifest-path "$DYNAMO_DIR/lib/bindings/python/Cargo.toml" \
+  --optional \
+  --rename dynamo-worker-selection-policy-catalog \
+  --path "$POLICY_DIR/catalog" \
+  acme-routing-catalog
+```
+
+Build the extension with the linked catalog:
+
+```bash
+# Build the extension with the custom-policy feature.
+cd "$DYNAMO_DIR/lib/bindings/python"
+CARGO_TARGET_DIR="$DYNAMO_DIR/target" maturin develop --uv --features custom-policy
+
+# Install the Python package from this checkout.
+cd "$DYNAMO_DIR"
+uv pip install -e .
+
+# Start the frontend with the policy configuration.
+python3 -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config "$POLICY_DIR/worker-selection.yaml"
+```
+
+</Tab>
+<Tab title="EPP">
+
+Create an EPP crate and add the catalog and runner dependencies:
+
+```bash
+# Create the custom EPP binary crate.
+cargo init --bin --name acme-epp "$POLICY_DIR/epp"
+
+# Add error handling and the asynchronous runtime.
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" anyhow
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" tokio@=1.48.0 --features macros,rt-multi-thread
+
+# Add the policy catalog and worker-selection API.
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$POLICY_DIR/catalog" acme-routing-catalog
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" --features standalone-selection dynamo-kv-router
+
+# Add the standard EPP runner.
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/deploy/inference-gateway/ext-proc" dynamo-ext-proc
+```
+
+Register the catalog before the standard runner starts:
+
+```rust
+use dynamo_ext_proc::run_with_worker_selection_policy_registry;
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    acme_routing_catalog::register(&mut registry)?;
+    run_with_worker_selection_policy_registry(registry).await
+}
+```
+
+Run the custom binary in standalone mode:
+
+```bash
+# Run the linked EPP from its crate directory.
+cd "$POLICY_DIR/epp"
+DYN_EPP_MODE=standalone DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
+```
+
+Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. A policy that branches on `worker_type` must handle `select`.
+
+</Tab>
+</Tabs>
+
+## Policy Contract
+
+- Return `true` from a filter to keep a worker and `false` to reject it.
+- Expect filters to run in declaration order before scoring. Rejecting every worker returns an error.
+- Return finite scorer costs.
+- Return a valid picker row.
+- Treat candidate order as unspecified.
+- Request only the signal groups that the component reads.
+- Keep blocking I/O and panics out of `keep`, `score`, and `pick`.
+- Keep policy state local to the factory-created policy unless cross-partition sharing is a deliberate requirement.
+- Build the policy against the same Dynamo revision as the frontend or EPP.
+- If a signal adds work, storage, allocation, or another scan, run the worker-selection benchmark.
+
+The [example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) contains the in-tree package names and build-check commands. For the built-in cost model, see [Routing Concepts](../knowledge-base/modular-components/router/routing-concepts.md). For the standalone selection lifecycle, see [Standalone Selection Service](../knowledge-base/modular-components/router/standalone-selection.md).

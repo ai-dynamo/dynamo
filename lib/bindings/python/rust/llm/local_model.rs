@@ -7,6 +7,7 @@ use super::*;
 use dynamo_kv_router::protocols::{
     KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
 };
+use dynamo_runtime::protocols::EndpointId;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
@@ -157,6 +158,16 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_kv_event_publishing_enabled(&mut self, enabled: Option<bool>) {
+        self.inner.kv_event_publishing_enabled = enabled;
+    }
+
+    #[setter]
+    fn set_kv_state_endpoint(&mut self, kv_state_endpoint: Option<String>) {
+        self.inner.kv_state_endpoint = kv_state_endpoint.as_deref().map(EndpointId::from);
+    }
+
+    #[setter]
     fn set_exclude_tools_when_tool_choice_none(
         &mut self,
         exclude_tools_when_tool_choice_none: bool,
@@ -230,8 +241,31 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn data_parallel_start_rank(&self) -> u32 {
+        self.inner.data_parallel_start_rank
+    }
+
+    #[getter]
+    fn data_parallel_size(&self) -> u32 {
+        self.inner.data_parallel_size
+    }
+
+    #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
+    }
+
+    #[getter]
+    fn kv_event_publishing_enabled(&self) -> Option<bool> {
+        self.inner.kv_event_publishing_enabled
+    }
+
+    #[getter]
+    fn kv_state_endpoint(&self) -> Option<String> {
+        self.inner
+            .kv_state_endpoint
+            .as_ref()
+            .map(ToString::to_string)
     }
 
     #[getter]

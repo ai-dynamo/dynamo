@@ -7,5 +7,4 @@ SPDX-License-Identifier: Apache-2.0
 
 Full documentation can be found:
 
-- [FastVideo - Dynamo Docs](https://docs.nvidia.com/dynamo/dev/user-guides/diffusion/fastvideo) (Recommended)
-- [FastVideo - GitHub](../../docs/features/diffusion/fastvideo.md)
+- [FastVideo - Dynamo Docs](../../docs/fern/pages/use-cases/diffusion/workflows/text-to-video.md#overview) (Recommended)

@@ -46,7 +46,7 @@
 //! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
-//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
+//! - ✅ `dynamo_frontend_active_requests` - Current active requests gauge
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
 //! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
@@ -212,6 +212,12 @@ pub mod frontend_service {
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
 
+    /// Scheduler selections with less overlap than another eligible worker
+    pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "non_max_overlap_selections_total";
+
+    /// Effective KV overlap blocks lost by non-max-overlap selections
+    pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -240,6 +246,9 @@ pub mod frontend_service {
 
     /// Number of `audio_url` content parts per request (histogram)
     pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
+
+    /// Calculated image-placeholder token count per image-bearing request (histogram)
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
 
     /// Model configuration metrics
     ///
@@ -437,8 +446,9 @@ pub mod work_handler {
     pub const QUEUE_CAPACITY: &str = "queue_capacity";
 
     /// Total times enqueuing work failed because the dispatcher channel was closed.
-    /// Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
-    /// this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
+    /// A full queue is shed via try_reserve() and counted under
+    /// `dynamo_rejection_request_total`. Saturation shows up as rising `QUEUE_DEPTH`
+    /// toward `QUEUE_CAPACITY`.
     pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
 
     /// Time spent waiting to acquire a worker-pool permit (histogram)
@@ -589,11 +599,11 @@ pub mod routing_overhead {
     /// Time spent querying the shared KV cache (Mooncake)
     pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
 
-    /// Total shared cache query errors (timeouts, HTTP failures)
+    /// Total shared cache failures (query and subscriber failures)
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (component-scoped aggregate histograms + counter)
+/// Router request metrics (component-scoped aggregate histograms + counters)
 ///
 /// These constants are the suffix portions of full metric names, combined with
 /// [`name_prefix::COMPONENT`] to form the complete name, e.g.
@@ -601,6 +611,9 @@ pub mod routing_overhead {
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod router {
+    /// Total number of requests admitted by the router scheduler
+    pub const REQUESTS_STARTED_TOTAL: &str = "router_requests_started_total";
+
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
@@ -635,6 +648,12 @@ pub mod router {
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Scheduler selections with less overlap than another eligible worker
+    pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "router_non_max_overlap_selections_total";
+
+    /// Effective KV overlap blocks lost by non-max-overlap selections
+    pub const OVERLAP_BLOCKS_LOST: &str = "router_overlap_blocks_lost";
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";
@@ -806,12 +825,22 @@ pub mod kvstats {
 
     /// GPU cache usage as a percentage (0.0-1.0)
     pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
+
+    /// Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    pub const KV_CACHE_HIT_RATE: &str = "kv_cache_hit_rate";
 }
 
 // Model information metrics
 pub mod model_info {
     /// Model load time in seconds
     pub const LOAD_TIME_SECONDS: &str = "model_load_time_seconds";
+}
+
+// Worker-lifecycle timing gauges. Set once per worker run by the framework, not by the engine.
+pub mod lifecycle {
+    pub const CLEANUP_TIME_SECONDS: &str = "cleanup_time_seconds";
+
+    pub const DRAIN_TIME_SECONDS: &str = "drain_time_seconds";
 }
 
 // Shared regex patterns for Prometheus sanitization

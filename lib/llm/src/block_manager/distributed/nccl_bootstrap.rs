@@ -195,6 +195,11 @@ impl NcclBootstrap {
             nvlsCTAs: i32::MIN,
             nChannelsPerNetPeer: i32::MIN,
             nvlinkCentricSched: i32::MIN,
+            // Fields added in NCCL 2.30 (cudarc 0.19.8's `nccl` feature maps to
+            // nccl-02030). i32::MIN is NCCL_CONFIG_UNDEF_INT — "use the default".
+            graphUsageMode: i32::MIN,
+            numRmaCtx: i32::MIN,
+            maxP2pPeers: i32::MIN,
         };
 
         let mut comm: ncclComm_t = std::ptr::null_mut();

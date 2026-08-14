@@ -32,21 +32,40 @@ jobs:
           python-version: "3.12"
       - run: pip install pyyaml pytest
 
-      # Unit tests for the canonical matcher + min-cost cover. These are the
-      # only piece the gates below trust -- if they fail, nothing else means
-      # anything.
-      - name: Unit tests (matcher + minimal_cover)
+      # Unit tests for the canonical matcher + the emitter's tree-independence
+      # contract. These are the only piece the gates below trust -- if they
+      # fail, nothing else means anything.
+      - name: Unit tests (matcher + tree-independence)
         run: |
           python -m pytest .github/codeowners/test_codeowners.py -v \
             -p no:cacheprovider \
             --override-ini="addopts=" \
             --override-ini="filterwarnings="
 
-      # Coverage gate: fail if any tracked file falls through to the catch-all.
-      # New directories must be covered by an area glob or a classify rule.
-      # Uses the same shared matcher the generator below routes by, so the gate
-      # and the artifact cannot disagree.
-      - name: Validate 100% coverage (strict)
+      # Coverage gate on PRs: DIFF-AWARE. checkout builds the base+PR merge
+      # tree, so git ls-files sees paths that only ever landed on the base
+      # branch. --changed-only gates just the paths THIS PR adds/renames/
+      # modifies vs base.sha; unowned paths inherited unchanged from the base
+      # are a non-fatal warning. That stops unrelated base churn from red-Xing
+      # long-running PRs while still requiring the PR's own surface to be 100%
+      # owned. A PR that edits ownership policy (areas/scripts/CODEOWNERS) is
+      # judged full-tree, since a policy edit can orphan any path. base.sha is
+      # fetched by fetch-depth: 0 above.
+      - name: Validate coverage (diff-aware, PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          python .github/codeowners/build_codeowners.py \
+            --areas .github/codeowners/areas.yaml \
+            --repo . \
+            --strict \
+            --changed-only \
+            --base ${{ github.event.pull_request.base.sha }}
+
+      # Coverage gate off PRs (push to main / manual): whole-tree 100%. This is
+      # the maintenance assertion that every tracked file has a real owner, and
+      # the only step that reads git ls-files without a diff filter.
+      - name: Validate 100% coverage (strict, full tree)
+        if: github.event_name != 'pull_request'
         run: |
           python .github/codeowners/build_codeowners.py \
             --areas .github/codeowners/areas.yaml \
@@ -54,14 +73,15 @@ jobs:
             --strict
 
       # Regenerate, then fail if the committed CODEOWNERS or CONTRIBUTORS.md
-      # drifted from what the sources produce (i.e. someone hand-edited an
-      # output, or changed areas.yaml / external_contributors.yaml without
-      # regenerating).
+      # drifted from what the sources produce. emit_codeowners.py is a PURE
+      # FUNCTION of areas.yaml + external_contributors.yaml (no tree walk),
+      # so this diff only ever fires when a policy input or a committed output
+      # actually changed -- never because unrelated files moved on the base
+      # branch.
       - name: Regenerate and check for drift
         run: |
           python .github/codeowners/emit_codeowners.py \
             --areas .github/codeowners/areas.yaml \
-            --repo . \
             --out CODEOWNERS \
             --external .github/codeowners/external_contributors.yaml \
             --contributors-out CONTRIBUTORS.md

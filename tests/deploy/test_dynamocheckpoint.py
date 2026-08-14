@@ -16,14 +16,19 @@ import pytest
 import requests
 from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.managed_deployment import (
-    DeploymentSpec,
-    ManagedDeployment,
-    _get_workspace_dir,
-)
 
 logger = logging.getLogger(__name__)
+
+# kr8s port-forward teardown runs in background threads; on pod termination it
+# can surface expected OSErrors (e.g. EADDRINUSE for a local port still in
+# TIME_WAIT) via threading.excepthook. Under filterwarnings=error those would
+# fail this live-cluster test, so scope the suppression to this module only
+# rather than globally hiding unrelated background-thread crashes.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
 
 TRANSIENT_K8S_EXCEPTIONS = (
     aiohttp.ClientError,
@@ -86,7 +91,7 @@ class CheckpointBackendConfig:
 CHECKPOINT_BACKENDS = {
     "vllm": CheckpointBackendConfig(
         name="vllm",
-        manifest=("examples", "backends", "vllm", "deploy", "v1beta1", "agg.yaml"),
+        manifest=("examples", "backends", "vllm", "deploy", "agg.yaml"),
         decode_component="VllmDecodeWorker",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
@@ -107,7 +112,6 @@ CHECKPOINT_BACKENDS = {
             "backends",
             "sglang",
             "deploy",
-            "v1beta1",
             "agg.yaml",
         ),
         decode_component="decode",
@@ -134,7 +138,6 @@ CHECKPOINT_BACKENDS = {
             "backends",
             "trtllm",
             "deploy",
-            "v1beta1",
             "agg.yaml",
         ),
         decode_component="TRTLLMWorker",
@@ -159,9 +162,10 @@ CHECKPOINT_BACKENDS = {
             "--free-gpu-memory-fraction",
             "0.10",
         ),
-        # Keep the raw DGD PVC-free: the checkpoint operator mounts
-        # snapshot-pvc at /checkpoints for checkpoint/restore pods, so HF_HOME
-        # there preserves model files across restore without a model-cache PVC.
+        # UCX_TLS is always set. HF_HOME defaults to the snapshot PVC so restore
+        # pods keep weights without a model-cache PVC; when CI passes
+        # --model-cache-pvc, _new_checkpoint_spec skips this HF_HOME so the
+        # shared cache mount can own it (same as regular deploy tests).
         env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
         # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
         # rollout overlap during initial DGD startup.
@@ -224,6 +228,9 @@ def _new_checkpoint_spec(
     namespace: str,
     image: str,
     frontend_image: str,
+    *,
+    model_cache_pvc: str | None = None,
+    model_cache_mount: str | None = None,
 ) -> DeploymentSpec:
     spec_path = Path(_get_workspace_dir()).joinpath(*backend.manifest)
     deployment_spec = DeploymentSpec(str(spec_path))
@@ -260,6 +267,10 @@ def _new_checkpoint_spec(
     if backend.env:
         env = container.setdefault("env", [])
         for name, value in backend.env:
+            # Container HF_HOME would shadow the deployment-level value that
+            # mount_model_cache_pvc sets; skip it when the shared cache is used.
+            if name == "HF_HOME" and model_cache_pvc:
+                continue
             for item in env:
                 if item.get("name") == name:
                     item["value"] = value
@@ -272,6 +283,11 @@ def _new_checkpoint_spec(
     checkpoint["targetContainerName"] = backend.target_container
     if backend.checkpoint_startup_policy is not None:
         checkpoint["startupPolicy"] = backend.checkpoint_startup_policy
+
+    if model_cache_pvc:
+        mount = model_cache_mount or "/models"
+        deployment_spec.mount_model_cache_pvc(model_cache_pvc, mount)
+
     return deployment_spec
 
 
@@ -585,6 +601,8 @@ async def test_dgd_checkpoint_restore_deploy(
         namespace=namespace,
         image=image,
         frontend_image=frontend_image,
+        model_cache_pvc=request.config.getoption("--model-cache-pvc") or None,
+        model_cache_mount=request.config.getoption("--model-cache-mount") or None,
     )
 
     async with ManagedDeployment(

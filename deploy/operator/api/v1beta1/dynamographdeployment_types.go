@@ -126,6 +126,11 @@ type DynamoGraphDeploymentStatus struct {
 	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+
+	// placement groups DGD-level scheduler placement signals (score, reporting
+	// state, and any future placement fields).
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
 }
 
 // DGD Ready condition reasons used to classify Grove-backed not-ready
@@ -162,6 +167,7 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgd
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready status of the graph deployment"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -169,9 +175,8 @@ const (
 
 // DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 //
-// v1beta1 is a served version: the API server accepts reads and writes
-// against it, and transparently converts to/from v1alpha1 (still the
-// storage version until a later MR flips it). Conversion goes through the
+// v1beta1 is the storage version. The API server transparently converts
+// to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -190,10 +195,6 @@ type DynamoGraphDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeployment{}, &DynamoGraphDeploymentList{})
 }
 
 // SetState updates the high-level lifecycle state.

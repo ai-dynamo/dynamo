@@ -39,6 +39,7 @@ from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .thinking import runtime_default_thinking_mode
 from .utils import (
     extract_mm_urls,
     handle_engine_error,
@@ -85,6 +86,36 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
+
+
+def _runtime_config_structural_tag_options(
+    mdc: ModelDeploymentCard,
+) -> tuple[str, str, str]:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return "off", "auto", "auto"
+    return (
+        runtime_config.get("structural_tag_mode", "off"),
+        runtime_config.get("structural_tag_scope", "auto"),
+        runtime_config.get("structural_tag_schema", "auto"),
+    )
+
+
+def _ensure_chat_template(
+    tokenizer: Any, local_dir: str, chat_template_flag: str | None
+) -> None:
+    """Set tokenizer.chat_template so vLLM's renderer handles tool calls.
+
+    Skipped for MistralTokenizer (--tokenizer-mode mistral): it has no
+    chat_template attribute and renders via mistral_common, so leave it
+    untouched rather than attach an HF template it never uses.
+    """
+    if not hasattr(tokenizer, "chat_template"):
+        return
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
+    if chat_template_flag:
+        tokenizer.chat_template = load_chat_template(chat_template_flag)
 
 
 def _mm_feature_modality(feature: Any) -> str:
@@ -190,6 +221,50 @@ def _inject_routing_metadata(
         target["mm_routing_info"] = mm_routing_info
 
 
+async def _build_engine_inputs(
+    renderer: Any,
+    engine_prompt: dict[str, Any],
+    prompt_token_ids: list[int],
+    *,
+    cache_salt: str | None,
+    mm_processor_kwargs: dict[str, Any] | None,
+    defer_multimodal_processing: bool = False,
+) -> dict[str, Any]:
+    """Convert a rendered chat prompt into the EngineInput vLLM expects."""
+    prompt_inputs = {**engine_prompt, "prompt_token_ids": prompt_token_ids}
+    if cache_salt is not None:
+        prompt_inputs["cache_salt"] = cache_salt
+    if mm_processor_kwargs is not None:
+        prompt_inputs["mm_processor_kwargs"] = mm_processor_kwargs
+
+    if defer_multimodal_processing:
+        # UUID-only media is resolved by the worker-side vLLM processor cache.
+        # Processing it in the frontend would turn a frontend-local cache miss
+        # into an error before the request can reach a worker whose cache may hit.
+        prompt_inputs.pop("multi_modal_data", None)
+        prompt_inputs.pop("multi_modal_uuids", None)
+
+    return await renderer.process_for_engine_async(prompt_inputs, time.time())
+
+
+def _normalize_vllm_image_parts(messages: list[Any]) -> None:
+    """Normalize image parts before vLLM validates and renders them."""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            if image_url.get("detail") is None:
+                image_url["detail"] = "auto"
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -201,6 +276,11 @@ class VllmProcessor:
         routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+        default_thinking_mode: str | None = None,
+        structural_tag_mode: str = "off",
+        structural_tag_scope: str = "auto",
+        structural_tag_schema: str = "auto",
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -211,6 +291,11 @@ class VllmProcessor:
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
+        self.default_chat_template_kwargs = default_chat_template_kwargs
+        self.default_thinking_mode = default_thinking_mode
+        self.structural_tag_mode = structural_tag_mode
+        self.structural_tag_scope = structural_tag_scope
+        self.structural_tag_schema = structural_tag_schema
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -258,6 +343,18 @@ class VllmProcessor:
         nixl_transferred = False
 
         rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
+        if dynamo_preproc.get("multi_modal_uuids"):
+            # Keep the worker as the source of truth for UUID-backed media. A
+            # worker-side processor-cache entry must include model-specific
+            # prompt updates as well as tensors; frontend tensor transfer cannot
+            # populate that complete entry for a later UUID-only request.
+            logger.debug(
+                "[mm-routing] User multimodal UUID present; using text-prefix "
+                "routing and worker-side multimodal processing"
+            )
+            _nvtx.end_range(rng_routing)
+            return None, cleanup_items, nixl_transferred
+
         if vllm_preproc.mm_features:
             mm_routing_info = build_mm_routing_info_from_features(
                 vllm_preproc.mm_features,
@@ -384,22 +481,12 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
-        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
-        # The Rust HTTP layer accepts None/missing, so normalize before validation.
         messages = request.get("messages") or []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "image_url":
-                    img_url = part.get("image_url")
-                    if isinstance(img_url, dict) and img_url.get("detail") is None:
-                        img_url["detail"] = "auto"
+        _normalize_vllm_image_parts(messages)
+        # Validate cache-UUID modality support before vLLM downloads or
+        # processes media. Dynamo currently exposes vLLM cache UUIDs for
+        # images only.
+        mm_data, mm_uuids = extract_mm_urls(messages)
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
@@ -412,6 +499,11 @@ class VllmProcessor:
                 tool_parser_class=self.tool_parser_class,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
+                default_chat_template_kwargs=self.default_chat_template_kwargs,
+                default_thinking_mode=self.default_thinking_mode,
+                structural_tag_mode=self.structural_tag_mode,
+                structural_tag_scope=self.structural_tag_scope,
+                structural_tag_schema=self.structural_tag_schema,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -419,6 +511,7 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
+        guided_decoding = pre.guided_decoding
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -463,32 +556,34 @@ class VllmProcessor:
         logprobs = request_for_sampling.logprobs
         top_logprobs = request_for_sampling.top_logprobs
         if logprobs is True:
-            sampling_params.logprobs = top_logprobs or 1
+            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
         elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
             sampling_params.logprobs = logprobs
         elif top_logprobs not in (None, 0):
             sampling_params.logprobs = top_logprobs
-        if sampling_params.logprobs is not None and sampling_params.logprobs > 0:
+        # TODO: Support logprobs in the distributed vLLM chat processor by
+        # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
+        if sampling_params.logprobs is not None:
             logger.warning(
                 "Logprobs requested but not supported in distributed inference mode"
             )
 
-        # The renderer's process_for_engine() always returns a fully processed
-        # EngineInput (TokenInputs or MultiModalInputs) with a "type" key.
-        # Pass it directly to process_inputs() — no need to rebuild a
-        # TokensPrompt, and this avoids the deprecation warning.
-        prompt_inputs = engine_prompt
-        if request_for_sampling.cache_salt is not None:
-            prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
-        if request_for_sampling.mm_processor_kwargs is not None:
-            prompt_inputs[
-                "mm_processor_kwargs"
-            ] = request_for_sampling.mm_processor_kwargs
-
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
+            # render_messages_async returns a raw prompt. Convert it to a typed
+            # EngineInput before process_inputs. User UUID requests deliberately
+            # stay token-only here: the selected worker must populate and query
+            # its own complete processor-cache entry.
+            engine_inputs = await _build_engine_inputs(
+                self.input_processor.renderer,
+                engine_prompt,
+                tokens,
+                cache_salt=request_for_sampling.cache_salt,
+                mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
+                defer_multimodal_processing=mm_uuids is not None,
+            )
             vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
                 request_id,
-                prompt_inputs,
+                engine_inputs,
                 sampling_params,
                 GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
             )
@@ -539,10 +634,18 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        if guided_decoding is not None:
+            dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_ended is not None:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
             dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+
+        # Attach user cache identities before building routing metadata. Opaque
+        # UUIDs deliberately suppress multimodal exact routing and frontend
+        # tensor transfer; the worker owns processor-cache fill and lookup.
+        if mm_uuids:
+            dynamo_preproc["multi_modal_uuids"] = mm_uuids
 
         # Extract MM routing metadata and prepare transfer.
         cleanup_items: list = []
@@ -565,7 +668,6 @@ class VllmProcessor:
             )
             all_transferred = nixl_transferred and n_with_data == n_features
             if not all_transferred:
-                mm_data = extract_mm_urls(request.get("messages") or [])
                 if mm_data:
                     dynamo_preproc["multi_modal_data"] = mm_data
 
@@ -585,6 +687,9 @@ class VllmProcessor:
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
                     stream_response=bool(request.get("stream", False)),
+                    uses_dynamo_json_tool_call_fallback=(
+                        pre.uses_dynamo_json_tool_call_fallback
+                    ),
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so
@@ -671,7 +776,8 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
-        _mm_counts = extract_mm_urls(request.get("messages") or []) or {}
+        _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
+        _mm_counts = _mm_counts or {}
         image_count = len(_mm_counts.get("image_url", []))
         video_count = len(_mm_counts.get("video_url", []))
         audio_count = len(_mm_counts.get("audio_url", []))
@@ -922,16 +1028,9 @@ class EngineFactory:
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
 
-        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
-        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
-        if tokenizer.chat_template is None:
-            tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
-
-        # --chat-template overrides; load_chat_template accepts either a file path
-        # or an inline Jinja template string.
-        chat_template_flag = getattr(self.flags, "chat_template", None)
-        if chat_template_flag:
-            tokenizer.chat_template = load_chat_template(chat_template_flag)
+        _ensure_chat_template(
+            tokenizer, local_dir, getattr(self.flags, "chat_template", None)
+        )
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval
@@ -974,6 +1073,12 @@ class EngineFactory:
             )
         else:
             reasoning_parser_class = None
+        default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        (
+            structural_tag_mode,
+            structural_tag_scope,
+            structural_tag_schema,
+        ) = _runtime_config_structural_tag_options(mdc)
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -986,6 +1091,13 @@ class EngineFactory:
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
+            default_chat_template_kwargs=getattr(
+                self.flags, "default_chat_template_kwargs", None
+            ),
+            default_thinking_mode=default_thinking_mode,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

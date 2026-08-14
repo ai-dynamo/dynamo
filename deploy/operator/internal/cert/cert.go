@@ -351,10 +351,7 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 		return fmt.Errorf("reading CA bundle from secret %s/%s: %w", i.namespace, i.cfg.Server.Webhook.SecretName, err)
 	}
 
-	if err := i.injectIntoValidatingWebhooks(ctx, caBundle); err != nil {
-		return err
-	}
-	if err := i.injectIntoMutatingWebhooks(ctx, caBundle); err != nil {
+	if err := i.injectAdmission(ctx, caBundle); err != nil {
 		return err
 	}
 	if err := i.ensureCRDConversionCA(ctx, caBundle); err != nil {
@@ -363,6 +360,29 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 
 	i.logger.Info("CA bundle injected into all webhook configurations")
 	return nil
+}
+
+// InjectAdmission reads the CA bundle from the cert secret and injects it only
+// into admission webhook configurations owned by this operator instance.
+func (i *CABundleInjector) InjectAdmission(ctx context.Context) error {
+	caBundle, err := i.readCABundle(ctx)
+	if err != nil {
+		return fmt.Errorf("reading CA bundle from secret %s/%s: %w", i.namespace, i.cfg.Server.Webhook.SecretName, err)
+	}
+
+	if err := i.injectAdmission(ctx, caBundle); err != nil {
+		return err
+	}
+
+	i.logger.Info("CA bundle injected into admission webhook configurations")
+	return nil
+}
+
+func (i *CABundleInjector) injectAdmission(ctx context.Context, caBundle []byte) error {
+	if err := i.injectIntoValidatingWebhooks(ctx, caBundle); err != nil {
+		return err
+	}
+	return i.injectIntoMutatingWebhooks(ctx, caBundle)
 }
 
 // InjectCRDConversionCA reads the CA bundle from the cert secret and patches it

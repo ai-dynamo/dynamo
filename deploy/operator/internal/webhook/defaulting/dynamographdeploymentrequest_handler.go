@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -56,11 +57,17 @@ const (
 // operator versions 1.0.0 and later.
 type DGDRDefaulter struct {
 	OperatorVersion string
+	// DefaultImage is the DGDR profiler image put into spec.image when a DGDR
+	// is created without one. Set it explicitly when the derived
+	// dynamo-planner:<operatorVersion> tag does not exist (pre-release charts:
+	// rc, nightly); empty keeps the derived default.
+	DefaultImage string
 }
 
-// NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version.
-func NewDGDRDefaulter(operatorVersion string) *DGDRDefaulter {
-	return &DGDRDefaulter{OperatorVersion: operatorVersion}
+// NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version
+// and optional explicit default profiler image.
+func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
+	return &DGDRDefaulter{OperatorVersion: operatorVersion, DefaultImage: defaultImage}
 }
 
 // Default implements admission.CustomDefaulter.
@@ -99,19 +106,25 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-// defaultImageFor returns the default image, or empty string when the operator version
-// is unknown (e.g. local dev builds), in which case the user must provide spec.image explicitly.
+// defaultImageFor returns the profiler image for spec.image: DefaultImage when
+// set, else the derived image with a canonical semver tag, or an empty string
+// when the operator version cannot be parsed.
 func (d *DGDRDefaulter) defaultImageFor() string {
-	if d.OperatorVersion == "" || d.OperatorVersion == "unknown" {
+	if d.DefaultImage != "" {
+		return d.DefaultImage
+	}
+	version, err := semver.NewVersion(d.OperatorVersion)
+	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("%s:%s", defaultImage, d.OperatorVersion)
+	return fmt.Sprintf("%s:%s", defaultImage, version.String())
 }
 
 // RegisterWithManager registers the DGDR defaulting webhook with the manager.
 func (d *DGDRDefaulter) RegisterWithManager(mgr manager.Manager) error {
+	defaulter := internalwebhook.NewLeaseAwareDefaulter(d, internalwebhook.GetExcludedNamespaces())
 	webhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, d).
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, defaulter).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dgdrDefaultingWebhookPath, webhook)
 	return nil

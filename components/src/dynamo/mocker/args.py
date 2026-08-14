@@ -211,8 +211,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
         default=None,
-        help="Explicit number of GPU blocks for KV cache. When unset, AIC-backed "
-        "mocker estimates the value; non-AIC mocker uses 16384.",
+        help="Explicit usable GPU-block capacity for the mock KV cache. When "
+        "unset, AIC-backed mocker estimates the value; non-AIC mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
@@ -253,6 +253,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="enable_prefix_caching",
         default=None,
         help="Disable automatic prefix caching",
+    )
+    parser.add_argument(
+        "--g1-backend",
+        choices=["kvbm", "native"],
+        default=None,
+        help="G1 manager for the shared vLLM/TRT-LLM scheduler. When unset, "
+        "native is used unless KVBM G2/G3/G4 offloading selects KVBM. Explicit "
+        "native cannot be combined with KVBM offloading. Ignored for SGLang.",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -315,8 +323,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-perf-model",
         action="store_true",
         default=False,
-        help="Use direct AIC SDK calls for latency prediction. "
-        "Requires aiconfigurator SDK installed.",
+        help="Use aiconfigurator-core directly for latency prediction. "
+        "Requires aiconfigurator-core installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -528,12 +536,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Mark this as a decode worker which does not publish KV events (default: False)",
     )
     parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
-        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
-    )
-    parser.add_argument(
         "--zmq-kv-events-ports",
         type=str,
         default=None,
@@ -604,7 +606,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=non_negative_int,
         default=None,
         help="Enable KVBM mock offload with this many per-worker G2 host blocks. "
-        "Set to 0 to disable.",
+        "This automatically selects the KVBM G1 backend. Set to 0 to disable.",
     )
     parser.add_argument(
         "--num-g3-blocks",
@@ -698,6 +700,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
+
+    kvbm_offload_enabled = (
+        (args.num_g2_blocks or 0) > 0
+        or (args.num_g3_blocks or 0) > 0
+        or args.enable_g4_storage
+    )
+    if (
+        args.engine_type in ("vllm", "trtllm")
+        and args.g1_backend == "native"
+        and kvbm_offload_enabled
+    ):
+        parser.error(
+            "--g1-backend native cannot be combined with KVBM G2/G3/G4 "
+            "offload; omit --g1-backend to select KVBM automatically or set "
+            "--g1-backend kvbm explicitly"
+        )
+
     validate_worker_type_args(args)
 
     # Validate num_workers

@@ -18,6 +18,8 @@ ignored = ["mio"]
 default = []
 integration = []
 testing-etcd = [] # Tests that require an active ETCD server
+# White-box helpers for cross-crate lifecycle tests. Never enabled by a normal build.
+testing = []
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
@@ -26,6 +28,9 @@ tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO
 nvtx = ["dep:cudarc"]
 
 [dependencies]
+# repo
+dynamo-truthy = { workspace = true }
+
 # Use workspace dependencies where available
 anyhow = { workspace = true }
 async-nats = { workspace = true }
@@ -42,7 +47,9 @@ derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
+fastrand = "2"
 futures = { workspace = true }
+fs4 = { workspace = true }
 humantime = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
@@ -52,8 +59,11 @@ rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 mio = { workspace = true }
@@ -80,7 +90,6 @@ educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
 # FSEvents omits deletes for FileStore's revision-zero hard-link publication path.
 notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
-libc = { version = "0.2" }
 local-ip-address = { version = "0.6.3" }
 # `release_max_level_debug` compiles out `log::trace!` in release builds (a
 # compile-time `STATIC_MAX_LEVEL` check — no runtime cost, cannot be overridden).
@@ -108,6 +117,7 @@ k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+rcgen = { workspace = true }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}

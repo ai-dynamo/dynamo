@@ -91,6 +91,15 @@ impl RadixTree {
         sequence: Vec<LocalBlockHash>,
         early_exit: bool,
     ) -> MatchDetails {
+        self.find_match_details_with_options(sequence, early_exit, false)
+    }
+
+    pub fn find_match_details_with_options(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        retain_router_hint_chain: bool,
+    ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.is_empty() {
             return details;
@@ -102,6 +111,8 @@ impl RadixTree {
         let mut seq_pos = 0usize;
         let mut first_node = true;
         let mut last_matched_hash = None;
+        let mut router_hint_root_chain =
+            retain_router_hint_chain.then(|| Vec::with_capacity(sequence.len()));
 
         while seq_pos < sequence.len() {
             let Some(node) = next.take() else {
@@ -120,6 +131,16 @@ impl RadixTree {
 
             if edge_match_len == 0 {
                 break;
+            }
+
+            if let Some(block_hashes) = router_hint_root_chain.as_mut() {
+                block_hashes.extend(
+                    node.state
+                        .edge
+                        .iter()
+                        .take(edge_match_len)
+                        .map(|(_, block_hash)| *block_hash),
+                );
             }
 
             if first_node {
@@ -194,6 +215,10 @@ impl RadixTree {
             }
         }
 
+        if let Some(block_hashes) = router_hint_root_chain {
+            details.retain_router_hint_root_candidates(block_hashes);
+        }
+
         details
     }
 
@@ -218,7 +243,7 @@ impl RadixTree {
             KvCacheEventData::Stored(store) => self.apply_stored(worker, store, event_id, counters),
             KvCacheEventData::Removed(remove) => self.apply_removed(worker, remove, event_id),
             KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker.worker_id);
+                self.remove_worker_dp_rank(worker.worker_id, worker.dp_rank);
                 Ok(())
             }
         }
@@ -231,6 +256,10 @@ impl RadixTree {
         event_id: u64,
         counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
+        // NOTE: This is a single-threaded indexer defense, not a cross-indexer validation
+        // contract. Publishers must not emit self-referencing stores; concurrent consumer
+        // indexers intentionally trust that guarantee to avoid this O(blocks) hot-path scan.
+        // Do not copy this validation into CRTC solely for implementation parity.
         if let Some(parent_hash) = store.parent_hash
             && store
                 .blocks
@@ -544,19 +573,15 @@ impl RadixTree {
         remove: KvCacheRemoveData,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
-        if !self.lookup.contains_key(&worker) {
+        let Some(lookup) = self.lookup.get_mut(&worker) else {
             return Err(KvCacheEventError::BlockNotFound);
-        }
+        };
         let mut first_error = None;
         let mut eagerly_removed = FxHashSet::default();
+        let mut block_hashes = remove.block_hashes.into_iter().peekable();
 
-        for block_hash in remove.block_hashes {
-            let Some(node) = self
-                .lookup
-                .get(&worker)
-                .and_then(|lookup| lookup.get(&block_hash))
-                .cloned()
-            else {
+        while let Some(block_hash) = block_hashes.next() {
+            let Some(node) = lookup.remove(&block_hash) else {
                 if eagerly_removed.contains(&block_hash) {
                     continue;
                 }
@@ -571,22 +596,54 @@ impl RadixTree {
                 continue;
             };
 
-            let outcome = {
-                let mut node_ref = node.borrow_mut();
-                let Some(&pos) = node_ref.state.edge_index.get(&block_hash) else {
+            let (min_pos, min_hash) = {
+                let node_ref = node.borrow();
+                let Some(&first_pos) = node_ref.state.edge_index.get(&block_hash) else {
+                    drop(node_ref);
+                    lookup.insert(block_hash, node);
                     first_error.get_or_insert(KvCacheEventError::BlockNotFound);
                     continue;
                 };
+                let mut min_pos = first_pos;
+                let mut min_hash = block_hash;
+                if node_ref.state.covers_pos(worker, first_pos) {
+                    while let Some(&candidate_hash) = block_hashes.peek() {
+                        let Some(candidate_node) = lookup.get(&candidate_hash) else {
+                            break;
+                        };
+                        if !Rc::ptr_eq(&node, candidate_node) {
+                            break;
+                        }
+                        let Some(&candidate_pos) = node_ref.state.edge_index.get(&candidate_hash)
+                        else {
+                            break;
+                        };
+                        if !node_ref.state.covers_pos(worker, candidate_pos) {
+                            break;
+                        }
+                        if candidate_pos < min_pos {
+                            min_pos = candidate_pos;
+                            min_hash = candidate_hash;
+                        }
+                        block_hashes.next();
+                    }
+                }
+                (min_pos, min_hash)
+            };
+
+            let outcome = {
+                let mut node_ref = node.borrow_mut();
                 // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
                 // subtree when a mid-edge removal leaves the node alive for another
                 // worker. Otherwise stale descendants can be reused as store parents,
                 // reactivated by restoring only the removed block, or emitted by dumps
                 // without a valid worker-specific parent.
-                let outcome = node_ref.state.remove_worker_at_pos(worker, pos, block_hash);
+                let outcome = node_ref
+                    .state
+                    .remove_worker_at_pos(worker, min_pos, min_hash);
                 node_ref.clear_children_if_unreachable();
                 outcome
             };
-            let lookup = self.lookup.get_mut(&worker).unwrap();
             for stale_hash in outcome.stale_hashes {
                 lookup.remove(&stale_hash);
                 eagerly_removed.insert(stale_hash);
@@ -772,7 +829,9 @@ mod tests {
 
     use super::*;
     use crate::indexer::WorkerKvQueryResponse;
-    use crate::test_utils::{create_store_event, make_store_event, snapshot_events};
+    use crate::test_utils::{
+        create_remove_event, create_store_event, make_store_event, snapshot_events,
+    };
 
     #[test]
     fn rejects_self_referencing_store() {
@@ -801,6 +860,115 @@ mod tests {
         assert_eq!(
             snapshot_events(tree.dump_tree_as_events()),
             vec![make_store_event(0, &[1, 2, 3, 4])]
+        );
+    }
+
+    #[test]
+    fn find_match_details_can_retain_router_hint_root_candidates() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(make_store_event(7, &[11, 12])).unwrap();
+        tree.apply_event(make_store_event(8, &[11, 12, 13]))
+            .unwrap();
+
+        let details = tree.find_match_details_with_options(
+            vec![
+                LocalBlockHash(11),
+                LocalBlockHash(12),
+                LocalBlockHash(13),
+                LocalBlockHash(14),
+            ],
+            false,
+            true,
+        );
+
+        let expected_hashes = compute_seq_hash_for_block(&[
+            LocalBlockHash(11),
+            LocalBlockHash(12),
+            LocalBlockHash(13),
+        ])
+        .into_iter()
+        .map(ExternalSequenceBlockHash)
+        .collect::<Vec<_>>();
+
+        let candidates = details.router_hint_root_candidates.unwrap();
+        assert_eq!(candidates.block_hashes, expected_hashes);
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![
+                (WorkerWithDpRank::new(7, 0), 2),
+                (WorkerWithDpRank::new(8, 0), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn batched_same_edge_removal_matches_serial_orderings() {
+        fn tree_with_blocks() -> RadixTree {
+            let mut tree = RadixTree::new();
+            tree.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4], None))
+                .unwrap();
+            tree
+        }
+
+        let mut serial = tree_with_blocks();
+        serial
+            .apply_event(create_remove_event(0, 1, vec![4]))
+            .unwrap();
+        serial
+            .apply_event(create_remove_event(0, 2, vec![2]))
+            .unwrap();
+        let expected = snapshot_events(serial.dump_tree_as_events());
+
+        for hashes in [vec![4, 2], vec![2, 4]] {
+            let mut batched = tree_with_blocks();
+            batched
+                .apply_event(create_remove_event(0, 1, hashes))
+                .unwrap();
+            assert_eq!(snapshot_events(batched.dump_tree_as_events()), expected);
+        }
+    }
+
+    #[test]
+    fn batched_removal_preserves_mixed_nodes_duplicates_and_errors() {
+        fn split_tree() -> RadixTree {
+            let mut tree = RadixTree::new();
+            tree.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4], None))
+                .unwrap();
+            tree.apply_event(create_store_event(1, 0, vec![1, 2, 5], None))
+                .unwrap();
+            assert_eq!(tree.edge_lengths_for_test(), vec![1, 2, 2]);
+            tree
+        }
+
+        let mut serial = split_tree();
+        serial
+            .apply_event(create_remove_event(0, 1, vec![4]))
+            .unwrap();
+        serial
+            .apply_event(create_remove_event(0, 2, vec![2]))
+            .unwrap();
+
+        let mut batched = split_tree();
+        batched
+            .apply_event(create_remove_event(0, 1, vec![4, 2, 2]))
+            .unwrap();
+        assert_eq!(
+            snapshot_events(batched.dump_tree_as_events()),
+            snapshot_events(serial.dump_tree_as_events())
+        );
+
+        let mut with_missing = split_tree();
+        assert_eq!(
+            with_missing.apply_event(create_remove_event(0, 1, vec![999, 3, 3])),
+            Err(KvCacheEventError::BlockNotFound)
+        );
+        let mut expected = split_tree();
+        expected
+            .apply_event(create_remove_event(0, 1, vec![3]))
+            .unwrap();
+        assert_eq!(
+            snapshot_events(with_missing.dump_tree_as_events()),
+            snapshot_events(expected.dump_tree_as_events())
         );
     }
 
@@ -883,10 +1051,12 @@ mod tests {
         let compact = WorkerKvQueryResponse::TreeDump {
             events,
             last_event_id: 42,
+            reset_scope: ResetScope::All,
         };
         let uncompressed = WorkerKvQueryResponse::TreeDump {
             events: uncompressed_events,
             last_event_id: 42,
+            reset_scope: ResetScope::All,
         };
         assert!(
             serde_json::to_vec(&compact).unwrap().len()

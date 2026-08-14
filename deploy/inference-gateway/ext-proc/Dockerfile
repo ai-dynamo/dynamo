@@ -33,10 +33,14 @@ ARG SCCACHE_REGION=""
 # protobuf-compiler provides protoc; libprotobuf-dev provides the well-known
 # .proto files (google/protobuf/struct.proto etc.) that our vendored Envoy
 # protos import. libclang-dev is needed by bindgen (nixl-sys transitive dep).
+# libzmq3-dev + pkg-config are needed by the `zmq` crate the in-process
+# selection service uses for KV-event and replica-sync sockets.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     libprotobuf-dev \
     libclang-dev \
+    libzmq3-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /dynamo
@@ -62,6 +66,7 @@ COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 # only compiles the crates dynamo-ext-proc transitively depends on; the rest
 # are parsed but not built.
 COPY --from=dynamo lib/ lib/
+COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
 
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
@@ -85,9 +90,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
 # =============================================================================
 FROM ${BASE_IMAGE}
 
+# libzmq5 is the runtime library for the embedded selector's ZMQ KV-event
+# subscriber (harmless if the binary was built HTTP-only).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libstdc++6 \
+    libzmq5 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /

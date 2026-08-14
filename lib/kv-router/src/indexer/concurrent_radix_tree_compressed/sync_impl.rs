@@ -77,12 +77,14 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::RemoveWorker {
                     worker_id,
                     sweep_tree,
+                    resp,
                 } => {
                     self.erase_worker_coverage(
                         &mut lookup,
                         WorkerRemovalTarget::WorkerId(worker_id),
                         sweep_tree,
                     );
+                    let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id,
@@ -168,12 +170,18 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     tail: suffix,
                 },
                 false,
+                false,
             )
         } else {
             let mut sequence = Vec::with_capacity(suffix.len() + 1);
             sequence.push(anchor.anchor_local_hash);
             sequence.extend_from_slice(suffix);
-            self.find_details_from_seq(Some(anchor_node), SliceHashSequence(&sequence), false)
+            self.find_details_from_seq(
+                Some(anchor_node),
+                SliceHashSequence(&sequence),
+                false,
+                false,
+            )
         };
         let mut scores = details.overlap_scores;
         let depth_adjustment = anchor.anchor_depth.saturating_sub(1) as u32;
@@ -226,6 +234,10 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        // NOTE: A live CRTC dump is intentionally not a consistent cut. Thread-pool markers
+        // drain earlier commands, but mutation lanes may resume while this traversal samples
+        // nodes independently. Core CRTC recovery does not use this diagnostic/parity surface;
+        // do not add a global mutation gate solely to strengthen its snapshot semantics.
         Some(self.dump_tree_as_events())
     }
 }

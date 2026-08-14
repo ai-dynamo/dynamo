@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -21,6 +23,8 @@ type RestoreOptions struct {
 	CUDADeviceMap  string
 	CgroupRoot     string
 	TargetPodIP    string
+	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
+	BundleDir string
 }
 
 type RestoreInNamespaceResult struct {
@@ -28,6 +32,11 @@ type RestoreInNamespaceResult struct {
 	NSRestoreSetupDuration time.Duration `json:"nsrestoreSetupDuration"`
 	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
 	CUDADuration           time.Duration `json:"cudaDuration"`
+}
+
+// TotalDuration returns the sum of all in-namespace restore phase durations.
+func (r RestoreInNamespaceResult) TotalDuration() time.Duration {
+	return r.NSRestoreSetupDuration + r.CRIURestoreDuration + r.CUDADuration
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -39,7 +48,6 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"cgroup_root", opts.CgroupRoot,
 		"target_pod_ip_present", opts.TargetPodIP != "",
 	)
-
 	manifestReadStart := time.Now()
 	m, err := types.ReadManifest(opts.CheckpointPath)
 	if err != nil {
@@ -52,6 +60,16 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"manage_cgroups_mode", m.CRIUDump.CRIU.ManageCgroupsMode,
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
+	cudaJobFile := ""
+	if !m.CUDA.IsEmpty() {
+		cudaJobFile, err = cuda.JobFileFromCheckpoint(opts.CheckpointPath)
+		if err != nil {
+			return nil, err
+		}
+		if len(m.CUDA.SourceGPUUUIDs) > 1 && cudaJobFile == "" {
+			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
+		}
+	}
 
 	// Phase 1: Configure — build CRIU opts from manifest
 	configureStart := time.Now()
@@ -65,7 +83,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	configureDuration := time.Since(configureStart)
 
 	// Phase 2: Execute — rootfs, CRIU restore, CUDA restore
-	executeTimings, restoredPID, err := executeRestore(ctx, criuOpts, m, opts, log)
+	executeTimings, restoredPID, err := executeRestore(ctx, criuOpts, m, opts, cudaJobFile, log)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +110,7 @@ type nsrestorePhaseTimings struct {
 	cudaDuration           time.Duration
 }
 
-func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
+func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, cudaJobFile string, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
 	timings := &nsrestorePhaseTimings{}
 
 	// Apply rootfs diff inside the namespace (target root is /)
@@ -103,6 +121,17 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
 		log.Error(err, "Failed to apply deleted files")
+	}
+	cudaRestoreJobFile := ""
+	if cudaJobFile != "" {
+		liveJobFile, err := cuda.PrepareLiveJobFile(cudaJobFile)
+		if err != nil {
+			return nil, 0, fmt.Errorf("prepare CUDA checkpoint job file: %w", err)
+		}
+		cudaRestoreJobFile = liveJobFile
+		if err := os.Setenv(cuda.JobFileEnv, cudaRestoreJobFile); err != nil {
+			return nil, 0, fmt.Errorf("set CUDA checkpoint job file environment: %w", err)
+		}
 	}
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
@@ -120,15 +149,46 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		}
 	}()
 
+	// Open the cuda-checkpoint-helper fd BEFORE CRIU runs. CRIU restores the
+	// original mount namespace of the checkpointed process, which did not include
+	// the bundle mount at /tmp/snapshot-binaries. The C helper's umount code
+	// tolerates ENOENT from umount2 with the comment "Already gone (CRIU removed
+	// it during namespace restore)" — confirming this is observed behaviour. By
+	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
+	// the fd remains valid even if the mount is gone.
+	var cudaHelperFdPath string
+	if !m.CUDA.IsEmpty() {
+		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
+		f, err := os.Open(helperPath)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to open cuda-checkpoint-helper before CRIU restore: %w", err)
+		}
+		defer f.Close()
+		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+	}
+
 	// CRIU restore
 	criuRestoreStart := time.Now()
-	restoredPID, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
 	if err != nil {
 		return nil, 0, err
 	}
+	// Run the restore's FD cleanup at return, after cuda unlock and the
+	// restore-complete sentinel below, so nothing but the required PID resolve
+	// sits between the CRIU restore and unlock. Runs on any return, incl. errors.
+	defer cleanup()
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
 	cudaStart := time.Now()
+	if cudaRestoreJobFile != "" {
+		uid, gid, err := snapshotruntime.ReadProcessFilesystemIDs("/proc", int(restoredPID))
+		if err != nil {
+			return nil, 0, fmt.Errorf("read restored process credentials: %w", err)
+		}
+		if err := cuda.SetLiveJobFileOwner(cudaRestoreJobFile, uid, gid); err != nil {
+			return nil, 0, fmt.Errorf("set CUDA checkpoint job file ownership: %w", err)
+		}
+	}
 	processes, err := snapshotruntime.ReadProcessTable("/proc")
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read restored process table: %w", err)
@@ -162,7 +222,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
+		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}

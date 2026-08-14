@@ -42,7 +42,12 @@ pub fn validate_replay_args_mode(
     }
 }
 
-fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -> Result<()> {
+fn validate_replay_args(
+    args: &MockEngineArgs,
+    num_workers: usize,
+    mode: &str,
+    allow_dp_replication: bool,
+) -> Result<()> {
     if num_workers == 0 {
         bail!("{mode} requires num_workers >= 1");
     }
@@ -52,7 +57,10 @@ fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -
             args.worker_type,
         );
     }
-    if args.dp_size != 1 {
+    // Offline replay treats dp_size>1 as rank topology: each mocker worker gets
+    // that many independent scheduler/KV-pool states, mirroring the live path.
+    // Online replay does not support it.
+    if args.dp_size != 1 && !allow_dp_replication {
         bail!(
             "{mode} only supports data_parallel_size=1, got {}",
             args.dp_size,
@@ -62,24 +70,32 @@ fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -
     Ok(())
 }
 
-fn validate_offline_router_mode(router_mode: ReplayRouterMode, num_workers: usize) -> Result<()> {
+fn validate_offline_router_mode(
+    router_mode: ReplayRouterMode,
+    num_workers: usize,
+    dp_size: u32,
+    scaling_enabled: bool,
+) -> Result<()> {
     if router_mode != ReplayRouterMode::KvRouter {
         return Ok(());
     }
-    if num_workers > 1 {
+    if scaling_enabled || num_workers.saturating_mul(dp_size.max(1) as usize) > 1 {
         return Ok(());
     }
 
-    bail!("offline replay only supports router_mode=kv_router when num_workers > 1");
+    bail!(
+        "offline replay only supports router_mode=kv_router with more than one worker/DP-rank target"
+    );
 }
 
 pub(super) fn validate_offline_replay_args(
     args: &MockEngineArgs,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    scaling_enabled: bool,
 ) -> Result<()> {
-    validate_offline_router_mode(router_mode, num_workers)?;
-    validate_replay_args(args, num_workers, "trace replay")
+    validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
+    validate_replay_args(args, num_workers, "trace replay", true)
 }
 
 pub(super) fn validate_offline_concurrency_args(
@@ -87,17 +103,19 @@ pub(super) fn validate_offline_concurrency_args(
     num_workers: usize,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    scaling_enabled: bool,
 ) -> Result<()> {
     if max_in_flight == 0 {
         bail!("concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_offline_router_mode(router_mode, num_workers)?;
-    validate_replay_args(args, num_workers, "concurrency replay")
+    validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
+    validate_replay_args(args, num_workers, "concurrency replay", true)
 }
 
 pub(super) fn validate_online_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
-    validate_replay_args(args, num_workers, "online replay")
+    validate_replay_args(args, num_workers, "online replay", false)?;
+    validate_online_kv_offload(args)
 }
 
 pub(super) fn validate_online_concurrency_args(
@@ -109,7 +127,17 @@ pub(super) fn validate_online_concurrency_args(
         bail!("online concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_replay_args(args, num_workers, "online replay")
+    validate_replay_args(args, num_workers, "online replay", false)?;
+    validate_online_kv_offload(args)
+}
+
+fn validate_online_kv_offload(args: &MockEngineArgs) -> Result<()> {
+    if args.num_g3_blocks.is_some() || args.enable_g4_storage {
+        bail!(
+            "online replay does not support G3 or G4 KV offload; only G1/G2 offload is supported"
+        );
+    }
+    Ok(())
 }
 
 fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Result<()> {
@@ -143,15 +171,11 @@ fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Resul
             config.decode_args.worker_type,
         );
     }
-    if config.prefill_args.dp_size != 1 {
+    if config.prefill_args.dp_size != 1 || config.decode_args.dp_size != 1 {
         bail!(
-            "{mode} only supports prefill data_parallel_size=1, got {}",
+            "offline disaggregated replay does not support attention DP; prefill/decode dp_size \
+             must both be 1 (got prefill_dp_size={}, decode_dp_size={})",
             config.prefill_args.dp_size,
-        );
-    }
-    if config.decode_args.dp_size != 1 {
-        bail!(
-            "{mode} only supports decode data_parallel_size=1, got {}",
             config.decode_args.dp_size,
         );
     }
@@ -231,5 +255,53 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains("matching prefill/decode"));
         }
+    }
+
+    #[test]
+    fn disagg_rejects_attention_dp_with_clear_error() {
+        for (prefill_dp_size, decode_dp_size) in [(2, 1), (1, 2), (2, 4)] {
+            let mut config = config(EngineType::Vllm, EngineType::Vllm);
+            config.prefill_args.dp_size = prefill_dp_size;
+            config.decode_args.dp_size = decode_dp_size;
+            let expected = format!(
+                "offline disaggregated replay does not support attention DP; prefill/decode \
+                 dp_size must both be 1 (got prefill_dp_size={prefill_dp_size}, \
+                 decode_dp_size={decode_dp_size})"
+            );
+
+            let trace_error =
+                validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin)
+                    .unwrap_err();
+            assert_eq!(trace_error.to_string(), expected);
+
+            let concurrency_error =
+                validate_offline_disagg_concurrency_args(&config, 1, ReplayRouterMode::RoundRobin)
+                    .unwrap_err();
+            assert_eq!(concurrency_error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn offline_kv_router_accepts_one_worker_with_multiple_dp_ranks() {
+        let mut args = args(EngineType::Vllm, WorkerType::Aggregated);
+        args.dp_size = 2;
+        validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, false).unwrap();
+    }
+
+    #[test]
+    fn offline_kv_router_accepts_one_worker_with_scaling() {
+        let args = args(EngineType::Vllm, WorkerType::Aggregated);
+        validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, true).unwrap();
+    }
+
+    #[test]
+    fn offline_kv_router_rejects_one_worker_without_scaling() {
+        let args = args(EngineType::Vllm, WorkerType::Aggregated);
+        let error =
+            validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "offline replay only supports router_mode=kv_router with more than one worker/DP-rank target"
+        );
     }
 }

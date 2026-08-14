@@ -34,8 +34,8 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
-from dynamo.planner.plugins.clock import VirtualClock
-from dynamo.planner.plugins.merge.types import ChainAugmentOutcome
+from dynamo.planner.plugins.clock import Clock, VirtualClock
+from dynamo.planner.plugins.merge.types import ChainAugmentOutcome, ComponentKey
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
 from dynamo.planner.plugins.types import ComponentTarget, ScalingProposal
@@ -282,10 +282,19 @@ def test_observe_fpm_feeds_installed_regression_without_crashing_disagg():
     )
 
 
-def _apply_outcome(targets):
+def _apply_outcome(targets, *, proposed=None):
+    if proposed is None:
+        proposed = {
+            target.sub_component_type
+            for target in targets
+            if target.replicas is not None
+        }
     return PipelineOutcome(
         execute_action="apply",
         final_proposal=ScalingProposal(targets=targets),
+        proposed_components=frozenset(
+            ComponentKey(sub_component_type=component) for component in proposed
+        ),
     )
 
 
@@ -316,6 +325,43 @@ def test_project_scale_to_no_change_returns_none():
         ]
     )
     assert adapter._project_scale_to(outcome, wc) is None
+
+
+def test_project_scale_to_raises_baseline_to_component_floors():
+    cfg = _disagg_config_sla_no_budget()
+    cfg.prefill_min_endpoint = 3
+    cfg.decode_min_endpoint = 4
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=2)
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=1),
+            ComponentTarget(sub_component_type="decode", replicas=2),
+        ],
+        proposed=set(),
+    )
+
+    decision = adapter._project_scale_to(outcome, wc)
+
+    assert decision is not None
+    assert decision.num_prefill == 3
+    assert decision.num_decode == 4
+
+
+def test_project_scale_to_raises_agg_baseline_to_runtime_legacy_floor():
+    cfg = _agg_config_throughput_on()
+    cfg.min_endpoint = 3
+    adapter = OrchestratorEngineAdapter(cfg, _caps())
+    wc = WorkerCounts(ready_num_decode=1)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=1)], proposed=set()
+    )
+
+    decision = adapter._project_scale_to(outcome, wc)
+
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 3
 
 
 def test_project_scale_to_single_component_proposal():
@@ -364,6 +410,12 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
 
 
 def test_project_scale_to_budget_preserves_single_component_target_mask():
+    """Decode-only proposal: residual GPU clamp must not invent a prefill target.
+
+    Prefill is charged at its ready count against the residual ceiling, and
+    the proposal-mask invariant must keep ``num_prefill`` None so a
+    decode-only decision cannot rewrite prefill desired.
+    """
     cfg = PlannerConfig(
         mode="disagg",
         enable_load_scaling=True,
@@ -372,16 +424,128 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
         served_model_name="test",
         max_gpu_budget=4,
         min_gpu_budget=-1,
+        enable_power_awareness=True,
+        total_gpu_power_limit=100000,
     )
     adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
-    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=1)
-    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
+    wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=1)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=10)]
+    )
 
     dec = adapter._project_scale_to(outcome, wc)
 
     assert dec is not None
     assert dec.num_prefill is None
-    assert dec.num_decode == 2
+    # Prefill ready=1 charged against residual ceiling 3 → decode capped at 3.
+    assert dec.num_decode == 3
+
+
+def test_partial_decode_proposal_respects_residual_gpu_ceiling():
+    """Power-aware path: decode-only proposal must not assume prefill shrinks.
+
+    Current (7, 1), one GPU each, ceiling 8. With power awareness on, the
+    ready-equal prefill echo is masked to None before the GPU clamp, so the
+    residual path sizes decode against the residual 1 GPU — never emit decode
+    4 from a joint clamp that assumed prefill also dropped to 4.
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=True,
+        # High enough that power does not mask the GPU-ceiling bug.
+        total_gpu_power_limit=100000,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=7,
+        ready_num_decode=1,
+        expected_num_prefill=7,
+        expected_num_decode=1,
+    )
+
+    assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 1)
+
+    # Power-awareness masks the ready-equal prefill echo before the GPU clamp.
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=7),
+            ComponentTarget(sub_component_type="decode", replicas=7),
+        ],
+        proposed={"decode"},
+    )
+    dec = adapter._project_scale_to(outcome, wc)
+    assert dec is None or dec.num_prefill is None
+    applied_d = 1 if (dec is None or dec.num_decode is None) else dec.num_decode
+    assert applied_d <= 1
+    assert 7 + applied_d <= 8
+
+
+def test_residual_gpu_clamp_holds_when_fixed_peer_already_over_ceiling():
+    """Fixed peer alone over the GPU ceiling must not zero the proposed role.
+
+    ready prefill=9, ceiling=8, decode-only propose 4: residual_max is 0, so
+    proportional_clamp_single would return 0. Hold decode at its ready count
+    instead of emitting a spurious scale-to-zero.
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=True,
+        total_gpu_power_limit=100000,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=9,
+        ready_num_decode=1,
+        expected_num_prefill=9,
+        expected_num_decode=1,
+    )
+
+    assert adapter._apply_gpu_final_budget(None, 4, wc) == (None, 1)
+
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
+    dec = adapter._project_scale_to(outcome, wc)
+    # Held at settled decode=1, then suppressed as a proven stable no-op.
+    assert dec is None or dec.num_decode is None
+    assert dec is None or dec.num_prefill is None
+
+
+def test_power_off_partial_proposal_keeps_joint_gpu_clamp():
+    """Power-off disagg keeps the historical joint-then-discard GPU clamp.
+
+    Same (7,1)/decode-7/ceiling-8 inputs as the power-aware residual test, but
+    without power awareness the joint clamp emits decode 4 (Ted P2 scope
+    guard: residual sizing must not change power-off behavior).
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=False,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=7,
+        ready_num_decode=1,
+        expected_num_prefill=7,
+        expected_num_decode=1,
+    )
+    assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 4)
 
 
 def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
@@ -523,7 +687,7 @@ async def test_tick_propagates_pipeline_execute_action_to_diagnostics():
         ],
     )
 
-    async def fake_tick(ctx, baseline):
+    async def fake_tick(ctx, baseline, *, tick_now=None):
         return canned_outcome
 
     adapter._orchestrator.tick = fake_tick  # type: ignore[method-assign]
@@ -716,6 +880,79 @@ def test_lazy_fpm_pull_only_when_load_builtin_is_due():
     assert not load_tick.run_throughput_scaling
 
 
+@pytest.mark.asyncio
+async def test_observation_prefetch_and_dispatch_share_tick_timestamp():
+    """A clock advance between adapter and orchestrator must not change due-ness.
+
+    Observation prefetch plans against the next tick's monotonic timestamp. In
+    production, sampling the clock again during dispatch produces a slightly
+    later value. When the load interval equals the pipeline interval, recording
+    that later value as ``last_call_at`` makes the following prefetch check miss
+    by the sampling delta, even though the plugin is due when dispatch runs.
+    """
+
+    class _DriftingMonoClock(Clock):
+        def __init__(self, step: float = 0.001) -> None:
+            self._mono = 0.0
+            self._step = step
+
+        def set_monotonic(self, value: float) -> None:
+            self._mono = value
+
+        def now(self) -> float:
+            return 1.7e9 + self._mono
+
+        def monotonic(self) -> float:
+            current = self._mono
+            self._mono += self._step
+            return current
+
+        async def sleep(self, seconds: float) -> None:  # pragma: no cover
+            return None
+
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": False,
+            "optimization_target": "load",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 5.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+            "decode_scale_up_kv_rate": 90.0,
+            "decode_scale_down_kv_rate": 50.0,
+        }
+    )
+    clock = _DriftingMonoClock()
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=clock)
+
+    # Adapter construction registers plugins and may read the clock. Reset it
+    # so this test controls the cadence boundary exactly.
+    clock.set_monotonic(0.0)
+    first = adapter.initial_tick(start_s=0.0)
+    assert first.at_monotonic_s == pytest.approx(5.0)
+    assert first.need_worker_fpm is True
+
+    clock.set_monotonic(first.at_monotonic_s)
+    effects = await adapter.tick(
+        first,
+        TickInput(
+            now_s=first.at_s,
+            worker_counts=WorkerCounts(
+                ready_num_decode=1,
+                expected_num_decode=1,
+            ),
+            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
+        ),
+    )
+
+    load_plugin = adapter._orchestrator.registry.get_plugin("builtin_load_propose")
+    assert load_plugin is not None
+    assert load_plugin.last_call_at == pytest.approx(first.at_monotonic_s)
+    assert effects.next_tick is not None
+    assert effects.next_tick.need_worker_fpm is True
+
+
 def test_throughput_only_sla_still_pulls_fpm_for_live_regression():
     cfg = PlannerConfig.model_validate(
         {
@@ -798,7 +1035,7 @@ async def test_external_fpm_request_does_not_feed_builtin_regression_early():
     assert tick.need_worker_fpm is True
     assert not tick.run_load_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
 
     adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
@@ -832,7 +1069,7 @@ async def test_internal_load_tick_feeds_builtin_regression():
     assert tick.need_worker_fpm is True
     assert tick.run_load_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
 
     adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
@@ -875,7 +1112,7 @@ async def test_disabled_load_scaling_reports_disabled_on_load_tick():
     assert tick.run_load_scaling
     assert not tick.run_throughput_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
 
     adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
@@ -899,7 +1136,7 @@ async def test_predict_failed_reason_surfaces_on_throughput_tick():
     tick = adapter._compute_next_scheduled_tick()
     assert tick.run_throughput_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(
             execute_action="skip_no_targets",
             final_proposal=None,

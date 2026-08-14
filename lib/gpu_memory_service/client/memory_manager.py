@@ -35,23 +35,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from gpu_memory_service.client.session import _GMSClientSession
-from gpu_memory_service.common.cuda_utils import (
-    align_to_granularity,
-    cuda_ensure_initialized,
-    cuda_synchronize,
-    cuda_validate_pointer,
-    cumem_address_free,
-    cumem_address_reserve,
-    cumem_create_tolerate_oom,
-    cumem_get_allocation_granularity,
-    cumem_import_from_shareable_handle_close_fd,
-    cumem_map,
-    cumem_release,
-    cumem_set_access,
-    cumem_unmap,
-)
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.utils import align_to_granularity
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +140,17 @@ class LocalMapping:
         )
 
 
+@dataclass(frozen=True)
+class LayoutCommit:
+    """What :meth:`GMSClientMemoryManager.commit_layout` did to this session.
+
+    Committing narrows the caller's grant, so the call hands back what it now holds.
+    """
+
+    memory_layout_hash: str
+    granted_lock_type: GrantedLockType
+
+
 class GMSClientMemoryManager:
     """Unified memory manager for GPU Memory Service.
 
@@ -171,6 +169,7 @@ class GMSClientMemoryManager:
         self.device = device
         self.tag = tag
         self.scratch_size = scratch_size
+        self._vmm = get_vmm()
 
         self._client: Optional[_GMSClientSession] = None
 
@@ -182,6 +181,9 @@ class GMSClientMemoryManager:
         self._mappings: Dict[int, LocalMapping] = {}
         self._inverse_mapping: Dict[str, int] = {}
         self._scratch_mappings: Dict[int, _ScratchMapping] = {}
+        # All scratch mappings alias ONE shared physical granule (N KV layers ->
+        # one scratch_size block, not N). Created lazily, released once.
+        self._shared_scratch_handle: int = 0
 
         self._unmapped = False
         self._aborted = False
@@ -191,10 +193,14 @@ class GMSClientMemoryManager:
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
-        cuda_ensure_initialized()
-        self.granularity = cumem_get_allocation_granularity(device)
+        self._vmm.ensure_initialized()
+        self.granularity = self._vmm.get_allocation_granularity(device)
 
     # ==================== Properties ====================
+
+    @property
+    def device_type(self) -> VMMDeviceType:
+        return get_vmm_device_type()
 
     @property
     def granted_lock_type(self) -> Optional[GrantedLockType]:
@@ -335,7 +341,7 @@ class GMSClientMemoryManager:
         self._require_rw()
 
         # Publish barrier: all writer-side GPU work must be visible before commit.
-        cuda_synchronize()
+        self._vmm.synchronize()
 
         for mapping in list(self._mappings.values()):
             if mapping.handle != 0:
@@ -348,6 +354,32 @@ class GMSClientMemoryManager:
         self._client = None
         self._granted_lock_type = None
         return True
+
+    def commit_layout(self) -> "LayoutCommit":
+        """Seal the allocation set: the shape is final, the pages outlive this session.
+
+        The counterpart to :meth:`commit`, which publishes *contents*: it unmaps the
+        writer, closes the session, and lets readers attach. This publishes only the
+        *shape*, leaving mappings and session intact so the caller keeps writing.
+
+        Call it once the pool is built. That call is the atomic boundary: die before it
+        and the half-built pool is discarded, die after and a standby can adopt it.
+
+        The session is narrowed to RW_DATA, so allocate and free now raise. Reconnect
+        with RW to build a different layout.
+        """
+        self._require_rw()
+        # Publish barrier, matching commit(): make this process's GPU writes visible
+        # before the layout is advertised as reattachable.
+        self._vmm.synchronize()
+        response = self._client.commit_layout()
+        # The server decides what we hold now; read it back rather than assuming.
+        self._granted_lock_type = self._client.lock_type
+        self._last_memory_layout_hash = response.memory_layout_hash
+        return LayoutCommit(
+            memory_layout_hash=response.memory_layout_hash,
+            granted_lock_type=self._granted_lock_type,
+        )
 
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()
@@ -376,7 +408,7 @@ class GMSClientMemoryManager:
     def reserve_va(self, size: int) -> int:
         """Reserve virtual address space (cuMemAddressReserve). No tracking."""
         aligned_size = align_to_granularity(size, self.granularity)
-        return cumem_address_reserve(aligned_size, self.granularity)
+        return self._vmm.address_reserve(aligned_size, self.granularity)
 
     def map_va(
         self,
@@ -393,9 +425,9 @@ class GMSClientMemoryManager:
         """
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
-        handle = cumem_import_from_shareable_handle_close_fd(fd)
-        cumem_map(va, aligned_size, handle)
-        cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
+        handle = self._vmm.import_shareable_handle_close_fd(fd)
+        self._vmm.map(va, aligned_size, handle)
+        self._vmm.set_access(va, aligned_size, self.device, self._granted_lock_type)
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
@@ -418,8 +450,8 @@ class GMSClientMemoryManager:
         mapping = self._mappings.get(va)
         if mapping is None or mapping.handle == 0:
             return
-        cumem_unmap(va, mapping.aligned_size)
-        cumem_release(mapping.handle)
+        self._vmm.unmap(va, mapping.aligned_size)
+        self._vmm.release(mapping.handle)
         self._mappings[va] = mapping.with_handle(0)
 
     def free_va(self, va: int) -> None:
@@ -435,7 +467,7 @@ class GMSClientMemoryManager:
             mapping = self._mappings.get(va)
             if mapping is None:
                 return
-        cumem_address_free(va, mapping.va_reserved_size)
+        self._vmm.address_free(va, mapping.va_reserved_size)
         self._mappings.pop(va, None)
         self._inverse_mapping.pop(mapping.allocation_id, None)
 
@@ -507,7 +539,7 @@ class GMSClientMemoryManager:
         """Synchronize + unmap all VAs (real mappings AND scratch mappings).
         Preserves VA reservations for remap.
         """
-        cuda_synchronize()
+        self._vmm.synchronize()
 
         unmapped_count = 0
         total_bytes = 0
@@ -523,11 +555,15 @@ class GMSClientMemoryManager:
         for base_va, scratch in self._scratch_mappings.items():
             if scratch.scratch_handle == 0:
                 continue
-            cumem_unmap(base_va, scratch.va_reserved_size)
-            cumem_release(scratch.scratch_handle)
+            self._vmm.unmap(base_va, scratch.va_reserved_size)
             scratch.scratch_handle = 0
             unmapped_count += 1
             total_bytes += scratch.va_reserved_size
+        # Every mapping aliased the one shared granule; release it once, after all
+        # ranges are unmapped.
+        if self._shared_scratch_handle != 0:
+            self._vmm.release(self._shared_scratch_handle)
+            self._shared_scratch_handle = 0
 
         self._va_preserved = True
         self._unmapped = True
@@ -586,14 +622,13 @@ class GMSClientMemoryManager:
                 )
             if str(alloc_info.tag) != mapping.tag:
                 raise StaleMemoryLayoutError(
-                    f"Layout rank {rank} tag changed: "
-                    f"{mapping.tag} vs {alloc_info.tag}"
+                    f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
             fd = self.export_handle(alloc_info.allocation_id)
-            handle = cumem_import_from_shareable_handle_close_fd(fd)
-            cumem_map(va, mapping.aligned_size, handle)
-            cumem_set_access(
+            handle = self._vmm.import_shareable_handle_close_fd(fd)
+            self._vmm.map(va, mapping.aligned_size, handle)
+            self._vmm.set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type
             )
             remapped_vas.append(va)
@@ -609,9 +644,9 @@ class GMSClientMemoryManager:
             total_bytes += mapping.aligned_size
 
         if remapped_vas:
-            cuda_synchronize()
+            self._vmm.synchronize()
             for va in remapped_vas:
-                cuda_validate_pointer(va)
+                self._vmm.validate_pointer(va)
 
         self._va_preserved = False
         self._unmapped = False
@@ -703,17 +738,25 @@ class GMSClientMemoryManager:
         aligned_size = align_to_granularity(size, self.granularity)
         va_reserved_size = align_to_granularity(size, self.scratch_size)
 
-        ok, scratch_handle = cumem_create_tolerate_oom(self.scratch_size, self.device)
-        if not ok:
-            raise RuntimeError(
-                "cuMemCreate failed to allocate the scratch chunk "
-                f"({self.scratch_size // (1 << 20)} MiB) on device {self.device}"
+        if self._shared_scratch_handle != 0:
+            # Reuse the one shared granule; every mapping aliases it.
+            scratch_handle = self._shared_scratch_handle
+        else:
+            ok, scratch_handle = self._vmm.create_tolerate_oom(
+                self.scratch_size, self.device
             )
+            if not ok:
+                raise RuntimeError(
+                    f"VMM physical memory allocation failed "
+                    f"({self.scratch_size // (1 << 20)} MiB) on "
+                    f"{self.device_type.value} device {self.device}"
+                )
+            self._shared_scratch_handle = scratch_handle
 
-        va = cumem_address_reserve(va_reserved_size, self.scratch_size)
+        va = self._vmm.address_reserve(va_reserved_size, self.scratch_size)
         for offset in range(0, va_reserved_size, self.scratch_size):
-            cumem_map(va + offset, self.scratch_size, scratch_handle)
-        cumem_set_access(va, va_reserved_size, self.device, GrantedLockType.RW)
+            self._vmm.map(va + offset, self.scratch_size, scratch_handle)
+        self._vmm.set_access(va, va_reserved_size, self.device, GrantedLockType.RW)
 
         self._scratch_mappings[va] = _ScratchMapping(
             size=size,
@@ -723,13 +766,26 @@ class GMSClientMemoryManager:
             scratch_handle=scratch_handle,
         )
         logger.info(
-            "[GMS] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d chunks",
+            "[GMS] Reserved %d MiB VA at 0x%x, aliased a %d MiB scratch block across %d chunks",
             va_reserved_size // (1 << 20),
             va,
             self.scratch_size // (1 << 20),
             va_reserved_size // self.scratch_size,
         )
         return va
+
+    def scratch_summary(self) -> tuple[int, int, int]:
+        """Return (count, virtual_bytes, physical_bytes) of live scratch mappings.
+
+        virtual_bytes is the VA range reserved; physical_bytes is the DRAM
+        actually committed (distinct scratch blocks * scratch_size), far smaller
+        since each mapping aliases one block across its whole range.
+        """
+        mappings = self._scratch_mappings.values()
+        virtual = sum(m.size for m in mappings)
+        live_blocks = {m.scratch_handle for m in mappings if m.scratch_handle}
+        physical = len(live_blocks) * self.scratch_size
+        return len(self._scratch_mappings), virtual, physical
 
     def prepare_scratch_for_reallocation(self) -> None:
         """Move scratch bookkeeping into _mappings as preserved-VA records.
@@ -777,9 +833,15 @@ class GMSClientMemoryManager:
 
             state = _tag_states.get(self.tag)
             if state is not None and state.manager is self:
-                if self.granted_lock_type != GrantedLockType.RW:
+                # RW_DATA counts: an adopting standby must move the same bookkeeping
+                # before it can remap, and this touches neither driver nor server. The
+                # server still refuses the allocations that routing would request.
+                if self.granted_lock_type not in (
+                    GrantedLockType.RW,
+                    GrantedLockType.RW_DATA,
+                ):
                     raise RuntimeError(
-                        "prepare_scratch_for_reallocation requires RW grant "
+                        "prepare_scratch_for_reallocation requires a writer grant "
                         "before disabling scratch routing: "
                         f"tag={self.tag!r} "
                         f"granted_lock_type={self.granted_lock_type}"
@@ -797,11 +859,15 @@ class GMSClientMemoryManager:
         if scratch is None:
             return False
 
-        cuda_synchronize()
+        self._vmm.synchronize()
         if scratch.scratch_handle:
-            cumem_unmap(base_va, scratch.va_reserved_size)
-            cumem_release(scratch.scratch_handle)
-        cumem_address_free(base_va, scratch.va_reserved_size)
+            self._vmm.unmap(base_va, scratch.va_reserved_size)
+            # Shared granule: release only once the last mapping is gone
+            # (this entry was already popped above).
+            if self._shared_scratch_handle != 0 and not self._scratch_mappings:
+                self._vmm.release(self._shared_scratch_handle)
+                self._shared_scratch_handle = 0
+        self._vmm.address_free(base_va, scratch.va_reserved_size)
         return True
 
     # ==================== Lifecycle ====================
@@ -812,10 +878,10 @@ class GMSClientMemoryManager:
         synchronize + unmap all + free all VAs + abort.
 
         Args:
-            best_effort: If True, skip cuda_synchronize and swallow
+            best_effort: If True, skip self._vmm.synchronize() and swallow
                 errors during cleanup. Used after checkpoint where
                 cuda-checkpoint may have torn down the device context
-                (cuda_synchronize calls os._exit via fail()).
+                (self._vmm.synchronize() calls os._exit via fail()).
         """
         if best_effort:
             try:
@@ -825,8 +891,9 @@ class GMSClientMemoryManager:
             self._mappings.clear()
             self._inverse_mapping.clear()
             self._scratch_mappings.clear()
+            self._shared_scratch_handle = 0
         else:
-            cuda_synchronize()
+            self._vmm.synchronize()
             for base_va in list(self._scratch_mappings.keys()):
                 self.destroy_scratch_mapping(base_va)
             for va in list(self._mappings.keys()):

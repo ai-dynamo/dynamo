@@ -254,14 +254,37 @@ where
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
             if (publisher.send(resp_bytes).await).is_err() {
-                tracing::error!(
-                    "Failed to publish complete final for stream {}",
-                    context.id()
-                );
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
-                        .inc();
+                // `is_stopped()` is `state != Live`, so it is also true after
+                // `kill()` — which the response-stream reader does on a TCP read
+                // error. Excluding killed narrows this to `state == Stopped` so
+                // real connection failures stay counted. `&&` reads `is_killed()`
+                // last, so a Stopped -> Killed upgrade between the two reads
+                // falls to the error path.
+                //
+                // Reachable only with a peer-sent `Stop`: the local
+                // `stop_generating()` above clears `send_complete_final` and
+                // breaks first. That invariant is load-bearing.
+                if context.is_stopped() && !context.is_killed() {
+                    // The peer asked us to stop, so a failed marker write is
+                    // attributable to that teardown, not to a fault here. Unlike
+                    // the per-frame branch, this also skips the counter.
+                    tracing::debug!(
+                        "Failed to publish complete final for stream {}; client already torn down",
+                        context.id()
+                    );
+                } else {
+                    // Still attached, or killed (hard cancel, protocol violation,
+                    // connection error): the client sees a stream with no
+                    // end-of-stream marker, so this stays a counted error.
+                    tracing::error!(
+                        "Failed to publish complete final for stream {}",
+                        context.id()
+                    );
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                            .inc();
+                    }
                 }
             }
             // Only notify on stream completion if no error responses were seen
@@ -732,5 +755,252 @@ where
         request_id: Option<String>,
     ) -> Result<(), PipelineError> {
         self.handle_payload_shared(payload, request_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
+    use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
+    use crate::protocols::annotated::Annotated;
+    use futures::stream;
+    use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
+
+    type TestRequest = serde_json::Value;
+    type TestResponse = Annotated<serde_json::Value>;
+    type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
+    fn test_metrics() -> WorkHandlerMetrics {
+        WorkHandlerMetrics::new(
+            IntCounter::with_opts(Opts::new("requests_total", "t")).unwrap(),
+            Histogram::with_opts(HistogramOpts::new("request_duration_seconds", "t")).unwrap(),
+            IntGauge::with_opts(Opts::new("inflight_requests", "t")).unwrap(),
+            IntCounter::with_opts(Opts::new("request_bytes_total", "t")).unwrap(),
+            IntCounter::with_opts(Opts::new("response_bytes_total", "t")).unwrap(),
+            IntCounterVec::new(
+                Opts::new(work_handler::ERRORS_TOTAL, "t"),
+                &[work_handler::ERROR_TYPE_LABEL],
+            )
+            .unwrap(),
+            IntCounter::with_opts(Opts::new("cancellation_total", "t")).unwrap(),
+        )
+    }
+
+    /// Which half of the teardown race a given run exercises.
+    #[derive(Clone, Copy, Debug)]
+    enum Teardown {
+        /// Frontend sent `ControlMessage::Stop`; the control reader called
+        /// `context.stop()` (see `tcp/client.rs`).
+        Stop,
+        /// Frontend sent `ControlMessage::Kill`; the control reader called
+        /// `context.kill()`.
+        Kill,
+        /// The response-stream reader hit a TCP read error and called
+        /// `context.kill()` (`tcp/client.rs`, "tcp stream read error").
+        /// Indistinguishable from `Kill` at the context level, which is
+        /// exactly why `is_stopped()` alone is too coarse a guard.
+        ConnectionReadError,
+        /// The transport died with the client still attached and the context
+        /// live — a genuine failure that must stay classified as an error.
+        TransportOnly,
+    }
+
+    /// Drive `pump_response_stream` through the client-teardown ordering:
+    /// the engine emits `content_frames` chunks, then the upstream reader goes
+    /// away (mirroring `handle_writer` exiting on `context.stopped()`) while the
+    /// trailing `complete_final` frame is still unsent.
+    ///
+    /// Returns (publish_final count, publish_response count).
+    async fn run_teardown_race(content_frames: usize, teardown: Teardown) -> (u64, u64) {
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress
+            .metrics
+            .set(metrics.clone())
+            .expect("metrics already set");
+
+        // Capacity covers every content frame, so a send only fails once the
+        // receiver is gone — never merely because the channel is full.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let engine_ctx = ctx.context();
+
+        // The stream yields its content, then parks until the test has torn the
+        // receiver down. Ending after the gate (rather than on a timer) is what
+        // makes the race deterministic.
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let content: Vec<TestResponse> = (0..content_frames)
+            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
+            .collect();
+        let tail = stream::unfold(Some(gate_rx), |state| async move {
+            // Awaiting then yielding `None` ends the stream, so
+            // `send_complete_final` stays true and the final frame is attempted.
+            let gate = state?;
+            let _ = gate.await;
+            None
+        });
+        let response_stream: ManyOut<TestResponse> = ResponseStream::new(
+            Box::pin(stream::iter(content).chain(tail)),
+            engine_ctx.clone(),
+        );
+
+        let pump = tokio::spawn({
+            let ingress = ingress.clone();
+            async move {
+                ingress
+                    .pump_response_stream(
+                        response_stream,
+                        &publisher,
+                        RequestPlanePayloadCodec::Json,
+                    )
+                    .await;
+            }
+        });
+
+        // Drain the content frames so the pump is past the per-frame branch.
+        for _ in 0..content_frames {
+            rx.recv().await.expect("content frame");
+        }
+
+        // Now reproduce the teardown: the frontend has everything it needs and
+        // drops the request, which kills the worker's writer task.
+        match teardown {
+            Teardown::Stop => engine_ctx.stop(),
+            Teardown::Kill | Teardown::ConnectionReadError => engine_ctx.kill(),
+            Teardown::TransportOnly => {}
+        }
+        drop(rx);
+        let _ = gate_tx.send(());
+
+        pump.await.expect("pump task panicked");
+
+        let errors = &metrics.error_counter;
+        (
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                .get(),
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                .get(),
+        )
+    }
+
+    /// Losing the `complete_final` send to a client that has already
+    /// torn down is not a worker error. The per-frame branch already makes this
+    /// distinction; the final-marker branch must make it too.
+    #[tokio::test]
+    async fn test_publish_final_race_with_stopped_context_is_not_an_error() {
+        let (publish_final, publish_response) = run_teardown_race(3, Teardown::Stop).await;
+        assert_eq!(
+            publish_final, 0,
+            "complete_final lost to a stopped context must not count as an error"
+        );
+        assert_eq!(
+            publish_response, 0,
+            "content frames were all delivered before teardown"
+        );
+    }
+
+    /// A killed context must stay a counted error. `is_stopped()` is
+    /// `state != Live`, so it is true after `kill()` as well — but the
+    /// response-stream reader kills the context on a TCP read error, so
+    /// suppressing on `is_stopped()` alone would hide real connection
+    /// failures from the very counter meant to surface them.
+    #[tokio::test]
+    async fn test_publish_final_with_killed_context_is_still_an_error() {
+        let (publish_final, _) = run_teardown_race(3, Teardown::Kill).await;
+        assert_eq!(
+            publish_final, 1,
+            "a killed context is not a graceful teardown and must still be counted"
+        );
+    }
+
+    /// The concrete regression: `tcp/client.rs` calls `context.kill()` on a TCP
+    /// read error ("tcp stream read error, closing connection"). That path must
+    /// remain visible in `dynamo_component_errors_total`.
+    #[tokio::test]
+    async fn test_publish_final_after_connection_read_error_is_still_an_error() {
+        let (publish_final, _) = run_teardown_race(3, Teardown::ConnectionReadError).await;
+        assert_eq!(
+            publish_final, 1,
+            "a dropped connection must not be silently reclassified as a benign teardown"
+        );
+    }
+
+    /// Guards against suppressing too much: with the context still live, a failed
+    /// `complete_final` is a real transport failure and must still be counted.
+    #[tokio::test]
+    async fn test_publish_final_failure_without_stop_is_still_an_error() {
+        let (publish_final, _) = run_teardown_race(3, Teardown::TransportOnly).await;
+        assert_eq!(
+            publish_final, 1,
+            "a genuine complete_final failure must still be counted"
+        );
+    }
+
+    /// The marker itself is the transport-level end-of-stream signal that
+    /// non-chat consumers (KV-router worker index queries, disaggregated
+    /// prefill→decode) rely on to tell a clean end from a truncated one. The
+    /// classification change must not disturb the clean path: every content
+    /// frame plus a `complete_final: true` frame still goes out, and nothing is
+    /// counted as an error.
+    #[tokio::test]
+    async fn test_complete_final_marker_still_sent_on_clean_stream() {
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+
+        let content_frames = 3;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let content: Vec<TestResponse> = (0..content_frames)
+            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
+            .collect();
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+        drop(publisher);
+
+        let mut frames = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            let (_header, data) = msg.into_parts();
+            frames.push(serde_json::from_slice::<serde_json::Value>(&data).unwrap());
+        }
+
+        assert_eq!(
+            frames.len(),
+            content_frames + 1,
+            "expected every content frame plus the trailing marker"
+        );
+        for (i, frame) in frames.iter().take(content_frames).enumerate() {
+            assert_eq!(frame["complete_final"], false, "content frame {i}");
+        }
+        assert_eq!(
+            frames[content_frames]["complete_final"], true,
+            "trailing frame must carry the end-of-stream marker"
+        );
+
+        let errors = &metrics.error_counter;
+        assert_eq!(
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                .get(),
+            0
+        );
+        assert_eq!(
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                .get(),
+            0
+        );
     }
 }

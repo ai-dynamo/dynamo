@@ -15,7 +15,7 @@ use dynamo_runtime::{
     },
 };
 use prometheus::{
-    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
 };
 use serde::Serialize;
 use std::{
@@ -29,13 +29,19 @@ use crate::protocols::{
     common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
+use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
 use dynamo_runtime::error::ErrorType as DynamoErrorType;
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
-    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    // Both overload flavors are client-visible rejections (HTTP 529). They differ
+    // only in whether migration may retry elsewhere.
+    const REJECTION: &[DynamoErrorType] = &[
+        DynamoErrorType::ResourceExhausted,
+        DynamoErrorType::WorkerOverloaded,
+    ];
     const NON_REJECTION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
@@ -139,7 +145,7 @@ pub static LORA_REPLICA_FACTOR_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
             format!("dynamo_frontend_{}", frontend_service::LORA_REPLICA_FACTOR),
             "Number of replicas allocated for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_replica_factor gauge")
 });
@@ -150,7 +156,7 @@ pub static LORA_IS_ACTIVE_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
             format!("dynamo_frontend_{}", frontend_service::LORA_IS_ACTIVE),
             "Whether a LoRA adapter is active (1) or inactive (0)",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_is_active gauge")
 });
@@ -164,7 +170,7 @@ pub static LORA_RAW_ARRIVAL_COUNT_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|
             ),
             "Raw arrival count (windowed rate counter) for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_raw_arrival_count gauge")
 });
@@ -175,7 +181,7 @@ pub static LORA_ESTIMATED_LOAD_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
             format!("dynamo_frontend_{}", frontend_service::LORA_ESTIMATED_LOAD),
             "Estimated load (windowed request count) for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_estimated_load gauge")
 });
@@ -186,37 +192,46 @@ pub static LORA_ACTIVE_REQUESTS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| 
             format!("dynamo_frontend_{}", frontend_service::LORA_ACTIVE_REQUESTS),
             "Number of in-flight requests for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_active_requests gauge")
 });
 
-pub static LORA_CHURN_LOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
-    IntGauge::new(
-        format!(
-            "dynamo_frontend_{}",
-            frontend_service::LORA_CHURN_LOADS_TOTAL
+pub static LORA_CHURN_LOADS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::LORA_CHURN_LOADS_TOTAL
+            ),
+            "Total LoRA loads (new placements) this tick",
         ),
-        "Total LoRA loads (new placements) this tick",
+        &["endpoint"],
     )
     .expect("Failed to create lora_churn_loads gauge")
 });
 
-pub static LORA_CHURN_UNLOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
-    IntGauge::new(
-        format!(
-            "dynamo_frontend_{}",
-            frontend_service::LORA_CHURN_UNLOADS_TOTAL
+pub static LORA_CHURN_UNLOADS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::LORA_CHURN_UNLOADS_TOTAL
+            ),
+            "Total LoRA unloads (removed placements) this tick",
         ),
-        "Total LoRA unloads (removed placements) this tick",
+        &["endpoint"],
     )
     .expect("Failed to create lora_churn_unloads gauge")
 });
 
-pub static LORA_OVERFLOW_COUNT_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
-    IntGauge::new(
-        format!("dynamo_frontend_{}", frontend_service::LORA_OVERFLOW_COUNT),
-        "MCF solver overflow count (unplaceable replicas)",
+pub static LORA_OVERFLOW_COUNT_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_OVERFLOW_COUNT),
+            "MCF solver overflow count (unplaceable replicas)",
+        ),
+        &["endpoint"],
     )
     .expect("Failed to create lora_overflow_count gauge")
 });
@@ -391,6 +406,7 @@ pub struct Metrics {
     images_per_request: HistogramVec,
     videos_per_request: HistogramVec,
     audio_per_request: HistogramVec,
+    image_tokens_per_request: HistogramVec,
 
     // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
     // source systems, but are implemented as gauges because they are copied/synchronized from upstream
@@ -447,6 +463,12 @@ pub enum Endpoint {
 
     /// OAI Embeddings
     Embeddings,
+
+    /// Classification (sequence classification / cross-encoder pooling)
+    Classify,
+
+    /// Pooling (raw pooler output)
+    Pooling,
 
     /// OAI Images
     Images,
@@ -535,6 +557,7 @@ pub struct ResponseMetricCollector {
     images_per_request: prometheus::Histogram,
     videos_per_request: prometheus::Histogram,
     audio_per_request: prometheus::Histogram,
+    image_tokens_per_request: prometheus::Histogram,
     // Latched per-request counts (for the tracing span fields recorded in `Drop`).
     image_count_val: usize,
     video_count_val: usize,
@@ -842,6 +865,24 @@ impl Metrics {
         )
         .unwrap();
 
+        // Image placeholder-token buckets: powers of two cover the common
+        // single-image range and multi-image request totals.
+        let image_token_buckets = vec![
+            4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0,
+            16384.0, 32768.0, 65536.0,
+        ];
+        let image_tokens_per_request = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::IMAGE_TOKENS_PER_REQUEST),
+                "Calculated image-placeholder token count per image-bearing request; \
+                 recorded from the response path only when every image resolves and \
+                 processor overrides are absent",
+            )
+            .buckets(image_token_buckets),
+            &["model"],
+        )
+        .unwrap();
+
         let cached_tokens = HistogramVec::new(
             HistogramOpts::new(
                 frontend_metric_name(frontend_service::CACHED_TOKENS),
@@ -977,6 +1018,7 @@ impl Metrics {
             images_per_request,
             videos_per_request,
             audio_per_request,
+            image_tokens_per_request,
             model_total_kv_blocks,
             model_max_num_seqs,
             model_max_num_batched_tokens,
@@ -1134,6 +1176,7 @@ impl Metrics {
         registry.register(Box::new(self.images_per_request.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
+        registry.register(Box::new(self.image_tokens_per_request.clone()))?;
 
         // Register runtime configuration metrics
         registry.register(Box::new(self.model_total_kv_blocks.clone()))?;
@@ -1467,6 +1510,8 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
+            Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
             Endpoint::Audios => write!(f, "audios"),
@@ -1484,6 +1529,8 @@ impl Endpoint {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
+            Endpoint::Classify => "classify",
+            Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
             Endpoint::Audios => "audios",
@@ -1552,6 +1599,9 @@ impl ResponseMetricCollector {
         let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
         let videos_per_request = metrics.videos_per_request.with_label_values(&[&model]);
         let audio_per_request = metrics.audio_per_request.with_label_values(&[&model]);
+        let image_tokens_per_request = metrics
+            .image_tokens_per_request
+            .with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
             model,
@@ -1564,6 +1614,7 @@ impl ResponseMetricCollector {
             images_per_request,
             videos_per_request,
             audio_per_request,
+            image_tokens_per_request,
             image_count_val: 0,
             video_count_val: 0,
             audio_count_val: 0,
@@ -1675,13 +1726,23 @@ impl ResponseMetricCollector {
         }
     }
 
-    /// Observe per-request multimodal content-part counts, latched to run exactly
-    /// once per request (the counts are constant across a request's chunks).
+    /// Observe per-request multimodal content-part counts, latched to run
+    /// exactly once per request (the counts are constant across chunks).
     pub fn observe_multimodal_counts(
         &mut self,
         image_count: usize,
         video_count: usize,
         audio_count: usize,
+    ) {
+        self.observe_multimodal_metrics(image_count, video_count, audio_count, None);
+    }
+
+    fn observe_multimodal_metrics(
+        &mut self,
+        image_count: usize,
+        video_count: usize,
+        audio_count: usize,
+        image_tokens: Option<usize>,
     ) {
         if self.multimodal_counts_observed {
             return;
@@ -1695,6 +1756,9 @@ impl ResponseMetricCollector {
         self.images_per_request.observe(image_count as f64);
         self.videos_per_request.observe(video_count as f64);
         self.audio_per_request.observe(audio_count as f64);
+        if let Some(image_tokens) = image_tokens {
+            self.image_tokens_per_request.observe(image_tokens as f64);
+        }
     }
 
     /// Observe tokenize/detokenize latencies in milliseconds.
@@ -1945,10 +2009,11 @@ fn observe_llm_metrics(
 ) {
     response_collector.observe_current_osl(metrics.output_tokens);
     response_collector.observe_cached_tokens(metrics.cached_tokens);
-    response_collector.observe_multimodal_counts(
+    response_collector.observe_multimodal_metrics(
         metrics.image_count,
         metrics.video_count,
         metrics.audio_count,
+        metrics.image_tokens,
     );
     response_collector.observe_tokenize_latencies(
         metrics.tokenize_latency,
@@ -2066,6 +2131,7 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
+    reasoning_field: ReasoningField,
 ) -> Result<Option<Event>, axum::Error> {
     let mut annotated = annotated.0;
 
@@ -2093,6 +2159,10 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
         annotated.data = None;
     }
 
+    // Route reasoning at the SSE boundary. Internal representation stays
+    // `reasoning_content`.
+    let annotated =
+        annotated.map_data(|response| Ok(RoutedReasoning::new(response, reasoning_field)));
     annotated_to_sse_event(annotated)
 }
 
@@ -2333,6 +2403,73 @@ mod tests {
         }
     }
 
+    /// A chunk whose delta renders as nothing is still an accounting event: the
+    /// engine generated those tokens. The chat SSE loop drops such chunks before
+    /// forwarding them (multi-byte token assembly, and the Nemotron
+    /// force_nonempty_content deferral, both produce them), so it observes their
+    /// metrics explicitly before discarding. This pins the helper it calls: an
+    /// empty delta carrying `llm_metrics` must still count.
+    #[test]
+    fn test_empty_delta_with_metrics_is_still_counted() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        };
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "test-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+        let mut guard = None;
+
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: model.to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: Some(LLMMetricAnnotation {
+                input_tokens: 10,
+                output_tokens: 4,
+                chunk_tokens: 4,
+                ..Default::default()
+            }),
+        };
+        let annotated = crate::types::Annotated::from_data(data);
+
+        process_chat_response_and_observe_metrics(&annotated, &mut collector, &mut guard);
+
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model])
+                .get(),
+            4,
+            "tokens on a non-renderable chunk must still be counted"
+        );
+    }
+
     #[test]
     fn test_output_tokens_counter_increments() {
         let metrics = Arc::new(Metrics::new());
@@ -2560,10 +2697,10 @@ mod tests {
 
         let mut collector = metrics.clone().create_response_collector(model);
         // Repeated calls simulate the same counts arriving on each streamed chunk.
-        collector.observe_multimodal_counts(2, 1, 0);
-        collector.observe_multimodal_counts(2, 1, 0);
+        collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
+        collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
         // A later, differing value must not override the latched counts.
-        collector.observe_multimodal_counts(99, 99, 99);
+        collector.observe_multimodal_metrics(99, 99, 99, Some(9999));
 
         let img = metrics.images_per_request.with_label_values(&[model]);
         assert_eq!(img.get_sample_count(), 1, "image histogram observed once");
@@ -2578,6 +2715,13 @@ mod tests {
             "audio histogram observes even a 0 (text-only distribution)"
         );
         assert_eq!(aud.get_sample_sum(), 0.0);
+        let image_tokens = metrics.image_tokens_per_request.with_label_values(&[model]);
+        assert_eq!(
+            image_tokens.get_sample_count(),
+            1,
+            "image-token histogram observed once"
+        );
+        assert_eq!(image_tokens.get_sample_sum(), 1290.0);
     }
 
     #[test]
@@ -2595,6 +2739,12 @@ mod tests {
         let img = metrics.images_per_request.with_label_values(&[model]);
         assert_eq!(img.get_sample_count(), 1);
         assert_eq!(img.get_sample_sum(), 0.0);
+        let image_tokens = metrics.image_tokens_per_request.with_label_values(&[model]);
+        assert_eq!(
+            image_tokens.get_sample_count(),
+            0,
+            "unavailable image-token count must not emit a sample"
+        );
     }
 
     #[test]
@@ -3054,6 +3204,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         );
 
         assert!(
@@ -3110,6 +3261,7 @@ mod tests {
             output_tokens: 2,
             chunk_tokens: 1,
             cached_tokens: Some(1),
+            image_tokens: Some(300),
             prefill_worker_id: None,
             prefill_dp_rank: None,
             prefill_worker_type: None,
@@ -3606,6 +3758,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
     }
 

@@ -25,6 +25,9 @@ pub enum WorkerEligibilityError {
     #[error("worker {worker_id} is overloaded")]
     WorkerOverloaded { worker_id: WorkerId },
 
+    #[error("worker {worker_id} is not routable")]
+    WorkerNotRoutable { worker_id: WorkerId },
+
     #[error("worker {worker_id} does not satisfy routing constraints")]
     RoutingConstraintsUnsatisfied { worker_id: WorkerId },
 }
@@ -33,6 +36,7 @@ pub enum WorkerEligibilityError {
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    available_worker_ids: Option<&'a HashSet<WorkerId>>,
     pinned_worker: Option<WorkerWithDpRank>,
     routing_constraints: &'a RoutingConstraints,
 }
@@ -48,9 +52,27 @@ impl<'a> RoutingEligibility<'a> {
         Self {
             allowed_worker_ids,
             overloaded_worker_ids,
+            available_worker_ids: None,
             pinned_worker,
             routing_constraints,
         }
+    }
+
+    /// Attach hard availability. Unlike transient overload, unavailability is
+    /// enforced on every path, including affinity-derived pins.
+    #[inline]
+    pub fn with_available_workers(
+        mut self,
+        available_worker_ids: Option<&'a HashSet<WorkerId>>,
+    ) -> Self {
+        self.available_worker_ids = available_worker_ids;
+        self
+    }
+
+    #[inline]
+    pub fn is_worker_available(&self, worker_id: WorkerId) -> bool {
+        self.available_worker_ids
+            .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
     }
 
     #[inline]
@@ -72,7 +94,9 @@ impl<'a> RoutingEligibility<'a> {
 
     #[inline]
     pub fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
-        self.caller_allows_worker_id(worker_id) && !self.is_worker_overloaded(worker_id)
+        self.caller_allows_worker_id(worker_id)
+            && self.is_worker_available(worker_id)
+            && !self.is_worker_overloaded(worker_id)
     }
 
     #[inline]
@@ -82,6 +106,7 @@ impl<'a> RoutingEligibility<'a> {
         config: &C,
     ) -> bool {
         self.caller_allows_worker_id(worker_id)
+            && self.is_worker_available(worker_id)
             && self
                 .routing_constraints
                 .is_compatible_with_worker_taints(config.taints())
@@ -137,6 +162,12 @@ impl<'a> RoutingEligibility<'a> {
     ) -> Result<&'w C, WorkerEligibilityError> {
         if !self.caller_allows_worker_id(worker.worker_id) {
             return Err(WorkerEligibilityError::WorkerNotAllowed {
+                worker_id: worker.worker_id,
+            });
+        }
+
+        if !self.is_worker_available(worker.worker_id) {
+            return Err(WorkerEligibilityError::WorkerNotRoutable {
                 worker_id: worker.worker_id,
             });
         }
@@ -340,6 +371,33 @@ mod tests {
             result.err(),
             Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
         );
+    }
+
+    #[test]
+    fn hard_availability_overrides_affinity_overload_bypass() {
+        let workers = workers();
+        let config = workers.get(&7).unwrap();
+        let overloaded = HashSet::from([7]);
+        let available = HashSet::from([8]);
+        let constraints = RoutingConstraints::default();
+        let worker = WorkerWithDpRank::new(7, 3);
+        let eligibility =
+            RoutingEligibility::new(None, Some(&overloaded), Some(worker), &constraints)
+                .with_available_workers(Some(&available));
+
+        assert!(!eligibility.allows_worker_ignoring_overload(7, config));
+        assert_eq!(
+            eligibility.validate_worker_rank(&workers, worker).err(),
+            Some(WorkerEligibilityError::WorkerNotRoutable { worker_id: 7 })
+        );
+
+        let empty = HashSet::new();
+        let authoritative_empty = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_workers(Some(&empty));
+        assert!(!authoritative_empty.allows_worker(7, config));
+
+        let no_provider = RoutingEligibility::new(None, Some(&overloaded), None, &constraints);
+        assert!(no_provider.allows_worker_ignoring_overload(7, config));
     }
 
     #[test]

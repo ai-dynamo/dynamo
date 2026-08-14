@@ -56,6 +56,7 @@ const (
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
+	KubeAnnotationGPUPowerLimit                   = "dynamo.nvidia.com/gpu-power-limit"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
@@ -101,6 +102,13 @@ const (
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
 
+	// SnapshotOwnerLabel is stamped by the checkpoint controller on the PodSnapshot and on the
+	// checkpoint Job's pod template, with the owning DynamoCheckpoint's name as the value. It is the
+	// stable lookup/search key for a checkpoint's PodSnapshot (decoupled from the object name, which
+	// may change in a future naming scheme) and lets the source-pod watch map a Job pod back to its
+	// DynamoCheckpoint. It follows the nvidia.com/snapshot-* label convention.
+	SnapshotOwnerLabel = "nvidia.com/snapshot-owner"
+
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
 
@@ -143,10 +151,6 @@ const (
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
-	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
-	// GMS + Snapshot admission gate when set to "1".
-	DynamoOperatorAllowGMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
-
 	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner  = "planner"
@@ -180,6 +184,13 @@ const (
 
 	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
 	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
+
+	// VLLMDPMasterIPEnvVar is the env var that tells vLLM which IP hosts the data-parallel master.
+	VLLMDPMasterIPEnvVar = "VLLM_DP_MASTER_IP"
+
+	// PodIPEnvVar carries the pod's own IP from the downward API, for launch
+	// commands that must name an address rather than let a library guess one.
+	PodIPEnvVar = "POD_IP"
 
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics

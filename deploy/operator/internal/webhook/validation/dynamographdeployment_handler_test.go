@@ -23,9 +23,8 @@ import (
 	"strings"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,56 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func TestDynamoGraphDeploymentV1Alpha1Handler(t *testing.T) {
-	handler := &dynamoGraphDeploymentV1Alpha1Handler{
-		handler: NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "", false),
-	}
-
-	t.Run("create", func(t *testing.T) {
-		dgd := newAlphaDGDForCompatibilityValidation()
-		dgd.Spec.Services["worker"].Annotations = map[string]string{
-			consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
-		}
-
-		_, err := handler.ValidateCreate(
-			dgdAdmissionContext(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
-			dgd,
-		)
-		if err == nil {
-			t.Fatal("ValidateCreate() error = nil, want preserved v1alpha1 validation error")
-		}
-		if !strings.Contains(err.Error(), "spec.services[worker].annotations[nvidia.com/vllm-distributed-executor-backend]") {
-			t.Fatalf("ValidateCreate() error = %q, want v1alpha1 service annotation validation error", err)
-		}
-	})
-
-	t.Run("update", func(t *testing.T) {
-		oldDGD := newAlphaDGDForCompatibilityValidation()
-		newDGD := oldDGD.DeepCopy()
-		newDGD.Labels = map[string]string{"updated": "true"}
-		warnings, err := handler.ValidateUpdate(
-			dgdAdmissionContext(admissionv1.Update, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
-			oldDGD,
-			newDGD,
-		)
-		if err != nil || len(warnings) != 0 {
-			t.Fatalf("ValidateUpdate() = (%v, %v), want no warnings or error", warnings, err)
-		}
-	})
-
-	t.Run("delete", func(t *testing.T) {
-		warnings, err := handler.ValidateDelete(
-			dgdAdmissionContext(admissionv1.Delete, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
-			newAlphaDGDForCompatibilityValidation(),
-		)
-		if err != nil || len(warnings) != 0 {
-			t.Fatalf("ValidateDelete() = (%v, %v), want no warnings or error", warnings, err)
-		}
-	})
-}
-
 func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator", false)
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator")
 	dgd := newBetaDGDForValidation()
 
 	warnings, err := handler.ValidateCreate(dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd)
@@ -108,17 +59,10 @@ func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
 		t.Fatalf("ValidateCreate() error = %v, want GVK mismatch", err)
 	}
 
-	_, err = handler.ValidateCreate(
-		dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
-		&runtime.Unknown{},
-	)
-	if err == nil || !strings.Contains(err.Error(), "expected v1alpha1 or v1beta1 DynamoGraphDeployment") {
-		t.Fatalf("ValidateCreate() error = %v, want type mismatch", err)
-	}
 }
 
 func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator", false)
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator")
 	ctx := dgdAdmissionContext(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
 	t.Run("valid", func(t *testing.T) {
@@ -138,22 +82,8 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD := oldDGD.DeepCopy()
 		now := metav1.Now()
 		newDGD.DeletionTimestamp = &now
-		if _, err := handler.ValidateUpdate(ctx, &runtime.Unknown{}, newDGD); err != nil {
+		if _, err := handler.ValidateUpdate(ctx, nil, newDGD); err != nil {
 			t.Fatalf("ValidateUpdate() error = %v", err)
-		}
-	})
-
-	t.Run("invalid new object", func(t *testing.T) {
-		_, err := handler.ValidateUpdate(ctx, newBetaDGDForValidation(), &runtime.Unknown{})
-		if err == nil || !strings.Contains(err.Error(), "expected v1alpha1 or v1beta1 DynamoGraphDeployment") {
-			t.Fatalf("ValidateUpdate() error = %v, want new object type mismatch", err)
-		}
-	})
-
-	t.Run("invalid old object", func(t *testing.T) {
-		_, err := handler.ValidateUpdate(ctx, &runtime.Unknown{}, newBetaDGDForValidation())
-		if err == nil || !strings.Contains(err.Error(), "expected v1alpha1 or v1beta1 DynamoGraphDeployment") {
-			t.Fatalf("ValidateUpdate() error = %v, want old object type mismatch", err)
 		}
 	})
 
@@ -175,7 +105,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentHandlerValidateDelete(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "", false)
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
 	ctx := dgdAdmissionContext(admissionv1.Delete, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
 	warnings, err := handler.ValidateDelete(ctx, newBetaDGDForValidation())
@@ -186,48 +116,32 @@ func TestDynamoGraphDeploymentHandlerValidateDelete(t *testing.T) {
 		t.Fatalf("ValidateDelete() warnings = %v, want none", warnings)
 	}
 
-	_, err = handler.ValidateDelete(ctx, &runtime.Unknown{})
-	if err == nil || !strings.Contains(err.Error(), "expected DynamoGraphDeployment") {
-		t.Fatalf("ValidateDelete() error = %v, want type mismatch", err)
-	}
-}
-
-func TestCastToDynamoGraphDeployment(t *testing.T) {
-	dgd := newBetaDGDForValidation()
-	got, err := castToDynamoGraphDeployment(dgd)
-	if err != nil || got != dgd {
-		t.Fatalf("castToDynamoGraphDeployment() = (%v, %v), want original DGD", got, err)
-	}
-
-	if _, err := castToDynamoGraphDeployment(nil); err == nil {
-		t.Fatal("castToDynamoGraphDeployment() error = nil, want type mismatch")
-	}
 }
 
 func TestDynamoGraphDeploymentHandlerRegisterWithManager(t *testing.T) {
 	scheme := runtime.NewScheme()
-	if err := nvidiacomv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add v1alpha1 scheme: %v", err)
-	}
 	if err := nvidiacomv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1beta1 scheme: %v", err)
 	}
 
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
-	handler := NewDynamoGraphDeploymentHandler(mgr, "", false)
-	if err := handler.RegisterWithManager(mgr); err != nil {
+	handler := NewDynamoGraphDeploymentHandler(mgr, "")
+	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}
 
-	for _, path := range []string{
-		dynamoGraphDeploymentV1Alpha1WebhookPath,
-		dynamoGraphDeploymentV1Beta1WebhookPath,
+	for _, tc := range []struct {
+		path        string
+		wantPattern string
+	}{
+		{path: dynamoGraphDeploymentWebhookPath, wantPattern: dynamoGraphDeploymentWebhookPath},
+		{path: "/validate-nvidia-com-v1alpha1-dynamographdeployment"},
 	} {
-		request := httptest.NewRequest("POST", path, nil)
+		request := httptest.NewRequest("POST", tc.path, nil)
 		_, pattern := server.WebhookMux().Handler(request)
-		if pattern != path {
-			t.Fatalf("registered pattern = %q, want %q", pattern, path)
+		if pattern != tc.wantPattern {
+			t.Fatalf("registered pattern for %q = %q, want %q", tc.path, pattern, tc.wantPattern)
 		}
 	}
 }
@@ -245,7 +159,7 @@ func dgdAdmissionContextWithUserInfo(
 	if userInfo != nil {
 		requestUserInfo = *userInfo.DeepCopy()
 	}
-	return admission.NewContextWithRequest(context.Background(), admission.Request{
+	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: operation,
 			UserInfo:  requestUserInfo,
@@ -256,4 +170,5 @@ func dgdAdmissionContextWithUserInfo(
 			},
 		},
 	})
+	return features.WithGate(ctx, features.Defaults())
 }
