@@ -27,7 +27,7 @@ The planner offers four `optimization_target` settings that control how scaling 
 | **`throughput`** (default) | Maximizes throughput by scaling based on queue depth and KV cache utilization. Scales up when engines are saturated, scales down when utilization drops. | No | No |
 | **`latency`** | Minimizes latency by scaling aggressively to keep queues short. Scales up at lower utilization thresholds. | No | No |
 | **`load`** | Uses user-defined prefill queue token and decode KV cache utilization thresholds. | No | No |
-| **`sla`** | Targets specific TTFT/ITL SLA values through the Planner engine-query layer and the `aiconfigurator-core` wheel: native AIC estimates when available, online FPM tuning, and FPM regression fallback. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
+| **`sla`** | Targets specific TTFT/ITL SLA values using the Rust engine perf shim: native AIC estimates when available, online FPM tuning, and FPM regression fallback. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
 
 **We recommend starting with the default `throughput` target** because it requires no configuration. Switch to `latency` for latency-sensitive workloads, `load` for explicit prefill queue token and decode KV cache utilization thresholds, or `sla` for precise SLA targeting with native AIC or FPM-based performance modeling.
 
@@ -39,8 +39,8 @@ The planner offers four `optimization_target` settings that control how scaling 
 
 The Planner supports two scaling modes that can run independently or together:
 
-- **Throughput-based scaling (`sla` target only)**: Uses the Planner engine-query layer and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Forward-pass estimates come directly from the `aiconfigurator-core` wheel, with self-benchmark or profiler FPM bootstrap data and live FPM tuning. Adjusts on a longer interval (default 180s). The default `throughput` target instead uses load-based queue and KV-utilization thresholds.
-- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and queries the same Planner engine-query layer for short-term TTFT/ITL estimates. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
+- **Throughput-based scaling**: Uses the engine perf shim and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. The shim can use native AIC estimates, self-benchmark/profiler FPM bootstrap data, and live FPM tuning. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
+- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and queries the same perf shim for short-term TTFT/ITL estimates. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
 
 When both modes are enabled, throughput-based scaling provides a capacity floor (long-term planning) while load-based scaling handles real-time adjustments above that floor.
 
@@ -134,7 +134,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 ### General
 
-**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. For a single-component deployment, set the active role's field; when that field is unset, `min_endpoint` supplies the active role. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** Set `min_endpoint` to a value that avoids scaling below your steady-state traffic floor, and use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
 
 ## Documentation
 
@@ -160,14 +160,12 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
 | `backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
 | `mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
-| `optimization_target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `load` (user-defined prefill queue and decode KV utilization thresholds), `sla` (AIC core performance modeling for SLA targeting) |
+| `optimization_target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `load` (user-defined prefill queue and decode KV utilization thresholds), `sla` (Rust engine perf model SLA targeting) |
 | `environment` | `kubernetes` | Deployment environment |
 | `ttft_ms` | `500.0` | Target Time To First Token (ms) |
 | `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
 | `max_gpu_budget` | `8` | Maximum GPUs across all workers |
-| `min_endpoint` | `1` | Replica floor for aggregated mode, the same floor for prefill and decode in disaggregated mode, or the active role in single-component mode when its role-specific field is `null` |
-| `prefill_min_endpoint` | `null` | Prefill replica floor; replaces the prefill value from `min_endpoint` when set |
-| `decode_min_endpoint` | `null` | Decode replica floor; replaces the decode value from `min_endpoint` when set |
+| `min_endpoint` | `1` | Minimum replicas per worker type |
 | `decode_engine_num_gpu` | `null` | GPUs per decode engine; auto-detected from the deployment when unset |
 | `prefill_engine_num_gpu` | `null` | GPUs per prefill engine; auto-detected from the deployment when unset |
 | `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |

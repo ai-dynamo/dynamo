@@ -22,8 +22,8 @@ Status legend: ✅ validated end to end · ⚠️ available but not yet validate
 | Disaggregated serving (`MultiConnector`: `NixlConnector` + `OffloadingConnector`) | ⚠️ | Validated end to end with the pending Dynamo fix in [#11219](https://github.com/ai-dynamo/dynamo/pull/11219). |
 | Tensor parallelism (TP > 1) | ✅ | Validated with TP=2, including GPU eviction, CPU reload, and one event stream per engine. |
 | Models with sliding-window or Mamba/SSM layers | ✅ | Validated with Gemma-2 and Falcon-H1. The router sees only full-attention KV cache groups. |
-| Disk and multi-tier offloading (`TieringOffloadingSpec`) | ⚠️ | vLLM main emits a unified `STORAGE` medium (FS/OBJ media removed in [vLLM #48123](https://github.com/vllm-project/vllm/pull/48123)); Dynamo maps `STORAGE` to the Disk lower tier. Cache-salted requests: see [Known Limitations](#known-limitations). |
-| Shared-pool routing | 🚧 | Dynamo consumes per-event locality (`LOCAL` or absent → worker-local; `REMOTE` or unknown → dropped). A shared-pool index is still planned. |
+| Disk and multi-tier offloading (`TieringOffloadingSpec`) | 🚧 | vLLM main emits FS and OBJ events; Dynamo tier mapping is in progress. |
+| Shared-pool routing | 🚧 | vLLM main emits optional locality metadata; Dynamo shared-pool indexing is in progress. |
 
 ## Requirements
 
@@ -118,18 +118,6 @@ The GPU and CPU copies then evict independently:
 
 Without this event wiring, offloading still works inside each worker, but the
 router treats CPU-resident prefixes as cache misses.
-
-## Known Limitations
-
-- **Cache-salted requests are not routable through `STORAGE`-tier events.**
-  vLLM's self-describing offload events do not yet carry `extra_keys` (the
-  per-block `cache_salt` and multimodal identifiers), so Dynamo cannot recover
-  the cache namespace and indexes `STORAGE` blocks under their unsalted hash. A
-  salted request then computes a salted query hash that never matches those
-  entries, so the `STORAGE`-tier copy is missed by routing — a lost cache-hit
-  opportunity, not a correctness problem (no wrong KV is returned). Populating
-  `extra_keys` on offload events is a known upstream deferral tracked in
-  vLLM RFC [#49413](https://github.com/vllm-project/vllm/issues/49413).
 
 ## Verification
 

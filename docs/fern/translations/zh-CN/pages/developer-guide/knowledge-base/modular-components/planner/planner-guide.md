@@ -15,7 +15,7 @@ planner 支持四个优化目标，这些目标决定扩缩容决策的方式：
 - **`throughput`**（默认）：基于队列深度和 KV cache 利用率使用静态阈值。不需要 SLA 目标或 profiling。开箱即用。
 - **`latency`**：与 `throughput` 采用相同方法，但使用更激进的阈值，即更早扩容并容忍更少排队。适合对延迟敏感的工作负载。
 - **`load`**：使用用户定义的 prefill 队列 token 阈值和 decode KV 利用率阈值，进行反应式的基于负载扩缩容。
-- **`sla`**：使用 Planner 自有的引擎查询层，并通过 `aiconfigurator-core` Python wheel 获取前向计算估算；同时支持在线 FPM 调优和 FPM 回归回退。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
+- **`sla`**：使用 Rust 引擎性能模型 shim；原生 AIC 可用时直接使用 AIC 估算，并结合在线 FPM 调优，否则回退到 FPM 回归模型。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
 
 **何时使用哪种模式：**
 
@@ -66,7 +66,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：通过 Planner 自有的引擎查询层和 `aiconfigurator-core` wheel，以 ttft_ms/itl_ms 为目标扩缩容。 |
+| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：使用 Rust 引擎性能模型，并以 ttft_ms/itl_ms 为目标扩缩容。 |
 
 当 `optimization_target` 为 `throughput`、`latency` 或 `load` 时，会自动启用基于负载的扩缩容，并禁用基于吞吐量的扩缩容。`ttft_ms`/`itl_ms` 字段会被忽略。
 
@@ -85,7 +85,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | 如何生成可选的性能模型启动数据：`rapid`（AIC 仿真，约 30 秒）、`thorough`（真实 GPU，2-4 小时）或 `none`（跳过）。 |
 
-SLA 模式使用 Planner 自有的引擎查询层。如果配置了 `aic_perf_model`，Planner 会把原生 AIC 模型身份和引擎上限直接传给 `aiconfigurator_core.sdk.RustForwardPassPerfModel`；如果原生 AIC 不支持该模型，wheel 会自动回退到基于观测 FPM 的回归模型。如果没有配置 `aic_perf_model`，wheel 会从 FPM 回归模型启动，并在自基准测试或在线 FPM 观测足够后变为可用。
+SLA 模式使用 Rust 引擎性能模型 shim。如果配置了 `aic_perf_model`，planner 会用原生 AIC 模型身份和引擎上限初始化 shim；如果该模型不被原生 AIC 支持，shim 会自动回退到基于观测 FPM 的回归模型。如果没有配置 `aic_perf_model`，shim 会从 FPM 回归模型启动，并在自基准测试或在线 FPM 观测足够后变为可用。
 
 启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AIC 可用或在线 FPM 足够之前报告 `model_not_ready`。
 
@@ -110,9 +110,7 @@ spec:
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | 基于吞吐量的扩缩容决策之间的秒数。 |
 | `throughput_metrics_source` | string | `frontend` | 用于吞吐量扩缩容的 Prometheus 流量来源：`frontend` 从公共 Frontend 读取 `dynamo_frontend_*` 指标；`router` 从 LocalRouter 读取 `dynamo_component_router_*` 指标。在 GlobalPlanner 部署中，为池本地 Planner 使用 `router`。 |
-| `min_endpoint` | int | `1` | `agg` 模式的最小端点数；在 `disagg` 模式中，将同一最小值同时应用于 prefill 和 decode；在 `prefill` 或 `decode` 单组件模式中，当对应角色专用字段为 `null` 时应用于当前角色。为兼容 scale-to-zero，可设置为 `0`。 |
-| `prefill_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `prefill` 模式的最小 prefill 端点数。设置后会替换 `min_endpoint` 提供的 prefill 值。必须至少为 `1`。 |
-| `decode_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `decode` 模式的最小 decode 端点数。设置后会替换 `min_endpoint` 提供的 decode 值。必须至少为 `1`。 |
+| `min_endpoint` | int | `1` | 要维持的引擎端点最小数量。 |
 | `max_gpu_budget` | int | `8` | planner 可以分配的 GPU 总数上限。 |
 | `ttft_ms` | float | `500.0` | 用于扩缩容决策的 TTFT SLA 目标（毫秒）。 |
 | `itl_ms` | float | `50.0` | 用于扩缩容决策的 ITL SLA 目标（毫秒）。 |
@@ -164,23 +162,6 @@ KV hit rate 和 speculative decode accept length 是引擎/Router 运行时信�
 | `report_interval_hours` | float or `null` | `24.0` | 每 N 小时（模拟时间）生成一份 HTML 诊断报告。设置为 `null` 可禁用周期性报告生成。 |
 | `report_output_dir` | string | `./planner_reports` | HTML 诊断报告的目录。 |
 | `live_dashboard_port` | int | `8080` | 实时诊断 dashboard HTTP 服务器的端口。设置为 `0` 可禁用。启用后，访问 `http://host:port/` 查看累积快照的实时 Plotly 报告。 |
-| `control_api_port` | int | `9086` | 仅监听 loopback 的运行时最小端点 API 端口。设置为 `0` 可禁用。 |
-
-### 运行时最小端点 API
-
-Planner 监听 `127.0.0.1:<control_api_port>`，并在 `/v1/min-endpoints` 支持 `GET` 和部分 `PATCH`。该 API 不提供认证，也不会通过 Kubernetes Service 暴露。分离模式使用 `prefill_min_endpoint` 和 `decode_min_endpoint`；单组件模式只使用当前组件对应的字段；聚合模式使用 `min_endpoint`。更新仅作用于当前进程，不会写回 Planner ConfigMap，并会在下一个 planner tick 生效。
-
-在 Kubernetes 中，先 port-forward 到 Planner pod，再修改当前模式对应的字段：
-
-```bash
-kubectl port-forward pod/<planner-pod> 9086:9086
-curl http://127.0.0.1:9086/v1/min-endpoints
-curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
-  --header 'Content-Type: application/json' \
-  --data '{"decode_min_endpoint": 3}'
-```
-
-更新是原子的。Planner 会拒绝格式错误的值、当前模式未启用的字段，以及超过 `max_gpu_budget` 或已配置 power budget 的最小资源组合。扩容没有组件级最大端点配置；现有的 GPU、power、Global Planner 和集群容量限制继续作为上限。
 
 这些报告中展示的同一组诊断信号也会以 `dynamo_planner_*` 前缀导出为 Prometheus 指标，例如估算的 TTFT/ITL（`dynamo_planner_estimated_ttft_ms`、`dynamo_planner_estimated_itl_ms`）、建议副本数（`dynamo_planner_predicted_num_prefill_replicas`、`dynamo_planner_predicted_num_decode_replicas`）、每个引擎的容量和 FPM 队列深度，以及负载/吞吐量扩缩容决策枚举。
 
@@ -201,7 +182,7 @@ Planner 默认通过内置 plugin pipeline 运行。基础 pipeline cadence 位�
 - `load_adjustment_interval_seconds` 调度 `builtin_load_propose`。它读取 FPM 和 worker count 观测，并执行当前 load-based 算法。
 - `throughput_adjustment_interval_seconds` 调度 `builtin_load_predict` 和 `builtin_throughput_propose`。Throughput propose 依赖同一个 tick 里的 prediction，因此只会在 predict plugin 触发的 tick 中执行。
 - 当两个 proposer 在同一个 tick 都产生目标时，load-based scaling 在 throughput-based scaling 之后运行，保留现有行为：throughput 先更新副本数下限，load-based scaling 再在该 floor 之上调整并应用全局 GPU budget clamp。
-- Plugin pipeline 结束后，planner 会对 builtin 和外部 plugin 的目标统一应用最终的组件有效下限和 GPU-budget safety check，然后才执行扩缩容。
+- Plugin pipeline 结束后，planner 会对 builtin 和外部 plugin 的目标统一应用最终的 `min_endpoint` 和 GPU-budget safety check，然后才执行扩缩容。
 
 #### DGDR 示例
 

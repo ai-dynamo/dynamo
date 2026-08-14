@@ -153,6 +153,6 @@ See [`docs/contribution-guide.md`](docs/fern/contribution-guide.md) for the full
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
 [`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
-[documentation style guide](docs/fern/documentation-style-guide.md): SPDX headers, Fern
+[documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.

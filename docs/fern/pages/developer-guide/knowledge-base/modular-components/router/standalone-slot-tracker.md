@@ -185,11 +185,8 @@ Record prompt blocks on a registered worker rank:
 ```
 
 Returns `201`. `sequence_hashes` is required and may be empty. `new_isl_tokens` defaults
-to `0`; positive values enable prefill-token accounting. Unknown trackers or worker ranks
-return `404`.
-
-Duplicate request IDs return `409` regardless of the target worker. The original
-booking is unchanged.
+to `0`; positive values enable prefill-token accounting. Duplicate request IDs return
+`409`. Unknown trackers or worker ranks return `404`.
 
 ### `POST /prefill_complete`
 
@@ -280,6 +277,4 @@ Projection response order is unspecified to keep the routing read path lean. `/l
 and `/potential_loads` are advisory snapshots, not reservations. A selected worker may
 disappear before `/add`; recompute after `/add` returns `404`. An ambiguous `/add`
 timeout is also consumer-owned: automatically retrying the same request is not
-guaranteed safe. A duplicate returns `409` regardless of the target worker, but the
-consumer cannot infer from a timeout whether the original booking succeeded. Reconcile
-the lifecycle state before retrying.
+guaranteed safe because duplicate adds return `409`.

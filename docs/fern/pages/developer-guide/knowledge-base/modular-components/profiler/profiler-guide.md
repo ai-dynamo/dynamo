@@ -9,7 +9,7 @@ subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model,
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AI Configurator (AIC)](https://github.com/ai-dynamo/aiconfigurator) for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the native AIC model identity passed directly to the `aiconfigurator-core` wheel and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AI Configurator (AIC)](https://github.com/ai-dynamo/aiconfigurator) for performance simulation, candidate enumeration, and configuration picking. When the planner is enabled, the profiler also emits native AIC perf-model identity for the Rust engine perf shim and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
 ## Workflow
 
@@ -128,7 +128,7 @@ Triggered when there is **no planner and no target load**. Maximizes throughput 
 
 ## Planner Integration
 
-When the Planner is enabled, the profiler emits the `aic_perf_model` identity used by the Planner's direct `aiconfigurator-core` integration whenever picked configs are available. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
+When the planner is enabled, the profiler emits `aic_perf_model` identity for the Rust engine perf shim whenever picked configs are available. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
 
 ```yaml
 features:
@@ -165,7 +165,7 @@ The profiler enforces these rules at startup:
 | `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
 | `enable_throughput_scaling: true` without `optimization_target: sla` | Silently coerced. `PlannerConfig` defaults `optimization_target` to `throughput`, which flips `enable_throughput_scaling` to `false` at validation time. Set `optimization_target: sla` explicitly to keep throughput-based scaling enabled. |
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Allowed for planner. The perf model starts from native AIC when available or waits for enough live FPM observations. |
-| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Allowed for Planner. The AIC core model falls back to observed-FPM regression when native AIC estimates are unavailable. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Allowed for planner. The Rust shim falls back to observed-FPM regression when native AIC estimates are unavailable. |
 | `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
 | All AIC rapid experiments return no SLA-feasible configuration | Profiling fails and no DGD is generated. SLA targets are not relaxed automatically. |
 | A real-GPU thorough sweep returns results, but none meet the SLA | Warning logged and the closest measured configuration is selected. |
@@ -491,9 +491,7 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    # Minimum for agg, both roles in disagg, or the active single role when
-    # its role-specific field is unset
-    min_endpoint: 2
+    min_endpoint: 2                            # Minimum endpoints to maintain
     load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
     throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
     load_predictor: arima                      # Load prediction method

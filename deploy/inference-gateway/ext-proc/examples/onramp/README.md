@@ -20,7 +20,7 @@ This on-ramp is available for aggregated serving only at this time.
 The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.26.0` image. Replace it with the vLLM
 image your platform standardizes on if you need another pinned or internally mirrored image.
 KV-aware selection is provided by the runtime-free
-[selection service](../../../../../docs/fern/components/router/standalone-selection.md),
+[selection service](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md),
 which the EPP runs **in-process**: the EPP and the selection service are compiled into one binary,
 so there is no separate selector Deployment and no HTTP hop. The EPP can run single-replica, or
 **replicated** with cross-replica active-load sync between EPP pods (see

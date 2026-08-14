@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner Goodput-per-GPU Sweep
-subtitle: Experimental Sweeper search over Planner policies for MiniMax-M2.5 on B200 GPUs
+subtitle: Experimental Spica search over Planner policies for MiniMax-M2.5 on B200 GPUs
 ---
 
 > [!WARNING]
 > **Experimental.** These replay results characterize one software snapshot and workload. Do not
-> treat them as production capacity guidance or a performance commitment. Sweeper's search behavior
+> treat them as production capacity guidance or a performance commitment. Spica's search behavior
 > and output may change without a standard deprecation period.
 
 Enable the planner (SLA mode) on the same deployment as the
-[router experiment](router-end-to-end-latency-sweep.md), then use Sweeper's smart sweep to **find the
+[router experiment](router-end-to-end-latency-sweep.md), then use Spica's smart sweep to **find the
 planner configuration that maximizes goodput-per-GPU** on the Mooncake toolagent trace, and
 compare against the static deployment and the default planner.
 
@@ -50,7 +50,7 @@ scales the fleet to an average of ~13.5 GPUs instead of pinning 32.
 
 ## Sweep config
 
-`Sweeper.run`, `goal.target = goodput_per_gpu`. Deployment + router + workload + SLA
+`run_smart_search`, `goal.target = goodput_per_gpu`. Deployment + router + workload + SLA
 fixed; only the planner knobs swept (full trace, open-loop):
 
 ```yaml
@@ -65,19 +65,15 @@ search_space:
     - {tp: 4, moe_ep: 4, replicas: 8}           # fixed; planner scales replicas 1..8
   agg_max_num_batched_tokens: [16384]
   agg_max_num_seqs: [512]
-adapters:
-  dynamo.router:
-    search_space:
-      mode: [kv_router]
-      overlap_score_credit: [1.0]
-      prefill_load_scale: [4.0]
-      temperature: [0.0]
-  dynamo.planner:
-    search_space:
-      scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
-                       load_180_10, hybrid_180_5, hybrid_600_5]
-      load_sensitivity: [aggressive, default, conservative]
-      fpm_sampling: [small, default, large, fine]
+  router_mode: [kv_router]                       # fixed tuned router
+  overlap_score_credit: [1.0]
+  prefill_load_scale: [4.0]
+  router_temperature: [0.0]
+  # swept: the planner
+  planner_scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
+                           load_180_10, hybrid_180_5, hybrid_600_5]
+  planner_load_sensitivity: [aggressive, default, conservative]
+  planner_fpm_sampling: [small, default, large, fine]
 workload:
   trace_path: <toolagent_trace.jsonl>            # open-loop: no replay_concurrency
   trace_format: mooncake
@@ -113,7 +109,7 @@ goodput-per-GPU first. `load_scaling_down_sensitivity` 70/80/90 = aggressive/def
 the predictive throughput-scaling policies** — for the `load_*` policies it is inert (so its
 spread within the `load_180_10` family is noise).
 
-| goodput/gpu | avg_gpu | goodput | ttft_ms | tpot_ms | scaling_policy | load_scaling_down_sensitivity | max_num_fpm_samples |
+| goodput/gpu | avg_gpu | goodput | ttft_ms | tpot_ms | planner_scaling_policy | load_scaling_down_sensitivity | max_num_fpm_samples |
 |---|---|---|---|---|---|---|---|
 | 121.0 | 8.26 | 999 | 1121 | 77.8 | load_180_10 | 90 | 128 |
 | 119.1 | 7.76 | 924 | 1249 | 83.8 | load_180_10 | 90 | 32 |
@@ -153,7 +149,7 @@ spread within the `load_180_10` family is noise).
 ## Reproduce
 
 ```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/planner-sweep.yaml
+python -m aisimulate.spica --config path/to/planner-sweep.yaml
 ```
 
 Notes: the planner path needs the `aic-forward-pass` binding; a per-throughput-interval

@@ -11,7 +11,7 @@ This deployment pattern enables dynamic LoRA adapter loading from S3-compatible 
 - Kubernetes cluster with GPU support
 - Helm 3.x installed
 - `kubectl` configured to access your cluster
-- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../../docs/fern/kubernetes/installation-guide.md))
+- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md))
 - HuggingFace token for downloading base and LoRA adapters
 
 ## Files in This Directory
@@ -367,4 +367,4 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 - [Multimodal LoRA Launch Guide](../../../launch/lora/multimodal/README.md) - Local launch with shell scripts
 - [LLM LoRA Deployment](../README.md) - Text-only LoRA deployment pattern
 - [Dynamo Kubernetes Guide](../../../../../../docs/fern/kubernetes/quickstart.mdx) - Platform setup
-- [Installation Guide](../../../../../../docs/fern/kubernetes/installation-guide.md) - Platform installation
+- [Installation Guide](../../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md) - Platform installation

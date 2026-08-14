@@ -65,6 +65,6 @@ kubectl get dgdr qwen-review -n ${NAMESPACE} \
 - `moe-sglang.yaml` is a large multinode example. Adjust its GPU budget, model cache, SLA, and
   scheduling configuration for your cluster before applying it.
 
-See the [DGDR walkthrough](../../../docs/fern/kubernetes/dgdr-guide.md)
+See the [DGDR walkthrough](../../../docs/fern/pages/kubernetes/auto-deployment/auto-deploy-with-dgdr.md)
 and [DGDR reference](../../../docs/fern/kubernetes/dgdr-reference.mdx)
 for field descriptions and lifecycle details.

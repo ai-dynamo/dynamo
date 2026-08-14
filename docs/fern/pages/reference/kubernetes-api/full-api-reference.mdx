@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 181 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 180 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">65 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
 
@@ -538,7 +538,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -624,7 +624,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed by the DGDSA and external autoscalers scale the service via the Scale subresource; when disabled, replicas are set directly. Opt in with `scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because `enabled` defaults to false.
+ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed via DGDSA and external autoscalers can scale the service using the Scale subresource. When disabled, replicas can be modified directly.
 See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -699,7 +699,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -785,7 +785,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed by the DGDSA and external autoscalers scale the service via the Scale subresource; when disabled, replicas are set directly. Opt in with `scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because `enabled` defaults to false.
+ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed via DGDSA and external autoscalers can scale the service using the Scale subresource. When disabled, replicas can be modified directly.
 See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -1750,11 +1750,6 @@ UID of the source pod, recorded so the node agent dumps that specific pod and no
 See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
-
-<ParamField path="containers" type="string array" required={true}>
-Containers narrows the capture to these containers of the source pod. The node agent reads this instead of the source pod's target-container annotation. v1alpha1 supports exactly one container; the cap is lifted when the runtime supports multi-container capture.
-**Validation:** MaxItems: 1  MinItems: 1  Required: \&#123;\&#125;  items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-</ParamField>
 </Accordion>
 
 <Accordion id="podsnapshot" title="PodSnapshot">
@@ -1909,7 +1904,7 @@ PodSnapshotSource identifies the workload captured by a PodSnapshot.
 **Appears in:** [PodSnapshotSpec](#podsnapshotspec)
 
 <ParamField path="podRef" type="PodReference" required={true}>
-PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod (control volume, checkpoint storage mount) before creating the PodSnapshot. The capture target container is carried on PodRef.Containers, not a pod annotation.
+PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod (control volume, target-container annotation, checkpoint storage mount) before creating the PodSnapshot.
 See [PodReference](#podreference).
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
@@ -2180,18 +2175,15 @@ UpdatedServices is the list of services that have completed the rolling update. 
 
 <Accordion id="scalingadapter" title="ScalingAdapter">
 ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-(DGDSA) for replica management. When enabled, the DGDSA owns the replicas field so that
-external autoscalers (HPA, KEDA, Planner) can drive scaling via the Scale subresource.
-
-Enable it with `scalingAdapter: {enabled: true}`. Because `enabled` defaults to false, a
-bare `scalingAdapter: {}` is disabled.
+for replica management. When enabled, the DGDSA owns the replicas field and
+external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="enabled" type="boolean" default="false">
-Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and owns the replicas field. When false (the default), no DGDSA is created and replicas are set directly on the DGD -- so a bare `scalingAdapter: \{\}` is disabled; set `enabled: true` to opt in.
+Enabled indicates whether the ScalingAdapter should be enabled for this service. When true, a DGDSA is created and owns the replicas field. When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2833,8 +2825,9 @@ extraParameters are additional parameters that affect the checkpoint hash. Depre
 <Accordion id="v1beta1-dynamocomponentdeployment" title="DynamoComponentDeployment">
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-v1beta1 is the storage version. The API server transparently converts
-to and from the served v1alpha1 version through
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
 operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
@@ -2888,7 +2881,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2909,7 +2902,7 @@ replicas is the desired number of Pods for this component. When `scalingAdapter`
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+minAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2932,7 +2925,7 @@ See [ModelReference](#v1beta1-modelreference).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter. Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource; omit the field to opt out.
+scalingAdapter opts this component into using the DynamoGraphDeploymentScalingAdapter. When set (even as an empty object, `scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the field to opt out.
 See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2991,7 +2984,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3012,7 +3005,7 @@ replicas is the desired number of Pods for this component. When `scalingAdapter`
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
-minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components rendered as a scaling group (multi-node, inter-pod GMS, or `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove PodClique minAvailable for all other single-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
+minAvailable maps to Grove PodClique minAvailable for single-node and Grove PodCliqueScalingGroup minAvailable for multi-node components. This field determines 1) the minimum number of replicas guaranteed to be gang-scheduled, and 2) when violating minAvailable replicas triggers gang termination. For Grove-backed DynamoGraphDeployment components, minAvailable defaults to 1 when omitted and is immutable after creation. Positive replica counts must be greater than or equal to minAvailable. Replicas may be scaled to 0 as a special scale-to-zero state; minAvailable remains configured but is not enforced again until replicas is scaled back to a positive value. For non-Grove deployments, setting this field will result in a validation error.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3035,7 +3028,7 @@ See [ModelReference](#v1beta1-modelreference).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter. Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource; omit the field to opt out.
+scalingAdapter opts this component into using the DynamoGraphDeploymentScalingAdapter. When set (even as an empty object, `scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the field to opt out.
 See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3073,8 +3066,9 @@ See [ExperimentalSpec](#experimentalspec).
 <Accordion id="v1beta1-dynamographdeployment" title="DynamoGraphDeployment">
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-v1beta1 is the storage version. The API server transparently converts
-to and from the served v1alpha1 version through
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
 operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
@@ -3322,8 +3316,8 @@ The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's component replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-v1beta1 is the storage version; conversion to and from the served v1alpha1
-version is handled by the operator's conversion webhook
+v1alpha1 remains the storage version; conversion between served versions is
+handled by the operator's conversion webhook
 (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 
 
@@ -3553,12 +3547,6 @@ See [FailoverSpec](#v1beta1-failoverspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="grove" type="GroveSpec">
-grove groups Grove-specific rendering options.
-See [GroveSpec](#grovespec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
 checkpoint configures container-image snapshotting and restore for this component. Set `checkpoint.enabled: true` to opt in. Without checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint CR and later restores pods in the same DGD generation from that checkpoint. With checkpointRef, the DGD restores from that existing checkpoint instead. The user-facing shape of this field is still settling, which is why it lives under `experimental` in v1beta1 instead of at the top level.
 See [ComponentCheckpointConfig](#componentcheckpointconfig).
@@ -3707,19 +3695,6 @@ GPUSKUType is the AIC hardware system identifier for a supported GPU.
 - <Badge intent="note" minimal>mi300</Badge>
 </Accordion>
 
-<Accordion id="grovespec" title="GroveSpec">
-GroveSpec groups experimental Grove-specific rendering options.
-
-
-**Kind:** `type`
-**Appears in:** [ExperimentalSpec](#experimentalspec)
-
-<ParamField path="forceScalingGroup" type="boolean">
-forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". Immutable after creation.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
 <Accordion id="hardwarespec" title="HardwareSpec">
 HardwareSpec describes the GPU hardware for profiling and deployment.
 All fields are auto-detected from cluster GPU nodes when omitted
@@ -3843,7 +3818,7 @@ PVCName is the name of the PersistentVolumeClaim containing model weights. The P
 </ParamField>
 
 <ParamField path="pvcModelPath" type="string">
-PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a container-visible absolute path already under PVCMountPath. Such an absolute path is interpreted as container-visible; use the relative form without a leading slash to address the same path prefix within the PVC.
+PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -4200,11 +4175,11 @@ See [OptimizationType](#optimizationtype).
 </Accordion>
 
 <Accordion id="v1beta1-scalingadapter" title="ScalingAdapter">
-ScalingAdapter opts a component into the DynamoGraphDeploymentScalingAdapter (DGDSA).
-It is a marker struct: setting `scalingAdapter` at all -- even as the empty object
-`scalingAdapter: {}` -- creates the DGDSA, which owns the `replicas` field so that
-external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource.
-Omit the field to opt out.
+ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
+(DGDSA). When `scalingAdapter` is set on a component (even as an empty
+object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
+field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
+the Scale subresource. Omitting the field opts the component out.
 
 
 **Kind:** `type`
@@ -4293,12 +4268,12 @@ OSL is the Output Sequence Length (number of tokens).
 </ParamField>
 
 <ParamField path="concurrency" type="float">
-Concurrency is the target concurrency level. Mutually exclusive with the requestRate field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.
+Concurrency is the target concurrency level. Required (or RequestRate) when the planner is disabled.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="requestRate" type="float">
-RequestRate is the target request rate (req/s). Mutually exclusive with the concurrency field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.
+RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

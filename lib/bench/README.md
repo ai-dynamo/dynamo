@@ -124,7 +124,7 @@ request arrives.
 4. The KV router routes the speculative request to the same worker, warming its cache.
 5. When the real next-turn request arrives, the KV router sees high cache overlap on that worker and routes there, yielding a much lower TTFT.
 
-See also: [Agent Hints documentation](../../docs/fern/components/frontend/nvext.md#agent-hints)
+See also: [Agent Hints documentation](../../docs/fern/pages/developer-guide/additional-resources/nvidia-request-extensions-nvext.md#agent-hints)
 
 ## Offline replay
 

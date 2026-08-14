@@ -26,7 +26,6 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 | `dynamo_frontend_*` | HTTP frontend (`python -m dynamo.frontend`) | `/metrics` on `DYN_HTTP_PORT` (default 8000) |
 | `dynamo_component_*` | Backend workers, standalone router | `/metrics` on `DYN_SYSTEM_PORT` (must be set) |
 | `dynamo_router_overhead_*` | Frontend with KV routing | `/metrics` on `DYN_HTTP_PORT` |
-| `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
 | `dynamo_operator_*` | Kubernetes operator | See [Operator Metrics](operator-metrics.mdx) |
 
 Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
@@ -140,7 +139,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_rejection_total" type="counter">
-  Total overload responses surfaced to the client as HTTP 529 by default. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Labeled by `model` and `endpoint` (the API route).
+  Total requests rejected because all workers were busy (surfaced to the client as HTTP 529 by default). Incremented when the router returns `ResourceExhausted`. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges
@@ -283,14 +282,6 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Predicted KV cache hit rate at routing time (0.0–1.0).
 </ParamField>
 
-<ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
-</ParamField>
-
-<ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
-  Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
-</ParamField>
-
 ### Per-request routing overhead
 
 `dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.
@@ -364,16 +355,6 @@ Not all router metrics appear in every deployment. This matrix shows which group
 - **Registered and populated** — the metric appears at `/metrics` with real values.
 - **Registered, always zero** — the metric appears at `/metrics` but is never incremented (useful for dashboards that expect it to exist).
 - **Not registered / Not created** — the metric does not appear at `/metrics` at all.
-
-## Endpoint picker metrics
-
-Emitted by the endpoint picker (EPP) when routing through the Gateway API Inference Extension, at `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090). Set the port to `0` to disable the endpoint.
-
-<ParamField path="dynamo_epp_cached_tokens" type="histogram">
-  Prompt tokens the model server served from its KV cache per request, read from `usage.prompt_tokens_details.cached_tokens` in the response body. This is the *observed* cache hit, as opposed to the overlap the KV router estimates at selection time. Buckets match `dynamo_frontend_cached_tokens` so the two can share a dashboard. The `model` label is the model the pool serves, resolved once at startup rather than from the request body.
-</ParamField>
-
-Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
 
 ## Related
 

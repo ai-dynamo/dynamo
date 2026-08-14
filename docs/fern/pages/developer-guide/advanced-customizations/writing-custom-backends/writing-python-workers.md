@@ -84,43 +84,6 @@ The `model_type` can be:
 
 See `examples/backends` for full code examples.
 
-### Token Overflow Admission
-
-Generation backends can publish a `token_budget` capability through
-`ModelRuntimeConfig`. This lets the frontend reject known-invalid requests with
-HTTP 400 before it starts a streaming response:
-
-```python
-import json
-
-from dynamo.llm import ModelRuntimeConfig
-
-runtime_config = ModelRuntimeConfig()
-runtime_config.set_engine_specific(
-    "token_budget",
-    json.dumps(
-        {
-            "combined_limit": max_model_len,
-            "reject_prompt_overflow": True,
-            "reject_total_overflow": True,
-        }
-    ),
-)
-```
-
-Set `combined_limit` to the maximum accepted input and output token count after
-subtracting any tokens reserved by the engine. Set `reject_prompt_overflow` when
-the engine rejects a prompt that fills or exceeds that limit. Set
-`reject_total_overflow` when the engine rejects
-`input_tokens + max_output_tokens > combined_limit`.
-
-A `false` flag delegates that overflow case to the backend. The frontend does
-not clamp output or truncate prompts. If a backend omits `token_budget`, the
-frontend delegates both cases to the backend. It also ignores malformed
-`token_budget` metadata with a warning. This default keeps custom backends
-compatible, but an over-limit streaming request might begin with HTTP 200
-before the backend reports its error.
-
 ## Component Names
 
 A worker needs three names to register itself: namespace.component.endpoint

@@ -105,16 +105,7 @@ A worker can impose a hard cap independently of Frontend busy detection. Setting
 `--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
 enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
 returns `Server overloaded: worker at capacity`; the Frontend maps the resulting
-rejection to the worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can
-retry the request without changing its allowlist or routing constraints.
-
-The worker rejection does not add a failed-worker exclusion to the routing request or change the
-standalone router protocol. An in-process router can exclude the failed worker with request-local
-state while retrying. In a split or standalone deployment, selection uses the router's current global
-overload and fault state, so a retry can select the same worker again. Worker-local overload
-migration is therefore best-effort in that topology. Pool-scoped `ResourceExhausted` remains
-non-migratable because no eligible worker has known capacity. If either overload error reaches the
-client, the Frontend returns the configured overload status, HTTP 529 by default.
+`ResourceExhausted` error to HTTP 529 and temporarily skips that worker on the next routing decision.
 
 The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
 advanced override, must be at least `2`, and is read only when the engine limit is enabled.

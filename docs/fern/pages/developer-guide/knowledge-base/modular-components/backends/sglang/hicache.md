@@ -17,7 +17,7 @@ SGLang HiCache extends RadixAttention with a multi-tier KV cache that transparen
 What Dynamo adds on top of HiCache:
 
 - **Tier-aware routing.** The KV router tracks which cache tier each block lives on (GPU / Host / External) and uses that when scoring candidate workers — not just device overlap.
-- **Shared-pool awareness.** When an external backend such as Mooncake is configured, the router tracks Mooncake object events so it can discount prefill cost for blocks any worker can fetch, not just blocks the candidate holds locally.
+- **Shared-pool awareness.** When an external backend such as Mooncake is configured, the router queries the shared pool in parallel with its own indexer so it can discount prefill cost for blocks any worker can fetch, not just blocks the candidate holds locally.
 
 If you are running a single worker with HiCache and no shared pool, no Dynamo-side configuration is required — the worker reports KV events to the router as usual.
 
@@ -84,17 +84,15 @@ flowchart LR
 
     Worker -- "KV events (store/remove + medium)" --> Router
     Worker -- "writes pages" --> Mooncake
-    Mooncake -- "object events (stored/removed)" --> Router
+    Router -- "batch_query on each request" --> Mooncake
 ```
 
-The router maintains two indexes:
+On every request the router runs two lookups in parallel:
 
 - Its own radix tree, built from worker KV events (per-tier).
-- A set of Mooncake object keys and verified logical groups, built from the Mooncake master's event stream.
+- A batch query to the Mooncake master for blocks reachable from the shared pool.
 
-Request routing checks both indexes locally. When an event includes SGLang's `group_id`, the first lookup verifies every physical object in the group and caches the result. Later requests use one group lookup per page; any event for that group invalidates the cached result. Events without `group_id` use exact object-key checks.
-
-If the event stream starts after Mooncake already contains objects, the shared-pool index starts empty and learns about subsequent events. A sequence gap clears the shared-pool index to avoid stale hits.
+If the shared-pool query fails, the router falls back to indexer-only scoring and logs a warning. The request still succeeds.
 
 ### Scoring
 
@@ -145,8 +143,7 @@ Earlier SGLang versions do not emit `medium=CPU_PINNED` for Host-tier residency,
 You also need:
 
 - Dynamo router started with `--shared-cache-type hicache` (see [Configuration](#configuration)).
-- A Mooncake master with KV events enabled. This requires the event publisher introduced by [kvcache-ai/Mooncake#2214](https://github.com/kvcache-ai/Mooncake/pull/2214) until that change is available in a Mooncake release.
-- A Mooncake KV event endpoint reachable from the Dynamo frontend host. Worker-side Mooncake config (event endpoint, page size, TP/PP layout, and split-head layout) is published automatically through each worker's registration metadata.
+- A Mooncake master reachable from the Dynamo frontend host. Worker-side Mooncake config (master address, page size, TP/PP layout, split-head layout) is published automatically via each worker's registration metadata when the worker is started with `--hicache-storage-backend mooncake`.
 
 ## Setup
 
@@ -163,16 +160,15 @@ python -m dynamo.sglang \
   --hicache-ratio 2 \
   --hicache-write-policy write_through \
   --hicache-storage-backend mooncake \
-  --hicache-storage-backend-extra-config '{"master_server_address": "mooncake-master.internal:50051", "enable_group_semantics": true}' \
+  --hicache-storage-backend-extra-config '{"master_server_address": "mooncake-master.internal:50051"}' \
   --skip-tokenizer-init
 ```
 
 Launch additional workers on other GPUs / hosts with the same Mooncake config so they back to the same cluster.
 
-**Dynamo frontend** — configure the Mooncake event endpoint and enable tier-aware routing:
+**Dynamo frontend** — enable tier-aware routing:
 
 ```bash
-DYN_MOONCAKE_KV_EVENTS_ENDPOINT=tcp://mooncake-master.internal:5557 \
 python -m dynamo.frontend \
   --http-port 8000 \
   --router-mode kv \
@@ -184,15 +180,12 @@ python -m dynamo.frontend \
 
 | Flag                        | Env var                       | Default | Description                                                                                                                                                        |
 | --------------------------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--shared-cache-type`       | `DYN_SHARED_CACHE_TYPE`       | `none`  | `none` disables shared-pool tracking; `hicache` enables the Mooncake event-backed index.                                                                           |
-| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.5`   | Discount factor for shared-pool hits. `0.0` ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally.             |
-| —                           | `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` | unset | Mooncake PUB endpoint consumed by the frontend. When unset, Dynamo uses one consistently advertised worker endpoint. |
+| `--shared-cache-type`       | `DYN_SHARED_CACHE_TYPE`       | `none`  | `none` disables shared-pool lookups; `hicache` enables Mooncake queries.                                                                                           |
+| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.5`   | Discount factor for shared-pool hits. `0.0` queries but ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally. |
 
 Per-request overrides are available via `RouterConfigOverride.shared_cache_multiplier` for A/B experimentation without restarting the router.
 
-Set `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` on the frontend to the Mooncake PUB endpoint, such as `tcp://mooncake-master.internal:5557`. The endpoint must be reachable from the frontend. Workers can advertise the same variable as a fallback, but a missing worker value does not disable shared-cache routing.
-
-Set `enable_group_semantics` to `true` in `--hicache-storage-backend-extra-config` to include SGLang logical group IDs in Mooncake metadata. Dynamo falls back to exact physical-key checks when group metadata is unavailable.
+No extra flags are required on the worker. When `--hicache-storage-backend mooncake` is set, Dynamo publishes the required metadata (page size, TP/PP layout, master address) via the worker's `ModelRuntimeConfig.engine_specific` blob under the key `sglang_hicache_mooncake`.
 
 ## Verification
 
@@ -206,13 +199,12 @@ python -m dynamo.sglang ... --log-level debug 2>&1 | grep -E 'BlockStored|BlockR
 
 If `medium` is missing or Host-tier transitions never report `CPU_PINNED`, confirm that the worker runs SGLang 0.5.11 or later (or a custom build that includes PR #22894).
 
-**Router sees the shared pool.** Shared-cache metrics are exposed on the frontend's Prometheus endpoint:
+**Router sees the shared pool.** Two new histograms are exposed on the frontend's Prometheus endpoint:
 
-| Metric                                    | Meaning                                                                  |
-| ----------------------------------------- | ------------------------------------------------------------------------ |
-| `router_shared_cache_hit_rate`            | Fraction of request blocks found in the shared pool (0.0–1.0).           |
-| `router_shared_cache_beyond_blocks`       | Blocks in the shared pool _beyond_ the selected worker's device overlap. |
-| `dynamo_router_shared_cache_errors_total` | Shared-cache query and Mooncake subscriber failures.                     |
+| Metric                              | Meaning                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------ |
+| `router_shared_cache_hit_rate`      | Fraction of request blocks found in the shared pool (0.0–1.0).           |
+| `router_shared_cache_beyond_blocks` | Blocks in the shared pool _beyond_ the selected worker's device overlap. |
 
 ```bash
 curl -s localhost:8000/metrics | grep shared_cache
@@ -222,12 +214,11 @@ curl -s localhost:8000/metrics | grep shared_cache
 
 | Symptom                                                  | Likely cause                                                                 | Fix                                                                                           |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `shared_cache_hit_rate` is always 0                     | Event endpoint missing, unreachable, or connected after objects were stored | Set `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` on the frontend and inspect `dynamo_router_shared_cache_errors_total`. |
-| Events only ever carry `medium=GPU`                     | SGLang older than 0.5.11 or a custom build missing [PR #22894](https://github.com/sgl-project/sglang/pull/22894) | Upgrade to SGLang 0.5.11 or later. |
-| Workers registered but router never tracks shared cache | `--shared-cache-type` left at default `none`                                | Set `--shared-cache-type hicache` on the frontend.                                        |
-| Shared hits do not affect worker selection              | `--shared-cache-multiplier 0.0`                                             | Raise the multiplier — typical starting range is `0.3`–`0.7`.                             |
+| `shared_cache_hit_rate` is always 0                      | Mooncake master unreachable from the router host                             | Check network path; the router logs `Shared cache query failed` when it can't reach Mooncake. |
+| Events only ever carry `medium=GPU`                      | SGLang older than 0.5.11 or a custom build missing [PR #22894](https://github.com/sgl-project/sglang/pull/22894) | Upgrade to SGLang 0.5.11 or later.                                                      |
+| Workers registered but router never queries shared cache | `--shared-cache-type` left at default `none`                                 | Set `--shared-cache-type hicache` on the frontend.                                            |
+| Queries issued but winning worker rarely changes         | `--shared-cache-multiplier 0.0`                                              | Raise the multiplier — typical starting range is `0.3`–`0.7`.                                 |
 | Page-size mismatch warnings                              | Router `--page-size` doesn't match worker `--page-size`                      | They must agree; the router hashes pages using the worker's page size.                        |
-| Mooncake page-size mismatch on a DCP worker              | DCP widens radix-event blocks but Mooncake objects retain the physical page size | DCP with Mooncake shared-cache tracking is unsupported; use `--shared-cache-type none`.     |
 | Router logs "no workers have HiCache enabled"            | No worker published `sglang_hicache_mooncake` metadata                       | Confirm workers started with `--hicache-storage-backend mooncake`.                            |
 
 ## Further Reading

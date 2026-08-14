@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: GLM-5-FP8 Disaggregated Pareto Sweep
-subtitle: Experimental Sweeper search for a GLM-5-FP8 Pareto frontier on B200 GPUs
+subtitle: Experimental Spica search for a GLM-5-FP8 Pareto frontier on B200 GPUs
 ---
 
 > [!WARNING]
 > **Experimental.** These replay results characterize one software snapshot and workload. Do not
-> treat them as production capacity guidance or a performance commitment. Sweeper's search behavior
+> treat them as production capacity guidance or a performance commitment. Spica's search behavior
 > and output may change without a standard deprecation period.
 
 This replay-backed sweep targets the InferenceX/SemiAnalysis (SA) **GLM-5-FP8 / B200 /
-Dynamo with SGLang / 1k-1k / disaggregated** frontier. It tests whether Sweeper can discover competitive
+Dynamo with SGLang / 1k-1k / disaggregated** frontier. It tests whether Spica can discover competitive
 deployment mappings without pinning the parallel shape or replica count.
 
 ## Setup
@@ -43,9 +43,9 @@ correct software baseline for this sweep; the earlier pre-fix replay curve is no
 |---|---:|---:|
 | SemiAnalysis measured | 64,587 | 100% |
 | latest AI Configurator and Dynamo Replay baseline | 53,825 | 83.3% |
-| Sweeper sweep | 61,093 | **94.6%** |
+| Spica sweep | 61,093 | **94.6%** |
 
-Hypervolume uses reference point `(0, 0)`. Sweeper reaches **113.5%** of the latest replay
+Hypervolume uses reference point `(0, 0)`. Spica reaches **113.5%** of the latest replay
 baseline's hypervolume by finding deployment mappings beyond the fixed SA mapping schedule.
 
 ## Search encoding
@@ -66,7 +66,7 @@ provide one config as a strict pin or several configs as a custom projection poo
 ## Configuration
 
 The reference configuration is
-`aisimulate/examples/sweeper/configs/glm5-disagg-pareto-frontier.yaml`:
+`examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml`:
 
 ```yaml
 search_space:
@@ -77,6 +77,8 @@ search_space:
   hardware_sku: b200_sxm
   gpu_budget: 72
   context_length: 2048
+  router_mode: [round_robin]
+  planner_scaling_policy: [disabled]
 workload:
   isl: 1024
   osl: 1024
@@ -123,7 +125,7 @@ Representative non-dominated points:
 | 50.30 | 115.3 | 64 | 7,038 | `1xDEP8 + 7xDEP8` |
 | 87.79 | 3.6 | 24 | 1 | `1xTEP8 + 2xTP8` |
 
-![GLM-5-FP8 B200 disaggregated Pareto frontier comparing Sweeper, the fixed replay baseline, and measured results](../../../../../../assets/img/sweeper-glm5-disagg-pareto-frontier-sweep.png)
+![GLM-5-FP8 B200 disaggregated Pareto frontier comparing Spica, the fixed replay baseline, and measured results](../../../../../../assets/img/spica-glm5-disagg-pareto-frontier-sweep.png)
 
 The exact Pareto filter returns 204 points because continuous load values produce many tiny
 tradeoffs along otherwise flat regions. The representative table and plot retain the useful
@@ -149,11 +151,9 @@ The packaged dependencies support this configuration's KV-capacity and candidate
 calculations. Reproducing the historical frontier still depends on AI Configurator performance
 database coverage for B200/SGLang/GLM-5-FP8 and on Replay behavior in the runtime snapshot.
 
-## Reproduce
-
 ```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py \
-  --config aisimulate/examples/sweeper/configs/glm5-disagg-pareto-frontier.yaml
+python -m aisimulate.spica \
+  --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
 The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo's attention-DP

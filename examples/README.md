@@ -27,8 +27,8 @@ This directory contains practical examples demonstrating how to deploy and use D
 Learn fundamental Dynamo concepts through these introductory examples:
 
 - **[Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart)** - Simple local Dynamo setup across supported backends
-- **[Disaggregated Serving](../docs/fern/features/disaggregated-serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
-- **[Multi-node TensorRT-LLM](../docs/fern/backends/trtllm/multinode/trtllm-multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
+- **[Disaggregated Serving](../docs/fern/pages/kubernetes/disaggregated-serving/overview.md)** - Prefill/decode separation for enhanced performance and scalability
+- **[Multi-node TensorRT-LLM](../docs/fern/pages/developer-guide/additional-resources/tensorrt-llm-details/multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
 
 ## Framework Support
 
@@ -56,7 +56,7 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 ## Getting Started
 
-1. **Choose your deployment pattern**: Start with the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) for a simple local deployment, or explore [Disaggregated Serving](../docs/fern/features/disaggregated-serving/README.md) for advanced architectures.
+1. **Choose your deployment pattern**: Start with the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) for a simple local deployment, or explore [Disaggregated Serving](../docs/fern/pages/kubernetes/disaggregated-serving/overview.md) for advanced architectures.
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
@@ -82,4 +82,4 @@ If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll a
 | **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
 | **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
 
-See the [Kubernetes Installation Guide](../docs/fern/kubernetes/installation-guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
+See the [Kubernetes Installation Guide](../docs/fern/pages/kubernetes/installation/install-dynamo.md#prerequisites) for detailed setup instructions and pre-deployment checks.

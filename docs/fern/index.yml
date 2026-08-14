@@ -724,36 +724,28 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/overview.md
-                  - section: Sweeper (Experimental)
-                    slug: sweeper
+                  - section: Spica (Experimental)
+                    slug: spica
                     collapsed: true
                     contents:
                       - page: Overview
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md
-                      - page: Quickstart
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/quickstart.md
-                      - page: Tutorial
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/tutorial.md
-                      - page: Architecture
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/architecture.md
-                      - page: Configuration
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md
+                      - page: Search Flow
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-flow.md
                       - page: Optimization Goals
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/optimization-goals.md
                       - page: Traffic
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md
-                      - page: Results
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/results.md
-                      - page: Sweep Configuration Providers
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/sweep-config-provider.md
-                      - page: Dynamo Integration
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/traffic.md
+                      - page: Search Space
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-space.md
+                      - page: Unrolled Samples
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/unrolled-samples.md
                       - page: GLM-5-FP8 Pareto Sweep
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/glm-5-fp8-pareto-sweep.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/glm-5-fp8-pareto-sweep.md
                       - page: Planner Goodput-per-GPU Sweep
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/planner-goodput-per-gpu-sweep.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/planner-goodput-per-gpu-sweep.md
                       - page: Router End-to-End Latency Sweep
-                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/router-end-to-end-latency-sweep.md
+                        path: pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/router-end-to-end-latency-sweep.md
               - section: KVBM
                 collapsed: true
                 contents:
@@ -883,8 +875,6 @@ navigation:
         contents:
           - page: Building from Source
             path: pages/developer-guide/advanced-customizations/building-from-source.md
-          - page: Write Custom Routing Strategies
-            path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: pages/developer-guide/advanced-customizations/custom-vision-encoders.md
@@ -1095,8 +1085,6 @@ navigation:
         contents:
           - page: Runtime Configuration
             path: pages/reference/components/runtime-configuration.mdx
-          - page: TLS Configuration
-            path: pages/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: pages/reference/components/frontend-configuration.mdx
           - page: Planner Configuration

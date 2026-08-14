@@ -110,12 +110,6 @@ Additional TCP-specific environment variables:
 - `DYN_TCP_CONNECT_TIMEOUT`: Connect timeout for TCP client (default: 3 seconds)
 - `DYN_TCP_CHANNEL_BUFFER`: Request channel buffer size for TCP client (default: 100)
 
-**Encryption:**
-
-TCP request-plane traffic can be encrypted with TLS. See the
-[TLS reference](../../../../reference/components/tls-configuration.mdx) for the
-`DYN_TCP_TLS_*` environment variables, CLI flags, and setup.
-
 ### Using NATS
 
 NATS provides a brokered request plane and can also carry KV events and router replica synchronization over NATS Core.

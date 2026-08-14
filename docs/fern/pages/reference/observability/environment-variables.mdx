@@ -29,7 +29,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
     ```bash
     export DYN_SYSTEM_PORT=8081
-    export DYN_LOGGING_CONSOLE_FORMAT=jsonl
+    export DYN_LOGGING_JSONL=true
     export DYN_LOG=info
 
     # Frontend (serves dynamo_frontend_* on DYN_HTTP_PORT, default 8000)
@@ -51,8 +51,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
       name: vllm-agg-tracing
     spec:
       envs:                              # applied to every component
-        - name: DYN_LOGGING_CONSOLE_FORMAT
-          value: "jsonl"
+        - name: DYN_LOGGING_JSONL
+          value: "true"
         - name: OTEL_EXPORT_ENABLED
           value: "true"
         - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
@@ -150,14 +150,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 ## Logging
 
-<ParamField path="DYN_LOGGING_CONSOLE_FORMAT" type="string" default="readable">
-  Console output format. Supported values are `readable` and `jsonl`; surrounding whitespace is ignored. When unset or blank, Dynamo falls back to `DYN_LOGGING_JSONL` for backward compatibility. This setting does not control OTLP export.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>readable</Badge> <Badge intent="note" minimal>jsonl</Badge></span>
-</ParamField>
-
 <ParamField path="DYN_LOGGING_JSONL" type="boolean" default="false">
-  Legacy JSONL switch used when `DYN_LOGGING_CONSOLE_FORMAT` is unset or blank. It also remains a local trace-context enablement signal for backward compatibility when the new setting explicitly selects readable output.
+  Emit logs as JSONL. When enabled, logs include `trace_id` and `span_id` fields and spans are created per request. Recommended for Loki.
 </ParamField>
 
 <ParamField path="DYN_LOGGING_SPAN_EVENTS" type="boolean" default="false">
@@ -281,7 +275,7 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">
-  Comma-separated sinks: `file`, `stderr`, `nats`, `otel`, and `s3`.
+  Comma-separated sinks: `file`, `stderr`, `nats`, and `otel`.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_FILE_PATH" type="string" default="/tmp/dynamo-request-trace">
@@ -318,26 +312,6 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 
 <ParamField path="DYN_REQUEST_TRACE_FILE_ROLL_LINES" type="integer">
   Optional gzip roll threshold in records.
-</ParamField>
-
-<ParamField path="DYN_REQUEST_TRACE_S3_BUCKET" type="string">
-  Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`; startup fails if unset.
-</ParamField>
-
-<ParamField path="DYN_REQUEST_TRACE_S3_REGION" type="string">
-  Region override for the `s3` sink. When unset, the client uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`.
-</ParamField>
-
-<ParamField path="DYN_REQUEST_TRACE_S3_PREFIX" type="string">
-  Object key prefix for the `s3` sink. When unset, records land at the bucket root. Keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`.
-</ParamField>
-
-<ParamField path="DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES" type="integer" default="67108864">
-  Batch roll threshold for the `s3` sink in uncompressed bytes. When the pending batch reaches this size it is gzipped and uploaded as one object.
-</ParamField>
-
-<ParamField path="DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS" type="integer" default="10000">
-  Periodic flush interval for the `s3` sink in milliseconds. A partial batch is uploaded when this elapses so low-volume traces still reach S3.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT" type="string">

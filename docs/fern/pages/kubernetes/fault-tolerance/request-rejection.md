@@ -132,13 +132,9 @@ Optional. A worker can independently cap concurrent engine work and queue only a
 ```
 
 When all `N` engine slots and the overflow queue are full, the worker rejects the request and the
-Frontend returns HTTP 529 when migration is disabled or its retry attempts do not find capacity.
-With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on another
-eligible worker first. Split or standalone routing uses global overload and fault state, so its
-retry is best-effort and can select the same worker again.
-`DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size, defaults to `16`, must be
-at least `2`, and has an effect only when the engine limit is set. The effective cap is `N + Q`
-in-flight requests per worker.
+Frontend returns HTTP 529. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue
+size, defaults to `16`, must be at least `2`, and has an effect only when the engine limit is set. The
+effective cap is `N + Q` in-flight requests per worker.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
 fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)

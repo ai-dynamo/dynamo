@@ -97,36 +97,7 @@ All `KvRouter` flags from `dynamo.router` (`--router-temperature`, `--use-kv-eve
 
 ## Observability
 
-The router emits INFO logs for lifecycle transitions and DEBUG logs for per-request route decisions. These lines let you confirm that a request went through ThunderAgent, whether it was a one-off passthrough or a program-scoped turn, and which worker hint or selected worker was used.
-
-**Request routing** — logged at DEBUG once per request:
-
-```text
-thunderagent.route path=<program|passthrough|session_final> ...
-```
-
-For program-scoped traffic, the line includes `program`, `prompt_tokens`, `worker_hint`, `waited_seconds`, `was_paused`, `soft_demoted`, and `priority_jump`. When the first response chunk carries backend worker attribution, the router also logs at DEBUG:
-
-```text
-thunderagent.route_selected program=<program_id> worker=<id> source=first_chunk
-```
-
-**Lifecycle transitions** — logged when a program is created, paused, resumed, or terminated:
-
-```text
-thunderagent.program created program=<program_id> ...
-thunderagent.program paused program=<program_id> reason=<admission_full|pressure> ...
-thunderagent.program resumed program=<program_id> worker=<id> ...
-thunderagent.program terminated program=<program_id> ...
-```
-
-**Request completion** — logged at DEBUG after token accounting runs:
-
-```text
-thunderagent.request_complete program=<program_id> prompt_tokens=<n> completion_tokens=<n> ...
-```
-
-The scheduler also emits a per-tick INFO summary on each side of the control loop, so both pause and resume activity are visible at INFO without enabling DEBUG.
+The scheduler emits a per-tick INFO summary on each side of the control loop, so both pause and resume activity are visible at INFO without enabling DEBUG. Per-program detail stays at DEBUG.
 
 **Pause side** — logged when a worker pauses or marks any program in a tick:
 
@@ -144,18 +115,14 @@ scheduler.tick resumed=<N> still_paused=<M>
 
 `resumed` is the number of programs resumed this tick and `still_paused` is the size of the paused table afterward. This line is symmetric to the pause-side summary; before it existed, pause was observable at INFO but resume was only visible at DEBUG, leaving a gap when reconstructing a control-loop cycle from INFO logs alone.
 
-### Status and Metrics Endpoints
+**Per-program detail (DEBUG):**
 
-ThunderAgent serves two Dynamo runtime endpoints alongside `generate`:
+```text
+Paused program <program_id> (tokens=<n>)
+Resumed program <program_id> -> worker=<id> (tokens=<n>)
+```
 
-- `<namespace>.thunderagent_router.status` returns scheduler state, active/paused program counts, per-program lifecycle state, per-worker utilization, and request counters.
-- `<namespace>.thunderagent_router.metrics` returns counters and gauges shaped for quick operational checks, including created/ended programs, admitted/paused requests, pause/resume totals, forced resumes, and per-worker utilization.
-
-These are Dynamo runtime endpoints, not public OpenAI HTTP routes. Use them from another Dynamo component or a small runtime client connected to the same namespace.
-
-### Response Route Proof
-
-For response-level debugging, request `nvext.extra_fields=["engine_data"]`. Only when that field is requested, ThunderAgent adds a `thunderagent` object under `nvext.engine_data` on generated chunks, with fields such as `handled_by`, `path`, `program_id`, `was_paused`, `waited_seconds`, `priority_jump`, `assigned_worker_hint`, and `selected_worker_id` when worker attribution is available.
+Enable these by lowering the log level for `dynamo.thunderagent_router`. They give the exact program identities behind each INFO summary count.
 
 For per-request tracing (token counts, cache hits, worker placement), the router also integrates with [Agent Tracing](agent-tracing.md#enable-output): set `DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM call. Harness tool-event spans are separate: they require `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
 

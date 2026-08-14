@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Router End-to-End Latency Sweep
-subtitle: Experimental Sweeper search over KV router settings for MiniMax-M2.5 on B200 GPUs
+subtitle: Experimental Spica search over KV router settings for MiniMax-M2.5 on B200 GPUs
 ---
 
 > [!WARNING]
 > **Experimental.** These replay results characterize one software snapshot and workload. Do not
-> treat them as production capacity guidance or a performance commitment. Sweeper's search behavior
+> treat them as production capacity guidance or a performance commitment. Spica's search behavior
 > and output may change without a standard deprecation period.
 
-Reproduce the DynoSim router experiment, then use Sweeper's smart sweep to **find the
+Reproduce the DynoSim router experiment, then use Spica's smart sweep to **find the
 KV-router configuration that minimizes mean end-to-end latency** on the Mooncake toolagent
 trace, and validate the winner against the default-router baseline on the full trace.
 
@@ -32,7 +32,7 @@ concurrency) so any change in e2e latency is attributable to the **router** alon
 
 ## Sweep config
 
-Searched with `Sweeper.run` (Vizier GP-bandit), `goal.target = e2e_latency`. Search
+Searched with `run_smart_search` (Vizier GP-bandit), `goal.target = e2e_latency`. Search
 runs on a 2k-request subset (fast, representative — same long-context mix); the winner is
 then validated on the full trace.
 
@@ -48,13 +48,12 @@ search_space:
     - {tp: 4, moe_ep: 4, replicas: 8}           # fixed: TEP, 8 workers x TP4
   agg_max_num_batched_tokens: [16384]
   agg_max_num_seqs: [512]
-adapters:
-  dynamo.router:
-    search_space:
-      mode: [kv_router, round_robin]
-      overlap_score_credit: [0.0, 0.5, 1.0]
-      prefill_load_scale: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
-      temperature: [0.0, 0.2, 0.5, 1.0]
+  planner_scaling_policy: [disabled]            # static — no autoscaling
+  # swept: the router
+  router_mode: [kv_router, round_robin]
+  overlap_score_credit: [0.0, 0.5, 1.0]         # kv-router hard-caps this at 1.0
+  prefill_load_scale: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+  router_temperature: [0.0, 0.2, 0.5, 1.0]
 workload:
   trace_path: <toolagent_trace.jsonl>           # 2k subset for the search; full trace to validate
   trace_format: mooncake
@@ -140,10 +139,10 @@ Every distinct config the Vizier sweep evaluated (2k subset, c=32), best mean-e2
 ## Reproduce
 
 ```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/router-sweep.yaml
+python -m aisimulate.spica --config path/to/router-sweep.yaml
 ```
 
 Run the winning router configuration against the full trace with
 `dynamo.replay.run_trace_replay`. The AI Configurator performance model needs the
 `aic-forward-pass` binding. To suppress router logs, set `RUST_LOG=error`.
-The Router adapter validates the configured search choices before the study starts.
+`prefill_load_scale` values up to 32 require the extended `SEARCH_CHOICES` in `config.py`.

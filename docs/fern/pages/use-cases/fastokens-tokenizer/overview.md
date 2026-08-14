@@ -39,10 +39,6 @@ Stay on the default backend if:
 
 ## Enable and Validate FastTokens
 
-> [!WARNING]
-> Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
-> Set `--no-tokenizer-fallback` or `DYN_TOKENIZER_FALLBACK=false` to adopt the future behavior now.
-
 <Steps>
   <Step title="Quick Start">
     `fastokens` is a **frontend** setting. Enable it on the Frontend component with the `DYN_TOKENIZER` environment variable:
@@ -70,8 +66,6 @@ Stay on the default backend if:
 
     You can also set the same option with the `--tokenizer fastokens` frontend flag. The flag takes precedence when both settings are present.
 
-    To require `fastokens`, set `DYN_TOKENIZER_FALLBACK=false` or add `--no-tokenizer-fallback`. The frontend then reports an error during model initialization when `fastokens` cannot load the tokenizer instead of using HuggingFace.
-
     To return to the default HuggingFace tokenizer backend, set `DYN_TOKENIZER=default` or omit it. Changing the value requires the Frontend pod to be replaced, which `kubectl apply` does automatically.
 
     No client changes are required. Request payloads, OpenAI-compatible API behavior, and streamed responses remain the same.
@@ -92,7 +86,7 @@ Stay on the default backend if:
     Failed to load fastokens, falling back to HuggingFace
     ```
 
-    The default fallback keeps the deployment healthy, but the model does not receive the `fastokens` speedup. With tokenizer fallback disabled, the same loading failure stops model initialization.
+    The fallback keeps the deployment healthy, but the model does not receive the `fastokens` speedup.
   </Step>
 
   <Step title="Measure Your Workload">
@@ -121,7 +115,7 @@ Stay on the default backend if:
   - **Encoding**: `fastokens` converts prompt text to token IDs.
   - **Decoding**: HuggingFace `tokenizers` converts generated token IDs back to text.
 
-  Both backends load from the same `tokenizer.json`, so supported tokenizers should produce the same token IDs as the default HuggingFace path. If `fastokens` cannot load the tokenizer file, Dynamo logs a warning and falls back to the default backend. Set `--no-tokenizer-fallback` to make this loading failure stop model initialization.
+  Both backends load from the same `tokenizer.json`, so supported tokenizers should produce the same token IDs as the default HuggingFace path. If `fastokens` cannot load the tokenizer file, Dynamo logs a warning and falls back to the default backend instead of dropping requests.
 
   ```mermaid
   flowchart TD
@@ -129,8 +123,7 @@ Stay on the default backend if:
       Kind -->|BPE tokenizer.json| Load{"fastokens loads?"}
       Kind -->|.model / .tiktoken| Other["Use existing TikToken backend"]
       Load -->|Yes| Fast["Encode with fastokens<br/>Decode with HuggingFace"]
-      Load -->|No, fallback enabled| Warn["Log warning"] --> Default["Use HuggingFace backend"]
-      Load -->|No, fallback disabled| Fail["Model initialization fails"]
+      Load -->|No| Warn["Log warning"] --> Default["Use HuggingFace backend"]
       Fast --> Serve["Serve requests"]
       Default --> Serve
       Other --> Serve
@@ -142,7 +135,7 @@ Stay on the default backend if:
 | Tokenizer format | Behavior with `--tokenizer fastokens` |
 |---|---|
 | BPE `tokenizer.json` | Dynamo tries to encode with `fastokens` and decode with HuggingFace. |
-| BPE `tokenizer.json` with unsupported components | Dynamo logs a warning and falls back to HuggingFace by default. With tokenizer fallback disabled, model initialization fails. |
+| BPE `tokenizer.json` with unsupported components | Dynamo logs a warning and falls back to HuggingFace. |
 | TikToken `.model` or `.tiktoken` | Unchanged. Dynamo uses the existing TikToken backend. |
 
 `fastokens` targets BPE tokenizer pipelines. It is focused on inference and does not support every HuggingFace `tokenizers` feature; additional encoding outputs and some normalizers or pre-tokenizers are not available.
@@ -159,19 +152,15 @@ For any new model, validate on representative prompts before rolling out broadly
   </Accordion>
 
   <Accordion title="Why did fastokens fall back to HuggingFace?">
-    The model's tokenizer file uses a feature that `fastokens` does not support, or it is not a BPE `tokenizer.json` path. Dynamo has already fallen back to HuggingFace and should keep serving traffic. Check the tokenizer format, compare it against the [tested models list](https://github.com/crusoecloud/fastokens#tested-models), and use `--tokenizer default` to avoid the warning. For a deployment that requires `fastokens`, use `--no-tokenizer-fallback` so an unsupported tokenizer fails during model initialization.
+    The model's tokenizer file uses a feature that `fastokens` does not support, or it is not a BPE `tokenizer.json` path. Dynamo has already fallen back to HuggingFace and should keep serving traffic. Check the tokenizer format, compare it against the [tested models list](https://github.com/crusoecloud/fastokens#tested-models), and use `--tokenizer default` to avoid the warning.
   </Accordion>
 
   <Accordion title="Why do the logs show an unrecognized DYN_TOKENIZER value?">
-    Use `default`, `fastokens`, or `basetenkenizer` for `DYN_TOKENIZER`. Values such as `fast`, `hf`, or `huggingface` are benchmark-runner aliases, not valid values for the frontend environment variable.
-  </Accordion>
-
-  <Accordion title="Why does DYN_TOKENIZER_FALLBACK report an invalid value?">
-    `DYN_TOKENIZER_FALLBACK` is parsed strictly. Use `true`/`false`, `1`/`0`, `on`/`off`, or `yes`/`no`. An invalid value fails model initialization instead of silently enabling the default fallback behavior. In dynamic mode, discovery retries the load while the frontend continues running.
+    Use only `fastokens` or `default` for `DYN_TOKENIZER`. Values such as `fast`, `hf`, or `huggingface` are benchmark-runner aliases, not valid values for the frontend environment variable.
   </Accordion>
 
   <Accordion title="What happens when the model uses .model or .tiktoken files?">
-    The `fastokens` and `basetenkenizer` settings have no effect for TikToken-format tokenizers. Dynamo uses the existing TikToken backend, so you should not expect either alternate-backend activation log or speedup.
+    The `fastokens` setting has no effect for TikToken-format tokenizers. Dynamo uses the existing TikToken backend, so you should not expect the `Using fastokens tokenizer backend` log or a `fastokens` speedup.
   </Accordion>
 
   <Accordion title="Why doesn't TTFT improve?">

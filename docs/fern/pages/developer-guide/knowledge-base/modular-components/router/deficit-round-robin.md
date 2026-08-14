@@ -300,7 +300,3 @@ tokens of DRR credit per round and regular earns 128, producing the ideal
 `256:64` split. Equal request costs make the queued token-service ratio visible
 directly in request completions; with varied request sizes, `quantum` continues
 to control the share of uncached-token service.
-
-The CPU Mocker regression test at
-`tests/router/test_policy_class.py`
-asserts both the larger premium share and continued regular progress.

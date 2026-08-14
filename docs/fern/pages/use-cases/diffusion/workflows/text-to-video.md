@@ -200,14 +200,14 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 ## Overview
 
-- **Default model:** `FastVideo/FastWan2.1-T2V-1.3B-Diffusers`.
-- **Typed API:** The worker builds `GeneratorConfig` once at startup and creates a `GenerationRequest` for each `/v1/videos` request.
-- **Optimized inference:** `torch.compile` and NVFP4 transformer quantization are available through `--torch-compile` and `--fp4-quantization`; the legacy `--enable-optimizations` flag remains as a shortcut for both.
+- **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
+- **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
+- **Optimized inference:** FP4 quantization and `torch.compile` are available via `--enable-optimizations`; attention backend selection is controlled separately via `--attention-backend`.
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
-> [!IMPORTANT]
-> `worker.py` defaults to `--attention-backend VIDEO_SPARSE_ATTN` and routes `VSA_sparsity=0.8` through FastVideo's typed `PipelineSelection.experimental` config. Keep this backend for FastWan 2.1 models; forcing `TORCH_SDPA` can instantiate a non-VSA Wan block and fail checkpoint loading. Use `--attention-backend TORCH_SDPA` for the LTX-2 compatibility path validated by the B300 smoke test.
+> [!WARNING]
+> `worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
 
 ## Kubernetes Deployment
 
@@ -233,21 +233,30 @@ Kubernetes is the recommended path for running FastVideo on Dynamo. The steps be
 
 <Step title="Build and push the FastVideo runtime image">
 
-The runtime image is built from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/Dockerfile):
+The runtime image is built from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile):
 
 - Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
-- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) `0.2.0` from PyPI, which provides the `fastvideo.api` typed surface and NVFP4 transformer quantization support
-- Installs the `ai-dynamo` package with `/v1/videos` support
+- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from GitHub
+- Installs Dynamo from the `release/1.0.0` branch (for `/v1/videos` support)
+- Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
 
-Build and push the image:
+The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture, and use `MAX_JOBS` (default: `4`) to bound the parallel flash-attention compile jobs:
 
 ```bash
-docker build examples/diffusers/ -t <nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
+# Blackwell (default)
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a" -t <nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
+
+# Hopper, on a memory-constrained builder
+docker build examples/diffusers/ \
+  --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a" \
+  --build-arg MAX_JOBS=2 \
+  -t <nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
+
 docker push <nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
 ```
 
-> [!NOTE]
-> A from-source [flash-attention](https://github.com/RandNMR73/flash-attention) (FA4) build is deferred. The worker runs on FastVideo's default attention backends without it.
+> [!WARNING]
+> The first image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS`. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
 
 </Step>
 
@@ -290,7 +299,7 @@ To swap the image on an existing deployment quickly:
 export DEPLOYMENT_FILE=agg.yaml
 export FASTVIDEO_IMAGE=<nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
 
-yq '(.spec.components[].podTemplate.spec.containers[] | select(.name == "main") | .image) = env(FASTVIDEO_IMAGE)' \
+yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FASTVIDEO_IMAGE)' \
   ${DEPLOYMENT_FILE} > ${DEPLOYMENT_FILE}.generated
 
 kubectl apply -f ${DEPLOYMENT_FILE}.generated -n ${NAMESPACE}
@@ -323,14 +332,14 @@ kubectl port-forward -n ${NAMESPACE} svc/fastvideo-agg-frontend 8000:8000
 curl -s -X POST http://localhost:8000/v1/videos \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "FastVideo/FastWan2.1-T2V-1.3B-Diffusers",
+    "model": "FastVideo/LTX2-Distilled-Diffusers",
     "prompt": "A cinematic drone shot over a snowy mountain range at sunrise",
-    "size": "256x256",
-    "response_format": "b64_json",
+    "size": "1920x1088",
+    "seconds": 5,
     "nvext": {
-      "fps": 8,
-      "num_frames": 8,
-      "num_inference_steps": 1,
+      "fps": 24,
+      "num_frames": 121,
+      "num_inference_steps": 5,
       "guidance_scale": 1.0,
       "seed": 10
     }
@@ -343,52 +352,13 @@ jq -r '.data[0].b64_json' response.json | base64 --decode > output.mp4
 jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 ```
 
-### FullHD Video with Audio (LTX-2)
-
-LTX-2 models support native audio generation alongside video. LTX-2 requires width and height divisible by 32, so FullHD requests use `1920x1088` rather than `1920x1080`.
-
-Start the local example with an LTX-2 model:
-
-```bash
-cd <dynamo-root>/examples/diffusers/local
-
-MODEL=FastVideo/LTX2-Distilled-Diffusers \
-WORKER_EXTRA_ARGS="--attention-backend TORCH_SDPA --fp4-quantization" \
-./run_local.sh
-```
-
-Send the request from another terminal:
-
-```bash
-curl -s -X POST http://localhost:8000/v1/videos \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "FastVideo/LTX2-Distilled-Diffusers",
-    "prompt": "A waterfall cascading into a forest pool, birds singing",
-    "size": "1920x1088",
-    "response_format": "b64_json",
-    "nvext": {
-      "fps": 24,
-      "num_frames": 121,
-      "num_inference_steps": 5,
-      "guidance_scale": 1.0,
-      "seed": 42
-    }
-  }'
-```
-
-FastVideo exposes generated audio and `audio_sample_rate` on its Python result object. This Dynamo worker returns the saved MP4 in `data[0].b64_json`, with FastVideo muxing the generated 24 kHz audio into the MP4 output.
-
-> [!NOTE]
-> LTX-2 refine pipeline flags such as `ltx2_refine_enabled`, `ltx2_refine_upsampler_path`, and per-component compile settings are not yet exposed through FastVideo's typed API config.
-
 </Step>
 
 </Steps>
 
 ## Warmup Time
 
-On first start, workers download model weights. When `--torch-compile` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful compiled response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
+On first start, workers download model weights. When `--enable-optimizations` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
 
 > [!TIP]
 > The shared Hugging Face cache PVC applied in the [Kubernetes Deployment](#kubernetes-deployment) steps means weights are downloaded once and reused across pod restarts, so warmup is only paid in full on the very first start.
@@ -400,101 +370,17 @@ On first start, workers download model weights. When `--torch-compile` is enable
 
 Flags passed to `worker.py`:
 
-<ParamField path="--model, --model-path" type="string" default="FastVideo/FastWan2.1-T2V-1.3B-Diffusers">
+<ParamField path="--model" type="string" default="FastVideo/LTX2-Distilled-Diffusers">
   HuggingFace model path.
 </ParamField>
 <ParamField path="--num-gpus" type="int" default="1">
   Number of GPUs for distributed inference.
 </ParamField>
-<ParamField path="--discovery-backend" type="string">
-  Dynamo discovery backend. Choices: `etcd`, `file`, `mem`, and `kubernetes`. Defaults to the environment, then Kubernetes or file discovery.
-</ParamField>
-<ParamField path="--attention-backend" type="string" default="VIDEO_SPARSE_ATTN">
-  Sets `FASTVIDEO_ATTENTION_BACKEND`. Choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN`.
-</ParamField>
-<ParamField path="--vsa-sparsity" type="float" default="0.8 for VIDEO_SPARSE_ATTN">
-  Sets `PipelineSelection.experimental["VSA_sparsity"]`. The worker omits this value for other attention backends unless explicitly set.
-</ParamField>
-<ParamField path="--torch-compile" type="flag" default="off">
-  Enables FastVideo `CompileConfig`.
-</ParamField>
-<ParamField path="--torch-compile-backend" type="string" default="inductor">
-  Sets the `torch.compile` backend.
-</ParamField>
-<ParamField path="--torch-compile-mode" type="string" default="max-autotune-no-cudagraphs">
-  Sets the `torch.compile` mode. Choices: `default`, `reduce-overhead`, `max-autotune`, and `max-autotune-no-cudagraphs`.
-</ParamField>
-<ParamField path="--torch-compile-fullgraph, --no-torch-compile-fullgraph" type="flag" default="on">
-  Controls fullgraph mode.
-</ParamField>
-<ParamField path="--torch-compile-dynamic, --no-torch-compile-dynamic" type="flag" default="off">
-  Controls dynamic shapes.
-</ParamField>
-<ParamField path="--fp4-quantization" type="flag" default="off">
-  Requests NVFP4 transformer quantization through `QuantizationConfig(transformer_quant="NVFP4")`. Confirm activation in worker logs before reporting FP4 results.
-</ParamField>
 <ParamField path="--enable-optimizations" type="flag" default="off">
-  Backward-compatible shortcut for `--torch-compile --fp4-quantization`.
+  Enables FP4 quantization and `torch.compile`.
 </ParamField>
-<ParamField path="--use-fsdp-inference, --no-use-fsdp-inference" type="flag" default="off">
-  Controls FastVideo Fully Sharded Data Parallel (FSDP) inference.
-</ParamField>
-<ParamField path="--dit-cpu-offload, --no-dit-cpu-offload" type="flag" default="on">
-  Controls Diffusion Transformer (DiT) CPU offload.
-</ParamField>
-<ParamField path="--dit-layerwise-offload, --no-dit-layerwise-offload" type="flag" default="on">
-  Controls layerwise DiT CPU offload.
-</ParamField>
-<ParamField path="--vae-cpu-offload, --no-vae-cpu-offload" type="flag" default="on">
-  Controls variational autoencoder (VAE) CPU offload.
-</ParamField>
-<ParamField path="--image-encoder-cpu-offload, --no-image-encoder-cpu-offload" type="flag" default="on">
-  Controls image encoder CPU offload.
-</ParamField>
-<ParamField path="--text-encoder-cpu-offload, --no-text-encoder-cpu-offload" type="flag" default="on">
-  Controls text encoder CPU offload.
-</ParamField>
-<ParamField path="--pin-cpu-memory, --no-pin-cpu-memory" type="flag" default="on">
-  Controls pinned host memory for CPU offload transfers.
-</ParamField>
-<ParamField path="--disable-autocast, --no-disable-autocast" type="flag" default="off">
-  Controls autocast in FastVideo denoising and decoding paths.
-</ParamField>
-<ParamField path="--default-size" type="string" default="1280x720">
-  Default request dimensions.
-</ParamField>
-<ParamField path="--default-seconds" type="int" default="5">
-  Default request duration in seconds.
-</ParamField>
-<ParamField path="--default-fps" type="int" default="24">
-  Default request frame rate.
-</ParamField>
-<ParamField path="--default-num-frames" type="int" default="125">
-  Default frame count.
-</ParamField>
-<ParamField path="--default-num-inference-steps" type="int" default="50">
-  Default diffusion inference steps.
-</ParamField>
-<ParamField path="--default-guidance-scale" type="float" default="1.0">
-  Default classifier-free guidance scale.
-</ParamField>
-<ParamField path="--default-seed" type="int">
-  Default random-number-generator seed. When unset, FastVideo uses its preset.
-</ParamField>
-<ParamField path="--max-video-width" type="int" default="4096">
-  Rejects wider requests before calling FastVideo.
-</ParamField>
-<ParamField path="--max-video-height" type="int" default="4096">
-  Rejects taller requests before calling FastVideo.
-</ParamField>
-<ParamField path="--max-num-frames" type="int" default="1024">
-  Rejects requests whose resolved frame count exceeds this cap.
-</ParamField>
-<ParamField path="--max-num-inference-steps" type="int" default="200">
-  Rejects requests whose inference-step count exceeds this cap.
-</ParamField>
-<ParamField path="--output-dir" type="string" default="$XDG_RUNTIME_DIR/dynamo-fastvideo/outputs or ~/.cache/dynamo/fastvideo/outputs">
-  Directory for generated MP4 staging files.
+<ParamField path="--attention-backend" type="string" default="TORCH_SDPA">
+  Sets `FASTVIDEO_ATTENTION_BACKEND`. Choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN`.
 </ParamField>
 
 </Tab>
@@ -505,17 +391,17 @@ Fields nested under `nvext` in the `/v1/videos` request body:
 <ParamField path="fps" type="int" default="24">
   Frames per second.
 </ParamField>
-<ParamField path="num_frames" type="int" default="125">
+<ParamField path="num_frames" type="int" default="121">
   Total frames; overrides `fps * seconds` when set.
 </ParamField>
-<ParamField path="num_inference_steps" type="int" default="50">
+<ParamField path="num_inference_steps" type="int" default="5">
   Diffusion inference steps.
 </ParamField>
 <ParamField path="guidance_scale" type="float" default="1.0">
   Classifier-free guidance scale.
 </ParamField>
-<ParamField path="seed" type="int">
-  Random-number-generator seed override for reproducibility. When unset, FastVideo uses its preset.
+<ParamField path="seed" type="int" default="10">
+  RNG seed for reproducibility.
 </ParamField>
 <ParamField path="negative_prompt" type="string">
   Text to avoid in generation.
@@ -530,7 +416,7 @@ Fields nested under `nvext` in the `/v1/videos` request body:
 <ParamField path="FASTVIDEO_X264_PRESET" type="string" default="ultrafast">
   x264 encoding speed preset.
 </ParamField>
-<ParamField path="FASTVIDEO_ATTENTION_BACKEND" type="string" default="VIDEO_SPARSE_ATTN">
+<ParamField path="FASTVIDEO_ATTENTION_BACKEND" type="string" default="TORCH_SDPA">
   Attention backend; `worker.py` sets this from `--attention-backend` and validates `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, and `SAGE_SLA_ATTN`.
 </ParamField>
 <ParamField path="FASTVIDEO_STAGE_LOGGING" type="string" default="1">
@@ -545,23 +431,14 @@ Fields nested under `nvext` in the `/v1/videos` request body:
 
 ## Troubleshooting
 
-### Hardware Support
-
-The worker checks the GPU compute capability at startup and fails fast when the selected attention backend cannot run on the detected hardware:
-
-| Configuration | Minimum compute capability | Notes |
-|---|---|---|
-| FastWan 2.1 + `VIDEO_SPARSE_ATTN` (default) | 9.0 | `fastvideo-kernel` compiles its Video Sparse Attention (VSA) kernels for sm90a and falls back to a Triton implementation on other architectures. Pre-Hopper GPUs, such as sm86, fail at runtime. FastWan 2.1 checkpoints contain VSA-specific layers, so `TORCH_SDPA` is not a fallback for this model. Validated on B300 (sm103) and RTX 5090 (sm120) |
-| LTX-2 + `TORCH_SDPA` | None specific | Compatibility path for GPUs below compute capability 9.0 |
-| `--fp4-quantization` (NVFP4) | 10.0 | On older GPUs, the worker logs a warning and continues without NVFP4 quantization |
-
 | Symptom | Cause | Fix |
 |---|---|---|
-| 10–20 min wait on first start with `--torch-compile` enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
+| OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
+| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper) |
+| 10–20 min wait on first start with optimizations enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Lower throughput than expected on Blackwell GPUs | NVFP4 and compile are opt-in | Pass `--fp4-quantization` and, if needed, `--torch-compile`; confirm NVFP4 activation in worker logs |
-| FastWan startup fails with a missing `to_gate_compress` checkpoint parameter | FastWan 2.1 checkpoints expect the VSA Wan block | Use `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8`; do not force `TORCH_SDPA` for FastWan 2.1 |
-| Startup or import failure after enabling FP4, compile, or another attention backend | NVFP4 and some attention backends depend on specific hardware and software support | Re-run `worker.py` without `--torch-compile --fp4-quantization`; for LTX-2, use `--attention-backend TORCH_SDPA` |
+| Lower throughput than expected on B200/B300 | FP4/compile and flash-attention are configured separately | Pass `--enable-optimizations` and, if desired, `--attention-backend FLASH_ATTN` |
+| Startup or import failure after enabling optimizations or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--enable-optimizations`, or use `--attention-backend TORCH_SDPA` |
 
 ## Local Deployment
 
@@ -582,13 +459,16 @@ For single-node development you can run FastVideo directly with Docker Compose o
 
 ### Option 1: Docker Compose
 
-The Compose file builds from the same [`Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/Dockerfile) used for the Kubernetes runtime image and exposes the API on `http://localhost:8000`.
+The Compose file builds from the same [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile) used for the Kubernetes runtime image and exposes the API on `http://localhost:8000`. Set `TORCH_CUDA_ARCH_LIST` and `MAX_JOBS` as environment variables to control the build (see the build notes in the [Kubernetes Deployment](#kubernetes-deployment) steps for time and memory expectations).
 
 ```bash
 cd <dynamo-root>/examples/diffusers/local
 
 # Start 4 workers on GPUs 0..3
 COMPOSE_PROFILES=4 docker compose up --build
+
+# Hopper on a memory-constrained builder
+TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
 ```
 
 ### Option 2: Host-Local Script
@@ -603,34 +483,24 @@ Environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `PYTHON_BIN` | `python3` | Python interpreter |
-| `MODEL` | `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | HuggingFace model path |
+| `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
-| `DYN_HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8`) |
+| `HTTP_PORT` | `8000` | Frontend HTTP port |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--enable-optimizations --attention-backend FLASH_ATTN`) |
 | `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
 
 Example:
 
 ```bash
-MODEL=FastVideo/FastWan2.1-T2V-1.3B-Diffusers \
+MODEL=FastVideo/LTX2-Distilled-Diffusers \
 NUM_GPUS=1 \
-DYN_HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8" \
+HTTP_PORT=8000 \
+WORKER_EXTRA_ARGS="--enable-optimizations --attention-backend FLASH_ATTN" \
 ./run_local.sh
 ```
 
 > [!NOTE]
-> FastVideo worker flags are not `dynamo.frontend` flags, so pass non-default worker configuration through `WORKER_EXTRA_ARGS`.
-
-Validated B300 smoke-test worker configurations:
-
-| Model | Base worker flags | FP4 worker flags |
-|---|---|---|
-| `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8` | `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8 --fp4-quantization` |
-| `FastVideo/LTX2-Distilled-Diffusers` | `--attention-backend TORCH_SDPA` | `--attention-backend TORCH_SDPA --fp4-quantization` |
-
-> [!NOTE]
-> The FastWan FP4 configuration completed the smoke request, but the worker log did not show the NVFP4 weight-conversion marker. Treat `--fp4-quantization` as requested, not independently confirmed, for FastWan until the FastVideo logs expose that confirmation.
+> `--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
 
 The script writes logs to:
 

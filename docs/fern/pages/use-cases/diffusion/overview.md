@@ -84,9 +84,9 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 
         **Best for:** Fast, production-oriented text-to-video generation on Kubernetes.
 
-        **Supports:** Text-to-video with FastWan 2.1 by default and an LTX-2 path with audio generation.
+        **Supports:** Text-to-video with a distilled LTX-2 model and five-step inference.
 
-        **Main limitation:** Uses a purpose-built runtime image and serves one request at a time per worker.
+        **Main limitation:** Uses a purpose-built runtime image that can take 20–40 minutes or longer to build initially.
       </Card>
     </CardGroup>
   </Step>
@@ -187,7 +187,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
       </Tab>
 
       <Tab title="FastVideo">
-        [FastVideo](https://github.com/hao-ai-lab/FastVideo) is a custom text-to-video worker that serves `/v1/videos` through its typed API.
+        [FastVideo](https://github.com/hao-ai-lab/FastVideo) is a custom text-to-video worker that serves `/v1/videos` with a distilled LTX-2 model.
 
         **Prerequisites**
 
@@ -197,7 +197,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 
         <AccordionGroup>
           <Accordion title="Build and deploy FastVideo">
-            Build the purpose-built runtime from [`examples/diffusers/Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/Dockerfile). The image installs FastVideo 0.2.0 and the Dynamo package with `/v1/videos` support.
+            Build the purpose-built runtime from [`examples/diffusers/Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile). The first build can take 20–40 minutes or longer because it installs FastVideo and compiles its dependencies.
 
             Kubernetes is the recommended deployment path. Follow the [FastVideo tab](workflows/text-to-video.md#fastvideo) for image build, deployment, and configuration instructions.
           </Accordion>

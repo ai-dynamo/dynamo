@@ -5,7 +5,7 @@ integration. Engine implementations own inference behavior; the Worker owns
 runtime registration, endpoint serving, cancellation monitoring, and shutdown.
 
 > **Looking for a walkthrough?** Start with the
-> [Writing Unified Backends](../../../../../docs/fern/development/unified-backends.md)
+> [Writing Unified Backends](../../../../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
 > guide and choose the Python tab. This README is the in-tree reference:
 > file layout, cancellation contract, disaggregation contract, and the
 > error-handling table.

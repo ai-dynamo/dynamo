@@ -57,11 +57,6 @@ The Rust HTTP server also reads these environment variables, which are not expos
   first use.
 </ParamField>
 
-<ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
-  Interval in milliseconds between SSE comment frames while a streaming response has no data.
-  Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
-</ParamField>
-
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded
@@ -295,28 +290,11 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
+  Startup-only YAML for policy-class queues. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
-  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/advanced-customizations/custom-worker-selection.mdx).
+  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
-</ParamField>
-
-<ParamField path="--router-prefill-policy" type="string" default="null">
-  Worker-selection instance for disaggregated prefill workers in the current router process. This
-  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
-  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
-
-  Environment variable: `DYN_ROUTER_PREFILL_POLICY`
-</ParamField>
-
-<ParamField path="--router-decode-policy" type="string" default="null">
-  Worker-selection instance for decode workers in the current router process. This option
-  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
-  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
-  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
-
-  Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>
 
 ## AIC prefill load model
@@ -516,24 +494,11 @@ See the [Frontend Guide](../../developer-guide/knowledge-base/modular-components
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
-  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
+  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance Rust tokenizer. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge></span>
 
   Environment variable: `DYN_TOKENIZER`
-</ParamField>
-
-<ParamField path="--tokenizer-fallback / --no-tokenizer-fallback" type="boolean" default="true">
-  Fall back to HuggingFace when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Use
-  `--no-tokenizer-fallback` to fail model initialization instead. In dynamic mode, discovery retries
-  the load while the frontend continues running.
-
-  <Warning>
-    Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
-    Set `--no-tokenizer-fallback` to adopt the future behavior now.
-  </Warning>
-
-  Environment variable: `DYN_TOKENIZER_FALLBACK`
 </ParamField>
 
 ## Experimental

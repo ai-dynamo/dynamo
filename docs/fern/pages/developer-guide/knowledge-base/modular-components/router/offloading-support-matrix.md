@@ -13,7 +13,7 @@ Legend: ✅ tier-aware routing · ⚠️ available but not fully validated · �
 
 | Framework | Version gates | GPU | CPU RAM | Disk | Shared pool |
 | --- | --- | --- | --- | --- | --- |
-| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | ⚠️ Unified `STORAGE` events map to the Disk tier with locality gating; available but not fully validated | 🚧 Remote locality is dropped; shared-pool indexing is still planned |
+| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | 🚧 vLLM main emits FS and OBJ events; Dynamo tier mapping is in progress | 🚧 vLLM main emits optional locality metadata; Dynamo shared-pool indexing is in progress |
 | [**SGLang**](#sglang) | SGLang v0.5.11+; v0.5.13+ with Mooncake; Dynamo v1.2+ | ✅ KV events | ✅ HiCache + KV events | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
 | [**TensorRT-LLM**](#tensorrt-llm) | Dynamo v1.3.0+ for the current event flag | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
 
@@ -61,9 +61,8 @@ PYTHONHASHSEED=0 python3 -m dynamo.vllm \
 ```
 
 - Versions: vLLM v0.24.0 or later. Earlier versions publish placeholder CPU events that the router silently drops — offloading still works engine-side, but the router only sees the GPU tier.
-- Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM emits a unified `STORAGE` medium. Dynamo maps worker-local `STORAGE` events to the Disk tier. The path is available but not yet fully validated.
-- Shared pools: `LOCAL` or absent locality remains worker-local; `REMOTE` or unknown locality is dropped. Dynamo does not yet build a shared-pool index from these events.
-- Cache-salted requests do not currently reuse `STORAGE`-tier entries for routing because those events omit the extra cache-namespace keys. See [Known Limitations](../backends/vllm/native-kv-offloading.md#known-limitations).
+- Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM main emits FS and OBJ events; Dynamo tier mapping is in progress.
+- Shared pools: vLLM main emits optional locality metadata; Dynamo shared-pool indexing is in progress.
 
 See [Native KV Offloading](../backends/vllm/native-kv-offloading.md) for the full support matrix (including disaggregated and tensor-parallel status), setup commands, verification, and troubleshooting.
 

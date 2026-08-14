@@ -1,26 +1,21 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Sweeper Optimization Goals
+title: Spica Optimization Goals
 subtitle: Objective metrics, SLA constraints, and Pareto-front scoring
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/optimization-goals.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
-> **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
+> **Experimental.** Spica is intended for evaluation and feedback, not production capacity
 > planning. Its API, configuration schema, search results, and deployment output may change
-> without a standard deprecation period. Sweeper provides no SLA, accuracy, or configuration
+> without a standard deprecation period. Spica provides no SLA, accuracy, or configuration
 > optimality guarantees.
 
 An `OptimizationGoal` (the `goal:` block of a `SmartSearchConfig`) declares **what
 "better" means** plus the SLA constraint. It is pinned, never searched. It picks one
 `OptimizationTarget` and — for `pareto` — the list of scalar objectives whose frontier to
-trace. Optional providers receive the complete goal in `SweepContext`; any feature-specific
-mapping belongs to the provider, not the Sweeper core.
+trace. The target also derives the Dynamo Planner's `optimization_target`
+(`OptimizationTarget.planner_optimization_target`; see search-space.md).
 
 The whole `goal:` block is **optional**: it defaults to a `throughput` goal with no SLA
 (`OptimizationGoal()` → `target = throughput`). `OptimizationGoal` itself is
@@ -68,7 +63,7 @@ This is the integral of provisioned GPUs over the run divided by its duration:
 
 - **static deployment** — `avg_gpu` collapses to the fixed GPU count
   (`gpu_hours = gpu_count * e2e_hours`).
-- **runtime-scaled run** — `avg_gpu` averages provisioned GPUs over startup + serve +
+- **planner-scaled run** — `avg_gpu` averages provisioned GPUs over startup + serve +
   drain.
 
 Dividing the rate by `gpu_hours` directly would be wrong: the rate already has time
@@ -114,7 +109,7 @@ tradeoff between the scalar targets in `pareto_objectives`.
   `pareto` among them, and `pareto_objectives` is only legal under a `pareto` target.
 
 - **Vizier study** — the sweep declares **one metric per objective** (each with its own
-  MAXIMIZE/MINIMIZE goal): `Sweeper.run` passes
+  MAXIMIZE/MINIMIZE goal): `run_smart_search` passes
   `sampler_objectives = [(t.value, t.maximize) for t in resolved_pareto_objectives]` to the
   `VizierBranchSampler`, which appends a `vz.MetricInformation` per objective
   (`sampler.py`). The Vizier algorithm is `"DEFAULT"` for **every** study (scalar or
@@ -128,7 +123,7 @@ tradeoff between the scalar targets in `pareto_objectives`.
   `_dominates(a, b)` is true iff `a` is at least as good as `b` on **every** objective (in
   that objective's own `maximize` direction) and strictly better on at least one. The
   front is **sorted by the last objective ascending** — the x-axis — so the list traces
-  the frontier left-to-right (e.g. low→high per-user throughput). `Sweeper.run`
+  the frontier left-to-right (e.g. low→high per-user throughput). `run_smart_search`
   returns this front for a Pareto goal, and `rank` (best score, ties → fewer GPUs) for
   every scalar goal.
 

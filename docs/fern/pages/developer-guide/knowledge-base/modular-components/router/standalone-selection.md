@@ -54,8 +54,6 @@ invalid configuration. Production integrations should use
 `SelectionServiceBuilder` so startup recovery, readiness, and background-task
 lifecycle remain consistent with the standalone service.
 
-To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
-
 The C and Go bindings do not currently expose `SelectionService`. An EPP
 integration requires separate FFI lifecycle, error-mapping, worker, and peer
 APIs. Those bindings should wrap `SelectionService` rather than construct
@@ -207,21 +205,16 @@ hash producer with the same algorithm, key, and key ID as the selector.
 ### `session_id`
 
 Both `POST /select` and `POST /select_and_reserve` accept an optional
-`session_id` string. It defaults to absent. Under the built-in selector,
-omitting it does not change selection; a custom policy that reads the field can
-select differently depending on whether it is present. The selector carries the
-value through scheduling and exposes it to worker-selection policy as
-`WorkerSelectionContext::session_id()`, so a custom picker or scorer can
-implement session affinity by preferring the worker a session used previously.
+`session_id` string. It defaults to absent. The built-in selector ignores it:
+omitting or supplying it does not change selection. The selector carries the
+value through scheduling and exposes it to policy-class admission policies as
+optional session identity.
 
 > [!NOTE]
 > `session_id` is an input to policy, not an affinity mechanism in itself. The
-> built-in selector ignores it, so it changes the chosen worker only when you
-> supply a custom picker or scorer that reads it. See
-> [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
-> It is also distinct from the frontend's own session affinity, which binds
-> sessions from request headers rather than from this API; see
-> [Configuration and Tuning](configuration-and-tuning.md).
+> built-in selector ignores it. It is also distinct from the frontend's own
+> session affinity, which binds sessions from request headers rather than from
+> this API; see [Configuration and Tuning](configuration-and-tuning.md).
 
 The selection service does not persist, replicate, or expire `session_id`
 bindings. It is not part of the selection response and is not retained by the
@@ -392,7 +385,7 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   reservation form is local to the selector that served the `/select`. Use
   `/select_and_reserve` for atomic local booking.
 - Reservation IDs must be globally unique. Duplicate bookings for the same ID
-  conflict (`409`), regardless of the target worker. An explicit booking that
+  conflict (`409`); no idempotency ledger is added. An explicit booking that
   carries a `selection_id` also discards that cached selection.
 
 ## Inspection APIs

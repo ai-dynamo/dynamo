@@ -264,31 +264,7 @@ For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend
 **For Elastic EP (Data Parallel with Ray):**
 1. Ensure Ray is installed in your container: `pip install "ray>=2.55.0"`
 2. Add `--data-parallel-backend ray` to your vLLM launch command.
-3. Define an explicit `command` on the main container. The operator starts the single-pod Ray head by wrapping your command, so it cannot fall back to the image `ENTRYPOINT`. The bundled single-pod and multinode Elastic EP templates already set `command: [python3, -m, dynamo.vllm]`.
 
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-elastic-ep-deployment
-spec:
-  services:
-    VllmDecodeWorker:
-      # ... your component spec
-      extraPodSpec:
-        mainContainer:
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --data-parallel-backend
-            - ray
-            - --enable-elastic-ep
-```
-
-> [!IMPORTANT]
-> A component that requests Elastic EP (`--enable-elastic-ep` with `--data-parallel-backend ray`, or the `-dpb ray` alias) but leaves `command` empty is rejected at admission — the operator cannot wrap the image `ENTRYPOINT` to launch the Ray head. Add an explicit `command` (for example `command: [python3, -m, dynamo.vllm]`) to make the manifest valid.
 
 The `mp` backend is the official recommendation and should be used for all new deployments.
 

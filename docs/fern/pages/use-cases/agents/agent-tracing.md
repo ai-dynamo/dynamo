@@ -178,30 +178,8 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
 
 </details>
 
-### Compaction Metadata
-
-When Dynamo receives a supported compaction signal, `agent_context.compaction` marks the `request_end` record for the summary inference. Normal requests omit this object. The field values come from the agent harness.
-
-For example, a Codex compaction request can produce:
-
-```json
-{
-  "agent_context": {
-    "session_id": "codex-thread-id",
-    "compaction": {
-      "trigger": "auto",
-      "reason": "context_limit",
-      "implementation": "responses",
-      "phase": "pre_turn",
-      "strategy": "memento"
-    }
-  }
-}
-```
-
-Use `session_id` to group requests before, during, and after compaction. Compaction does not create a new session ID or change request placement. See [Agent Harnesses](agent-harnesses.mdx#compaction-signals) for current harness support.
-
 For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
 
 > [!WARNING]
 > Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
+

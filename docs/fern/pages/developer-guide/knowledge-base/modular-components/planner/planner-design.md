@@ -27,7 +27,7 @@ used by external gRPC plugins.
    worker observations and applies the load-based +/-1 scaling algorithm.
 4. **RECONCILE / CONSTRAIN**: The generic pipeline merges proposals from
    builtin and external plugins. After CONSTRAIN, the engine adapter applies
-   the local planner's final effective component minimums and GPU-budget invariants before
+   the local planner's final `min_endpoint` and GPU-budget invariants before
    returning any scaling effect.
 5. **EXECUTE**: The adapter returns `PlannerEffects.scale_to`; `NativePlannerBase`
    applies those targets through the configured connector.
@@ -85,7 +85,7 @@ gRPC plugin contract.
   engine RPS, decision reasons, lower bounds, and execution/audit metadata used
   by metrics and HTML reports.
 - **Worker capabilities and budget inputs**: component GPU counts and runtime
-  capabilities used to clamp final targets to the effective component minimums and GPU budgets.
+  capabilities used to clamp final targets to `min_endpoint` and GPU budgets.
 
 Predictor history is intentionally not stored in `PlannerScalingState`.
 `builtin_load_predict` owns the request-count, ISL, and OSL predictor state and
@@ -153,11 +153,9 @@ targets. The perf model is bootstrapped from the first available source:
 3. `profile_results_dir` NPZ/JSON fallback data
 4. live FPM regression warmup when no pre-deployment data is available
 
-The Planner calls `aiconfigurator_core.sdk.RustForwardPassPerfModel` directly
-for native AIC estimates, online correction, and regression fallback. A
-Planner-owned engine-query layer derives queue drain, TTFT, ITL, and capacity.
-Runtime metadata such as KV hit rate and speculative accept length are applied
-as input features, not as persistent correction-factor flags.
+The Rust perf shim can use native AIC estimates and online FPM tuning. Runtime
+metadata such as KV hit rate and speculative accept length are applied as input
+features, not as persistent correction-factor flags.
 
 ### Step 4: Proposal and Lower Bound
 

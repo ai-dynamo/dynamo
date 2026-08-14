@@ -17,7 +17,7 @@ Planner 是 Dynamo 的自动扩缩容控制器。它支持两种扩缩容模式�
 1. **OBSERVE**：`NativePlannerBase` 和 engine adapter 收集 worker 数量、流量指标和 forward-pass metrics。观测数据通过 `PipelineContext.observations` 暴露。
 2. **PREDICT**：`builtin_load_predict` 按 throughput interval 运行。它消费流量观测，并为当前 tick 输出预测的请求数、ISL、OSL、KV hit rate 和 speculative accept length。
 3. **PROPOSE**：`builtin_throughput_propose` 消费同一个 tick 的预测结果，并更新 throughput lower bound。`builtin_load_propose` 消费 FPM 和 worker 观测，并执行基于负载的 +/-1 扩缩容算法。
-4. **RECONCILE / CONSTRAIN**：通用 pipeline 合并 builtin 和外部 plugins 的 proposal。CONSTRAIN 之后，engine adapter 会在返回 scaling effect 前应用本地 planner 的最终组件有效下限和 GPU budget 不变量。
+4. **RECONCILE / CONSTRAIN**：通用 pipeline 合并 builtin 和外部 plugins 的 proposal。CONSTRAIN 之后，engine adapter 会在返回 scaling effect 前应用本地 planner 的最终 `min_endpoint` 和 GPU budget 不变量。
 5. **EXECUTE**：adapter 返回 `PlannerEffects.scale_to`；`NativePlannerBase` 通过配置的 connector 应用这些目标。
 
 为了兼容现有配置和 DGDR 生成的 planner payload，`load_adjustment_interval_seconds` 和 `throughput_adjustment_interval_seconds` 仍然定义 builtin plugin 的 fire interval。基础 `scheduling.scale_interval_seconds` 默认是已启用 interval 的最大公约数，因此现有 load 和 throughput 的 fire time 会保持不变。
@@ -43,7 +43,7 @@ Pipeline context 是每个 tick 的数据平面：observations、predictions 和
 - **Throughput lower bounds**：由基于吞吐量的扩缩容产生的当前 prefill/decode floor。基于负载的扩缩容可以扩到这个 floor 之上，但不能缩到这个 floor 之下。
 - **Runtime metadata**：最近观测到的 KV hit rate 和 speculative accept length。这些值使用 last-value 语义，并作为 capacity estimation 的输入特征。
 - **每个 tick 的 diagnostics scratch**：估算的 TTFT/ITL、预测的流量形状、engine RPS、decision reasons、lower bounds，以及 metrics 和 HTML reports 使用的 execution/audit metadata。
-- **Worker capabilities 和 budget 输入**：组件 GPU 数量和运行时能力，用于把最终目标 clamp 到组件有效下限和 GPU budgets。
+- **Worker capabilities 和 budget 输入**：组件 GPU 数量和运行时能力，用于把最终目标 clamp 到 `min_endpoint` 和 GPU budgets。
 
 Predictor history 不保存在 `PlannerScalingState` 中。`builtin_load_predict` 自己维护 request count、ISL 和 OSL predictor state，并通过 `PredictionData` 把同一个 tick 的输出显式传给后续 stage。这样 PREDICT -> PROPOSE 的依赖是显式的，同时 builtin proposer plugins 仍然可以共享天然跨 tick 的状态，例如 perf-model fitting 和 throughput floors。
 
@@ -93,7 +93,7 @@ Planner 会预测下一个 interval 的三个流量形状值：
 3. `profile_results_dir` 中的 NPZ/JSON fallback data
 4. 没有 pre-deployment data 时的 live FPM regression warmup
 
-Planner 直接调用 `aiconfigurator_core.sdk.RustForwardPassPerfModel`，获取原生 AIC 估算、在线校正和回归回退。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
+Rust perf shim 可以使用原生 AIC 估算和在线 FPM tuning。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
 
 ### Step 4: Proposal 和 Lower Bound
 
