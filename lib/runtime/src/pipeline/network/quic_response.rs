@@ -53,20 +53,16 @@ use crate::{
 pub const TRANSPORT_NAME: &str = "quic-response";
 const PROTOCOL_VERSION: u8 = 3;
 const ALPN: &[u8] = b"dynamo-response-v2";
-const DEFAULT_CONNECTIONS: usize = 8;
-const MIN_CONNECTIONS: usize = 1;
-const MAX_CONNECTIONS: usize = 8;
-const DEFAULT_LANES: usize = 8;
-const MIN_LANES: usize = 1;
-const MAX_LANES: usize = 64;
+const BULK_CONNECTIONS: usize = 8;
+const BULK_LANES: usize = 8;
+const PRIORITY_CONNECTIONS: usize = 1;
 const LANE_QUEUE_CAPACITY: usize = 512;
 // Bulk writers can spend tens of milliseconds waiting for Quinn to accept a
 // large batch. Keep enough bounded slack to absorb those stalls without
 // parking every response task on the lane semaphore. Priority traffic stays
 // on the smaller queue because it never carries the long token stream.
 const BULK_LANE_QUEUE_CAPACITY: usize = 4_096;
-const DEFAULT_MAX_BATCH_FRAMES: usize = 512;
-const MAX_BATCH_FRAMES_LIMIT: usize = 4_096;
+const MAX_BATCH_FRAMES: usize = 512;
 const DEFAULT_BATCH_INTERVAL_US: u64 = 5_000;
 const MAX_BATCH_INTERVAL_US: u64 = 100_000;
 const FRAME_HEADER_LEN: usize = 1 + 16 + 4;
@@ -91,39 +87,17 @@ const CLOSE_CODE_INVARIANT: quinn::VarInt = quinn::VarInt::from_u32(1);
 
 #[derive(Debug, Clone, Copy)]
 pub struct QuicResponseConfig {
-    pub connections: usize,
-    /// Total lanes across every connection in the bundle.
-    pub lanes: usize,
     pub batch_interval: Duration,
-    pub max_batch_frames: usize,
     pub response_buffer_capacity: usize,
 }
 
 impl QuicResponseConfig {
     pub fn from_env() -> Result<Self, PipelineError> {
-        let connections = parse_env_range(
-            quic_response::DYN_QUIC_RESPONSE_CONNECTIONS,
-            DEFAULT_CONNECTIONS,
-            MIN_CONNECTIONS,
-            MAX_CONNECTIONS,
-        )?;
-        let lanes = parse_env_range(
-            quic_response::DYN_QUIC_RESPONSE_LANES,
-            DEFAULT_LANES,
-            MIN_LANES,
-            MAX_LANES,
-        )?;
         let interval_us = parse_env_range(
             quic_response::DYN_QUIC_RESPONSE_BATCH_INTERVAL_US,
             DEFAULT_BATCH_INTERVAL_US,
             0,
             MAX_BATCH_INTERVAL_US,
-        )?;
-        let max_batch_frames = parse_env_range(
-            quic_response::DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES,
-            DEFAULT_MAX_BATCH_FRAMES,
-            1,
-            MAX_BATCH_FRAMES_LIMIT,
         )?;
         let response_buffer_capacity = parse_env_range(
             quic_response::DYN_QUIC_RESPONSE_BUFFER_CAPACITY,
@@ -131,18 +105,8 @@ impl QuicResponseConfig {
             1,
             MAX_RESPONSE_BUFFER_CAPACITY,
         )?;
-        if connections > lanes {
-            return Err(PipelineError::Generic(format!(
-                "{} ({connections}) cannot exceed {} ({lanes})",
-                quic_response::DYN_QUIC_RESPONSE_CONNECTIONS,
-                quic_response::DYN_QUIC_RESPONSE_LANES,
-            )));
-        }
         Ok(Self {
-            connections,
-            lanes,
             batch_interval: Duration::from_micros(interval_us),
-            max_batch_frames,
             response_buffer_capacity,
         })
     }
@@ -251,8 +215,6 @@ struct Frame {
     kind: FrameKind,
     registration_id: Uuid,
     payload: Bytes,
-    queued_at: Option<Instant>,
-    diagnostic_kind: Option<&'static str>,
 }
 
 impl Frame {
@@ -261,13 +223,6 @@ impl Frame {
             kind,
             registration_id,
             payload,
-            diagnostic_kind: match kind {
-                FrameKind::Prologue => Some("prologue"),
-                FrameKind::FirstData => Some("first_data"),
-                _ => None,
-            },
-            queued_at: matches!(kind, FrameKind::Prologue | FrameKind::FirstData)
-                .then(Instant::now),
         }
     }
 
@@ -298,8 +253,6 @@ where
         kind,
         registration_id,
         payload: payload.freeze(),
-        queued_at: None,
-        diagnostic_kind: None,
     })
 }
 
@@ -496,15 +449,14 @@ async fn receive_batch(
     batch: &mut Vec<Frame>,
     interval: Duration,
     max_batch_frames: usize,
-) -> Option<Duration> {
+) -> bool {
     batch.clear();
     if receiver.recv_many(batch, max_batch_frames).await == 0 {
-        return None;
+        return false;
     }
 
-    let batch_started = Instant::now();
     if interval.is_zero() {
-        return Some(batch_started.elapsed());
+        return true;
     }
     let deadline = Instant::now() + interval;
     let sleep = sleep_until(deadline);
@@ -520,7 +472,7 @@ async fn receive_batch(
             }
         }
     }
-    Some(batch_started.elapsed())
+    true
 }
 
 const SERVER_STATE_SHARDS: usize = 64;
@@ -589,7 +541,6 @@ impl DeferredResponse {
 struct PendingResponse {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
-    registered_at: Instant,
     bundle_id: Option<Uuid>,
     deferred: DeferredResponse,
 }
@@ -598,7 +549,6 @@ struct ActiveResponse {
     sender: mpsc::Sender<Bytes>,
     monitor_cancel: CancellationToken,
     bundle_id: Uuid,
-    prologue_received_at: Instant,
     priority_ready: bool,
     priority_draining: bool,
     deferred: DeferredResponse,
@@ -690,7 +640,7 @@ impl QuicResponseServer {
         ));
         let transport = Arc::get_mut(&mut server_config.transport)
             .expect("new QUIC server config has one transport owner");
-        transport.max_concurrent_bidi_streams((MAX_LANES as u32).into());
+        transport.max_concurrent_bidi_streams((BULK_LANES as u32).into());
         transport.max_concurrent_uni_streams(0_u8.into());
         transport.keep_alive_interval(Some(Duration::from_secs(5)));
         if let Some(window) = stream_receive_window {
@@ -802,7 +752,6 @@ impl QuicResponseServer {
                 PendingResponse {
                     context,
                     connection: pending_tx,
-                    registered_at: Instant::now(),
                     bundle_id: None,
                     deferred: DeferredResponse::default(),
                 },
@@ -1024,6 +973,7 @@ fn fail_server_connection(state: &ServerState, connection_id: usize) {
             .collect::<Vec<_>>();
         (bundle_id, connections)
     };
+    crate::metrics::quic_response::record_bundle_failure("frontend");
 
     for connection in connections {
         connection.close(
@@ -1154,7 +1104,6 @@ async fn process_server_frame(
             }
             let (response_tx, response_rx) = mpsc::channel(response_buffer_capacity);
             let monitor_cancel = CancellationToken::new();
-            let prologue_received_at = Instant::now();
             let (pending_context, pending_connection) = {
                 let mut registration = state.registration(frame.registration_id).lock();
                 let Some(pending) = registration.pending.remove(&frame.registration_id) else {
@@ -1164,7 +1113,6 @@ async fn process_server_frame(
                 let PendingResponse {
                     context,
                     connection,
-                    registered_at,
                     bundle_id: pending_bundle,
                     deferred,
                 } = pending;
@@ -1175,15 +1123,12 @@ async fn process_server_frame(
                         bundle_id
                     );
                 }
-                crate::metrics::quic_response::SETUP_SECONDS
-                    .observe(registered_at.elapsed().as_secs_f64());
                 registration.active.insert(
                     frame.registration_id,
                     ActiveResponse {
                         sender: response_tx.clone(),
                         monitor_cancel: monitor_cancel.clone(),
                         bundle_id,
-                        prologue_received_at,
                         priority_ready: false,
                         priority_draining: false,
                         deferred,
@@ -1249,23 +1194,18 @@ async fn process_server_frame(
                     Some(active) if active.priority_ready || active.priority_draining => None,
                     Some(active) => {
                         active.priority_draining = true;
-                        Some((active.sender.clone(), active.prologue_received_at))
+                        Some(active.sender.clone())
                     }
                     None => None,
                 }
             };
-            let Some((sender, prologue_received_at)) = active else {
+            let Some(sender) = active else {
                 send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                 return Ok(());
             };
 
             if let Some(payload) = first_payload {
-                crate::metrics::quic_response::FIRST_DATA_AFTER_PROLOGUE_SECONDS
-                    .observe(prologue_received_at.elapsed().as_secs_f64());
-                let delivery_started = Instant::now();
                 let delivery = deliver_server_payload(&sender, payload);
-                crate::metrics::quic_response::FIRST_DATA_DELIVERY_SECONDS
-                    .observe(delivery_started.elapsed().as_secs_f64());
                 if let Delivery::Reset(reason) = delivery {
                     reset_registration(state, control_tx, frame.registration_id, reason)?;
                     return Ok(());
@@ -1702,8 +1642,8 @@ impl QuicResponseClientPool {
             .with_context(|| format!("invalid QUIC response address {}", key.address))?;
         let expected_fingerprint = decode_fingerprint(&key.certificate_sha256)?;
         let client_config = pinned_client_config(expected_fingerprint)?;
-        let priority_connection_index = self.config.connections;
-        let total_connections = self.config.connections + 1;
+        let priority_connection_index = BULK_CONNECTIONS;
+        let total_connections = BULK_CONNECTIONS + PRIORITY_CONNECTIONS;
         let endpoints = self.client_endpoints(key, total_connections)?;
         let mut connections = Vec::with_capacity(total_connections);
         for endpoint in &endpoints {
@@ -1721,9 +1661,9 @@ impl QuicResponseClientPool {
         let bundle_id = Uuid::new_v4();
         let contexts = Arc::new(Mutex::new(HashMap::new()));
         let healthy = Arc::new(AtomicBool::new(true));
-        let mut lanes = Vec::with_capacity(self.config.lanes);
-        for index in 0..self.config.lanes {
-            let connection = connections[index % self.config.connections].clone();
+        let mut lanes = Vec::with_capacity(BULK_LANES);
+        for index in 0..BULK_LANES {
+            let connection = connections[index % BULK_CONNECTIONS].clone();
             let (send, recv) = connection.open_bi().await?;
             let (lane_tx, lane_rx) = lane_queue(BULK_LANE_QUEUE_CAPACITY);
             let ordered = Arc::new(Lane {
@@ -1735,7 +1675,7 @@ impl QuicResponseClientPool {
                 recv,
                 lane_rx,
                 self.config.batch_interval,
-                self.config.max_batch_frames,
+                MAX_BATCH_FRAMES,
                 bundle_id,
                 connections.clone(),
                 contexts.clone(),
@@ -1764,9 +1704,9 @@ impl QuicResponseClientPool {
 
         tracing::debug!(
             remote = %address,
-            bulk_connections = self.config.connections,
-            priority_connections = 1,
-            total_lanes = self.config.lanes,
+            bulk_connections = BULK_CONNECTIONS,
+            priority_connections = PRIORITY_CONNECTIONS,
+            total_lanes = BULK_LANES,
             "QUIC response connection bundle and lanes ready"
         );
         Ok(Arc::new(ClientConnectionBundle {
@@ -1849,16 +1789,7 @@ async fn run_client_writer(
 
     let mut batch = Vec::with_capacity(max_batch_frames);
     let mut chunks = Vec::with_capacity(max_batch_frames * 2);
-    while let Some(batch_wait) =
-        receive_batch(&mut receiver, &mut batch, interval, max_batch_frames).await
-    {
-        for frame in &batch {
-            if let (Some(kind), Some(queued_at)) = (frame.diagnostic_kind, frame.queued_at) {
-                crate::metrics::quic_response::FIRST_RESPONSE_QUEUE_DWELL_SECONDS
-                    .with_label_values(&[kind])
-                    .observe(queued_at.elapsed().as_secs_f64());
-            }
-        }
+    while receive_batch(&mut receiver, &mut batch, interval, max_batch_frames).await {
         chunks.clear();
         for frame in &batch {
             chunks.push(frame.header());
@@ -1866,14 +1797,7 @@ async fn run_client_writer(
                 chunks.push(frame.payload.clone());
             }
         }
-        let write_started = Instant::now();
-        let write_result = send.write_all_chunks(&mut chunks).await;
-        crate::metrics::quic_response::WRITER_WRITE_SECONDS
-            .observe(write_started.elapsed().as_secs_f64());
-        write_result?;
-        crate::metrics::quic_response::BATCHES.inc();
-        crate::metrics::quic_response::FRAMES_PER_BATCH.observe(batch.len() as f64);
-        crate::metrics::quic_response::BATCH_WAIT_SECONDS.observe(batch_wait.as_secs_f64());
+        send.write_all_chunks(&mut chunks).await?;
         if batch
             .iter()
             .any(|frame| matches!(frame.kind, FrameKind::Error | FrameKind::End))
@@ -1937,6 +1861,7 @@ fn fail_client_connection_bundle(
     if !healthy.swap(false, Ordering::AcqRel) {
         return;
     }
+    crate::metrics::quic_response::record_bundle_failure("worker");
     tracing::warn!(%reason, "QUIC response connection bundle invariant failed");
     for (_, entry) in contexts.lock().drain() {
         entry.fail_registration(reason);
@@ -1952,8 +1877,6 @@ fn fail_client_connection_bundle(
 }
 
 pub struct QuicResponseSender {
-    // Lane selection is performed exactly once by the pool. Token writes only
-    // touch this Arc and its bounded channel.
     lane: Arc<Lane>,
     priority_lane: Arc<Lane>,
     contexts: Arc<Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>>,
@@ -2063,24 +1986,7 @@ impl QuicResponseSender {
             Err(LaneTrySendError::Closed(_)) => {
                 bail!("QUIC response lane closed")
             }
-            Err(LaneTrySendError::Full(frame)) => {
-                let blocked_at = Instant::now();
-                let diagnostic_kind = frame.diagnostic_kind;
-                let result = lane.sender.send(frame).await;
-                let blocked_seconds = blocked_at.elapsed().as_secs_f64();
-                crate::metrics::quic_response::BLOCKED_ENQUEUE_SECONDS.observe(blocked_seconds);
-                if let Some(kind) = diagnostic_kind {
-                    crate::metrics::quic_response::FIRST_RESPONSE_BLOCKED_ENQUEUE_SECONDS
-                        .with_label_values(&[kind])
-                        .observe(blocked_seconds);
-                }
-                result?;
-                tracing::trace!(
-                    blocked_seconds = blocked_at.elapsed().as_secs_f64(),
-                    "QUIC response enqueue blocked"
-                );
-                Ok(())
-            }
+            Err(LaneTrySendError::Full(frame)) => lane.sender.send(frame).await,
         }
     }
 }
@@ -2233,17 +2139,33 @@ mod tests {
         Frame::new(FrameKind::Data, Uuid::nil(), Bytes::from(index.to_string()))
     }
 
-    fn test_pool(connections: usize, lanes: usize) -> QuicResponseClientPool {
+    fn test_pool() -> QuicResponseClientPool {
         QuicResponseClientPool {
             config: QuicResponseConfig {
-                connections,
-                lanes,
                 batch_interval: Duration::ZERO,
-                max_batch_frames: DEFAULT_MAX_BATCH_FRAMES,
                 response_buffer_capacity: RESPONSE_BUFFER_CAPACITY,
             },
             connections: DashMap::new(),
         }
+    }
+
+    fn test_server(
+        response_buffer_capacity: usize,
+    ) -> (CancellationToken, Arc<QuicResponseServer>) {
+        let shutdown = CancellationToken::new();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            QuicResponseConfig {
+                batch_interval: Duration::ZERO,
+                response_buffer_capacity,
+            },
+        )
+        .unwrap();
+        (shutdown, server)
     }
 
     fn only_bundle(pool: &QuicResponseClientPool) -> Arc<ClientConnectionBundle> {
@@ -2257,53 +2179,20 @@ mod tests {
             .unwrap()
     }
 
-    fn context_for_lane(lane: usize, lanes: usize) -> PipelineContext<()> {
-        for candidate in 0_u64.. {
-            let id = format!("lane-{lane}-{candidate}");
-            if xxh3_64(id.as_bytes()) as usize % lanes == lane {
-                return PipelineContext::with_id_and_metadata((), id, Default::default());
-            }
-        }
-        unreachable!()
-    }
-
     #[tokio::test]
-    async fn bulk_drains_available_frames_at_key_boundaries() {
-        for available in [1, 63, 64] {
-            let (tx, mut rx) = lane_queue(128);
-            for index in 0..available {
-                tx.send(frame(index)).await.unwrap();
-            }
-            let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
-            assert!(
-                receive_batch(
-                    &mut rx,
-                    &mut batch,
-                    Duration::ZERO,
-                    DEFAULT_MAX_BATCH_FRAMES,
-                )
-                .await
-                .is_some()
-            );
-            assert_eq!(batch.len(), available);
-        }
-    }
-
-    #[tokio::test]
-    async fn configured_batch_cap_drains_256_frames() {
-        let (tx, mut rx) = lane_queue(300);
-        for index in 0..300 {
+    async fn fixed_batch_cap_drains_512_frames() {
+        let (tx, mut rx) = lane_queue(MAX_BATCH_FRAMES + 1);
+        for index in 0..=MAX_BATCH_FRAMES {
             tx.send(frame(index)).await.unwrap();
         }
-        let mut batch = Vec::with_capacity(256);
-        assert!(
-            receive_batch(&mut rx, &mut batch, Duration::ZERO, 256)
-                .await
-                .is_some()
-        );
-        assert_eq!(batch.len(), 256);
+        let mut batch = Vec::with_capacity(MAX_BATCH_FRAMES);
+        assert!(receive_batch(&mut rx, &mut batch, Duration::ZERO, MAX_BATCH_FRAMES).await);
+        assert_eq!(batch.len(), MAX_BATCH_FRAMES);
         assert_eq!(batch[0].payload, Bytes::from_static(b"0"));
-        assert_eq!(batch[255].payload, Bytes::from_static(b"255"));
+        assert_eq!(
+            batch[MAX_BATCH_FRAMES - 1].payload,
+            Bytes::from_static(b"511")
+        );
     }
 
     #[tokio::test]
@@ -2318,24 +2207,22 @@ mod tests {
             tx.try_send(frame(LANE_QUEUE_CAPACITY)),
             Err(LaneTrySendError::Full(_))
         ));
+        let blocked = tokio::spawn({
+            let tx = tx.clone();
+            async move { tx.send(frame(LANE_QUEUE_CAPACITY)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!blocked.is_finished());
 
         let mut batch = Vec::with_capacity(256);
-        assert!(
-            receive_batch(&mut rx, &mut batch, Duration::ZERO, 256)
-                .await
-                .is_some()
-        );
+        assert!(receive_batch(&mut rx, &mut batch, Duration::ZERO, 256).await);
         for (expected, actual) in (0..256).zip(&batch) {
             assert_eq!(actual.payload, Bytes::from(expected.to_string()));
         }
 
-        tx.try_send(frame(LANE_QUEUE_CAPACITY)).unwrap();
+        blocked.await.unwrap().unwrap();
         assert_eq!(queue.notifications.load(Ordering::Relaxed), 1);
-        assert!(
-            receive_batch(&mut rx, &mut batch, Duration::ZERO, LANE_QUEUE_CAPACITY,)
-                .await
-                .is_some()
-        );
+        assert!(receive_batch(&mut rx, &mut batch, Duration::ZERO, LANE_QUEUE_CAPACITY).await);
         for (expected, actual) in (256..=LANE_QUEUE_CAPACITY).zip(&batch) {
             assert_eq!(actual.payload, Bytes::from(expected.to_string()));
         }
@@ -2343,21 +2230,13 @@ mod tests {
         tx.try_send(frame(LANE_QUEUE_CAPACITY + 1)).unwrap();
         assert_eq!(queue.notifications.load(Ordering::Relaxed), 1);
         drop(tx);
-        assert!(
-            receive_batch(&mut rx, &mut batch, Duration::ZERO, LANE_QUEUE_CAPACITY,)
-                .await
-                .is_some()
-        );
+        assert!(receive_batch(&mut rx, &mut batch, Duration::ZERO, LANE_QUEUE_CAPACITY).await);
         assert_eq!(batch.len(), 1);
         assert_eq!(
             batch[0].payload,
             Bytes::from((LANE_QUEUE_CAPACITY + 1).to_string())
         );
-        assert!(
-            receive_batch(&mut rx, &mut batch, Duration::ZERO, LANE_QUEUE_CAPACITY,)
-                .await
-                .is_none()
-        );
+        assert!(!receive_batch(&mut rx, &mut batch, Duration::ZERO, LANE_QUEUE_CAPACITY).await);
     }
 
     #[tokio::test]
@@ -2378,38 +2257,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn deadline_flushes_partial_batch_and_reuses_vector() {
-        let (tx, mut rx) = lane_queue(128);
-        tx.send(frame(0)).await.unwrap();
-        let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
-        let allocation = batch.as_ptr();
-        assert!(
-            receive_batch(
-                &mut rx,
-                &mut batch,
-                Duration::from_millis(1),
-                DEFAULT_MAX_BATCH_FRAMES,
-            )
-            .await
-            .is_some()
-        );
-        assert_eq!(batch.len(), 1);
-        batch.clear();
-        assert_eq!(batch.as_ptr(), allocation);
-    }
-
     #[tokio::test(start_paused = true)]
     async fn frames_arriving_before_deadline_join_the_same_batch() {
         let (tx, mut rx) = lane_queue(128);
         tx.send(frame(0)).await.unwrap();
         let task = tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
+            let mut batch = Vec::with_capacity(MAX_BATCH_FRAMES);
             let wait = receive_batch(
                 &mut rx,
                 &mut batch,
                 Duration::from_millis(1),
-                DEFAULT_MAX_BATCH_FRAMES,
+                MAX_BATCH_FRAMES,
             )
             .await;
             (wait, batch.len())
@@ -2421,7 +2279,7 @@ mod tests {
         }
         tokio::task::yield_now().await;
         let (wait, len) = task.await.unwrap();
-        assert!(wait.is_some());
+        assert!(wait);
         assert_eq!(len, 64);
     }
 
@@ -2430,12 +2288,12 @@ mod tests {
         let (tx, mut rx) = lane_queue(128);
         tx.send(frame(0)).await.unwrap();
         let task = tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
+            let mut batch = Vec::with_capacity(MAX_BATCH_FRAMES);
             let wait = receive_batch(
                 &mut rx,
                 &mut batch,
                 Duration::from_millis(1),
-                DEFAULT_MAX_BATCH_FRAMES,
+                MAX_BATCH_FRAMES,
             )
             .await;
             (wait, batch, rx)
@@ -2446,71 +2304,15 @@ mod tests {
         tokio::task::yield_now().await;
 
         let (wait, batch, mut rx) = task.await.unwrap();
-        assert!(wait.is_some());
+        assert!(wait);
         assert_eq!(batch.len(), 1);
         assert_eq!(rx.recv().await.unwrap().payload, Bytes::from_static(b"1"));
     }
 
     #[tokio::test]
-    async fn closed_channel_returns_final_batch_then_eof() {
-        let (tx, mut rx) = lane_queue(8);
-        tx.send(frame(0)).await.unwrap();
-        drop(tx);
-        let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
-        assert!(
-            receive_batch(
-                &mut rx,
-                &mut batch,
-                Duration::ZERO,
-                DEFAULT_MAX_BATCH_FRAMES,
-            )
-            .await
-            .is_some()
-        );
-        assert_eq!(batch.len(), 1);
-        assert!(
-            receive_batch(
-                &mut rx,
-                &mut batch,
-                Duration::ZERO,
-                DEFAULT_MAX_BATCH_FRAMES,
-            )
-            .await
-            .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn bounded_lane_queue_blocks_only_after_512_frames() {
-        let (tx, mut rx) = lane_queue(LANE_QUEUE_CAPACITY);
-        for index in 0..LANE_QUEUE_CAPACITY {
-            tx.try_send(frame(index)).unwrap();
-        }
-        let blocked = tokio::spawn({
-            let tx = tx.clone();
-            async move { tx.send(frame(LANE_QUEUE_CAPACITY)).await }
-        });
-        tokio::task::yield_now().await;
-        assert!(!blocked.is_finished());
-        for expected in 0..=LANE_QUEUE_CAPACITY {
-            let received = rx.recv().await.unwrap();
-            assert_eq!(received.payload, Bytes::from(expected.to_string()));
-        }
-        blocked.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
     async fn eight_connections_eight_lanes_carry_1000_ordered_responses() {
-        let shutdown = CancellationToken::new();
-        let pool = test_pool(8, 8);
-        let server = QuicResponseServer::new_with_config(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            shutdown.clone(),
-            None,
-            pool.config,
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
 
         let mut lane_by_request = HashMap::new();
         for index in 0..1_000 {
@@ -2557,22 +2359,7 @@ mod tests {
 
     #[tokio::test]
     async fn registration_ack_does_not_resolve_response_stream() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            QuicResponseConfig {
-                connections: 1,
-                lanes: 1,
-                batch_interval: Duration::ZERO,
-                max_batch_frames: 1,
-                response_buffer_capacity: 4,
-            },
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(4);
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let registration_id = registered.registration_id().unwrap();
@@ -2610,22 +2397,7 @@ mod tests {
 
     #[tokio::test]
     async fn prologue_activation_is_atomic_with_concurrent_bulk_data() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            QuicResponseConfig {
-                connections: 1,
-                lanes: 1,
-                batch_interval: Duration::ZERO,
-                max_batch_frames: 1,
-                response_buffer_capacity: 4,
-            },
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(4);
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let registration_id = registered.registration_id().unwrap();
@@ -2695,17 +2467,8 @@ mod tests {
 
     #[tokio::test]
     async fn priority_path_preserves_response_order() {
-        let shutdown = CancellationToken::new();
-        let pool = test_pool(1, 1);
-        let server_config = pool.config;
-        let server = QuicResponseServer::new_with_config(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            shutdown.clone(),
-            None,
-            server_config,
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
 
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
@@ -2734,17 +2497,8 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_drop_sends_logical_reset_without_resetting_lane() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let pool = test_pool(1, 4);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            pool.config,
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let (info, provider) = registered.into_parts();
@@ -2783,7 +2537,6 @@ mod tests {
                 sender: response_tx,
                 monitor_cancel: CancellationToken::new(),
                 bundle_id,
-                prologue_received_at: Instant::now(),
                 priority_ready: false,
                 priority_draining: false,
                 deferred: DeferredResponse::default(),
@@ -2864,17 +2617,8 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_generate_error_uses_ordered_lane_frame() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let pool = test_pool(1, 4);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            pool.config,
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let (info, provider) = registered.into_parts();
@@ -2892,17 +2636,8 @@ mod tests {
 
     #[tokio::test]
     async fn physical_connection_failure_kills_all_and_reconnects_once() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let pool = Arc::new(test_pool(2, 8));
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            pool.config,
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = Arc::new(test_pool());
 
         let first_context = PipelineContext::new(());
         let first = server.register_response(first_context.context());
@@ -2936,16 +2671,6 @@ mod tests {
         })
         .await
         .expect("one physical failure must close the complete client bundle");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while old_ids.iter().any(|connection_id| {
-                crate::metrics::quic_response::is_connection_tracked(*connection_id)
-            }) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("closed connections must leave transport-stat tracking immediately");
-
         let mut registrations = Vec::new();
         let mut providers = Vec::new();
         for _ in 0..16 {
@@ -2967,7 +2692,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(errors.is_empty(), "replacement sender errors: {errors:?}");
         let replacement = only_bundle(&pool);
-        assert_eq!(replacement.connections.len(), 3);
+        assert_eq!(
+            replacement.connections.len(),
+            BULK_CONNECTIONS + PRIORITY_CONNECTIONS
+        );
         assert!(
             replacement
                 .connections
@@ -2981,17 +2709,8 @@ mod tests {
 
     #[tokio::test]
     async fn different_connection_keys_initialize_in_parallel() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let pool = test_pool(1, 1);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            pool.config,
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
 
         let blocked_key = ConnectionKey {
             address: "127.0.0.1:1".to_string(),
@@ -3022,17 +2741,8 @@ mod tests {
 
     #[tokio::test]
     async fn bundle_failure_before_prologue_resolves_pending_provider() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let pool = test_pool(1, 1);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            pool.config,
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let (info, provider) = registered.into_parts();
@@ -3071,7 +2781,6 @@ mod tests {
                     sender,
                     monitor_cancel: CancellationToken::new(),
                     bundle_id,
-                    prologue_received_at: Instant::now(),
                     priority_ready: true,
                     priority_draining: false,
                     deferred: DeferredResponse::default(),
@@ -3160,7 +2869,6 @@ mod tests {
                     sender: response_tx,
                     monitor_cancel: CancellationToken::new(),
                     bundle_id,
-                    prologue_received_at: Instant::now(),
                     priority_ready: false,
                     priority_draining: false,
                     deferred,
@@ -3211,77 +2919,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn stalled_lane_does_not_block_sibling_lane() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let mut pool = test_pool(1, 4);
-        // This test needs deterministic backpressure, independent of the
-        // production batch-size default.
-        pool.config.max_batch_frames = 64;
-        let pool = Arc::new(pool);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            Some(8 * 1024),
-            pool.config,
-        )
-        .unwrap();
-
-        let stalled_context = context_for_lane(0, 4);
-        let stalled = server.register_response(stalled_context.context());
-        let (stalled_info, stalled_provider) = stalled.into_parts();
-        let mut stalled_sender = pool
-            .sender(stalled_context.context(), stalled_info)
-            .await
-            .unwrap();
-        assert_eq!(stalled_sender.lane_index(), 0);
-        stalled_sender.send_prologue(None).await.unwrap();
-        let _stalled_receiver = stalled_provider.await.unwrap().unwrap();
-        let stall_task = tokio::spawn(async move {
-            let payload = Bytes::from(vec![0x5a; 16 * 1024]);
-            for _ in 0..BULK_LANE_QUEUE_CAPACITY + 512 {
-                stalled_sender.send(payload.clone()).await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            !stall_task.is_finished(),
-            "stalled lane producer should back up"
-        );
-
-        let sibling_context = context_for_lane(1, 4);
-        let sibling = server.register_response(sibling_context.context());
-        let (sibling_info, sibling_provider) = sibling.into_parts();
-        let mut sibling_sender = pool
-            .sender(sibling_context.context(), sibling_info)
-            .await
-            .unwrap();
-        assert_eq!(sibling_sender.lane_index(), 1);
-        sibling_sender.send_prologue(None).await.unwrap();
-        sibling_sender
-            .send(Bytes::from_static(b"progress"))
-            .await
-            .unwrap();
-        sibling_sender.finish().await.unwrap();
-        let mut sibling_receiver = tokio::time::timeout(Duration::from_secs(1), sibling_provider)
-            .await
-            .expect("sibling prologue should progress")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), sibling_receiver.rx.recv())
-                .await
-                .expect("sibling data should progress")
-                .unwrap(),
-            Bytes::from_static(b"progress")
-        );
-        stall_task.abort();
-        shutdown.cancel();
-    }
-
     #[test]
     fn fingerprint_round_trip() {
         let fingerprint = [0x5a; 32];
@@ -3294,22 +2931,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_drop_cancels_accept_loops_and_closes_endpoints() {
-        let shutdown = CancellationToken::new();
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = QuicResponseServer::new_with_config(
-            address,
-            address,
-            shutdown.clone(),
-            None,
-            QuicResponseConfig {
-                connections: 1,
-                lanes: 1,
-                batch_interval: Duration::ZERO,
-                max_batch_frames: 1,
-                response_buffer_capacity: 1,
-            },
-        )
-        .unwrap();
+        let (shutdown, server) = test_server(1);
         assert_eq!(server.endpoints.len(), SERVER_ENDPOINTS);
         let accept_shutdown = server.shutdown.clone();
         drop(server);

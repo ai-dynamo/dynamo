@@ -730,15 +730,9 @@ pub mod tcp_response_stream {
 
 /// Fixed-lane QUIC response transport.
 pub mod quic_response {
-    /// Physical QUIC connections per worker/frontend process pair. Defaults to 8.
-    pub const DYN_QUIC_RESPONSE_CONNECTIONS: &str = "DYN_QUIC_RESPONSE_CONNECTIONS";
-    /// Total response lanes distributed across the connection bundle. Defaults to 8.
-    pub const DYN_QUIC_RESPONSE_LANES: &str = "DYN_QUIC_RESPONSE_LANES";
     /// Bulk-lane batch interval in microseconds. Defaults to 5,000. Registration,
     /// prologue, first-data, and priority-end frames always flush immediately.
     pub const DYN_QUIC_RESPONSE_BATCH_INTERVAL_US: &str = "DYN_QUIC_RESPONSE_BATCH_INTERVAL_US";
-    /// Maximum logical frames submitted by one lane write. Defaults to 512.
-    pub const DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES: &str = "DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES";
     /// Per-response frontend mailbox capacity. Defaults to 64 frames.
     pub const DYN_QUIC_RESPONSE_BUFFER_CAPACITY: &str = "DYN_QUIC_RESPONSE_BUFFER_CAPACITY";
 }
@@ -1002,10 +996,7 @@ mod tests {
             tcp_response_stream::tls::DYN_TCP_TLS_INSECURE,
             tcp_response_stream::tls::DYN_TCP_TLS_SERVER_NAME,
             tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
-            quic_response::DYN_QUIC_RESPONSE_CONNECTIONS,
-            quic_response::DYN_QUIC_RESPONSE_LANES,
             quic_response::DYN_QUIC_RESPONSE_BATCH_INTERVAL_US,
-            quic_response::DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES,
             quic_response::DYN_QUIC_RESPONSE_BUFFER_CAPACITY,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
