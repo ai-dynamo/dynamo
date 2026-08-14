@@ -1630,8 +1630,12 @@ class ManagedDeployment:
             self._logger.info(
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
-            for port_forward in self._active_port_forwards:
-                self._stop_port_forward(port_forward)
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(self._stop_port_forward, port_forward)
+                    for port_forward in self._active_port_forwards
+                )
+            )
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
