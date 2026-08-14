@@ -175,10 +175,15 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 		var componentReason string
 		var checkErr error
 
+		runtimeNamespaceContext := &groveRuntimeNamespaceContext{
+			dgd:                     dgd,
+			component:               component,
+			acceptedPCSRevisionHash: acceptedPCSRevisionHash,
+		}
 		if usesPCSG {
-			ok, reason, componentStatus, componentReason, checkErr = CheckPCSGReady(ctx, reader, resourceName, dgd.Namespace, logger)
+			ok, reason, componentStatus, componentReason, checkErr = CheckPCSGReady(ctx, reader, resourceName, dgd.Namespace, logger, runtimeNamespaceContext)
 		} else {
-			ok, reason, componentStatus, componentReason, checkErr = CheckPodCliqueReady(ctx, reader, resourceName, dgd.Namespace, logger)
+			ok, reason, componentStatus, componentReason, checkErr = CheckPodCliqueReady(ctx, reader, resourceName, dgd.Namespace, logger, runtimeNamespaceContext)
 		}
 		// A non-NotFound read error is a transient failure to determine
 		// readiness. Propagate it (rather than folding it into a not-ready
@@ -188,11 +193,6 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 		if checkErr != nil {
 			return false, "", "", nil, fmt.Errorf("component %q: %w", componentName, checkErr)
 		}
-		runtimeNamespace, err := GetGroveRuntimeNamespace(ctx, reader, dgd, component, acceptedPCSRevisionHash)
-		if err != nil {
-			return false, "", "", nil, fmt.Errorf("component %q runtime namespace: %w", componentName, err)
-		}
-		componentStatus.RuntimeNamespace = runtimeNamespace
 		componentStatuses[componentName] = componentStatus
 		if !ok {
 			notReadyComponents = append(notReadyComponents, fmt.Sprintf("%s: %s", componentName, reason))
@@ -247,73 +247,52 @@ func getAcceptedPCSRevisionHash(pcs *grovev1alpha1.PodCliqueSet) *string {
 	return pcs.Status.CurrentGenerationHash
 }
 
-// groveComponentHasCompletedPCSRevision reports whether the live Grove child
-// has observed and completed the accepted PCS revision for one worker component.
-func groveComponentHasCompletedPCSRevision(
-	ctx context.Context,
-	reader client.Reader,
-	dgd *v1beta1.DynamoGraphDeployment,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	acceptedPCSRevisionHash *string,
-
-) (bool, error) {
-	if acceptedPCSRevisionHash == nil {
-		return false, nil
-	}
-
-	resourceName := GroveComponentResourceName(dgd, component.ComponentName)
-	if component.UsesPCSG() {
-		return grovePCSGHasCompletedPCSRevision(ctx, reader, resourceName, dgd.Namespace, *acceptedPCSRevisionHash)
-	}
-	return grovePodCliqueHasCompletedPCSRevision(ctx, reader, resourceName, dgd.Namespace, *acceptedPCSRevisionHash)
+// groveComponentRevisionState is the child status needed to decide whether a
+// worker revision has cut over. CheckPodCliqueReady and CheckPCSGReady build it
+// from the child object they already fetched for readiness.
+type groveComponentRevisionState struct {
+	currentPCSRevisionHash *string
+	replicas               int32
+	updatedReplicas        int32
+	desiredReplicas        int32
+	updateEnded            bool
 }
 
-func grovePodCliqueHasCompletedPCSRevision(
-	ctx context.Context,
-	reader client.Reader,
-	resourceName string,
-	namespace string,
-	pcsGenerationHash string,
-) (bool, error) {
-	// Read the child status to verify that it realized the accepted PCS revision.
-	podClique := &grovev1alpha1.PodClique{}
-	if err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique); err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("get PodClique %s/%s: %w", namespace, resourceName, err)
-	}
-
-	return podClique.Status.CurrentPodCliqueSetGenerationHash != nil &&
-		*podClique.Status.CurrentPodCliqueSetGenerationHash == pcsGenerationHash &&
-		podClique.Status.Replicas == podClique.Spec.Replicas &&
-		podClique.Status.UpdatedReplicas == podClique.Spec.Replicas &&
-		podClique.Status.UpdateProgress != nil &&
-		podClique.Status.UpdateProgress.UpdateEndedAt != nil, nil
+func (s groveComponentRevisionState) hasCompletedAcceptedPCSRevision(acceptedPCSRevisionHash *string) bool {
+	return acceptedPCSRevisionHash != nil &&
+		s.currentPCSRevisionHash != nil &&
+		*s.currentPCSRevisionHash == *acceptedPCSRevisionHash &&
+		s.replicas == s.desiredReplicas &&
+		s.updatedReplicas == s.desiredReplicas &&
+		s.updateEnded
 }
 
-func grovePCSGHasCompletedPCSRevision(
-	ctx context.Context,
-	reader client.Reader,
-	resourceName string,
-	namespace string,
-	pcsGenerationHash string,
-) (bool, error) {
-	// Read the scaling-group status to verify that it realized the accepted PCS revision.
-	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
-	if err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg); err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("get PodCliqueScalingGroup %s/%s: %w", namespace, resourceName, err)
+// groveRuntimeNamespaceContext carries the DGD-level state used while a child
+// readiness check publishes its runtime namespace.
+type groveRuntimeNamespaceContext struct {
+	dgd                     *v1beta1.DynamoGraphDeployment
+	component               *v1beta1.DynamoComponentDeploymentSharedSpec
+	acceptedPCSRevisionHash *string
+}
+
+func (c *groveRuntimeNamespaceContext) setRuntimeNamespace(
+	componentStatus *v1beta1.ComponentReplicaStatus,
+	revisionState groveComponentRevisionState,
+) error {
+	if c == nil {
+		return nil
 	}
 
-	return pcsg.Status.CurrentPodCliqueSetGenerationHash != nil &&
-		*pcsg.Status.CurrentPodCliqueSetGenerationHash == pcsGenerationHash &&
-		pcsg.Status.Replicas == pcsg.Spec.Replicas &&
-		pcsg.Status.UpdatedReplicas == pcsg.Spec.Replicas &&
-		pcsg.Status.UpdateProgress != nil &&
-		pcsg.Status.UpdateProgress.UpdateEndedAt != nil, nil
+	runtimeNamespace, err := GetGroveRuntimeNamespace(
+		c.dgd,
+		c.component,
+		revisionState.hasCompletedAcceptedPCSRevision(c.acceptedPCSRevisionHash),
+	)
+	if err != nil {
+		return fmt.Errorf("get Grove runtime namespace: %w", err)
+	}
+	componentStatus.RuntimeNamespace = runtimeNamespace
+	return nil
 }
 
 // CheckPodCliqueReady determines if a Grove PodClique is fully ready and available.
@@ -327,7 +306,7 @@ func grovePCSGHasCompletedPCSRevision(
 // rollout is unfinished, PodsNotReady when scheduled but not enough replicas
 // are ready, or SomeResourcesNotReady when the cause cannot be determined. It
 // is empty when the component is ready.
-func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
+func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger, runtimeNamespaceContext *groveRuntimeNamespaceContext) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
 	podClique := &grovev1alpha1.PodClique{}
 	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
 	if err != nil {
@@ -336,10 +315,14 @@ func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName
 			// The backing PodClique is not created yet. Return a valid status
 			// entry (with the known kind and expected name) rather than an empty
 			// ComponentReplicaStatus{}
-			return false, "resource not found", v1beta1.ComponentReplicaStatus{
+			serviceStatus := v1beta1.ComponentReplicaStatus{
 				ComponentKind:  v1beta1.ComponentKindPodClique,
 				ComponentNames: []string{resourceName},
-			}, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			}
+			if err := runtimeNamespaceContext.setRuntimeNamespace(&serviceStatus, groveComponentRevisionState{}); err != nil {
+				return false, "", serviceStatus, "", err
+			}
+			return false, "resource not found", serviceStatus, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
 		}
 		// A non-NotFound error is a transient failure to determine readiness,
 		// not a legitimate not-ready state. Return it so the reconcile retries
@@ -375,6 +358,16 @@ func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
 		ReadyReplicas:   &readyReplicas,
+	}
+	if err := runtimeNamespaceContext.setRuntimeNamespace(&serviceStatus, groveComponentRevisionState{
+		currentPCSRevisionHash: podClique.Status.CurrentPodCliqueSetGenerationHash,
+		replicas:               replicas,
+		updatedReplicas:        updatedReplicas,
+		desiredReplicas:        desiredReplicas,
+		updateEnded: podClique.Status.UpdateProgress != nil &&
+			podClique.Status.UpdateProgress.UpdateEndedAt != nil,
+	}); err != nil {
+		return false, "", serviceStatus, "", err
 	}
 
 	if observedGeneration == nil {
@@ -438,7 +431,7 @@ func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName
 // It checks various status fields to ensure all replicas are available and the PCSG
 // configuration has been fully applied. This is the PodCliqueScalingGroup equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPCSGReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
+func CheckPCSGReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger, runtimeNamespaceContext *groveRuntimeNamespaceContext) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
 	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
 	if err != nil {
@@ -447,10 +440,14 @@ func CheckPCSGReady(ctx context.Context, reader client.Reader, resourceName, nam
 			// The backing PodCliqueScalingGroup is not created yet. Return a valid
 			// status entry (with the known kind and expected name) rather than an
 			// empty ComponentReplicaStatus{}
-			return false, "resource not found", v1beta1.ComponentReplicaStatus{
+			serviceStatus := v1beta1.ComponentReplicaStatus{
 				ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames: []string{resourceName},
-			}, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			}
+			if err := runtimeNamespaceContext.setRuntimeNamespace(&serviceStatus, groveComponentRevisionState{}); err != nil {
+				return false, "", serviceStatus, "", err
+			}
+			return false, "resource not found", serviceStatus, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
 		}
 		// A non-NotFound error is a transient failure to determine readiness,
 		// not a legitimate not-ready state. Return it so the reconcile retries
@@ -484,6 +481,16 @@ func CheckPCSGReady(ctx context.Context, reader client.Reader, resourceName, nam
 		Replicas:          pcsg.Status.Replicas,
 		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
 		AvailableReplicas: &availableReplicas,
+	}
+	if err := runtimeNamespaceContext.setRuntimeNamespace(&serviceStatus, groveComponentRevisionState{
+		currentPCSRevisionHash: pcsg.Status.CurrentPodCliqueSetGenerationHash,
+		replicas:               replicas,
+		updatedReplicas:        updatedReplicas,
+		desiredReplicas:        desiredReplicas,
+		updateEnded: pcsg.Status.UpdateProgress != nil &&
+			pcsg.Status.UpdateProgress.UpdateEndedAt != nil,
+	}); err != nil {
+		return false, "", serviceStatus, "", err
 	}
 
 	if observedGeneration == nil {

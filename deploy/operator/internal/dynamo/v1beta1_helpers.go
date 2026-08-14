@@ -6,7 +6,6 @@
 package dynamo
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -16,7 +15,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ComponentsByName returns the graph deployment components indexed by their
@@ -305,13 +303,12 @@ func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 
 // GetGroveRuntimeNamespace returns the runtime namespace published for a Grove
 // component. A worker keeps its previous namespace until its child has
-// completed the accepted PCS revision.
+// completed the accepted PCS revision. The caller obtains that completion
+// result while reading the child for readiness.
 func GetGroveRuntimeNamespace(
-	ctx context.Context,
-	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	acceptedPCSRevisionHash *string,
+	componentCompletedAcceptedPCSRevision bool,
 ) (string, error) {
 	if dgd == nil || component == nil {
 		return "", nil
@@ -329,11 +326,7 @@ func GetGroveRuntimeNamespace(
 	}
 	desiredNamespace := ComponentRuntimeNamespace(namespace, string(component.ComponentType), workerHash)
 
-	completed, err := groveComponentHasCompletedPCSRevision(ctx, reader, dgd, component, acceptedPCSRevisionHash)
-	if err != nil {
-		return "", fmt.Errorf("failed to check if component %q completed the accepted PCS revision: %w", component.ComponentName, err)
-	}
-	if !completed {
+	if !componentCompletedAcceptedPCSRevision {
 		if previousNamespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace; previousNamespace != "" {
 			return previousNamespace, nil
 		}

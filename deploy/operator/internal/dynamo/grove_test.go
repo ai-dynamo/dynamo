@@ -663,7 +663,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				Build()
 
 			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification, checkErr := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
+			ready, reason, serviceStatus, classification, checkErr := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger, nil)
 
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -951,7 +951,7 @@ func TestCheckPCSGReady(t *testing.T) {
 				Build()
 
 			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification, checkErr := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
+			ready, reason, serviceStatus, classification, checkErr := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger, nil)
 
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -1511,11 +1511,83 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 	}
 }
 
-// ---------------------------------------------------------------------------
-func TestGroveComponentHasCompletedPCSRevisionForPCSG(t *testing.T) {
+func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 	ctx := context.Background()
+	g := gomega.NewWithT(t)
 	targetRevision := "target-revision"
 	completedAt := metav1.Now()
+
+	t.Log("Build a Grove worker whose accepted child revision has completed.")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			Annotations: map[string]string{
+				commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "prefill",
+				ComponentType: v1beta1.ComponentTypePrefill,
+			}},
+		},
+	}
+	component := dgd.GetComponentByName("prefill")
+	podCliqueSet := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Namespace:  dgd.Namespace,
+			Generation: 1,
+		},
+		Status: grovev1alpha1.PodCliqueSetStatus{
+			ObservedGeneration:    ptr.To(int64(1)),
+			CurrentGenerationHash: &targetRevision,
+		},
+	}
+	podClique := &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       GroveComponentResourceName(dgd, component.ComponentName),
+			Namespace:  dgd.Namespace,
+			Generation: 1,
+		},
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: grovev1alpha1.PodCliqueStatus{
+			Replicas:                          1,
+			ReadyReplicas:                     1,
+			UpdatedReplicas:                   1,
+			ScheduledReplicas:                 1,
+			ObservedGeneration:                ptr.To(int64(1)),
+			CurrentPodCliqueSetGenerationHash: &targetRevision,
+			UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
+		},
+	}
+
+	childReads := 0
+	g.Expect(grovev1alpha1.AddToScheme(scheme.Scheme)).To(gomega.Succeed())
+	reader := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(podCliqueSet, podClique).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+				if _, ok := object.(*grovev1alpha1.PodClique); ok {
+					childReads++
+				}
+				return c.Get(ctx, key, object, options...)
+			},
+		}).
+		Build()
+
+	t.Log("Evaluate readiness and assert that namespace cutover reuses the child read.")
+	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(readiness.Ready).To(gomega.BeTrue())
+	g.Expect(childReads).To(gomega.Equal(1))
+}
+
+// ---------------------------------------------------------------------------
+func TestGroveComponentRevisionStateHasCompletedAcceptedPCSRevision(t *testing.T) {
+	targetRevision := "target-revision"
 
 	tests := []struct {
 		name            string
@@ -1523,49 +1595,25 @@ func TestGroveComponentHasCompletedPCSRevisionForPCSG(t *testing.T) {
 		updatedReplicas int32
 		want            bool
 	}{
-		{name: "completed scaling group completes the PCS revision", finished: true, updatedReplicas: 1, want: true},
-		{name: "unfinished scaling group keeps the PCS revision pending", finished: false, updatedReplicas: 1, want: false},
-		{name: "scaling group with stale update count keeps the PCS revision pending", finished: true, updatedReplicas: 0, want: false},
+		{name: "completed component completes the PCS revision", finished: true, updatedReplicas: 1, want: true},
+		{name: "unfinished component keeps the PCS revision pending", finished: false, updatedReplicas: 1, want: false},
+		{name: "component with stale update count keeps the PCS revision pending", finished: true, updatedReplicas: 0, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := gomega.NewGomegaWithT(t)
-
-			t.Log("Build a multinode worker and accepted PCS revision hash.")
-			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-				Spec: v1beta1.DynamoGraphDeploymentSpec{
-					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-						ComponentName: "prefill",
-						ComponentType: v1beta1.ComponentTypePrefill,
-						Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
-					}},
-				},
+			t.Log("Evaluate the child revision state against the accepted PCS revision.")
+			state := groveComponentRevisionState{
+				currentPCSRevisionHash: &targetRevision,
+				replicas:               1,
+				updatedReplicas:        tt.updatedReplicas,
+				desiredReplicas:        1,
+				updateEnded:            tt.finished,
 			}
-			component := dgd.GetComponentByName("prefill")
-			t.Log("Seed the scaling group at the requested revision-completion state.")
-			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      GroveComponentResourceName(dgd, component.ComponentName),
-					Namespace: dgd.Namespace,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:                          1,
-					UpdatedReplicas:                   tt.updatedReplicas,
-					CurrentPodCliqueSetGenerationHash: &targetRevision,
-				},
+			completed := state.hasCompletedAcceptedPCSRevision(&targetRevision)
+			if completed != tt.want {
+				t.Fatalf("hasCompletedAcceptedPCSRevision() = %t, want %t", completed, tt.want)
 			}
-			if tt.finished {
-				pcsg.Status.UpdateProgress = &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &completedAt}
-			}
-
-			t.Log("Evaluate whether the scaling group completed the accepted PCS revision.")
-			reader := newFakeGroveClient(g, pcsg)
-			completed, err := groveComponentHasCompletedPCSRevision(ctx, reader, dgd, component, &targetRevision)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(completed).To(gomega.Equal(tt.want))
 		})
 	}
 }
@@ -1715,7 +1763,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 				objs = append(objs, tt.podClique)
 			}
 			c := newFakeGroveClient(g, objs...)
-			ready, reason, _, classification, checkErr := CheckPodCliqueReady(ctx, c, testPodCliqueName, "default", log.FromContext(ctx))
+			ready, reason, _, classification, checkErr := CheckPodCliqueReady(ctx, c, testPodCliqueName, "default", log.FromContext(ctx), nil)
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -1822,7 +1870,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				objs = append(objs, tt.pcsg)
 			}
 			c := newFakeGroveClient(g, objs...)
-			ready, reason, _, classification, checkErr := CheckPCSGReady(ctx, c, testPCSGName, "default", log.FromContext(ctx))
+			ready, reason, _, classification, checkErr := CheckPCSGReady(ctx, c, testPCSGName, "default", log.FromContext(ctx), nil)
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -1906,7 +1954,7 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 	t.Run("CheckPodCliqueReady returns error on non-NotFound get failure", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		c := newClient(g)
-		ready, _, _, classification, err := CheckPodCliqueReady(ctx, c, "test-pc", "default", logger)
+		ready, _, _, classification, err := CheckPodCliqueReady(ctx, c, "test-pc", "default", logger, nil)
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
 		g.Expect(ready).To(gomega.BeFalse())
@@ -1917,7 +1965,7 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 	t.Run("CheckPCSGReady returns error on non-NotFound get failure", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		c := newClient(g)
-		ready, _, _, classification, err := CheckPCSGReady(ctx, c, "test-pcsg", "default", logger)
+		ready, _, _, classification, err := CheckPCSGReady(ctx, c, "test-pcsg", "default", logger, nil)
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
 		g.Expect(ready).To(gomega.BeFalse())
