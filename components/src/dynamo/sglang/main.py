@@ -62,6 +62,8 @@ async def worker(argv: list[str] | None = None):
             dynamo_args,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
+        await snapshot_controller.pause_controller.resume()
+        snapshot_controller.pause_controller.mark_resumed()
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []

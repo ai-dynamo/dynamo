@@ -1132,6 +1132,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Optional[Client] = None,
+        engine_monitor: VllmEngineMonitor | None = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
@@ -1140,7 +1141,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
+        self.engine_monitor = engine_monitor or VllmEngineMonitor(
+            runtime, engine, shutdown_event
+        )
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
@@ -3135,6 +3138,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        engine_monitor: VllmEngineMonitor | None = None,
     ):
         super().__init__(
             runtime,
@@ -3149,6 +3153,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             shutdown_event=shutdown_event,
             enable_frontend_decoding=enable_frontend_decoding,
             encode_worker_client=encode_worker_client,
+            engine_monitor=engine_monitor,
         )
 
     async def generate(self, request, context):
