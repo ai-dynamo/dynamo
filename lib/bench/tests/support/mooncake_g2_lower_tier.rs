@@ -9,7 +9,9 @@ use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer,
     MatchDetails, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier};
+use dynamo_kv_router::protocols::{
+    KvCacheEvent, KvCacheEventData, ResidencyProjection, RouterEvent, StorageTier,
+};
 use rustc_hash::FxHashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -37,7 +39,7 @@ fn additive_device_and_host_pinned_scores(
     }
 
     if let Some(first_hash) = request.first() {
-        for worker in host_pinned.root_workers(*first_hash) {
+        for worker in host_pinned.root_workers(*first_hash, &ResidencyProjection::default()) {
             continuations
                 .entry(worker)
                 .or_insert_with(|| LowerTierContinuation::from_root(0));

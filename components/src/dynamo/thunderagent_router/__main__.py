@@ -150,7 +150,8 @@ class ThunderAgentRouterHandler:
             aic_perf_config=build_aic_perf_config(self._config),
         )
 
-        self._capacity = WorkerCapacityProvider(worker_endpoint)
+        worker_client = await worker_endpoint.client()
+        self._capacity = WorkerCapacityProvider(worker_endpoint, worker_client)
         self._capacity.start()
 
         self._scheduler = ThunderAgentScheduler(
