@@ -1551,6 +1551,9 @@ func TestGenerateLeaderWorkerSetManualRoleTemplates(t *testing.T) {
 				ComponentName: "engine",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Replicas:      ptr.To(int32(1)),
+				Experimental: &v1beta1.ExperimentalSpec{
+					FlagsInjection: v1beta1.FlagsInjectionModeManual,
+				},
 				PodTemplate: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"example.com/engine-role": "leader"}},
 					Spec: corev1.PodSpec{
@@ -1574,7 +1577,6 @@ func TestGenerateLeaderWorkerSetManualRoleTemplates(t *testing.T) {
 					},
 				},
 				Multinode: &v1beta1.MultinodeSpec{
-					Mode:      v1beta1.MultinodeModeManual,
 					NodeCount: 2,
 					Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
 						Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
@@ -1652,8 +1654,12 @@ func TestGenerateLeaderWorkerSetManualRoleTemplates(t *testing.T) {
 	require.Contains(t, worker.Spec.InitContainers[0].Command[2], "LEADER_PORT=\""+commonconsts.VLLMMpMasterPort+"\"")
 }
 
-func TestGenerateLeaderWorkerSetOmittedModeMatchesAutomatic(t *testing.T) {
-	newDCD := func(mode v1beta1.MultinodeMode) *v1beta1.DynamoComponentDeployment {
+func TestGenerateLeaderWorkerSetOmittedFlagsInjectionMatchesAutomatic(t *testing.T) {
+	newDCD := func(mode v1beta1.FlagsInjectionMode) *v1beta1.DynamoComponentDeployment {
+		var experimental *v1beta1.ExperimentalSpec
+		if mode != "" {
+			experimental = &v1beta1.ExperimentalSpec{FlagsInjection: mode}
+		}
 		return &v1beta1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "automatic-engine", Namespace: "default"},
 			Spec: v1beta1.DynamoComponentDeploymentSpec{
@@ -1661,6 +1667,7 @@ func TestGenerateLeaderWorkerSetOmittedModeMatchesAutomatic(t *testing.T) {
 				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 					ComponentName: "engine",
 					ComponentType: v1beta1.ComponentTypeWorker,
+					Experimental:  experimental,
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name:    commonconsts.MainContainerName,
 						Image:   "runtime:1.4.0",
@@ -1670,7 +1677,7 @@ func TestGenerateLeaderWorkerSetOmittedModeMatchesAutomatic(t *testing.T) {
 							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8"),
 						}},
 					}}}},
-					Multinode: &v1beta1.MultinodeSpec{Mode: mode, NodeCount: 2},
+					Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
 				},
 			},
 		}
@@ -1696,9 +1703,9 @@ func TestGenerateLeaderWorkerSetOmittedModeMatchesAutomatic(t *testing.T) {
 	}
 
 	omitted := render(newDCD(""))
-	explicit := render(newDCD(v1beta1.MultinodeModeAutomatic))
+	explicit := render(newDCD(v1beta1.FlagsInjectionModeAutomatic))
 	if diff := cmp.Diff(omitted, explicit); diff != "" {
-		t.Fatalf("omitted mode changed Automatic LWS output (-omitted +explicit):\n%s", diff)
+		t.Fatalf("omitted flagsInjection changed Automatic LWS output (-omitted +explicit):\n%s", diff)
 	}
 }
 

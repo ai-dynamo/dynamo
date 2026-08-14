@@ -68,30 +68,8 @@ type CompilationCacheConfig struct {
 	MountPath string `json:"mountPath,omitempty"`
 }
 
-// MultinodeMode selects who owns engine-specific multinode arguments.
-// +kubebuilder:validation:Enum=Automatic;Manual
-type MultinodeMode string
-
-const (
-	// MultinodeModeAutomatic keeps the existing operator-generated multinode launch configuration.
-	MultinodeModeAutomatic MultinodeMode = "Automatic"
-	// MultinodeModeManual is experimental and uses the user-supplied leader and worker launch configuration.
-	MultinodeModeManual MultinodeMode = "Manual"
-)
-
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
-	// mode selects ownership of engine-specific multinode configuration.
-	// Automatic preserves the existing operator-generated launch configuration.
-	// Manual is experimental and may change without notice. It uses podTemplate
-	// for the leader and applies worker.podTemplateOverrides to construct the worker
-	// template. Manual requires users to provide all engine-specific topology
-	// arguments. For vLLM multiprocessing, the operator still adds
-	// --master-port=29500 to both roles.
-	// +optional
-	// +kubebuilder:default=Automatic
-	Mode MultinodeMode `json:"mode,omitempty"`
-
 	// nodeCount is the number of nodes to deploy for the multinode component.
 	// Total GPUs used is `nodeCount * container GPU request`.
 	// +optional
@@ -99,13 +77,14 @@ type MultinodeSpec struct {
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
 
-	// worker contains worker-only settings. It is required when mode is Manual
-	// and must be omitted when mode is Automatic.
+	// worker contains optional worker-only settings. It is independent of
+	// experimental.flagsInjection and can be used with Automatic or Manual
+	// flag injection.
 	// +optional
 	Worker *MultinodeWorkerSpec `json:"worker,omitempty"`
 }
 
-// MultinodeWorkerSpec configures worker pods in Manual multinode mode.
+// MultinodeWorkerSpec configures worker pods independently of multinode launch injection.
 type MultinodeWorkerSpec struct {
 	// podTemplateOverrides is a restricted, presence-aware overlay applied to
 	// the component podTemplate for workers. Omitted fields inherit the leader
@@ -297,6 +276,33 @@ const (
 // graduate out of this block (and become first-class fields on the shared
 // spec) once their API is considered stable.
 type ExperimentalSpec struct {
+	// flagsInjection controls automatic backend-specific multinode flag and
+	// launch injection. Automatic is the default.
+	// For vLLM multiprocessing, Automatic injects
+	// --distributed-executor-backend=mp, --nnodes, --master-addr,
+	// --master-port=29500, --node-rank, and --headless on workers. Manual omits
+	// all of those except --master-port=29500, which remains operator-owned when
+	// the supplied command selects multiprocessing. The wait-for-leader-mp init
+	// container and other operator-owned pod wiring also remain in both modes.
+	// For vLLM Ray, Automatic constructs the Ray head or worker launch command and
+	// adds --distributed-executor-backend=ray to the leader; Manual preserves the
+	// supplied commands. For vLLM data parallelism, Automatic injects
+	// --data-parallel-hybrid-lb, --data-parallel-size when absent,
+	// --data-parallel-size-local, --data-parallel-start-rank,
+	// --data-parallel-address, and --data-parallel-rpc-port; Manual omits them.
+	// For SGLang, Automatic injects --dist-init-addr, --nnodes, and --node-rank;
+	// Manual omits them. For TensorRT-LLM, Automatic constructs the mpirun or sshd
+	// launch command; Manual preserves the supplied command and arguments. The
+	// TensorRT-LLM SSH and worker-probe wiring remains in both modes.
+	// Manual is valid only for multinode worker components and cannot initially
+	// be combined with GPU memory service or failover.
+	// multinode.worker.podTemplateOverrides is independent of this field and may
+	// be used in either mode. Automatic injection does not reject or rewrite
+	// user-provided topology flags, so specifying them can produce duplicates.
+	// +optional
+	// +kubebuilder:default=Automatic
+	FlagsInjection FlagsInjectionMode `json:"flagsInjection,omitempty"`
+
 	// gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
 	// access for GMS clients is managed via DRA.
 	// +optional
@@ -319,6 +325,17 @@ type ExperimentalSpec struct {
 	// +optional
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
+
+// FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+// +kubebuilder:validation:Enum=Automatic;Manual
+type FlagsInjectionMode string
+
+const (
+	// FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+	FlagsInjectionModeAutomatic FlagsInjectionMode = "Automatic"
+	// FlagsInjectionModeManual disables backend-specific multinode launch injection.
+	FlagsInjectionModeManual FlagsInjectionMode = "Manual"
+)
 
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a
 // worker component. The operator injects GMS wiring and replaces the main

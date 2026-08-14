@@ -149,64 +149,68 @@ func (v *sharedValidation) validateMultinodeSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
+	allErrs := field.ErrorList{}
+	flagsInjectionPath := fldPath.Child("experimental", "flagsInjection")
+	mode := dynamo.EffectiveFlagsInjectionMode(spec)
+	switch mode {
+	case nvidiacomv1beta1.FlagsInjectionModeAutomatic:
+	case nvidiacomv1beta1.FlagsInjectionModeManual:
+		if spec.Multinode == nil {
+			allErrs = append(allErrs, field.Forbidden(
+				flagsInjectionPath,
+				"Manual flag injection requires a multinode component",
+			))
+			return allErrs
+		}
+		allErrs = append(allErrs, v.validateManualFlagsInjection(spec, fldPath)...)
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			flagsInjectionPath,
+			mode,
+			[]string{string(nvidiacomv1beta1.FlagsInjectionModeAutomatic), string(nvidiacomv1beta1.FlagsInjectionModeManual)},
+		))
+	}
 	if spec.Multinode == nil {
-		return nil
+		return allErrs
 	}
 
-	multinodePath := fldPath.Child("multinode")
-	mode := dynamo.EffectiveMultinodeMode(spec)
-	switch mode {
-	case nvidiacomv1beta1.MultinodeModeAutomatic:
-		if spec.Multinode.Worker != nil {
-			return field.ErrorList{field.Forbidden(
-				multinodePath.Child("worker"),
-				"must be omitted when multinode.mode is Automatic",
-			)}
-		}
-		return nil
-	case nvidiacomv1beta1.MultinodeModeManual:
-		return v.validateManualMultinodeSpec(spec, fldPath)
-	default:
-		return field.ErrorList{field.NotSupported(
-			multinodePath.Child("mode"),
-			mode,
-			[]string{string(nvidiacomv1beta1.MultinodeModeAutomatic), string(nvidiacomv1beta1.MultinodeModeManual)},
-		)}
-	}
+	allErrs = append(allErrs, v.validateMultinodeWorkerOverrides(spec, fldPath)...)
+	return allErrs
 }
 
-func (v *sharedValidation) validateManualMultinodeSpec(
+func (v *sharedValidation) validateManualFlagsInjection(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	multinodePath := fldPath.Child("multinode")
-	workerPath := multinodePath.Child("worker")
+	flagsInjectionPath := fldPath.Child("experimental", "flagsInjection")
 
 	if spec.ComponentType != nvidiacomv1beta1.ComponentTypeWorker {
 		allErrs = append(allErrs, field.Forbidden(
-			multinodePath.Child("mode"),
-			"Manual mode is supported only for multinode worker components",
+			flagsInjectionPath,
+			"Manual flag injection is supported only for multinode worker components",
 		))
-	}
-	if spec.Multinode.Worker == nil {
-		allErrs = append(allErrs, field.Required(workerPath, "is required when multinode.mode is Manual"))
-		return allErrs
-	}
-	overrides := spec.Multinode.Worker.PodTemplateOverrides
-	if overrides == nil {
-		allErrs = append(allErrs, field.Required(
-			workerPath.Child("podTemplateOverrides"),
-			"is required when multinode.mode is Manual",
-		))
-		return allErrs
 	}
 	if spec.Experimental != nil && (spec.Experimental.GPUMemoryService != nil || spec.Experimental.Failover != nil) {
 		allErrs = append(allErrs, field.Forbidden(
-			multinodePath.Child("mode"),
-			"Manual mode cannot be combined with gpuMemoryService or failover",
+			flagsInjectionPath,
+			"Manual flag injection cannot be combined with gpuMemoryService or failover",
 		))
 	}
+	return allErrs
+}
+
+func (v *sharedValidation) validateMultinodeWorkerOverrides(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.Multinode.Worker == nil || spec.Multinode.Worker.PodTemplateOverrides == nil {
+		return nil
+	}
+
+	allErrs := field.ErrorList{}
+	workerPath := fldPath.Child("multinode", "worker")
+	overrides := spec.Multinode.Worker.PodTemplateOverrides
 
 	containersPath := workerPath.Child("podTemplateOverrides", "spec", "containers")
 	if overrides.Spec != nil && overrides.Spec.Containers != nil {

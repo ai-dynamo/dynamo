@@ -18,7 +18,6 @@ func TestMultinodeSpecConversionRoundTrip(t *testing.T) {
 	claimTemplateName := "worker-devices"
 	seconds := int64(30)
 	src := &v1beta1.MultinodeSpec{
-		Mode:      v1beta1.MultinodeModeManual,
 		NodeCount: 4,
 		Worker: &v1beta1.MultinodeWorkerSpec{
 			PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
@@ -73,7 +72,6 @@ func TestMultinodeSpecConversionRoundTrip(t *testing.T) {
 
 func TestMultinodeSpecConversionPreservesExplicitEmptyOverrides(t *testing.T) {
 	src := &v1beta1.MultinodeSpec{
-		Mode:      v1beta1.MultinodeModeManual,
 		NodeCount: 2,
 		Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
 			Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
@@ -110,13 +108,13 @@ func TestMultinodeSpecConversionPreservesExplicitEmptyOverrides(t *testing.T) {
 	}
 }
 
-func TestMultinodeSpecConversionAutomaticMode(t *testing.T) {
-	src := &v1beta1.MultinodeSpec{Mode: v1beta1.MultinodeModeAutomatic, NodeCount: 2}
+func TestMultinodeSpecConversionWithoutWorkerOverrides(t *testing.T) {
+	src := &v1beta1.MultinodeSpec{NodeCount: 2}
 	alpha := &MultinodeSpec{}
 	ConvertToMultinodeSpec(src, alpha)
 	got := &v1beta1.MultinodeSpec{}
 	ConvertFromMultinodeSpec(alpha, got)
 	if !apiequality.Semantic.DeepEqual(got, src) {
-		t.Fatalf("Automatic mode round trip = %#v, want %#v", got, src)
+		t.Fatalf("multinode round trip = %#v, want %#v", got, src)
 	}
 }

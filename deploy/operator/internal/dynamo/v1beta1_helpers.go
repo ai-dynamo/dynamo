@@ -17,36 +17,35 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// EffectiveMultinodeMode returns Automatic for the omitted API value.
-func EffectiveMultinodeMode(component *v1beta1.DynamoComponentDeploymentSharedSpec) v1beta1.MultinodeMode {
-	if component == nil || component.Multinode == nil || component.Multinode.Mode == "" {
-		return v1beta1.MultinodeModeAutomatic
+// EffectiveFlagsInjectionMode returns Automatic for the omitted API value.
+func EffectiveFlagsInjectionMode(component *v1beta1.DynamoComponentDeploymentSharedSpec) v1beta1.FlagsInjectionMode {
+	if component == nil || component.Experimental == nil || component.Experimental.FlagsInjection == "" {
+		return v1beta1.FlagsInjectionModeAutomatic
 	}
-	return component.Multinode.Mode
+	return component.Experimental.FlagsInjection
 }
 
-// IsManualMultinode reports whether the component uses user-supplied leader
-// and worker launch configuration.
-func IsManualMultinode(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return EffectiveMultinodeMode(component) == v1beta1.MultinodeModeManual
+// IsManualFlagsInjection reports whether backend-specific multinode launch
+// injection is disabled.
+func IsManualFlagsInjection(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return EffectiveFlagsInjectionMode(component) == v1beta1.FlagsInjectionModeManual
 }
 
-// EffectiveComponentForRole returns a role-specific component copy. In Manual
-// mode the component podTemplate is the leader and common worker base, and the
-// restricted worker overlay replaces every field that is explicitly present.
+// EffectiveComponentForRole returns a role-specific component copy. The
+// component podTemplate is the leader and common worker base, and the restricted
+// worker overlay replaces every field that is explicitly present. Flag injection
+// mode does not affect template resolution.
 func EffectiveComponentForRole(component *v1beta1.DynamoComponentDeploymentSharedSpec, role Role) (*v1beta1.DynamoComponentDeploymentSharedSpec, error) {
 	if component == nil {
 		return nil, fmt.Errorf("component is nil")
 	}
 	effective := component.DeepCopy()
-	if role != RoleWorker || !IsManualMultinode(component) {
+	if role != RoleWorker || component.Multinode == nil || component.Multinode.Worker == nil ||
+		component.Multinode.Worker.PodTemplateOverrides == nil {
 		return effective, nil
 	}
-	if component.Multinode.Worker == nil || component.Multinode.Worker.PodTemplateOverrides == nil {
-		return nil, fmt.Errorf("manual multinode mode requires worker.podTemplateOverrides")
-	}
 	if effective.PodTemplate == nil {
-		return nil, fmt.Errorf("manual multinode mode requires podTemplate for the leader and worker base")
+		return nil, fmt.Errorf("multinode worker overrides require podTemplate as their base")
 	}
 	if err := applyMultinodeWorkerPodTemplateOverrides(effective.PodTemplate, component.Multinode.Worker.PodTemplateOverrides); err != nil {
 		return nil, err
@@ -82,11 +81,11 @@ func applyMultinodeWorkerPodTemplateOverrides(podTemplate *corev1.PodTemplateSpe
 		return nil
 	}
 	if len(overrides.Spec.Containers) != 1 || overrides.Spec.Containers[0].Name != commonconsts.MainContainerName {
-		return fmt.Errorf("manual multinode worker containers must contain exactly one %q override", commonconsts.MainContainerName)
+		return fmt.Errorf("multinode worker containers must contain exactly one %q override", commonconsts.MainContainerName)
 	}
 	main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplate})
 	if main == nil {
-		return fmt.Errorf("manual multinode worker base has no %q container", commonconsts.MainContainerName)
+		return fmt.Errorf("multinode worker base has no %q container", commonconsts.MainContainerName)
 	}
 	applyMultinodeWorkerContainerOverride(main, &overrides.Spec.Containers[0])
 	return nil

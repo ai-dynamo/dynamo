@@ -50,16 +50,16 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
-		manualMP := IsManualMultinode(component) && containerCommandLineHasArg(container, distributedExecutorFlag, "mp")
+		manualMP := IsManualFlagsInjection(component) && containerCommandLineHasArg(container, distributedExecutorFlag, "mp")
 		if manualMP {
 			injectVLLMManualMpMasterPort(container)
-		} else if !IsManualMultinode(component) {
+		} else if !IsManualFlagsInjection(component) {
 			resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
 			// Apply multinode-specific argument modifications in Automatic mode.
 			updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, &resources, numberOfNodes, annotations)
 		}
 
-		if manualMP || (!IsManualMultinode(component) && shouldUseMpBackend(annotations)) {
+		if manualMP || (!IsManualFlagsInjection(component) && shouldUseMpBackend(annotations)) {
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
@@ -105,7 +105,8 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 
 // injectVLLMManualMpMasterPort keeps the operator-owned wait-for-leader init
 // container and the user-supplied vLLM MP command on the same coordination
-// port. All other multinode topology arguments remain user-owned in Manual mode.
+// port. All other multinode topology arguments remain user-owned when automatic
+// flag injection is Manual.
 func injectVLLMManualMpMasterPort(container *corev1.Container) {
 	if containerCommandLineHasArg(container, "--master-port", commonconsts.VLLMMpMasterPort) {
 		return

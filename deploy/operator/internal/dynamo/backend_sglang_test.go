@@ -566,13 +566,14 @@ func TestSGLangBackend_ManualMultinodePreservesUserLaunchArguments(t *testing.T)
 	wantCommand := append([]string(nil), container.Command...)
 	wantArgs := append([]string(nil), container.Args...)
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		Multinode: &v1alpha1.MultinodeSpec{Mode: v1alpha1.MultinodeModeManual, NodeCount: 2},
+		Experimental: &v1alpha1.ExperimentalSpec{FlagsInjection: v1alpha1.FlagsInjectionModeManual},
+		Multinode:    &v1alpha1.MultinodeSpec{NodeCount: 2},
 	})
 
 	backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
 
 	if !reflect.DeepEqual(container.Command, wantCommand) || !reflect.DeepEqual(container.Args, wantArgs) {
-		t.Fatalf("Manual mode changed user launch configuration: command=%v args=%v", container.Command, container.Args)
+		t.Fatalf("Manual flags injection changed user launch configuration: command=%v args=%v", container.Command, container.Args)
 	}
 	if container.LivenessProbe != nil || container.ReadinessProbe != nil || container.StartupProbe != nil {
 		t.Fatal("Manual SGLang worker probes were not removed")

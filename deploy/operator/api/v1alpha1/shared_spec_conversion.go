@@ -814,7 +814,6 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 // v1beta1.
 func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
 	*dst = v1beta1.MultinodeSpec{
-		Mode:      v1beta1.MultinodeMode(src.Mode),
 		NodeCount: src.NodeCount,
 	}
 	if src.Worker == nil {
@@ -832,7 +831,6 @@ func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
 // v1alpha1.
 func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
 	*dst = MultinodeSpec{
-		Mode:      MultinodeMode(src.Mode),
 		NodeCount: src.NodeCount,
 	}
 	if src.Worker == nil {
@@ -1497,10 +1495,20 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
 	}
 
+	if src.Experimental != nil {
+		ensureExp().FlagsInjection = v1beta1.FlagsInjectionMode(src.Experimental.FlagsInjection)
+	}
+
 	dst.Experimental = exp
 }
 
 func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
+	if src.Experimental != nil && src.Experimental.FlagsInjection != "" {
+		dst.Experimental = &ExperimentalSpec{
+			FlagsInjection: FlagsInjectionMode(src.Experimental.FlagsInjection),
+		}
+	}
+
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{}
 		ConvertToGPUMemoryServiceSpec(src.Experimental.GPUMemoryService, dst.GPUMemoryService)
@@ -2120,6 +2128,7 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 
 func experimentalIsHubOnlyShape(src *v1beta1.ExperimentalSpec) bool {
 	return src != nil &&
+		src.FlagsInjection == "" &&
 		src.GPUMemoryService == nil &&
 		src.Failover == nil &&
 		src.Checkpoint == nil

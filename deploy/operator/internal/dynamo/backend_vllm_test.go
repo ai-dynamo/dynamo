@@ -15,9 +15,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func TestVLLMBackendManualMultinodeInjectsOnlyMpMasterPort(t *testing.T) {
+func TestVLLMBackendManualFlagsInjectionAddsOnlyMpMasterPort(t *testing.T) {
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-		Multinode: &v1beta1.MultinodeSpec{Mode: v1beta1.MultinodeModeManual, NodeCount: 2},
+		Experimental: &v1beta1.ExperimentalSpec{FlagsInjection: v1beta1.FlagsInjectionModeManual},
+		Multinode:    &v1beta1.MultinodeSpec{NodeCount: 2},
 	}
 	for _, role := range []Role{RoleLeader, RoleWorker} {
 		t.Run(string(role), func(t *testing.T) {
@@ -38,7 +39,7 @@ func TestVLLMBackendManualMultinodeInjectsOnlyMpMasterPort(t *testing.T) {
 			}
 			for _, env := range container.Env {
 				if env.Name == "DYNAMO_RANK" || env.Name == "DYNAMO_LEADER_ADDRESS" {
-					t.Fatalf("phase-one Manual mode injected deferred topology alias %q", env.Name)
+					t.Fatalf("phase-one Manual flag injection added deferred topology alias %q", env.Name)
 				}
 			}
 		})

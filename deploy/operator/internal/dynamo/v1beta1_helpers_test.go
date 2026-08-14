@@ -14,11 +14,12 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func TestEffectiveComponentForRoleManualWorkerOverrides(t *testing.T) {
+func TestEffectiveComponentForRoleAutomaticWorkerOverrides(t *testing.T) {
 	terminationGracePeriod := int64(30)
 	leaderClaimTemplate := "leader-claim"
 	workerClaimTemplate := "worker-claim"
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{FlagsInjection: v1beta1.FlagsInjectionModeAutomatic},
 		PodTemplate: &corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels:      map[string]string{"role": "leader"},
@@ -50,7 +51,6 @@ func TestEffectiveComponentForRoleManualWorkerOverrides(t *testing.T) {
 			},
 		},
 		Multinode: &v1beta1.MultinodeSpec{
-			Mode:      v1beta1.MultinodeModeManual,
 			NodeCount: 2,
 			Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
 				Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
@@ -128,6 +128,7 @@ func TestEffectiveComponentForRoleManualWorkerOverrides(t *testing.T) {
 
 func TestEffectiveComponentForRoleManualWorkerExplicitEmptyOverrides(t *testing.T) {
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1beta1.ExperimentalSpec{FlagsInjection: v1beta1.FlagsInjectionModeManual},
 		PodTemplate: &corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"leader": "true"}, Annotations: map[string]string{"leader": "true"}},
 			Spec: corev1.PodSpec{
@@ -148,7 +149,6 @@ func TestEffectiveComponentForRoleManualWorkerExplicitEmptyOverrides(t *testing.
 			},
 		},
 		Multinode: &v1beta1.MultinodeSpec{
-			Mode: v1beta1.MultinodeModeManual,
 			Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
 				Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
 					Labels:      ptr.To(map[string]string{}),

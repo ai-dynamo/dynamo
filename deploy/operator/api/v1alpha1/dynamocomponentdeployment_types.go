@@ -152,6 +152,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+
+	// Experimental groups opt-in preview features whose API shape and behavior
+	// may change without notice.
+	// +optional
+	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
+
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
 	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
@@ -194,43 +200,22 @@ type DynamoComponentDeploymentSharedSpec struct {
 	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
-// MultinodeMode selects who owns engine-specific multinode arguments.
-// +kubebuilder:validation:Enum=Automatic;Manual
-type MultinodeMode string
-
-const (
-	// MultinodeModeAutomatic keeps the existing operator-generated multinode launch configuration.
-	MultinodeModeAutomatic MultinodeMode = "Automatic"
-	// MultinodeModeManual is experimental and uses the user-supplied leader and worker launch configuration.
-	MultinodeModeManual MultinodeMode = "Manual"
-)
-
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
-	// Mode selects ownership of engine-specific multinode configuration.
-	// Automatic preserves the existing operator-generated launch configuration.
-	// Manual is experimental and may change without notice. It uses the component
-	// pod configuration for the leader and applies Worker.PodTemplateOverrides to
-	// construct the worker template. Manual requires users to provide all
-	// engine-specific topology arguments. For vLLM multiprocessing, the operator
-	// still adds --master-port=29500 to both roles.
-	// +optional
-	// +kubebuilder:default=Automatic
-	Mode MultinodeMode `json:"mode,omitempty"`
-
 	// NodeCount is the number of nodes to deploy for the multinode component.
 	// Total GPUs used is NodeCount multiplied by the container GPU limit.
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
 
-	// Worker contains worker-only settings. It is required when Mode is Manual
-	// and must be omitted when Mode is Automatic.
+	// Worker contains optional worker-only settings. It is independent of
+	// Experimental.FlagsInjection and can be used with Automatic or Manual
+	// flag injection.
 	// +optional
 	Worker *MultinodeWorkerSpec `json:"worker,omitempty"`
 }
 
-// MultinodeWorkerSpec configures worker pods in Manual multinode mode.
+// MultinodeWorkerSpec configures worker pods independently of multinode launch injection.
 type MultinodeWorkerSpec struct {
 	// PodTemplateOverrides is a restricted, presence-aware overlay applied to
 	// the component pod configuration for workers. Omitted fields inherit the
@@ -322,6 +307,48 @@ type MultinodeContainerResourceOverrides struct {
 	// +optional
 	Claims *[]corev1.ResourceClaim `json:"claims,omitempty"`
 }
+
+// ExperimentalSpec groups opt-in preview features whose API shape and behavior
+// may change without notice.
+type ExperimentalSpec struct {
+	// FlagsInjection controls automatic backend-specific multinode flag and
+	// launch injection. Automatic is the default.
+	// For vLLM multiprocessing, Automatic injects
+	// --distributed-executor-backend=mp, --nnodes, --master-addr,
+	// --master-port=29500, --node-rank, and --headless on workers. Manual omits
+	// all of those except --master-port=29500, which remains operator-owned when
+	// the supplied command selects multiprocessing. The wait-for-leader-mp init
+	// container and other operator-owned pod wiring also remain in both modes.
+	// For vLLM Ray, Automatic constructs the Ray head or worker launch command and
+	// adds --distributed-executor-backend=ray to the leader; Manual preserves the
+	// supplied commands. For vLLM data parallelism, Automatic injects
+	// --data-parallel-hybrid-lb, --data-parallel-size when absent,
+	// --data-parallel-size-local, --data-parallel-start-rank,
+	// --data-parallel-address, and --data-parallel-rpc-port; Manual omits them.
+	// For SGLang, Automatic injects --dist-init-addr, --nnodes, and --node-rank;
+	// Manual omits them. For TensorRT-LLM, Automatic constructs the mpirun or sshd
+	// launch command; Manual preserves the supplied command and arguments. The
+	// TensorRT-LLM SSH and worker-probe wiring remains in both modes.
+	// Manual is valid only for multinode worker components and cannot initially
+	// be combined with GPU memory service or failover.
+	// Multinode.Worker.PodTemplateOverrides is independent of this field and may
+	// be used in either mode. Automatic injection does not reject or rewrite
+	// user-provided topology flags, so specifying them can produce duplicates.
+	// +optional
+	// +kubebuilder:default=Automatic
+	FlagsInjection FlagsInjectionMode `json:"flagsInjection,omitempty"`
+}
+
+// FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+// +kubebuilder:validation:Enum=Automatic;Manual
+type FlagsInjectionMode string
+
+const (
+	// FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+	FlagsInjectionModeAutomatic FlagsInjectionMode = "Automatic"
+	// FlagsInjectionModeManual disables backend-specific multinode launch injection.
+	FlagsInjectionModeManual FlagsInjectionMode = "Manual"
+)
 
 type IngressTLSSpec struct {
 	// SecretName is the name of a Kubernetes Secret containing the TLS certificate and key.

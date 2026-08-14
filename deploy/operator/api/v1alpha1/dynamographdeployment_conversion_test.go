@@ -151,7 +151,7 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	}
 }
 
-func TestDGD_RoundTrip_ManualMultinodeIsFirstClassInV1alpha1(t *testing.T) {
+func TestDGD_RoundTrip_ManualFlagsInjectionAndMultinodeOverridesAreFirstClassInV1alpha1(t *testing.T) {
 	labels := map[string]string{"dynamo.nvidia.com/role": "worker"}
 	args := []string{"--nnodes=2", "--node-rank=1", "--master-addr=leader"}
 	src := &v1beta1.DynamoGraphDeployment{
@@ -160,8 +160,10 @@ func TestDGD_RoundTrip_ManualMultinodeIsFirstClassInV1alpha1(t *testing.T) {
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "worker",
 				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					FlagsInjection: v1beta1.FlagsInjectionModeManual,
+				},
 				Multinode: &v1beta1.MultinodeSpec{
-					Mode:      v1beta1.MultinodeModeManual,
 					NodeCount: 2,
 					Worker: &v1beta1.MultinodeWorkerSpec{
 						PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
@@ -184,7 +186,7 @@ func TestDGD_RoundTrip_ManualMultinodeIsFirstClassInV1alpha1(t *testing.T) {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
 	if raw := spoke.Annotations[annDGDSpec]; raw != "" {
-		t.Fatalf("manual multinode was stored in the conversion annotation instead of v1alpha1: %s", raw)
+		t.Fatalf("flags injection or multinode overrides were stored in the conversion annotation instead of v1alpha1: %s", raw)
 	}
 
 	got := &v1beta1.DynamoGraphDeployment{}
@@ -192,7 +194,7 @@ func TestDGD_RoundTrip_ManualMultinodeIsFirstClassInV1alpha1(t *testing.T) {
 		t.Fatalf("ConvertTo: %v", err)
 	}
 	if diff := cmp.Diff(src, got); diff != "" {
-		t.Errorf("manual multinode round-trip mismatch (-want +got):\n%s", diff)
+		t.Errorf("flags injection and multinode override round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
 

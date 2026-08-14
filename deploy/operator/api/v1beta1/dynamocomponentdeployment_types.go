@@ -210,9 +210,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// experimental groups opt-in preview features whose API shape and
 	// behavior may change in breaking ways between v1beta1 releases,
 	// including disappearing without a name-preserving graduation path.
-	// In v1beta1 this block holds `gpuMemoryService` and `failover` (which
-	// remain tightly coupled -- failover requires GMS -- and are expected to
-	// evolve together as the DRA-based GPU sharing story matures), and
+	// In v1beta1 this block holds `flagsInjection`, `gpuMemoryService`, and
+	// `failover` (which remain tightly coupled -- failover requires GMS -- and
+	// are expected to evolve together as the DRA-based GPU sharing story
+	// matures), and
 	// `checkpoint` (whose API shape is still settling). Fields here are
 	// explicitly NOT covered by the normal v1beta1 deprecation policy; do not
 	// depend on them for production workloads.

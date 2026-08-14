@@ -1430,6 +1430,42 @@ spec:
                             type: object
                             x-kubernetes-map-type: atomic
                         type: object
+                      experimental:
+                        description: |-
+                          Experimental groups opt-in preview features whose API shape and behavior
+                          may change without notice.
+                        properties:
+                          flagsInjection:
+                            default: Automatic
+                            description: |-
+                              FlagsInjection controls automatic backend-specific multinode flag and
+                              launch injection. Automatic is the default.
+                              For vLLM multiprocessing, Automatic injects
+                              --distributed-executor-backend=mp, --nnodes, --master-addr,
+                              --master-port=29500, --node-rank, and --headless on workers. Manual omits
+                              all of those except --master-port=29500, which remains operator-owned when
+                              the supplied command selects multiprocessing. The wait-for-leader-mp init
+                              container and other operator-owned pod wiring also remain in both modes.
+                              For vLLM Ray, Automatic constructs the Ray head or worker launch command and
+                              adds --distributed-executor-backend=ray to the leader; Manual preserves the
+                              supplied commands. For vLLM data parallelism, Automatic injects
+                              --data-parallel-hybrid-lb, --data-parallel-size when absent,
+                              --data-parallel-size-local, --data-parallel-start-rank,
+                              --data-parallel-address, and --data-parallel-rpc-port; Manual omits them.
+                              For SGLang, Automatic injects --dist-init-addr, --nnodes, and --node-rank;
+                              Manual omits them. For TensorRT-LLM, Automatic constructs the mpirun or sshd
+                              launch command; Manual preserves the supplied command and arguments. The
+                              TensorRT-LLM SSH and worker-probe wiring remains in both modes.
+                              Manual is valid only for multinode worker components and cannot initially
+                              be combined with GPU memory service or failover.
+                              Multinode.Worker.PodTemplateOverrides is independent of this field and may
+                              be used in either mode. Automatic injection does not reject or rewrite
+                              user-provided topology flags, so specifying them can produce duplicates.
+                            enum:
+                              - Automatic
+                              - Manual
+                            type: string
+                        type: object
                       extraPodMetadata:
                         description: ExtraPodMetadata adds labels/annotations to the created Pods.
                         properties:
@@ -11505,20 +11541,6 @@ spec:
                       multinode:
                         description: Multinode is the configuration for multinode components.
                         properties:
-                          mode:
-                            default: Automatic
-                            description: |-
-                              Mode selects ownership of engine-specific multinode configuration.
-                              Automatic preserves the existing operator-generated launch configuration.
-                              Manual is experimental and may change without notice. It uses the component
-                              pod configuration for the leader and applies Worker.PodTemplateOverrides to
-                              construct the worker template. Manual requires users to provide all
-                              engine-specific topology arguments. For vLLM multiprocessing, the operator
-                              still adds --master-port=29500 to both roles.
-                            enum:
-                              - Automatic
-                              - Manual
-                            type: string
                           nodeCount:
                             default: 2
                             description: |-
@@ -11529,8 +11551,9 @@ spec:
                             type: integer
                           worker:
                             description: |-
-                              Worker contains worker-only settings. It is required when Mode is Manual
-                              and must be omitted when Mode is Automatic.
+                              Worker contains optional worker-only settings. It is independent of
+                              Experimental.FlagsInjection and can be used with Automatic or Manual
+                              flag injection.
                             properties:
                               podTemplateOverrides:
                                 description: |-
@@ -12769,9 +12792,10 @@ spec:
                           experimental groups opt-in preview features whose API shape and
                           behavior may change in breaking ways between v1beta1 releases,
                           including disappearing without a name-preserving graduation path.
-                          In v1beta1 this block holds `gpuMemoryService` and `failover` (which
-                          remain tightly coupled -- failover requires GMS -- and are expected to
-                          evolve together as the DRA-based GPU sharing story matures), and
+                          In v1beta1 this block holds `flagsInjection`, `gpuMemoryService`, and
+                          `failover` (which remain tightly coupled -- failover requires GMS -- and
+                          are expected to evolve together as the DRA-based GPU sharing story
+                          matures), and
                           `checkpoint` (whose API shape is still settling). Fields here are
                           explicitly NOT covered by the normal v1beta1 deprecation policy; do not
                           depend on them for production workloads.
@@ -12959,6 +12983,36 @@ spec:
                                 minimum: 1
                                 type: integer
                             type: object
+                          flagsInjection:
+                            default: Automatic
+                            description: |-
+                              flagsInjection controls automatic backend-specific multinode flag and
+                              launch injection. Automatic is the default.
+                              For vLLM multiprocessing, Automatic injects
+                              --distributed-executor-backend=mp, --nnodes, --master-addr,
+                              --master-port=29500, --node-rank, and --headless on workers. Manual omits
+                              all of those except --master-port=29500, which remains operator-owned when
+                              the supplied command selects multiprocessing. The wait-for-leader-mp init
+                              container and other operator-owned pod wiring also remain in both modes.
+                              For vLLM Ray, Automatic constructs the Ray head or worker launch command and
+                              adds --distributed-executor-backend=ray to the leader; Manual preserves the
+                              supplied commands. For vLLM data parallelism, Automatic injects
+                              --data-parallel-hybrid-lb, --data-parallel-size when absent,
+                              --data-parallel-size-local, --data-parallel-start-rank,
+                              --data-parallel-address, and --data-parallel-rpc-port; Manual omits them.
+                              For SGLang, Automatic injects --dist-init-addr, --nnodes, and --node-rank;
+                              Manual omits them. For TensorRT-LLM, Automatic constructs the mpirun or sshd
+                              launch command; Manual preserves the supplied command and arguments. The
+                              TensorRT-LLM SSH and worker-probe wiring remains in both modes.
+                              Manual is valid only for multinode worker components and cannot initially
+                              be combined with GPU memory service or failover.
+                              multinode.worker.podTemplateOverrides is independent of this field and may
+                              be used in either mode. Automatic injection does not reject or rewrite
+                              user-provided topology flags, so specifying them can produce duplicates.
+                            enum:
+                              - Automatic
+                              - Manual
+                            type: string
                           gpuMemoryService:
                             description: |-
                               gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
@@ -13077,20 +13131,6 @@ spec:
                       multinode:
                         description: multinode configures multinode components.
                         properties:
-                          mode:
-                            default: Automatic
-                            description: |-
-                              mode selects ownership of engine-specific multinode configuration.
-                              Automatic preserves the existing operator-generated launch configuration.
-                              Manual is experimental and may change without notice. It uses podTemplate
-                              for the leader and applies worker.podTemplateOverrides to construct the worker
-                              template. Manual requires users to provide all engine-specific topology
-                              arguments. For vLLM multiprocessing, the operator still adds
-                              --master-port=29500 to both roles.
-                            enum:
-                              - Automatic
-                              - Manual
-                            type: string
                           nodeCount:
                             default: 2
                             description: |-
@@ -13101,8 +13141,9 @@ spec:
                             type: integer
                           worker:
                             description: |-
-                              worker contains worker-only settings. It is required when mode is Manual
-                              and must be omitted when mode is Automatic.
+                              worker contains optional worker-only settings. It is independent of
+                              experimental.flagsInjection and can be used with Automatic or Manual
+                              flag injection.
                             properties:
                               podTemplateOverrides:
                                 description: |-

@@ -487,7 +487,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 	}
 }
 
-func TestTRTLLMBackend_ManualMultinodePreservesUserLaunchConfiguration(t *testing.T) {
+func TestTRTLLMBackend_ManualFlagsPreservesLaunchAndRetainsPodWiring(t *testing.T) {
 	backend := &TRTLLMBackend{MpiRunSecretName: mpiRunSecretName}
 	container := &corev1.Container{
 		Command:        []string{"python3"},
@@ -496,20 +496,28 @@ func TestTRTLLMBackend_ManualMultinodePreservesUserLaunchConfiguration(t *testin
 		ReadinessProbe: &corev1.Probe{},
 		StartupProbe:   &corev1.Probe{},
 	}
-	wantContainer := container.DeepCopy()
+	wantCommand := append([]string(nil), container.Command...)
+	wantArgs := append([]string(nil), container.Args...)
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		Multinode: &v1alpha1.MultinodeSpec{Mode: v1alpha1.MultinodeModeManual, NodeCount: 2},
+		Experimental: &v1alpha1.ExperimentalSpec{FlagsInjection: v1alpha1.FlagsInjectionModeManual},
+		Multinode:    &v1alpha1.MultinodeSpec{NodeCount: 2},
 	})
 
 	backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
-	if !reflect.DeepEqual(container, wantContainer) {
-		t.Fatalf("Manual mode changed user container:\n got: %#v\nwant: %#v", container, wantContainer)
+	if !reflect.DeepEqual(container.Command, wantCommand) || !reflect.DeepEqual(container.Args, wantArgs) {
+		t.Fatalf("Manual flags injection changed user launch: command=%v args=%v", container.Command, container.Args)
+	}
+	if container.LivenessProbe != nil || container.StartupProbe != nil || container.ReadinessProbe == nil {
+		t.Fatalf("Manual flags injection did not retain worker probe wiring: %#v", container)
+	}
+	if len(container.VolumeMounts) != 1 || container.VolumeMounts[0].Name != mpiRunSecretName {
+		t.Fatalf("Manual flags injection did not retain the SSH volume mount: %#v", container.VolumeMounts)
 	}
 
 	podSpec := &corev1.PodSpec{Containers: []corev1.Container{*container}}
 	backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
-	if len(podSpec.Volumes) != 0 {
-		t.Fatalf("Manual mode injected TRT-LLM SSH volumes: %#v", podSpec.Volumes)
+	if len(podSpec.Volumes) != 1 || podSpec.Volumes[0].Name != mpiRunSecretName {
+		t.Fatalf("Manual flags injection did not retain the SSH volume: %#v", podSpec.Volumes)
 	}
 }
 

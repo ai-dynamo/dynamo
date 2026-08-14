@@ -175,6 +175,14 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		func(v *v1beta1.OptimizationType, c randfill.Continue) {
 			*v = oneOf(c, v1beta1.OptimizationTypeLatency, v1beta1.OptimizationTypeThroughput)
 		},
+		// flagsInjection is defaulted by the CRD whenever experimental is present.
+		// Keep fuzzed objects within the admitted/defaulted enum domain.
+		func(v *v1alpha1.FlagsInjectionMode, c randfill.Continue) {
+			*v = oneOf(c, v1alpha1.FlagsInjectionModeAutomatic, v1alpha1.FlagsInjectionModeManual)
+		},
+		func(v *v1beta1.FlagsInjectionMode, c randfill.Continue) {
+			*v = oneOf(c, v1beta1.FlagsInjectionModeAutomatic, v1beta1.FlagsInjectionModeManual)
+		},
 		fuzzAlphaDGDRSpec,
 		fuzzAlphaDGDRStatus,
 		fuzzBetaDGDRSpec,
