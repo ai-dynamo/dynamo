@@ -152,7 +152,7 @@ mod tests {
             policy_file.path(),
             r#"
 worker_selection:
-  default: custom
+  aggregated: custom
   instances:
     - name: custom
       type: test
