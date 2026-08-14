@@ -827,7 +827,7 @@ where
         let backend = ServiceBackend::from_engine(engine);
 
         // create the pipeline
-        let pipeline = frontend.link(backend)?.link(frontend)?;
+        let pipeline = frontend.link(backend)?.link_terminal(frontend)?;
 
         let ingress = Ingress::new_with_adapter(payload_adapter);
         ingress.attach(pipeline)?;

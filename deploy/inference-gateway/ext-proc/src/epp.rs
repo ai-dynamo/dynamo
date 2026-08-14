@@ -182,6 +182,8 @@ impl Router {
             // ext-proc constructs no KvWorkerMonitor; overload publishing is
             // unused on this path (matches the prior namespace-lookup miss).
             None,
+            // This standalone router is not owned by a frontend WorkerSet.
+            None,
         );
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);

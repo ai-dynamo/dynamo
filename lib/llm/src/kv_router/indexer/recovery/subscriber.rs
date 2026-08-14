@@ -365,9 +365,18 @@ pub(super) fn clear_mismatch_metric_on_cancellation(
 pub(crate) struct KvEventSubscriptionHandle {
     cancel: CancellationToken,
     completions: Vec<oneshot::Receiver<()>>,
+    runtime: tokio::runtime::Handle,
+    task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
 }
 
 impl KvEventSubscriptionHandle {
+    pub(crate) fn set_task_guard(
+        &mut self,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) {
+        self.task_guard = Some(task_guard);
+    }
+
     pub(crate) async fn shutdown(mut self) {
         self.cancel.cancel();
         for completion in self.completions.drain(..) {
@@ -379,6 +388,16 @@ impl KvEventSubscriptionHandle {
 impl Drop for KvEventSubscriptionHandle {
     fn drop(&mut self) {
         self.cancel.cancel();
+        let Some(task_guard) = self.task_guard.take() else {
+            return;
+        };
+        let completions = std::mem::take(&mut self.completions);
+        self.runtime.spawn(async move {
+            let _task_guard = task_guard;
+            for completion in completions {
+                let _ = completion.await;
+            }
+        });
     }
 }
 
@@ -393,6 +412,7 @@ pub async fn start_subscriber(
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<KvEventSubscriptionHandle> {
+    let runtime = endpoint.component().drt().runtime().secondary();
     let transport_kind = endpoint.component().drt().default_event_transport_kind();
     let direct_zmq = uses_direct_zmq(transport_kind);
     let cancel = cancellation_token.child_token();
@@ -445,6 +465,8 @@ pub async fn start_subscriber(
         return Ok(KvEventSubscriptionHandle {
             cancel,
             completions: vec![completion_rx, health_completion],
+            runtime,
+            task_guard: None,
         });
     }
 
@@ -478,6 +500,8 @@ pub async fn start_subscriber(
     Ok(KvEventSubscriptionHandle {
         cancel,
         completions: vec![completion_rx, health_completion],
+        runtime,
+        task_guard: None,
     })
 }
 
@@ -640,10 +664,44 @@ mod tests {
         let handle = KvEventSubscriptionHandle {
             cancel,
             completions,
+            runtime: tokio::runtime::Handle::current(),
+            task_guard: None,
         };
 
         tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
             .await
             .expect("subscription shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn dropped_subscription_retains_task_guard_until_owned_tasks_finish() {
+        let cancel = CancellationToken::new();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = release_rx.await;
+            let _ = completion_tx.send(());
+        });
+        let teardown = Arc::new(());
+        let teardown_weak = Arc::downgrade(&teardown);
+        let mut handle = KvEventSubscriptionHandle {
+            cancel,
+            completions: vec![completion_rx],
+            runtime: tokio::runtime::Handle::current(),
+            task_guard: None,
+        };
+        handle.set_task_guard(teardown.clone());
+        drop(teardown);
+
+        drop(handle);
+        assert!(teardown_weak.upgrade().is_some());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while teardown_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("subscription task guard was not released after task completion");
     }
 }

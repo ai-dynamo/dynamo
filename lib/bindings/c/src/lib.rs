@@ -864,6 +864,8 @@ pub unsafe extern "C" fn create_routers(
             // C bindings construct no KvWorkerMonitor; overload publishing is
             // unused on this path (matches the prior namespace-lookup miss).
             None,
+            // This standalone router is not owned by a frontend WorkerSet.
+            None,
         );
 
         // Spawn background discovery watcher for prefill workers.

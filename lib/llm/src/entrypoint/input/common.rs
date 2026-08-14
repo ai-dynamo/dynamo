@@ -471,7 +471,7 @@ where
         .link(engine)?
         .link(backend.backward_edge())?
         .link(preprocessor.backward_edge())?
-        .link(frontend)?)
+        .link_terminal(frontend)?)
 }
 
 impl PreprocessedRouting {
@@ -516,7 +516,7 @@ impl PreprocessedRouting {
             .link(token_backend.backward_edge())?
             .link(migration.backward_edge())?
             .link(preprocessor_op.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }
@@ -550,7 +550,7 @@ impl PreprocessedRouting {
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
             .link(migration.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }

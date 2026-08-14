@@ -85,6 +85,24 @@ impl EncoderRouter {
         model_name: String,
         namespace: String,
     ) -> Arc<Self> {
+        Self::new_inner(activation_rx, model_name, namespace, None)
+    }
+
+    pub(crate) fn new_with_task_guard(
+        activation_rx: oneshot::Receiver<Endpoint>,
+        model_name: String,
+        namespace: String,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) -> Arc<Self> {
+        Self::new_inner(activation_rx, model_name, namespace, Some(task_guard))
+    }
+
+    fn new_inner(
+        activation_rx: oneshot::Receiver<Endpoint>,
+        model_name: String,
+        namespace: String,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
         let router = Arc::new(Self {
             router: OnceLock::new(),
@@ -96,6 +114,7 @@ impl EncoderRouter {
 
         let router_weak = Arc::downgrade(&router);
         tokio::spawn(async move {
+            let _task_guard = task_guard;
             tokio::select! {
                 result = activation_rx => {
                     let Ok(endpoint) = result else {
