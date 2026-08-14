@@ -241,7 +241,6 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	toDelete bool,
 ) (Resource, error) {
-	logger := log.FromContext(ctx)
 	componentName := component.ComponentName
 	service := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
@@ -262,16 +261,16 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		},
 	)
 	if err != nil {
-		logger.Error(err, "failed to sync the elastic-EP leader service")
 		return nil, fmt.Errorf("failed to sync the elastic-EP leader service: %w", err)
 	}
+
+	// Nil means the sync deleted the Service, or found nothing to delete: no resource to
+	// report either way.
 	if syncedService == nil {
 		return nil, nil
 	}
 
-	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) {
-		return true, ""
-	})
+	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) { return true, "" })
 	if err != nil {
 		return nil, fmt.Errorf("failed to wrap the elastic-EP leader service: %w", err)
 	}
