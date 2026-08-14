@@ -100,7 +100,7 @@ pub(crate) struct EngineProgress {
     pub(in crate::replay::offline) had_raw_observations: bool,
 }
 
-pub(crate) trait EngineEventBatch: Default {
+pub(crate) trait EngineEventBatch: Default + Send + 'static {
     fn is_empty(&self) -> bool;
     fn append(&mut self, other: Self);
 }
