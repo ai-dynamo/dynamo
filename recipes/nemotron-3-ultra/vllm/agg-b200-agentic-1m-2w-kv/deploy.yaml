@@ -16,7 +16,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: nemotron-ultra-refresh-b200-1m-agg-2w-kv
+  name: ultra-agg-b200-1m-2w-kv
   labels:
     app.kubernetes.io/part-of: nemotron-3-ultra
     nemotron-ultra-refresh.nvidia.com/sku: b200

@@ -43,12 +43,12 @@ The shared Refresh Job replays all 3541 rows of the 15% agentic Mooncake trace t
 
 | Profile | `DGD_NAME` | `CONTEXT` | `CONCURRENCY` | `GPU_COUNT` | `REQUEST_TIMEOUT` | `WARMUP_BURSTS` | Expected requests | Expected errors |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| B200 256K | `nemotron-ultra-refresh-b200-256k-agg-2w-kv` | `256k` | 94 | 8 | 3600 | 2 | 3411 | 130 |
-| B200 1M | `nemotron-ultra-refresh-b200-1m-agg-2w-kv` | `1m` | 46 | 8 | 3600 | 2 | 3528 | 13 |
-| GB200 256K | `nemotron-ultra-refresh-gb200-256k-agg-2w-kv` | `256k` | 96 | 8 | 1200 | 1 | 3411 | 130 |
-| GB200 1M | `nemotron-ultra-refresh-gb200-1m-agg-2w-kv` | `1m` | 48 | 8 | 3600 | 2 | 3528 | 13 |
-| H200 256K | `nemotron-ultra-refresh-h200-256k-agg-2w-kv` | `256k` | 64 | 16 | 1200 | 2 | 3411 | 130 |
-| H200 1M | `nemotron-ultra-refresh-h200-1m-agg-2w-kv` | `1m` | 32 | 16 | 3600 | 2 | 3528 | 13 |
+| B200 256K | `ultra-agg-b200-256k-2w-kv` | `256k` | 94 | 8 | 3600 | 2 | 3411 | 130 |
+| B200 1M | `ultra-agg-b200-1m-2w-kv` | `1m` | 46 | 8 | 3600 | 2 | 3528 | 13 |
+| GB200 256K | `ultra-agg-gb200-256k-2w-kv` | `256k` | 96 | 8 | 1200 | 1 | 3411 | 130 |
+| GB200 1M | `ultra-agg-gb200-1m-2w-kv` | `1m` | 48 | 8 | 3600 | 2 | 3528 | 13 |
+| H200 256K | `ultra-agg-h200-256k-2w-kv` | `256k` | 64 | 16 | 1200 | 2 | 3411 | 130 |
+| H200 1M | `ultra-agg-h200-1m-2w-kv` | `1m` | 32 | 16 | 3600 | 2 | 3528 | 13 |
 
 Set `ENDPOINT` to `<DGD_NAME>-frontend:8000`, `EXPECTED_REQUEST_COUNT` and `EXPECTED_ERROR_COUNT` to the final two columns, and leave `JOB_NAME=perf-nemotron-ultra-refresh`. Then run:
 
