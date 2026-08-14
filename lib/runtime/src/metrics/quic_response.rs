@@ -6,7 +6,7 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 
 use parking_lot::Mutex;
-use prometheus::{Histogram, HistogramOpts, IntCounter, IntGauge};
+use prometheus::{Histogram, HistogramOpts, HistogramVec, IntCounter, IntGauge, Opts};
 
 use crate::MetricsRegistry;
 
@@ -37,7 +37,10 @@ pub static FRAMES_PER_BATCH: LazyLock<Histogram> = LazyLock::new(|| {
             "dynamo_quic_response_frames_per_batch",
             "Logical response frames per vectored QUIC write",
         )
-        .buckets(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 63.0, 64.0]),
+        .buckets(vec![
+            1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 63.0, 64.0, 96.0, 128.0, 192.0, 255.0, 256.0,
+            512.0, 1_024.0, 2_048.0, 4_096.0,
+        ]),
     )
     .unwrap()
 });
@@ -61,6 +64,99 @@ pub static BLOCKED_ENQUEUE_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
         )
         .buckets(vec![0.000_001, 0.000_01, 0.000_1, 0.001, 0.01, 0.1, 1.0]),
     )
+    .unwrap()
+});
+pub static FIRST_RESPONSE_QUEUE_DWELL_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    HistogramVec::new(
+        HistogramOpts::new(
+            "dynamo_quic_response_first_response_queue_dwell_seconds",
+            "Time a prologue or first data frame spends in the mocker lane queue",
+        )
+        .buckets(vec![
+            0.000_01, 0.000_1, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0,
+        ]),
+        &["kind"],
+    )
+    .unwrap()
+});
+pub static FIRST_RESPONSE_BLOCKED_ENQUEUE_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    HistogramVec::new(
+        HistogramOpts::new(
+            "dynamo_quic_response_first_response_blocked_enqueue_seconds",
+            "Full-lane-queue wait for a prologue or first data frame",
+        )
+        .buckets(vec![
+            0.000_01, 0.000_1, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0,
+        ]),
+        &["kind"],
+    )
+    .unwrap()
+});
+pub static WRITER_WRITE_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "dynamo_quic_response_writer_write_seconds",
+            "Time for one mocker QUIC lane write_all_chunks call",
+        )
+        .buckets(vec![
+            0.000_01, 0.000_1, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0,
+        ]),
+    )
+    .unwrap()
+});
+pub static SETUP_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "dynamo_quic_response_setup_seconds",
+            "Time from frontend response registration to QUIC prologue arrival",
+        )
+        .buckets(vec![
+            0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0,
+        ]),
+    )
+    .unwrap()
+});
+pub static FIRST_DATA_AFTER_PROLOGUE_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "dynamo_quic_response_first_data_after_prologue_seconds",
+            "Time from QUIC prologue arrival to first data-frame arrival",
+        )
+        .buckets(vec![
+            0.000_01, 0.000_1, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0,
+        ]),
+    )
+    .unwrap()
+});
+pub static SERVER_DELIVERY_BLOCKED_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "dynamo_quic_response_server_delivery_blocked_seconds",
+            "Frontend lane-reader wait after one response mailbox is full",
+        )
+        .buckets(vec![
+            0.000_01, 0.000_1, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0,
+        ]),
+    )
+    .unwrap()
+});
+pub static FIRST_DATA_DELIVERY_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "dynamo_quic_response_first_data_delivery_seconds",
+            "Time to deliver the first data frame into its frontend response mailbox",
+        )
+        .buckets(vec![
+            0.000_001, 0.000_01, 0.000_1, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0,
+        ]),
+    )
+    .unwrap()
+});
+pub static SERVER_DELIVERY_BLOCKED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::with_opts(Opts::new(
+        "dynamo_quic_response_server_delivery_blocked_total",
+        "Data frames that found a full frontend response mailbox",
+    ))
     .unwrap()
 });
 
@@ -132,6 +228,14 @@ pub fn ensure_registered(registry: &MetricsRegistry) {
         register!(FRAMES_PER_BATCH);
         register!(BATCH_WAIT_SECONDS);
         register!(BLOCKED_ENQUEUE_SECONDS);
+        register!(FIRST_RESPONSE_QUEUE_DWELL_SECONDS);
+        register!(FIRST_RESPONSE_BLOCKED_ENQUEUE_SECONDS);
+        register!(WRITER_WRITE_SECONDS);
+        register!(SETUP_SECONDS);
+        register!(FIRST_DATA_AFTER_PROLOGUE_SECONDS);
+        register!(SERVER_DELIVERY_BLOCKED_SECONDS);
+        register!(FIRST_DATA_DELIVERY_SECONDS);
+        register!(SERVER_DELIVERY_BLOCKED_TOTAL);
         register!(UDP_TX_DATAGRAMS);
         register!(UDP_RX_DATAGRAMS);
         register!(LOST_PACKETS);

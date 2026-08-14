@@ -140,6 +140,16 @@ impl Drop for RequestMetricsGuard {
     }
 }
 
+trait ResponsePublisher {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
+}
+
+impl ResponsePublisher for quic_response::QuicResponseSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send(self, payload).await
+    }
+}
+
 impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
 where
     Req: PipelineIO + Sync,
@@ -147,7 +157,7 @@ where
     Adapter: Send + Sync + 'static,
 {
     /// Pump every chunk from the engine's response stream out to the
-    /// upstream-side `StreamSender`, plus the terminal complete-final
+    /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
     /// classification (client-side disconnect vs. real failure), and the
     /// health-check notifier policy (notify only on non-error chunks and
@@ -155,7 +165,7 @@ where
     async fn pump_response_stream<U>(
         &self,
         mut stream: ManyOut<U>,
-        publisher: &quic_response::QuicResponseSender,
+        publisher: &impl ResponsePublisher,
         payload_codec: RequestPlanePayloadCodec,
     ) where
         U: Data + std::fmt::Debug,
@@ -785,6 +795,12 @@ mod tests {
     type TestResponse = Annotated<serde_json::Value>;
     type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
 
+    impl ResponsePublisher for StreamSender {
+        async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+            StreamSender::send(self, payload).await
+        }
+    }
+
     /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
     fn test_metrics() -> WorkHandlerMetrics {
         WorkHandlerMetrics::new(
@@ -838,7 +854,7 @@ mod tests {
         // Capacity covers every content frame, so a send only fails once the
         // receiver is gone — never merely because the channel is full.
         let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
-        let publisher = StreamSender { tx, prologue: None };
+        let publisher = StreamSender { tx };
 
         let ctx = Context::new(serde_json::json!({}));
         let engine_ctx = ctx.context();
@@ -970,7 +986,7 @@ mod tests {
 
         let content_frames = 3;
         let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
-        let publisher = StreamSender { tx, prologue: None };
+        let publisher = StreamSender { tx };
 
         let ctx = Context::new(serde_json::json!({}));
         let content: Vec<TestResponse> = (0..content_frames)

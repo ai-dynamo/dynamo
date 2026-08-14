@@ -735,6 +735,15 @@ pub mod quic_response {
     /// Total response lanes distributed across the connection bundle. Defaults to 8.
     pub const DYN_QUIC_RESPONSE_LANES: &str = "DYN_QUIC_RESPONSE_LANES";
     pub const DYN_QUIC_RESPONSE_BATCH_INTERVAL_US: &str = "DYN_QUIC_RESPONSE_BATCH_INTERVAL_US";
+    /// Maximum logical frames submitted by one lane write. Defaults to 64.
+    pub const DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES: &str = "DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES";
+    /// Use a coalescing lane queue that wakes its writer only on an empty-to-nonempty transition.
+    pub const DYN_QUIC_RESPONSE_COALESCING_QUEUE: &str = "DYN_QUIC_RESPONSE_COALESCING_QUEUE";
+    /// Per-response frontend mailbox capacity. Defaults to 64 frames.
+    pub const DYN_QUIC_RESPONSE_BUFFER_CAPACITY: &str = "DYN_QUIC_RESPONSE_BUFFER_CAPACITY";
+    /// Send response prologues and first data on fixed lanes over a dedicated QUIC connection.
+    pub const DYN_QUIC_RESPONSE_PRIORITY_PROLOGUE_STREAM: &str =
+        "DYN_QUIC_RESPONSE_PRIORITY_PROLOGUE_STREAM";
 }
 
 /// Event Plane transport environment variables
@@ -999,6 +1008,10 @@ mod tests {
             quic_response::DYN_QUIC_RESPONSE_CONNECTIONS,
             quic_response::DYN_QUIC_RESPONSE_LANES,
             quic_response::DYN_QUIC_RESPONSE_BATCH_INTERVAL_US,
+            quic_response::DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES,
+            quic_response::DYN_QUIC_RESPONSE_COALESCING_QUEUE,
+            quic_response::DYN_QUIC_RESPONSE_BUFFER_CAPACITY,
+            quic_response::DYN_QUIC_RESPONSE_PRIORITY_PROLOGUE_STREAM,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
