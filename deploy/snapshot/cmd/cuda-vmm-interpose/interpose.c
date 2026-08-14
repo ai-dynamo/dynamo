@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 
 #include <cuda.h>
+#include <cuda_runtime_api.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <link.h>
@@ -23,6 +24,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "multicast.h"
 #include "posix.h"
 #include "protocol.h"
 #include "util.h"
@@ -30,6 +32,8 @@
 #undef cuGetProcAddress
 #undef cuMulticastBindAddr
 #undef cuMulticastBindMem
+#undef cudaGetDriverEntryPoint
+#undef cudaGetDriverEntryPointByVersion
 
 #define CONTROL_DIR "/snapshot-control"
 #define CONTROL_TIMEOUT_SECONDS 30
@@ -42,6 +46,14 @@ CUresult CUDAAPI cuGetProcAddress_v2(const char*, void**, int, cuuint64_t, CUdri
 CUresult CUDAAPI cuGetProcAddress_v2_ptsz(const char*, void**, int, cuuint64_t, CUdriverProcAddressQueryResult*);
 CUresult CUDAAPI cuMemRetainAllocationHandle(CUmemGenericAllocationHandle*, void*);
 CUresult CUDAAPI cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp*, CUmemGenericAllocationHandle);
+cudaError_t CUDARTAPI
+cudaGetDriverEntryPoint(const char*, void**, unsigned long long, enum cudaDriverEntryPointQueryResult*);
+cudaError_t CUDARTAPI cudaGetDriverEntryPointByVersion(
+    const char*, void**, unsigned int, unsigned long long, enum cudaDriverEntryPointQueryResult*);
+cudaError_t CUDARTAPI
+cudaGetDriverEntryPoint_ptsz(const char*, void**, unsigned long long, enum cudaDriverEntryPointQueryResult*);
+cudaError_t CUDARTAPI cudaGetDriverEntryPointByVersion_ptsz(
+    const char*, void**, unsigned int, unsigned long long, enum cudaDriverEntryPointQueryResult*);
 
 typedef CUresult(CUDAAPI* create_fn)(
     CUmemGenericAllocationHandle*, size_t, const CUmemAllocationProp*, unsigned long long);
@@ -96,8 +108,13 @@ struct allocation {
 enum phase {
   PHASE_ACTIVE,
   PHASE_CARRIERS,
+  PHASE_MULTICAST_DETACHED,
   PHASE_PREPARED,
   PHASE_CREATORS_RESTORED,
+  PHASE_UNICAST_RESTORED,
+  PHASE_MULTICAST_CREATED,
+  PHASE_MULTICAST_IMPORTED,
+  PHASE_MULTICAST_JOINED,
   PHASE_FAILED,
 };
 
@@ -123,10 +140,27 @@ static uint64_t next_logical_handle = 1;
 static pthread_once_t real_dlsym_once = PTHREAD_ONCE_INIT;
 static void* (*real_dlsym_function)(void*, const char*);
 static _Atomic(uintptr_t) explicit_libcuda_handle;
+static _Atomic(uintptr_t) explicit_libcudart_handle;
 static _Atomic(uintptr_t) explicit_cu_get_proc_address;
 static _Atomic(uintptr_t) explicit_cu_get_proc_address_v2;
 
 static void* replacement(const char*, int);
+static struct handle* resolve_managed_handle(CUmemGenericAllocationHandle logical);
+static struct mapping* find_mapping_at(CUdeviceptr address);
+static struct mapping* first_mapping(const struct allocation* allocation);
+static struct handle* first_live_handle(const struct allocation* allocation);
+
+static void
+release_state_lock(void)
+{
+  pthread_mutex_unlock(&state_lock);
+}
+
+static void
+acquire_state_lock(void)
+{
+  pthread_mutex_lock(&state_lock);
+}
 
 static void
 set_failure(const char* message)
@@ -173,7 +207,7 @@ real_dlsym(void* handle, const char* name)
 }
 
 static void*
-real_symbol(const char* name)
+lookup_real_symbol(const char* name)
 {
   void* symbol = real_dlsym(RTLD_NEXT, name);
   void* handle;
@@ -181,26 +215,41 @@ real_symbol(const char* name)
   if (symbol != NULL)
     return symbol;
   handle = (void*)atomic_load(&explicit_libcuda_handle);
+  if (handle != NULL && (symbol = real_dlsym(handle, name)) != NULL)
+    return symbol;
+  handle = (void*)atomic_load(&explicit_libcudart_handle);
   return handle == NULL ? NULL : real_dlsym(handle, name);
 }
 
+static void*
+real_symbol(const char* name)
+{
+  return lookup_real_symbol(name);
+}
+
 static bool
-is_libcuda(void* handle, void* symbol)
+is_cuda_library(void* handle, void* symbol, const char** library)
 {
   struct link_map* map;
   Dl_info info;
-  const char* name;
+  const char* provider;
+  const char* requested;
 
-  if (handle == NULL || handle == RTLD_NEXT || dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == NULL ||
-      dladdr(symbol, &info) == 0)
+  if (dladdr(symbol, &info) == 0)
     return false;
-  name = strrchr(map->l_name, '/');
-  name = name == NULL ? map->l_name : name + 1;
-  if (strncmp(name, "libcuda.so", 10) != 0)
+  provider = strrchr(info.dli_fname, '/');
+  provider = provider == NULL ? info.dli_fname : provider + 1;
+  if (strncmp(provider, "libcuda.so", 10) != 0 && strncmp(provider, "libcudart.so", 12) != 0)
     return false;
-  name = strrchr(info.dli_fname, '/');
-  name = name == NULL ? info.dli_fname : name + 1;
-  return strncmp(name, "libcuda.so", 10) == 0;
+  *library = provider;
+  if (handle == NULL || handle == RTLD_NEXT)
+    return true;
+  if (dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == NULL)
+    return false;
+  requested = strrchr(map->l_name, '/');
+  requested = requested == NULL ? map->l_name : requested + 1;
+  return (strncmp(requested, "libcuda.so", 10) == 0 && strncmp(provider, "libcuda.so", 10) == 0) ||
+         (strncmp(requested, "libcudart.so", 12) == 0 && strncmp(provider, "libcudart.so", 12) == 0);
 }
 
 void*
@@ -208,14 +257,19 @@ dlsym(void* handle, const char* name)
 {
   void* symbol = real_dlsym(handle, name);
   void* entry;
+  const char* library;
 
-  if (!enabled || symbol == NULL || !is_libcuda(handle, symbol))
+  if (!enabled || symbol == NULL || !is_cuda_library(handle, symbol, &library))
     return symbol;
-  atomic_store(&explicit_libcuda_handle, (uintptr_t)handle);
-  if (strcmp(name, "cuGetProcAddress") == 0)
-    atomic_store(&explicit_cu_get_proc_address, (uintptr_t)symbol);
-  if (strcmp(name, "cuGetProcAddress_v2") == 0)
-    atomic_store(&explicit_cu_get_proc_address_v2, (uintptr_t)symbol);
+  if (strncmp(library, "libcuda.so", 10) == 0) {
+    if (handle != NULL && handle != RTLD_NEXT)
+      atomic_store(&explicit_libcuda_handle, (uintptr_t)handle);
+    if (strcmp(name, "cuGetProcAddress") == 0)
+      atomic_store(&explicit_cu_get_proc_address, (uintptr_t)symbol);
+    if (strcmp(name, "cuGetProcAddress_v2") == 0)
+      atomic_store(&explicit_cu_get_proc_address_v2, (uintptr_t)symbol);
+  } else if (handle != NULL && handle != RTLD_NEXT)
+    atomic_store(&explicit_libcudart_handle, (uintptr_t)handle);
   entry = replacement(name, 0);
   return entry == NULL || entry == symbol ? symbol : entry;
 }
@@ -260,6 +314,65 @@ find_allocation(const uint8_t id[SNAPSHOT_VMM_ALLOCATION_ID_SIZE])
       return allocation;
   }
   return NULL;
+}
+
+static int
+multicast_member_from_handle(CUmemGenericAllocationHandle logical, struct snapshot_multicast_member* member)
+{
+  struct handle* handle = resolve_managed_handle(logical);
+
+  if (handle == NULL || handle->driver == 0)
+    return -1;
+  handle->allocation->shared = true;
+  memcpy(member->id, handle->allocation->id, sizeof(member->id));
+  member->handle = handle->driver;
+  member->device = handle->allocation->properties.location.id;
+  return 0;
+}
+
+static int
+multicast_member_from_address(CUdeviceptr address, size_t size, struct snapshot_multicast_member* member)
+{
+  struct mapping* mapping = find_mapping_at(address);
+
+  if (mapping == NULL || size > mapping->size || address - mapping->address > mapping->size - size)
+    return -1;
+  mapping->allocation->shared = true;
+  memcpy(member->id, mapping->allocation->id, sizeof(member->id));
+  member->address = address;
+  member->allocation_offset = mapping->offset + (size_t)(address - mapping->address);
+  member->device = mapping->allocation->properties.location.id;
+  return 0;
+}
+
+static int
+multicast_member_from_id(const uint8_t id[SNAPSHOT_VMM_ALLOCATION_ID_SIZE], struct snapshot_multicast_member* member)
+{
+  retain_fn retain = (retain_fn)real_symbol("cuMemRetainAllocationHandle");
+  struct allocation* allocation = find_allocation(id);
+  struct handle* handle;
+  struct mapping* mapping;
+
+  if (allocation == NULL)
+    return -1;
+  memcpy(member->id, allocation->id, sizeof(member->id));
+  member->device = allocation->properties.location.id;
+  handle = first_live_handle(allocation);
+  if (handle != NULL && handle->driver != 0) {
+    member->handle = handle->driver;
+    return 0;
+  }
+  mapping = first_mapping(allocation);
+  if (mapping == NULL || retain == NULL || retain(&member->handle, (void*)(uintptr_t)mapping->address) != CUDA_SUCCESS)
+    return -1;
+  member->temporary_handle = true;
+  return 0;
+}
+
+static void*
+runtime_replacement(const char* symbol, unsigned int version)
+{
+  return replacement(symbol, version == 0 ? CUDA_VERSION : (int)version);
 }
 
 static bool
@@ -429,6 +542,7 @@ create_posix_capability(const struct allocation* allocation, int* output)
   memset(&capability, 0, sizeof(capability));
   capability.magic = SNAPSHOT_VMM_POSIX_CAPABILITY_MAGIC;
   capability.version = SNAPSHOT_VMM_POSIX_CAPABILITY_VERSION;
+  capability.resource_kind = SNAPSHOT_VMM_RESOURCE_UNICAST;
   snprintf(capability.job_id, sizeof(capability.job_id), "%s", job_id);
   snprintf(
       capability.creator_participant, sizeof(capability.creator_participant), "%s", allocation->creator_participant);
@@ -480,6 +594,62 @@ done:
   return result;
 }
 
+static cudaError_t
+runtime_driver_entry_point(
+    const char* resolver, const char* symbol, void** output, unsigned int version, unsigned long long flags,
+    enum cudaDriverEntryPointQueryResult* status)
+{
+  cudaError_t result;
+  void* entry;
+
+  if (strcmp(resolver, "cudaGetDriverEntryPoint") == 0 || strcmp(resolver, "cudaGetDriverEntryPoint_ptsz") == 0) {
+    typedef cudaError_t(CUDARTAPI * legacy_type)(
+        const char*, void**, unsigned long long, enum cudaDriverEntryPointQueryResult*);
+    legacy_type legacy = (legacy_type)real_symbol(resolver);
+    result = legacy != NULL ? legacy(symbol, output, flags, status) : cudaErrorInitializationError;
+  } else {
+    typedef cudaError_t(CUDARTAPI * function_type)(
+        const char*, void**, unsigned int, unsigned long long, enum cudaDriverEntryPointQueryResult*);
+    function_type function = (function_type)real_symbol(resolver);
+    result = function != NULL ? function(symbol, output, version, flags, status) : cudaErrorInitializationError;
+  }
+  if (enabled && result == cudaSuccess && output != NULL && *output != NULL &&
+      (status == NULL || *status == cudaDriverEntryPointSuccess) &&
+      (entry = runtime_replacement(symbol, version)) != NULL)
+    *output = entry;
+  return result;
+}
+
+cudaError_t CUDARTAPI
+cudaGetDriverEntryPoint(
+    const char* symbol, void** output, unsigned long long flags, enum cudaDriverEntryPointQueryResult* status)
+{
+  return runtime_driver_entry_point("cudaGetDriverEntryPoint", symbol, output, 0, flags, status);
+}
+
+cudaError_t CUDARTAPI
+cudaGetDriverEntryPoint_ptsz(
+    const char* symbol, void** output, unsigned long long flags, enum cudaDriverEntryPointQueryResult* status)
+{
+  return runtime_driver_entry_point("cudaGetDriverEntryPoint_ptsz", symbol, output, 0, flags, status);
+}
+
+cudaError_t CUDARTAPI
+cudaGetDriverEntryPointByVersion(
+    const char* symbol, void** output, unsigned int version, unsigned long long flags,
+    enum cudaDriverEntryPointQueryResult* status)
+{
+  return runtime_driver_entry_point("cudaGetDriverEntryPointByVersion", symbol, output, version, flags, status);
+}
+
+cudaError_t CUDARTAPI
+cudaGetDriverEntryPointByVersion_ptsz(
+    const char* symbol, void** output, unsigned int version, unsigned long long flags,
+    enum cudaDriverEntryPointQueryResult* status)
+{
+  return runtime_driver_entry_point("cudaGetDriverEntryPointByVersion_ptsz", symbol, output, version, flags, status);
+}
+
 static int
 request_export(const struct snapshot_vmm_posix_capability* capability, int* output, char* error, size_t error_size)
 {
@@ -494,16 +664,21 @@ request_export(const struct snapshot_vmm_posix_capability* capability, int* outp
     return -1;
   }
   if (strcmp(capability->creator_participant, participant_id) == 0) {
-    struct allocation* allocation;
-    CUresult export_result;
+    CUresult export_result = CUDA_ERROR_INVALID_HANDLE;
 
     pthread_mutex_lock(&state_lock);
-    allocation = find_allocation(capability->allocation_id);
-    if (allocation == NULL ||
-        memcmp(allocation->authorization, capability->authorization, sizeof(allocation->authorization)) != 0) {
+    if (capability->resource_kind == SNAPSHOT_VMM_RESOURCE_MULTICAST) {
+      export_result = snapshot_multicast_export_raw(capability->allocation_id, capability->authorization, output);
+    } else {
+      struct allocation* allocation = find_allocation(capability->allocation_id);
+      if (allocation != NULL &&
+          memcmp(allocation->authorization, capability->authorization, sizeof(allocation->authorization)) == 0)
+        export_result = export_raw(allocation, output);
+    }
+    if (export_result == CUDA_ERROR_INVALID_HANDLE) {
       if (error != NULL && error_size != 0)
-        snprintf(error, error_size, "%s", "creator allocation is unavailable");
-    } else if ((export_result = export_raw(allocation, output)) != CUDA_SUCCESS) {
+        snprintf(error, error_size, "%s", "creator resource is unavailable");
+    } else if (export_result != CUDA_SUCCESS) {
       if (error != NULL && error_size != 0)
         snprintf(error, error_size, "creator export failed: CUresult=%d", (int)export_result);
     } else {
@@ -551,6 +726,7 @@ inspect_records(uint32_t* count)
     if (mapping->allocation->shared && mapping->mapped)
       total++;
   }
+  total += snapshot_multicast_record_count();
   if (total > SNAPSHOT_VMM_MAX_RECORDS)
     return NULL;
   records = calloc(total == 0 ? 1 : total, sizeof(*records));
@@ -590,6 +766,10 @@ inspect_records(uint32_t* count)
       record->access[index].flags = mapping->access[index].flags;
     }
     record++;
+  }
+  if (snapshot_multicast_write_records(record, total - (size_t)(record - records)) != 0) {
+    free(records);
+    return NULL;
   }
   *count = (uint32_t)total;
   return records;
@@ -644,6 +824,19 @@ failed:
 }
 
 static int
+prepare_multicast(void)
+{
+  if (current_phase != PHASE_CARRIERS)
+    return -1;
+  if (snapshot_multicast_prepare() != 0) {
+    set_failure(snapshot_multicast_error());
+    return -1;
+  }
+  current_phase = PHASE_MULTICAST_DETACHED;
+  return 0;
+}
+
+static int
 prepare_topology(void)
 {
   release_fn release = (release_fn)real_symbol("cuMemRelease");
@@ -653,14 +846,13 @@ prepare_topology(void)
   struct handle* handle;
   struct mapping* mapping;
 
-  if (current_phase != PHASE_CARRIERS || release == NULL || unmap == NULL)
+  if (current_phase != PHASE_MULTICAST_DETACHED || release == NULL || unmap == NULL)
     return -1;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
     if (allocation->shared && allocation->creator &&
         (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL) && allocation->carrier == 0)
       goto failed;
   }
-  current_phase = PHASE_PREPARED;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
     if (!allocation->shared ||
         (live_handle_count(allocation) == 0 && first_mapping(allocation) == NULL && allocation->carrier == 0))
@@ -696,6 +888,7 @@ prepare_topology(void)
     if (leave_context(&scope) != 0)
       goto failed;
   }
+  current_phase = PHASE_PREPARED;
   return 0;
 failed:
   set_failure("cannot prepare CUDA VMM topology");
@@ -822,6 +1015,7 @@ restore_importers(void)
     memset(&capability, 0, sizeof(capability));
     capability.magic = SNAPSHOT_VMM_POSIX_CAPABILITY_MAGIC;
     capability.version = SNAPSHOT_VMM_POSIX_CAPABILITY_VERSION;
+    capability.resource_kind = SNAPSHOT_VMM_RESOURCE_UNICAST;
     snprintf(capability.job_id, sizeof(capability.job_id), "%s", job_id);
     snprintf(
         capability.creator_participant, sizeof(capability.creator_participant), "%s", allocation->creator_participant);
@@ -880,7 +1074,7 @@ restore_importers(void)
       return -1;
     }
   }
-  current_phase = PHASE_ACTIVE;
+  current_phase = PHASE_UNICAST_RESTORED;
   failure[0] = '\0';
   return 0;
 }
@@ -939,6 +1133,11 @@ serve(int client)
         response_error(&response, failure);
       (void)snapshot_vmm_send_header(client, &response, -1);
       break;
+    case SNAPSHOT_VMM_PREPARE_MULTICAST:
+      if (prepare_multicast() != 0)
+        response_error(&response, failure);
+      (void)snapshot_vmm_send_header(client, &response, -1);
+      break;
     case SNAPSHOT_VMM_CREATE_CARRIERS:
       if (create_checkpoint_carriers() != 0)
         response_error(&response, failure);
@@ -954,17 +1153,68 @@ serve(int client)
         response_error(&response, failure);
       (void)snapshot_vmm_send_header(client, &response, -1);
       break;
+    case SNAPSHOT_VMM_RESTORE_MULTICAST_CREATORS:
+      if (current_phase != PHASE_UNICAST_RESTORED || snapshot_multicast_restore_creators() != 0) {
+        set_failure(snapshot_multicast_error());
+        response_error(&response, failure);
+      } else {
+        current_phase = PHASE_MULTICAST_CREATED;
+      }
+      (void)snapshot_vmm_send_header(client, &response, -1);
+      break;
+    case SNAPSHOT_VMM_RESTORE_MULTICAST_IMPORTERS:
+      if (current_phase != PHASE_MULTICAST_CREATED || snapshot_multicast_restore_importers() != 0) {
+        set_failure(snapshot_multicast_error());
+        response_error(&response, failure);
+      } else {
+        current_phase = PHASE_MULTICAST_IMPORTED;
+      }
+      (void)snapshot_vmm_send_header(client, &response, -1);
+      break;
+    case SNAPSHOT_VMM_RESTORE_MULTICAST_DEVICES:
+      if (current_phase != PHASE_MULTICAST_IMPORTED || snapshot_multicast_restore_devices() != 0) {
+        set_failure(snapshot_multicast_error());
+        response_error(&response, failure);
+      } else {
+        current_phase = PHASE_MULTICAST_JOINED;
+      }
+      (void)snapshot_vmm_send_header(client, &response, -1);
+      break;
+    case SNAPSHOT_VMM_RESTORE_MULTICAST:
+      if (current_phase != PHASE_MULTICAST_JOINED || snapshot_multicast_restore_topology() != 0) {
+        set_failure(snapshot_multicast_error());
+        response_error(&response, failure);
+      } else {
+        current_phase = PHASE_ACTIVE;
+        failure[0] = '\0';
+      }
+      (void)snapshot_vmm_send_header(client, &response, -1);
+      break;
     case SNAPSHOT_VMM_EXPORT: {
-      struct allocation* allocation = find_allocation(request.allocation_id);
       CUresult export_result;
-      if (strcmp(request.participant_id, participant_id) != 0 || allocation == NULL || !allocation->creator ||
-          memcmp(allocation->authorization, request.authorization, sizeof(request.authorization)) != 0 ||
-          (current_phase != PHASE_ACTIVE && current_phase != PHASE_CREATORS_RESTORED)) {
-        response_error(&response, "creator allocation is unavailable");
+      if (strcmp(request.participant_id, participant_id) != 0 ||
+          (request.resource_kind != SNAPSHOT_VMM_RESOURCE_UNICAST &&
+           request.resource_kind != SNAPSHOT_VMM_RESOURCE_MULTICAST) ||
+          (current_phase != PHASE_ACTIVE && current_phase != PHASE_CREATORS_RESTORED &&
+           current_phase != PHASE_UNICAST_RESTORED && current_phase != PHASE_MULTICAST_CREATED &&
+           current_phase != PHASE_MULTICAST_IMPORTED && current_phase != PHASE_MULTICAST_JOINED)) {
+        response_error(&response, "creator resource is unavailable");
         (void)snapshot_vmm_send_header(client, &response, -1);
         break;
       }
-      export_result = export_raw(allocation, &exported_fd);
+      response.resource_kind = request.resource_kind;
+      if (request.resource_kind == SNAPSHOT_VMM_RESOURCE_MULTICAST) {
+        export_result = snapshot_multicast_export_raw(request.allocation_id, request.authorization, &exported_fd);
+      } else {
+        struct allocation* allocation = find_allocation(request.allocation_id);
+        if (allocation == NULL || !allocation->creator ||
+            memcmp(allocation->authorization, request.authorization, sizeof(request.authorization)) != 0) {
+          response_error(&response, "creator allocation is unavailable");
+          (void)snapshot_vmm_send_header(client, &response, -1);
+          break;
+        }
+        export_result = export_raw(allocation, &exported_fd);
+      }
       if (export_result != CUDA_SUCCESS) {
         char message[sizeof(response.message)];
         snprintf(message, sizeof(message), "creator export failed: CUresult=%d", (int)export_result);
@@ -972,7 +1222,7 @@ serve(int client)
         (void)snapshot_vmm_send_header(client, &response, -1);
         break;
       }
-      memcpy(response.allocation_id, allocation->id, sizeof(response.allocation_id));
+      memcpy(response.allocation_id, request.allocation_id, sizeof(response.allocation_id));
       (void)snapshot_vmm_send_header(client, &response, exported_fd);
       break;
     }
@@ -1065,6 +1315,7 @@ fork_child(void)
   allocations = NULL;
   handles = NULL;
   mappings = NULL;
+  snapshot_multicast_reset();
   next_logical_handle = 1;
   current_phase = PHASE_ACTIVE;
   failure[0] = '\0';
@@ -1094,6 +1345,16 @@ ensure_process_endpoint(void)
 __attribute__((constructor)) static void
 initialize(void)
 {
+  const struct snapshot_multicast_callbacks multicast_callbacks = {
+      .real_symbol = lookup_real_symbol,
+      .allocate_logical_handle = allocate_logical_handle,
+      .random_bytes = random_bytes,
+      .member_from_handle = multicast_member_from_handle,
+      .member_from_address = multicast_member_from_address,
+      .member_from_id = multicast_member_from_id,
+      .release_state_lock = release_state_lock,
+      .acquire_state_lock = acquire_state_lock,
+  };
   const char* control;
   const char* configured_participant;
   const char* configured_job;
@@ -1131,6 +1392,7 @@ initialize(void)
     set_failure("cannot start CUDA VMM control endpoint");
     return;
   }
+  snapshot_multicast_initialize(&multicast_callbacks, job_id, participant_id, socket_path);
 }
 
 __attribute__((destructor)) static void
@@ -1208,6 +1470,11 @@ cuMemRelease(CUmemGenericAllocationHandle application)
   pthread_mutex_lock(&state_lock);
   handle = resolve_managed_handle(application);
   if (handle == NULL) {
+    if (snapshot_multicast_is_handle(application)) {
+      result = current_phase == PHASE_ACTIVE ? snapshot_multicast_release(application) : CUDA_ERROR_NOT_READY;
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     if (is_logical_handle(application))
       return CUDA_ERROR_INVALID_HANDLE;
@@ -1243,6 +1510,13 @@ cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* output, void* address)
     return function(output, address);
   if (output == NULL)
     return CUDA_ERROR_INVALID_VALUE;
+  pthread_mutex_lock(&state_lock);
+  result = current_phase == PHASE_ACTIVE ? snapshot_multicast_retain(output, address) : CUDA_ERROR_NOT_READY;
+  if (result != CUDA_ERROR_INVALID_VALUE) {
+    pthread_mutex_unlock(&state_lock);
+    return result;
+  }
+  pthread_mutex_unlock(&state_lock);
   result = function(&driver, address);
   if (result != CUDA_SUCCESS)
     return result;
@@ -1278,6 +1552,12 @@ cuMemMap(
   pthread_mutex_lock(&state_lock);
   handle = resolve_managed_handle(application);
   if (handle == NULL) {
+    if (snapshot_multicast_is_handle(application)) {
+      result = current_phase == PHASE_ACTIVE ? snapshot_multicast_map(address, size, offset, application, flags)
+                                             : CUDA_ERROR_NOT_READY;
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     if (is_logical_handle(application))
       return CUDA_ERROR_INVALID_HANDLE;
@@ -1323,6 +1603,11 @@ cuMemUnmap(CUdeviceptr address, size_t size)
   pthread_mutex_lock(&state_lock);
   mapping = find_mapping(address, size);
   if (mapping == NULL) {
+    if (snapshot_multicast_has_mapping(address, size)) {
+      result = current_phase == PHASE_ACTIVE ? snapshot_multicast_unmap(address, size) : CUDA_ERROR_NOT_READY;
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     return function != NULL ? function(address, size) : unavailable();
   }
@@ -1351,6 +1636,12 @@ cuMemSetAccess(CUdeviceptr address, size_t size, const CUmemAccessDesc* descript
   pthread_mutex_lock(&state_lock);
   mapping = find_mapping(address, size);
   if (mapping == NULL) {
+    if (snapshot_multicast_has_mapping(address, size)) {
+      result = current_phase == PHASE_ACTIVE ? snapshot_multicast_set_access(address, size, descriptors, count)
+                                             : CUDA_ERROR_NOT_READY;
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     return function != NULL ? function(address, size, descriptors, count) : unavailable();
   }
@@ -1386,6 +1677,12 @@ cuMemExportToShareableHandle(
   pthread_mutex_lock(&state_lock);
   handle = resolve_managed_handle(application);
   if (handle == NULL) {
+    if (snapshot_multicast_is_handle(application)) {
+      result = current_phase == PHASE_ACTIVE ? snapshot_multicast_export(shareable, application, type, flags)
+                                             : CUDA_ERROR_NOT_READY;
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     if (is_logical_handle(application))
       return CUDA_ERROR_INVALID_HANDLE;
@@ -1431,6 +1728,19 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
     return CUDA_ERROR_INVALID_HANDLE;
   if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
+  if (capability.resource_kind == SNAPSHOT_VMM_RESOURCE_MULTICAST) {
+    if (request_export(&capability, &raw_fd, NULL, 0) != 0)
+      return CUDA_ERROR_INVALID_HANDLE;
+    pthread_mutex_lock(&state_lock);
+    result = current_phase == PHASE_ACTIVE ? snapshot_multicast_import(output, &capability, raw_fd)
+                                           : CUDA_ERROR_INVALID_HANDLE;
+    pthread_mutex_unlock(&state_lock);
+    if (close(raw_fd) != 0 && result == CUDA_SUCCESS) {
+      (void)cuMemRelease(*output);
+      return CUDA_ERROR_UNKNOWN;
+    }
+    return result;
+  }
   pthread_mutex_lock(&state_lock);
   if (current_phase != PHASE_ACTIVE) {
     pthread_mutex_unlock(&state_lock);
@@ -1500,12 +1810,17 @@ cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp* properties, CUmemGen
     return result;
   pthread_mutex_lock(&state_lock);
   handle = resolve_managed_handle(application);
-  if (handle == NULL)
-    result = is_logical_handle(application) ? CUDA_ERROR_INVALID_HANDLE
-                                            : (function != NULL ? function(properties, application) : unavailable());
-  else
+  if (handle == NULL) {
+    if (snapshot_multicast_is_handle(application))
+      result = current_phase == PHASE_ACTIVE ? snapshot_multicast_get_properties(properties, application)
+                                             : CUDA_ERROR_NOT_READY;
+    else
+      result = is_logical_handle(application) ? CUDA_ERROR_INVALID_HANDLE
+                                              : (function != NULL ? function(properties, application) : unavailable());
+  } else {
     result = current_phase == PHASE_ACTIVE && handle->driver != 0 ? function(properties, handle->driver)
                                                                   : CUDA_ERROR_NOT_READY;
+  }
   pthread_mutex_unlock(&state_lock);
   return result;
 }
@@ -1515,8 +1830,16 @@ cuMulticastCreate(CUmemGenericAllocationHandle* output, const CUmulticastObjectP
 {
   typedef CUresult(CUDAAPI * function_type)(CUmemGenericAllocationHandle*, const CUmulticastObjectProp*);
   function_type function = (function_type)real_symbol("cuMulticastCreate");
+  CUresult result;
 
-  return enabled ? CUDA_ERROR_NOT_SUPPORTED : (function != NULL ? function(output, properties) : unavailable());
+  if (!enabled)
+    return function != NULL ? function(output, properties) : unavailable();
+  if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
+    return result;
+  pthread_mutex_lock(&state_lock);
+  result = current_phase == PHASE_ACTIVE ? snapshot_multicast_create(output, properties) : CUDA_ERROR_NOT_READY;
+  pthread_mutex_unlock(&state_lock);
+  return result;
 }
 
 CUresult CUDAAPI
@@ -1524,8 +1847,16 @@ cuMulticastAddDevice(CUmemGenericAllocationHandle multicast, CUdevice device)
 {
   typedef CUresult(CUDAAPI * function_type)(CUmemGenericAllocationHandle, CUdevice);
   function_type function = (function_type)real_symbol("cuMulticastAddDevice");
+  CUresult result;
 
-  return enabled ? CUDA_ERROR_NOT_SUPPORTED : (function != NULL ? function(multicast, device) : unavailable());
+  if (!enabled)
+    return function != NULL ? function(multicast, device) : unavailable();
+  if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
+    return result;
+  pthread_mutex_lock(&state_lock);
+  result = current_phase == PHASE_ACTIVE ? snapshot_multicast_add_device(multicast, device) : CUDA_ERROR_NOT_READY;
+  pthread_mutex_unlock(&state_lock);
+  return result;
 }
 
 CUresult CUDAAPI
@@ -1536,12 +1867,21 @@ cuMulticastBindMem(
   typedef CUresult(CUDAAPI * function_type)(
       CUmemGenericAllocationHandle, size_t, CUmemGenericAllocationHandle, size_t, size_t, unsigned long long);
   function_type function = (function_type)real_symbol("cuMulticastBindMem");
+  CUresult result;
 
-  return enabled ? CUDA_ERROR_NOT_SUPPORTED
-                 : (function != NULL ? function(multicast, multicast_offset, memory, memory_offset, size, flags)
-                                     : unavailable());
+  if (!enabled)
+    return function != NULL ? function(multicast, multicast_offset, memory, memory_offset, size, flags) : unavailable();
+  if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
+    return result;
+  pthread_mutex_lock(&state_lock);
+  result = current_phase == PHASE_ACTIVE
+               ? snapshot_multicast_bind_mem(multicast, 0, false, multicast_offset, memory, memory_offset, size, flags)
+               : CUDA_ERROR_NOT_READY;
+  pthread_mutex_unlock(&state_lock);
+  return result;
 }
 
+#if CUDA_VERSION >= 13010
 CUresult CUDAAPI
 cuMulticastBindMem_v2(
     CUmemGenericAllocationHandle multicast, CUdevice device, size_t multicast_offset,
@@ -1550,11 +1890,22 @@ cuMulticastBindMem_v2(
   typedef CUresult(CUDAAPI * function_type)(
       CUmemGenericAllocationHandle, CUdevice, size_t, CUmemGenericAllocationHandle, size_t, size_t, unsigned long long);
   function_type function = (function_type)real_symbol("cuMulticastBindMem_v2");
+  CUresult result;
 
-  return enabled ? CUDA_ERROR_NOT_SUPPORTED
-                 : (function != NULL ? function(multicast, device, multicast_offset, memory, memory_offset, size, flags)
-                                     : unavailable());
+  if (!enabled)
+    return function != NULL ? function(multicast, device, multicast_offset, memory, memory_offset, size, flags)
+                            : unavailable();
+  if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
+    return result;
+  pthread_mutex_lock(&state_lock);
+  result =
+      current_phase == PHASE_ACTIVE
+          ? snapshot_multicast_bind_mem(multicast, device, true, multicast_offset, memory, memory_offset, size, flags)
+          : CUDA_ERROR_NOT_READY;
+  pthread_mutex_unlock(&state_lock);
+  return result;
 }
+#endif
 
 CUresult CUDAAPI
 cuMulticastBindAddr(
@@ -1564,11 +1915,21 @@ cuMulticastBindAddr(
   typedef CUresult(CUDAAPI * function_type)(
       CUmemGenericAllocationHandle, size_t, CUdeviceptr, size_t, unsigned long long);
   function_type function = (function_type)real_symbol("cuMulticastBindAddr");
+  CUresult result;
 
-  return enabled ? CUDA_ERROR_NOT_SUPPORTED
-                 : (function != NULL ? function(multicast, multicast_offset, memory, size, flags) : unavailable());
+  if (!enabled)
+    return function != NULL ? function(multicast, multicast_offset, memory, size, flags) : unavailable();
+  if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
+    return result;
+  pthread_mutex_lock(&state_lock);
+  result = current_phase == PHASE_ACTIVE
+               ? snapshot_multicast_bind_address(multicast, 0, false, multicast_offset, memory, size, flags)
+               : CUDA_ERROR_NOT_READY;
+  pthread_mutex_unlock(&state_lock);
+  return result;
 }
 
+#if CUDA_VERSION >= 13010
 CUresult CUDAAPI
 cuMulticastBindAddr_v2(
     CUmemGenericAllocationHandle multicast, CUdevice device, size_t multicast_offset, CUdeviceptr memory, size_t size,
@@ -1577,11 +1938,20 @@ cuMulticastBindAddr_v2(
   typedef CUresult(CUDAAPI * function_type)(
       CUmemGenericAllocationHandle, CUdevice, size_t, CUdeviceptr, size_t, unsigned long long);
   function_type function = (function_type)real_symbol("cuMulticastBindAddr_v2");
+  CUresult result;
 
-  return enabled
-             ? CUDA_ERROR_NOT_SUPPORTED
-             : (function != NULL ? function(multicast, device, multicast_offset, memory, size, flags) : unavailable());
+  if (!enabled)
+    return function != NULL ? function(multicast, device, multicast_offset, memory, size, flags) : unavailable();
+  if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
+    return result;
+  pthread_mutex_lock(&state_lock);
+  result = current_phase == PHASE_ACTIVE
+               ? snapshot_multicast_bind_address(multicast, device, true, multicast_offset, memory, size, flags)
+               : CUDA_ERROR_NOT_READY;
+  pthread_mutex_unlock(&state_lock);
+  return result;
 }
+#endif
 
 CUresult CUDAAPI
 cuMulticastGetGranularity(
@@ -1590,8 +1960,7 @@ cuMulticastGetGranularity(
   typedef CUresult(CUDAAPI * function_type)(size_t*, const CUmulticastObjectProp*, CUmulticastGranularity_flags);
   function_type function = (function_type)real_symbol("cuMulticastGetGranularity");
 
-  return enabled ? CUDA_ERROR_NOT_SUPPORTED
-                 : (function != NULL ? function(granularity, properties, option) : unavailable());
+  return function != NULL ? function(granularity, properties, option) : unavailable();
 }
 
 CUresult CUDAAPI
@@ -1599,9 +1968,17 @@ cuMulticastUnbind(CUmemGenericAllocationHandle multicast, CUdevice device, size_
 {
   typedef CUresult(CUDAAPI * function_type)(CUmemGenericAllocationHandle, CUdevice, size_t, size_t);
   function_type function = (function_type)real_symbol("cuMulticastUnbind");
+  CUresult result;
 
-  return enabled ? CUDA_ERROR_NOT_SUPPORTED
-                 : (function != NULL ? function(multicast, device, offset, size) : unavailable());
+  if (!enabled)
+    return function != NULL ? function(multicast, device, offset, size) : unavailable();
+  if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
+    return result;
+  pthread_mutex_lock(&state_lock);
+  result =
+      current_phase == PHASE_ACTIVE ? snapshot_multicast_unbind(multicast, device, offset, size) : CUDA_ERROR_NOT_READY;
+  pthread_mutex_unlock(&state_lock);
+  return result;
 }
 
 static void*
@@ -1612,6 +1989,12 @@ replacement(const char* symbol, int version)
   return (void*)&name
   if (symbol == NULL)
     return NULL;
+#if CUDA_VERSION >= 13010
+  if (version >= 13010 && strcmp(symbol, "cuMulticastBindMem") == 0)
+    return (void*)&cuMulticastBindMem_v2;
+  if (version >= 13010 && strcmp(symbol, "cuMulticastBindAddr") == 0)
+    return (void*)&cuMulticastBindAddr_v2;
+#endif
   ENTRY(cuMemCreate);
   ENTRY(cuMemRelease);
   ENTRY(cuMemRetainAllocationHandle);
@@ -1624,13 +2007,21 @@ replacement(const char* symbol, int version)
   ENTRY(cuMulticastCreate);
   ENTRY(cuMulticastAddDevice);
   ENTRY(cuMulticastBindMem);
+#if CUDA_VERSION >= 13010
   ENTRY(cuMulticastBindMem_v2);
+#endif
   ENTRY(cuMulticastBindAddr);
+#if CUDA_VERSION >= 13010
   ENTRY(cuMulticastBindAddr_v2);
+#endif
   ENTRY(cuMulticastGetGranularity);
   ENTRY(cuMulticastUnbind);
   ENTRY(cuGetProcAddress_v2);
   ENTRY(cuGetProcAddress_v2_ptsz);
+  ENTRY(cudaGetDriverEntryPoint);
+  ENTRY(cudaGetDriverEntryPoint_ptsz);
+  ENTRY(cudaGetDriverEntryPointByVersion);
+  ENTRY(cudaGetDriverEntryPointByVersion_ptsz);
 #undef ENTRY
   if (strcmp(symbol, "cuGetProcAddress") == 0)
     return version >= 12000 ? (void*)&cuGetProcAddress_v2 : (void*)&cuGetProcAddress;

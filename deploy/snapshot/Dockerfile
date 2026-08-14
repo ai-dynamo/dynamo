@@ -134,6 +134,8 @@ COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 COPY cmd/cuda-vmm-interpose/interpose.c ./cmd/cuda-vmm-interpose/interpose.c
 COPY cmd/cuda-vmm-interpose/coordinator.c ./cmd/cuda-vmm-interpose/coordinator.c
+COPY cmd/cuda-vmm-interpose/multicast.c ./cmd/cuda-vmm-interpose/multicast.c
+COPY cmd/cuda-vmm-interpose/multicast.h ./cmd/cuda-vmm-interpose/multicast.h
 COPY cmd/cuda-vmm-interpose/posix.c ./cmd/cuda-vmm-interpose/posix.c
 COPY cmd/cuda-vmm-interpose/posix.h ./cmd/cuda-vmm-interpose/posix.h
 COPY cmd/cuda-vmm-interpose/protocol.h ./cmd/cuda-vmm-interpose/protocol.h
