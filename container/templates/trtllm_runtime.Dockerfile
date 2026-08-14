@@ -314,8 +314,68 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # one, in range, so a surviving old copy beside the new one fails the build.
 # Version-compared rather than glob-matched: a glob range silently stops matching
 # at the end of the series it was written for.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
+RUN /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir --upgrade "aiohttp>=3.14.3,<4.0" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
+
+# Same treatment, same reason, for the rest of the packages requirements.trtllm.txt
+# floors. The comment at the top of that file says naming a package there is enough
+# to refresh the bundled copy in place. For these it is not: those installs run with
+# VIRTUAL_ENV set, so they land in /opt/dynamo/venv and the base image's copy stays
+# on disk under dist-packages, which is where the image inventory reads. The floors
+# and the shipped versions disagreed on every one of them:
+#
+#   pillow          floor >=12.3.0   bundled 12.2.0
+#   mistune         floor >=3.3.0    bundled 3.2.1
+#   tornado         floor >=6.5.6    bundled 6.5.5
+#   jupyter-server  floor >=2.20.0   bundled 2.18.2
+#   jupyterlab      floor >=4.5.10   bundled 4.5.7
+#   gitpython       floor >=3.1.58   bundled 3.1.50
+#   soupsieve       floor >=2.8.4    bundled 2.8.3
+#
+# aiohttp was the only floor in that file that took, and it took because of the
+# explicit system-interpreter install above rather than because of the floor.
+#
+# Named packages only, and --no-deps keeps that literal: without it pip's default
+# only-if-needed strategy will upgrade a transitive dependency whenever a newly
+# selected release wants one the base image does not satisfy, which both re-solves
+# part of upstream's graph and leaves that dependency's old metadata behind (it is
+# not in the whiteout list, which names only these packages).
+#
+# --no-deps is only safe if the selected release cannot introduce a dependency the
+# base image lacks, so every floor carries an upper bound at the next minor. An
+# open floor does not stay on the patch line: `jupyterlab>=4.5.10` resolves to
+# 4.6.3 today, which adds a hard runtime dependency on jupyter-builder that the
+# base image does not bundle, and with --no-deps that dependency is simply absent
+# -- `jupyter lab` then raises ImportError from a top-level import in commands.py.
+# The caps keep each package on the line its fix shipped in (4.5.9/4.5.10 for
+# jupyterlab, 2.8.4 for soupsieve, and so on), so they cost no remediation.
+#
+# --no-cache-dir because the base image sets no PIP_NO_CACHE_DIR; without it these
+# RUNs leave wheel blobs in /root/.cache/pip and `COPY --from=runtime_full / /`
+# carries them into the shipped image. Extending the whiteout cannot fix that --
+# the overlay re-adds runtime_full's copy.
+#
+# Mirrored by the pre_runtime whiteout below for the same dist-info-rename reason,
+# and re-asserted after the overlay -- see the post-overlay guard near the end of
+# this file for why the in-stage guard cannot cover the whiteout.
+#
+# The guard normalizes distribution names before comparing (PEP 503: runs of
+# -_. collapse and case folds), because the on-disk directories do not agree on
+# spelling -- jupyter_server-*.dist-info and GitPython-*.dist-info both appear.
+# It requires exactly one dist-info per package and a version inside the declared
+# range, so a venv-only install, a missed whiteout, an old copy surviving beside
+# the new one, or a resolution past the cap all fail the build here rather than in
+# a scan afterwards. aiohttp is carried in the same dict for parity: it is managed
+# by the same mechanism and its own guard above is in-stage only.
+RUN /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir --upgrade --no-deps \
+        "pillow>=12.3.0,<12.4" \
+        "mistune>=3.3.0,<3.4" \
+        "tornado>=6.5.6,<6.6" \
+        "jupyter-server>=2.20.0,<2.21" \
+        "jupyterlab>=4.5.10,<4.6" \
+        "gitpython>=3.1.58,<3.2" \
+        "soupsieve>=2.8.4,<2.9" && \
+    /usr/bin/python3 -c 'import os, re, sys; D = "/usr/local/lib/python3.12/dist-packages"; W = {"aiohttp": ((3, 14, 3), (4, 0, 0)), "pillow": ((12, 3, 0), (12, 4, 0)), "mistune": ((3, 3, 0), (3, 4, 0)), "tornado": ((6, 5, 6), (6, 6, 0)), "jupyter-server": ((2, 20, 0), (2, 21, 0)), "jupyterlab": ((4, 5, 10), (4, 6, 0)), "gitpython": ((3, 1, 58), (3, 2, 0)), "soupsieve": ((2, 8, 4), (2, 9, 0))}; norm = lambda s: re.sub(r"[-_.]+", "-", s).lower(); tv = lambda s: tuple(int(x) for x in re.findall(r"\d+", s)[:3]); stems = [d[:-10].rsplit("-", 1) for d in os.listdir(D) if d.endswith(".dist-info") and "-" in d[:-10]]; found = {k: [] for k in W}; [found[norm(n)].append(v) for n, v in stems if norm(n) in found]; print("system-site dist-info:", found); bad = [(k, v) for k, v in sorted(found.items()) if len(v) != 1 or not (W[k][0] <= tv(v[0]) < W[k][1])]; print("FAILED:", bad) if bad else None; sys.exit(1 if bad else 0)'
 
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
@@ -394,7 +454,23 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs-* \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
-    /usr/local/lib/python3.12/dist-packages/attrs-* && \
+    /usr/local/lib/python3.12/dist-packages/attrs-* \
+    /usr/local/lib/python3.12/dist-packages/PIL \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs \
+    /usr/local/lib/python3.12/dist-packages/pillow-* \
+    /usr/local/lib/python3.12/dist-packages/mistune \
+    /usr/local/lib/python3.12/dist-packages/mistune-* \
+    /usr/local/lib/python3.12/dist-packages/tornado \
+    /usr/local/lib/python3.12/dist-packages/tornado-* \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server-* \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab-* \
+    /usr/local/share/jupyter/lab \
+    /usr/local/lib/python3.12/dist-packages/git \
+    /usr/local/lib/python3.12/dist-packages/[Gg]it[Pp]ython-* \
+    /usr/local/lib/python3.12/dist-packages/soupsieve \
+    /usr/local/lib/python3.12/dist-packages/soupsieve-* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
@@ -415,6 +491,32 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done
+
+# Post-overlay guard for the system-site floor whiteouts above, for the same
+# reason DALI has one: the in-stage assertion runs inside runtime_full, before
+# `COPY --from=runtime_full / /`, so by construction it cannot observe a whiteout
+# mistake. A duplicate only exists after the overlay re-adds the base image's
+# copy beside the upgraded one, and the metadata directory rename is what makes
+# the copy survive. Two real cases were shipped past the in-stage guard before
+# this existed: a case-sensitive `GitPython-*` that never matched the base
+# image's lowercase `gitpython-*.dist-info`, and `PIL.libs` for a directory
+# auditwheel actually names `pillow.libs`.
+#
+# Same normalized comparison as the in-stage guard, re-run here where the
+# duplicate can appear, and carrying aiohttp too -- it is managed by the same
+# mechanism and its own guard is in-stage only.
+#
+# The dist-info count alone would not have caught the pillow defect: a package can
+# carry exactly one correct dist-info while stale hash-named payload files ship
+# beside the new ones. pillow 12.2.0 and 12.3.0 each vendor 18 differently-hashed
+# .so files in pillow.libs and share one path, so a missed whiteout leaves ~17
+# stale codec libraries with the metadata still reading clean. The second check
+# therefore probes the payload directly: RECORD lists exactly the pillow.libs
+# entries the installed wheel owns, so anything on disk beyond that set is a
+# survivor from the base image. This mirrors what the DALI guard does -- it
+# inspects the libraries, not the version string.
+RUN /usr/bin/python3 -c 'import os, re, sys; D = "/usr/local/lib/python3.12/dist-packages"; W = {"aiohttp": ((3, 14, 3), (4, 0, 0)), "pillow": ((12, 3, 0), (12, 4, 0)), "mistune": ((3, 3, 0), (3, 4, 0)), "tornado": ((6, 5, 6), (6, 6, 0)), "jupyter-server": ((2, 20, 0), (2, 21, 0)), "jupyterlab": ((4, 5, 10), (4, 6, 0)), "gitpython": ((3, 1, 58), (3, 2, 0)), "soupsieve": ((2, 8, 4), (2, 9, 0))}; norm = lambda s: re.sub(r"[-_.]+", "-", s).lower(); tv = lambda s: tuple(int(x) for x in re.findall(r"\d+", s)[:3]); stems = [d[:-10].rsplit("-", 1) for d in os.listdir(D) if d.endswith(".dist-info") and "-" in d[:-10]]; found = {k: [] for k in W}; [found[norm(n)].append(v) for n, v in stems if norm(n) in found]; print("post-overlay system-site dist-info:", found); bad = [(k, v) for k, v in sorted(found.items()) if len(v) != 1 or not (W[k][0] <= tv(v[0]) < W[k][1])]; print("FAILED:", bad) if bad else None; sys.exit(1 if bad else 0)' && \
+    /usr/bin/python3 -c 'import glob, os, sys; D = "/usr/local/lib/python3.12/dist-packages"; libs = os.path.join(D, "pillow.libs"); recs = glob.glob(os.path.join(D, "pillow-*.dist-info", "RECORD")); sys.exit(1) if len(recs) != 1 else None; owned = {os.path.basename(l.split(",")[0]) for l in open(recs[0]) if l.startswith("pillow.libs/")}; disk = set(os.listdir(libs)) if os.path.isdir(libs) else set(); stale = sorted(disk - owned); print("pillow.libs owned:", len(owned), "on disk:", len(disk)); print("STALE:", stale) if stale else None; sys.exit(1 if stale else 0)'
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
