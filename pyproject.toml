@@ -81,7 +81,7 @@ sglang = [
 ]
 
 mocker = [
-    "aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@614b9c8c8725332533616786e2eb049df48935f0#subdirectory=aic-core",
+    "aiconfigurator-core==0.11.0",
 ]
 
 [project.entry-points.pytest11]
@@ -117,9 +117,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = [

@@ -185,9 +185,6 @@ tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
 
-[patch.crates-io]
-aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "614b9c8c8725332533616786e2eb049df48935f0" }
-
 [profile.dev.package]
 insta.opt-level = 3
 
