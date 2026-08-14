@@ -11,7 +11,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -32,8 +32,9 @@ use rustls::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncRead, AsyncReadExt, BufReader},
     sync::{Notify, Semaphore, mpsc, oneshot},
     time::{Instant, sleep_until},
 };
@@ -57,11 +58,24 @@ const DEFAULT_LANES: usize = 8;
 const MIN_LANES: usize = 1;
 const MAX_LANES: usize = 64;
 const LANE_QUEUE_CAPACITY: usize = 512;
-const DEFAULT_MAX_BATCH_FRAMES: usize = 64;
+// Bulk writers can spend tens of milliseconds waiting for Quinn to accept a
+// large batch. Keep enough bounded slack to absorb those stalls without
+// parking every response task on the lane semaphore. Priority traffic stays
+// on the smaller queue because it never carries the long token stream.
+const BULK_LANE_QUEUE_CAPACITY: usize = 4_096;
+const DEFAULT_MAX_BATCH_FRAMES: usize = 512;
 const MAX_BATCH_FRAMES_LIMIT: usize = 4_096;
-const DEFAULT_BATCH_INTERVAL_US: u64 = 1_000;
+const DEFAULT_BATCH_INTERVAL_US: u64 = 5_000;
 const MAX_BATCH_INTERVAL_US: u64 = 100_000;
 const FRAME_HEADER_LEN: usize = 1 + 16 + 4;
+// A writer batch can contain hundreds of small response frames. Buffer reads
+// at the receiver so parsing those frames does not poll Quinn once per header
+// and payload and exhaust Tokio's cooperative task budget.
+const RECEIVE_BUFFER_CAPACITY: usize = 256 * 1024;
+// A single frontend UDP socket is limited by the host receive-buffer ceiling.
+// Reuse-port endpoints preserve one advertised address while spreading QUIC
+// connections and receive queues across several sockets.
+const SERVER_ENDPOINTS: usize = 8;
 const MAX_FRAME_PAYLOAD: usize = 32 * 1024 * 1024;
 const RESPONSE_BUFFER_CAPACITY: usize = 64;
 const MAX_RESPONSE_BUFFER_CAPACITY: usize = 65_536;
@@ -77,9 +91,7 @@ pub struct QuicResponseConfig {
     pub lanes: usize,
     pub batch_interval: Duration,
     pub max_batch_frames: usize,
-    pub coalescing_queue: bool,
     pub response_buffer_capacity: usize,
-    pub priority_prologue_stream: bool,
 }
 
 impl QuicResponseConfig {
@@ -126,13 +138,7 @@ impl QuicResponseConfig {
             lanes,
             batch_interval: Duration::from_micros(interval_us),
             max_batch_frames,
-            coalescing_queue: crate::config::env_is_truthy(
-                quic_response::DYN_QUIC_RESPONSE_COALESCING_QUEUE,
-            ),
             response_buffer_capacity,
-            priority_prologue_stream: crate::config::env_is_truthy(
-                quic_response::DYN_QUIC_RESPONSE_PRIORITY_PROLOGUE_STREAM,
-            ),
         })
     }
 }
@@ -271,7 +277,10 @@ impl Frame {
     }
 }
 
-async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Frame> {
+async fn read_frame<R>(recv: &mut R) -> Result<Frame>
+where
+    R: AsyncRead + Unpin,
+{
     let mut header = [0_u8; FRAME_HEADER_LEN];
     recv.read_exact(&mut header).await?;
     let kind = FrameKind::try_from(header[0])?;
@@ -285,17 +294,11 @@ async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Frame> {
     Ok(Frame::new(kind, registration_id, payload.freeze()))
 }
 
-enum LaneSender {
-    Tokio(mpsc::Sender<Frame>),
-    Coalescing(Arc<CoalescingLaneQueue>),
-}
+struct LaneSender(Arc<LaneQueue>);
 
-enum LaneReceiver {
-    Tokio(mpsc::Receiver<Frame>),
-    Coalescing(Arc<CoalescingLaneQueue>),
-}
+struct LaneReceiver(Arc<LaneQueue>);
 
-struct CoalescingLaneQueue {
+struct LaneQueue {
     urgent_frames: SegQueue<Frame>,
     frames: SegQueue<Frame>,
     urgent_slots: Semaphore,
@@ -314,7 +317,7 @@ enum LaneTrySendError {
     Full(Frame),
 }
 
-impl CoalescingLaneQueue {
+impl LaneQueue {
     fn new(capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             urgent_frames: SegQueue::new(),
@@ -466,40 +469,28 @@ impl CoalescingLaneQueue {
 
 impl Drop for LaneReceiver {
     fn drop(&mut self) {
-        if let Self::Coalescing(queue) = self {
-            queue.close_receiver();
-        }
+        self.0.close_receiver();
     }
 }
 
 impl Clone for LaneSender {
     fn clone(&self) -> Self {
-        match self {
-            Self::Tokio(sender) => Self::Tokio(sender.clone()),
-            Self::Coalescing(queue) => {
-                queue.senders.fetch_add(1, Ordering::Relaxed);
-                Self::Coalescing(queue.clone())
-            }
-        }
+        self.0.senders.fetch_add(1, Ordering::Relaxed);
+        Self(self.0.clone())
     }
 }
 
 impl Drop for LaneSender {
     fn drop(&mut self) {
-        if let Self::Coalescing(queue) = self
-            && queue.senders.fetch_sub(1, Ordering::AcqRel) == 1
-        {
-            queue.close_sender();
+        if self.0.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.close_sender();
         }
     }
 }
 
 impl LaneReceiver {
     async fn recv_many(&mut self, batch: &mut Vec<Frame>, limit: usize) -> usize {
-        match self {
-            Self::Tokio(receiver) => receiver.recv_many(batch, limit).await,
-            Self::Coalescing(queue) => queue.recv_many(batch, limit).await,
-        }
+        self.0.recv_many(batch, limit).await
     }
 
     #[cfg(test)]
@@ -511,37 +502,17 @@ impl LaneReceiver {
 
 impl LaneSender {
     fn try_send(&self, frame: Frame) -> std::result::Result<(), LaneTrySendError> {
-        match self {
-            Self::Tokio(sender) => sender.try_send(frame).map_err(|error| match error {
-                mpsc::error::TrySendError::Closed(frame) => LaneTrySendError::Closed(frame),
-                mpsc::error::TrySendError::Full(frame) => LaneTrySendError::Full(frame),
-            }),
-            Self::Coalescing(queue) => queue.try_send(frame),
-        }
+        self.0.try_send(frame)
     }
 
     async fn send(&self, frame: Frame) -> Result<()> {
-        match self {
-            Self::Tokio(sender) => sender
-                .send(frame)
-                .await
-                .map_err(|_| anyhow!("QUIC response lane closed")),
-            Self::Coalescing(queue) => queue.send(frame).await,
-        }
+        self.0.send(frame).await
     }
 }
 
-fn lane_queue(coalescing: bool) -> (LaneSender, LaneReceiver) {
-    if coalescing {
-        let queue = CoalescingLaneQueue::new(LANE_QUEUE_CAPACITY);
-        (
-            LaneSender::Coalescing(queue.clone()),
-            LaneReceiver::Coalescing(queue),
-        )
-    } else {
-        let (sender, receiver) = mpsc::channel(LANE_QUEUE_CAPACITY);
-        (LaneSender::Tokio(sender), LaneReceiver::Tokio(receiver))
-    }
+fn lane_queue(capacity: usize) -> (LaneSender, LaneReceiver) {
+    let queue = LaneQueue::new(capacity);
+    (LaneSender(queue.clone()), LaneReceiver(queue))
 }
 
 /// Fill `batch` with up to `max_batch_frames` frames. The first `recv_many`
@@ -579,14 +550,40 @@ async fn receive_batch(
     Some(batch_started.elapsed())
 }
 
+const SERVER_STATE_SHARDS: usize = 64;
+
 #[derive(Default)]
-struct ServerState {
+struct RegistrationShard {
     pending: HashMap<Uuid, PendingResponse>,
     active: HashMap<Uuid, ActiveResponse>,
+}
+
+#[derive(Default)]
+struct ServerIndexes {
     registration_instance: HashMap<Uuid, EndpointInstanceId>,
     instance_registrations: HashMap<EndpointInstanceId, Vec<Uuid>>,
     removed_instances: HashMap<EndpointInstanceId, Instant>,
     connection_bundles: HashMap<usize, Uuid>,
+}
+
+struct ServerState {
+    registrations: [Mutex<RegistrationShard>; SERVER_STATE_SHARDS],
+    indexes: Mutex<ServerIndexes>,
+}
+
+impl Default for ServerState {
+    fn default() -> Self {
+        Self {
+            registrations: std::array::from_fn(|_| Mutex::new(RegistrationShard::default())),
+            indexes: Mutex::new(ServerIndexes::default()),
+        }
+    }
+}
+
+impl ServerState {
+    fn registration(&self, registration_id: Uuid) -> &Mutex<RegistrationShard> {
+        &self.registrations[registration_id.as_u128() as usize % SERVER_STATE_SHARDS]
+    }
 }
 
 #[derive(Default)]
@@ -633,20 +630,19 @@ struct ActiveResponse {
     deferred: DeferredResponse,
 }
 
-fn prune_tombstones(state: &mut ServerState, now: Instant) {
-    state
+fn prune_tombstones(indexes: &mut ServerIndexes, now: Instant) {
+    indexes
         .removed_instances
         .retain(|_, inserted| now.saturating_duration_since(*inserted) < TOMBSTONE_TTL);
 }
 
 pub struct QuicResponseServer {
-    endpoint: quinn::Endpoint,
+    endpoints: Arc<[quinn::Endpoint]>,
     advertised_address: SocketAddr,
     frontend_id: String,
     certificate_sha256: String,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<ServerState>,
     response_buffer_capacity: usize,
-    priority_prologue_stream: bool,
     shutdown: CancellationToken,
 }
 
@@ -727,26 +723,56 @@ impl QuicResponseServer {
             transport.stream_receive_window(quinn::VarInt::from_u32(window));
         }
 
-        let endpoint = quinn::Endpoint::server(server_config, bind_address).map_err(|error| {
+        let socket = bind_reuseport_udp(bind_address).map_err(|error| {
             PipelineError::Generic(format!(
-                "failed binding QUIC response server on {bind_address}: {error}"
+                "failed binding QUIC response server socket on {bind_address}: {error}"
             ))
         })?;
+        let bound_address = socket.local_addr().map_err(|error| {
+            PipelineError::Generic(format!(
+                "failed reading QUIC response server socket address: {error}"
+            ))
+        })?;
+        let mut first_socket = Some(socket);
+        let mut endpoints = Vec::with_capacity(SERVER_ENDPOINTS);
+        for index in 0..SERVER_ENDPOINTS {
+            let socket = if index == 0 {
+                first_socket
+                    .take()
+                    .expect("first QUIC response socket exists")
+            } else {
+                bind_reuseport_udp(bound_address).map_err(|error| {
+                    PipelineError::Generic(format!(
+                        "failed binding QUIC response reuse-port socket {index} on {bound_address}: {error}"
+                    ))
+                })?
+            };
+            let endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(server_config.clone()),
+                socket,
+                Arc::new(quinn::TokioRuntime),
+            )
+            .map_err(|error| {
+                PipelineError::Generic(format!(
+                    "failed creating QUIC response endpoint {index} on {bound_address}: {error}"
+                ))
+            })?;
+            endpoints.push(endpoint);
+        }
+        let endpoints: Arc<[quinn::Endpoint]> = endpoints.into();
         let advertised_address = if advertised_address.port() == 0 {
-            endpoint.local_addr().map_err(|error| {
-                PipelineError::Generic(format!("failed reading QUIC response address: {error}"))
-            })?
+            bound_address
         } else {
             advertised_address
         };
         let server = Arc::new(Self {
-            endpoint,
+            endpoints,
             advertised_address,
             frontend_id: Uuid::new_v4().to_string(),
             certificate_sha256,
-            state: Arc::new(Mutex::new(ServerState::default())),
+            state: Arc::new(ServerState::default()),
             response_buffer_capacity: response_config.response_buffer_capacity,
-            priority_prologue_stream: response_config.priority_prologue_stream,
             shutdown,
         });
         Self::spawn_accept_loop(&server);
@@ -754,36 +780,35 @@ impl QuicResponseServer {
     }
 
     fn spawn_accept_loop(server: &Arc<Self>) {
-        let endpoint = server.endpoint.clone();
-        let state = server.state.clone();
-        let response_buffer_capacity = server.response_buffer_capacity;
-        let priority_prologue_stream = server.priority_prologue_stream;
-        let shutdown = server.shutdown.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => {
-                        endpoint.close(quinn::VarInt::from_u32(0), b"runtime shutdown");
-                        break;
-                    }
-                    incoming = endpoint.accept() => {
-                        let Some(incoming) = incoming else { break };
-                        let state = state.clone();
-                        tokio::spawn(async move {
-                            match incoming.await {
-                                Ok(connection) => run_server_connection(
-                                    connection,
-                                    state,
-                                    response_buffer_capacity,
-                                    priority_prologue_stream,
-                                ).await,
-                                Err(error) => tracing::warn!(%error, "QUIC response handshake failed"),
-                            }
-                        });
+        for endpoint in server.endpoints.iter().cloned() {
+            let state = server.state.clone();
+            let response_buffer_capacity = server.response_buffer_capacity;
+            let shutdown = server.shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {
+                            endpoint.close(quinn::VarInt::from_u32(0), b"runtime shutdown");
+                            break;
+                        }
+                        incoming = endpoint.accept() => {
+                            let Some(incoming) = incoming else { break };
+                            let state = state.clone();
+                            tokio::spawn(async move {
+                                match incoming.await {
+                                    Ok(connection) => run_server_connection(
+                                        connection,
+                                        state,
+                                        response_buffer_capacity,
+                                    ).await,
+                                    Err(error) => tracing::warn!(%error, "QUIC response handshake failed"),
+                                }
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
     }
 
     pub fn register_response(
@@ -793,16 +818,20 @@ impl QuicResponseServer {
         let registration_id = Uuid::new_v4();
         let request_id = context.id().to_string();
         let (pending_tx, pending_rx) = oneshot::channel();
-        self.state.lock().pending.insert(
-            registration_id,
-            PendingResponse {
-                context,
-                connection: pending_tx,
-                registered_at: Instant::now(),
-                bundle_id: None,
-                deferred: DeferredResponse::default(),
-            },
-        );
+        self.state
+            .registration(registration_id)
+            .lock()
+            .pending
+            .insert(
+                registration_id,
+                PendingResponse {
+                    context,
+                    connection: pending_tx,
+                    registered_at: Instant::now(),
+                    bundle_id: None,
+                    deferred: DeferredResponse::default(),
+                },
+            );
 
         let connection_info = QuicResponseConnectionInfo {
             version: PROTOCOL_VERSION,
@@ -821,18 +850,18 @@ impl QuicResponseServer {
     }
 
     pub async fn associate_instance(&self, registration_id: Uuid, id: &EndpointInstanceId) -> bool {
-        let mut state = self.state.lock();
+        let mut indexes = self.state.indexes.lock();
         let now = Instant::now();
-        prune_tombstones(&mut state, now);
-        if state.removed_instances.contains_key(id) {
-            drop(state);
+        prune_tombstones(&mut indexes, now);
+        if indexes.removed_instances.contains_key(id) {
+            drop(indexes);
             remove_registration(&self.state, registration_id);
             return false;
         }
-        state
+        indexes
             .registration_instance
             .insert(registration_id, id.clone());
-        state
+        indexes
             .instance_registrations
             .entry(id.clone())
             .or_default()
@@ -846,45 +875,71 @@ impl QuicResponseServer {
 
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let registrations = {
-            let mut state = self.state.lock();
+            let mut indexes = self.state.indexes.lock();
             let now = Instant::now();
-            prune_tombstones(&mut state, now);
-            state.removed_instances.insert(id.clone(), now);
-            state.instance_registrations.remove(id).unwrap_or_default()
+            prune_tombstones(&mut indexes, now);
+            indexes.removed_instances.insert(id.clone(), now);
+            let registrations = indexes
+                .instance_registrations
+                .remove(id)
+                .unwrap_or_default();
+            for registration_id in &registrations {
+                indexes.registration_instance.remove(registration_id);
+            }
+            registrations
         };
         let count = registrations.len();
         for registration_id in registrations {
-            remove_registration(&self.state, registration_id);
+            remove_registration_data(&self.state, registration_id);
         }
         count
     }
 
     pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
-        self.state.lock().removed_instances.remove(id);
+        self.state.indexes.lock().removed_instances.remove(id);
     }
 }
 
-fn remove_registration(state: &Mutex<ServerState>, registration_id: Uuid) {
-    let mut state = state.lock();
-    state.pending.remove(&registration_id);
-    if let Some(active) = state.active.remove(&registration_id) {
+fn bind_reuseport_udp(address: SocketAddr) -> std::io::Result<UdpSocket> {
+    let socket = Socket::new(
+        Domain::for_address(address),
+        Type::DGRAM,
+        Some(Protocol::UDP),
+    )?;
+    socket.set_reuse_address(true)?;
+    #[cfg(target_os = "linux")]
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    Ok(socket.into())
+}
+
+fn remove_registration_data(state: &ServerState, registration_id: Uuid) {
+    let mut registration = state.registration(registration_id).lock();
+    registration.pending.remove(&registration_id);
+    if let Some(active) = registration.active.remove(&registration_id) {
         active.monitor_cancel.cancel();
     }
-    if let Some(instance) = state.registration_instance.remove(&registration_id)
-        && let Some(registrations) = state.instance_registrations.get_mut(&instance)
+}
+
+fn remove_registration(state: &ServerState, registration_id: Uuid) {
+    let mut indexes = state.indexes.lock();
+    if let Some(instance) = indexes.registration_instance.remove(&registration_id)
+        && let Some(registrations) = indexes.instance_registrations.get_mut(&instance)
     {
         registrations.retain(|candidate| *candidate != registration_id);
         if registrations.is_empty() {
-            state.instance_registrations.remove(&instance);
+            indexes.instance_registrations.remove(&instance);
         }
     }
+    drop(indexes);
+    remove_registration_data(state, registration_id);
 }
 
 async fn run_server_connection(
     connection: quinn::Connection,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<ServerState>,
     response_buffer_capacity: usize,
-    priority_prologue_stream: bool,
 ) {
     let connection_id = connection.stable_id();
     crate::metrics::quic_response::track_connection(connection.clone());
@@ -901,7 +956,6 @@ async fn run_server_connection(
                         connection_id,
                         lane_state.clone(),
                         response_buffer_capacity,
-                        priority_prologue_stream,
                     )
                     .await;
                     if let Err(error) = result {
@@ -924,42 +978,55 @@ async fn run_server_connection(
 }
 
 fn register_server_connection_bundle(
-    state: &Mutex<ServerState>,
+    state: &ServerState,
     connection_id: usize,
     bundle_id: Uuid,
 ) -> Result<()> {
-    let mut state = state.lock();
-    if let Some(existing) = state.connection_bundles.get(&connection_id)
+    let mut indexes = state.indexes.lock();
+    if let Some(existing) = indexes.connection_bundles.get(&connection_id)
         && *existing != bundle_id
     {
         bail!(
             "QUIC response connection {connection_id} changed bundle id from {existing} to {bundle_id}"
         );
     }
-    state.connection_bundles.insert(connection_id, bundle_id);
+    indexes.connection_bundles.insert(connection_id, bundle_id);
     Ok(())
 }
 
-fn fail_server_connection(state: &Mutex<ServerState>, connection_id: usize) {
-    let doomed: Vec<Uuid> = {
-        let mut state = state.lock();
-        let Some(bundle_id) = state.connection_bundles.remove(&connection_id) else {
+fn fail_server_connection(state: &ServerState, connection_id: usize) {
+    let bundle_id = {
+        let mut indexes = state.indexes.lock();
+        let Some(bundle_id) = indexes.connection_bundles.remove(&connection_id) else {
             return;
         };
-        state
+        indexes
             .connection_bundles
             .retain(|_, candidate| *candidate != bundle_id);
-        state
-            .pending
-            .iter()
-            .filter_map(|(registration_id, pending)| {
-                (pending.bundle_id == Some(bundle_id)).then_some(*registration_id)
-            })
-            .chain(state.active.iter().filter_map(|(registration_id, active)| {
-                (active.bundle_id == bundle_id).then_some(*registration_id)
-            }))
-            .collect()
+        bundle_id
     };
+    let doomed: Vec<Uuid> = state
+        .registrations
+        .iter()
+        .flat_map(|registration| {
+            let registration = registration.lock();
+            registration
+                .pending
+                .iter()
+                .filter_map(|(registration_id, pending)| {
+                    (pending.bundle_id == Some(bundle_id)).then_some(*registration_id)
+                })
+                .chain(
+                    registration
+                        .active
+                        .iter()
+                        .filter_map(|(registration_id, active)| {
+                            (active.bundle_id == bundle_id).then_some(*registration_id)
+                        }),
+                )
+                .collect::<Vec<_>>()
+        })
+        .collect();
     for registration_id in doomed {
         remove_registration(state, registration_id);
     }
@@ -967,12 +1034,12 @@ fn fail_server_connection(state: &Mutex<ServerState>, connection_id: usize) {
 
 async fn run_server_lane(
     mut send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
+    recv: quinn::RecvStream,
     connection_id: usize,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<ServerState>,
     response_buffer_capacity: usize,
-    priority_prologue_stream: bool,
 ) -> Result<()> {
+    let mut recv = BufReader::with_capacity(RECEIVE_BUFFER_CAPACITY, recv);
     let bundle = read_frame(&mut recv).await?;
     if bundle.kind != FrameKind::Bundle || !bundle.payload.is_empty() {
         bail!("QUIC response lane did not start with a bundle frame");
@@ -998,7 +1065,6 @@ async fn run_server_lane(
                 &state,
                 &control_tx,
                 response_buffer_capacity,
-                priority_prologue_stream,
             )
             .await?;
         }
@@ -1023,17 +1089,21 @@ async fn run_server_lane(
 async fn process_server_frame(
     frame: Frame,
     bundle_id: Uuid,
-    state: &Arc<Mutex<ServerState>>,
+    state: &Arc<ServerState>,
     control_tx: &mpsc::Sender<Frame>,
     response_buffer_capacity: usize,
-    priority_prologue_stream: bool,
 ) -> Result<()> {
     match frame.kind {
         FrameKind::Prologue => {
             if !frame.payload.is_empty() {
                 bail!("QUIC response Prologue frame carried a payload");
             }
-            let Some(pending) = state.lock().pending.remove(&frame.registration_id) else {
+            let Some(pending) = state
+                .registration(frame.registration_id)
+                .lock()
+                .pending
+                .remove(&frame.registration_id)
+            else {
                 send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
                 return Ok(());
             };
@@ -1052,18 +1122,22 @@ async fn process_server_frame(
             let (response_tx, response_rx) = mpsc::channel(response_buffer_capacity);
             let monitor_cancel = CancellationToken::new();
             let prologue_received_at = Instant::now();
-            state.lock().active.insert(
-                frame.registration_id,
-                ActiveResponse {
-                    sender: response_tx.clone(),
-                    monitor_cancel: monitor_cancel.clone(),
-                    bundle_id,
-                    prologue_received_at,
-                    priority_ready: !priority_prologue_stream,
-                    priority_draining: false,
-                    deferred: pending.deferred,
-                },
-            );
+            state
+                .registration(frame.registration_id)
+                .lock()
+                .active
+                .insert(
+                    frame.registration_id,
+                    ActiveResponse {
+                        sender: response_tx.clone(),
+                        monitor_cancel: monitor_cancel.clone(),
+                        bundle_id,
+                        prologue_received_at,
+                        priority_ready: false,
+                        priority_draining: false,
+                        deferred: pending.deferred,
+                    },
+                );
             if pending
                 .connection
                 .send(Ok(StreamReceiver { rx: response_rx }))
@@ -1085,7 +1159,11 @@ async fn process_server_frame(
         FrameKind::Error => {
             let error = String::from_utf8(frame.payload.to_vec())
                 .context("QUIC response terminal error was not UTF-8")?;
-            let pending = state.lock().pending.remove(&frame.registration_id);
+            let pending = state
+                .registration(frame.registration_id)
+                .lock()
+                .pending
+                .remove(&frame.registration_id);
             if let Some(pending) = pending {
                 if let Some(pending_bundle) = pending.bundle_id
                     && pending_bundle != bundle_id
@@ -1106,8 +1184,8 @@ async fn process_server_frame(
         FrameKind::FirstData | FrameKind::PriorityEnd => {
             let first_payload = (frame.kind == FrameKind::FirstData).then_some(frame.payload);
             let active = {
-                let mut state = state.lock();
-                match state.active.get_mut(&frame.registration_id) {
+                let mut registration = state.registration(frame.registration_id).lock();
+                match registration.active.get_mut(&frame.registration_id) {
                     Some(active) if active.bundle_id != bundle_id => {
                         bail!(
                             "QUIC response registration {} changed bundle id from {} to {}",
@@ -1153,8 +1231,8 @@ async fn process_server_frame(
             }
 
             let disposition = {
-                let mut state = state.lock();
-                match state.active.get_mut(&frame.registration_id) {
+                let mut registration = state.registration(frame.registration_id).lock();
+                match registration.active.get_mut(&frame.registration_id) {
                     Some(active) if active.bundle_id != bundle_id => {
                         bail!(
                             "QUIC response registration {} changed bundle id from {} to {}",
@@ -1170,8 +1248,9 @@ async fn process_server_frame(
                         }
                     }
                     Some(active) => Disposition::Deliver(active.sender.clone(), frame.payload),
-                    None if priority_prologue_stream => {
-                        if let Some(pending) = state.pending.get_mut(&frame.registration_id) {
+                    None => {
+                        if let Some(pending) = registration.pending.get_mut(&frame.registration_id)
+                        {
                             if let Some(pending_bundle) = pending.bundle_id
                                 && pending_bundle != bundle_id
                             {
@@ -1191,7 +1270,6 @@ async fn process_server_frame(
                             Disposition::Reset
                         }
                     }
-                    None => Disposition::Reset,
                 }
             };
             match disposition {
@@ -1219,8 +1297,8 @@ async fn process_server_frame(
                 bail!("QUIC response End frame carried a payload");
             }
             let disposition = {
-                let mut state = state.lock();
-                match state.active.get_mut(&frame.registration_id) {
+                let mut registration = state.registration(frame.registration_id).lock();
+                match registration.active.get_mut(&frame.registration_id) {
                     Some(active) if active.bundle_id != bundle_id => {
                         bail!(
                             "QUIC response registration {} changed bundle id from {} to {}",
@@ -1234,8 +1312,9 @@ async fn process_server_frame(
                         0
                     }
                     Some(_) => 1,
-                    None if priority_prologue_stream => {
-                        if let Some(pending) = state.pending.get_mut(&frame.registration_id) {
+                    None => {
+                        if let Some(pending) = registration.pending.get_mut(&frame.registration_id)
+                        {
                             if let Some(pending_bundle) = pending.bundle_id
                                 && pending_bundle != bundle_id
                             {
@@ -1253,7 +1332,6 @@ async fn process_server_frame(
                             2
                         }
                     }
-                    None => 1,
                 }
             };
             match disposition {
@@ -1288,15 +1366,15 @@ async fn deliver_server_payload(sender: &mpsc::Sender<Bytes>, payload: Bytes) ->
 }
 
 async fn drain_deferred_response(
-    state: &Arc<Mutex<ServerState>>,
+    state: &Arc<ServerState>,
     registration_id: Uuid,
     sender: &mpsc::Sender<Bytes>,
     control_tx: &mpsc::Sender<Frame>,
 ) -> Result<()> {
     loop {
         let (deferred, remove_after_drain) = {
-            let mut state = state.lock();
-            let Some(active) = state.active.get_mut(&registration_id) else {
+            let mut registration = state.registration(registration_id).lock();
+            let Some(active) = registration.active.get_mut(&registration_id) else {
                 return Ok(());
             };
             if active.deferred.data.is_empty() {
@@ -1377,7 +1455,7 @@ struct Lane {
 
 struct ResponseLanes {
     ordered: Arc<Lane>,
-    priority: Option<Arc<Lane>>,
+    priority: Arc<Lane>,
 }
 
 struct ClientConnectionBundle {
@@ -1406,7 +1484,10 @@ struct ConnectionKey {
 
 pub struct QuicResponseClientPool {
     config: QuicResponseConfig,
-    endpoints: Mutex<HashMap<bool, quinn::Endpoint>>,
+    // Keep one UDP socket per QUIC connection. Tyche's unprivileged UDP
+    // receive buffer is small, so sharing one socket across every connection
+    // can drop ACKs even when the NIC and softnet layers are healthy.
+    endpoints: Mutex<HashMap<ConnectionKey, Vec<quinn::Endpoint>>>,
     connections: tokio::sync::Mutex<HashMap<ConnectionKey, Arc<ClientConnectionBundle>>>,
 }
 
@@ -1515,15 +1596,11 @@ impl QuicResponseClientPool {
             .with_context(|| format!("invalid QUIC response address {}", key.address))?;
         let expected_fingerprint = decode_fingerprint(&key.certificate_sha256)?;
         let client_config = pinned_client_config(expected_fingerprint)?;
-        let endpoint = self.client_endpoint(address.is_ipv6())?;
-        let priority_connection_index = self
-            .config
-            .priority_prologue_stream
-            .then_some(self.config.connections);
-        let total_connections =
-            self.config.connections + usize::from(priority_connection_index.is_some());
+        let priority_connection_index = self.config.connections;
+        let total_connections = self.config.connections + 1;
+        let endpoints = self.client_endpoints(key, total_connections)?;
         let mut connections = Vec::with_capacity(total_connections);
-        for _ in 0..total_connections {
+        for endpoint in endpoints {
             let connection = endpoint
                 .connect_with(client_config.clone(), address, "localhost")?
                 .await
@@ -1542,7 +1619,7 @@ impl QuicResponseClientPool {
         for index in 0..self.config.lanes {
             let connection = connections[index % self.config.connections].clone();
             let (send, recv) = connection.open_bi().await?;
-            let (lane_tx, lane_rx) = lane_queue(self.config.coalescing_queue);
+            let (lane_tx, lane_rx) = lane_queue(BULK_LANE_QUEUE_CAPACITY);
             let ordered = Arc::new(Lane {
                 index,
                 sender: lane_tx,
@@ -1558,40 +1635,32 @@ impl QuicResponseClientPool {
                 contexts.clone(),
                 healthy.clone(),
             );
-            let priority = if self.config.priority_prologue_stream {
-                let priority_connection = connections
-                    [priority_connection_index.expect("priority connection exists")]
-                .clone();
-                let (priority_send, priority_recv) = priority_connection.open_bi().await?;
-                let (priority_tx, priority_rx) = lane_queue(self.config.coalescing_queue);
-                let priority = Arc::new(Lane {
-                    index,
-                    sender: priority_tx,
-                });
-                spawn_client_lane(
-                    priority_send,
-                    priority_recv,
-                    priority_rx,
-                    self.config.batch_interval,
-                    self.config.max_batch_frames,
-                    bundle_id,
-                    connections.clone(),
-                    contexts.clone(),
-                    healthy.clone(),
-                );
-                Some(priority)
-            } else {
-                None
-            };
+            let priority_connection = connections[priority_connection_index].clone();
+            let (priority_send, priority_recv) = priority_connection.open_bi().await?;
+            let (priority_tx, priority_rx) = lane_queue(LANE_QUEUE_CAPACITY);
+            let priority = Arc::new(Lane {
+                index,
+                sender: priority_tx,
+            });
+            spawn_client_lane(
+                priority_send,
+                priority_recv,
+                priority_rx,
+                self.config.batch_interval,
+                self.config.max_batch_frames,
+                bundle_id,
+                connections.clone(),
+                contexts.clone(),
+                healthy.clone(),
+            );
             lanes.push(ResponseLanes { ordered, priority });
         }
 
         tracing::debug!(
             remote = %address,
             bulk_connections = self.config.connections,
-            priority_connections = usize::from(priority_connection_index.is_some()),
+            priority_connections = 1,
             total_lanes = self.config.lanes,
-            priority_prologue_stream = self.config.priority_prologue_stream,
             "QUIC response connection bundle and lanes ready"
         );
         Ok(Arc::new(ClientConnectionBundle {
@@ -1602,19 +1671,19 @@ impl QuicResponseClientPool {
         }))
     }
 
-    fn client_endpoint(&self, ipv6: bool) -> Result<quinn::Endpoint> {
+    fn client_endpoints(&self, key: &ConnectionKey, count: usize) -> Result<Vec<quinn::Endpoint>> {
+        let ipv6 = key.address.parse::<SocketAddr>()?.is_ipv6();
         let mut endpoints = self.endpoints.lock();
-        if let Some(endpoint) = endpoints.get(&ipv6) {
-            return Ok(endpoint.clone());
+        let entry = endpoints.entry(key.clone()).or_default();
+        while entry.len() < count {
+            let bind = if ipv6 {
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+            } else {
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+            };
+            entry.push(quinn::Endpoint::client(bind)?);
         }
-        let bind = if ipv6 {
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
-        } else {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
-        };
-        let endpoint = quinn::Endpoint::client(bind)?;
-        endpoints.insert(ipv6, endpoint.clone());
-        Ok(endpoint)
+        Ok(entry[..count].to_vec())
     }
 }
 
@@ -1716,9 +1785,10 @@ async fn run_client_writer(
 }
 
 async fn run_client_control_reader(
-    mut recv: quinn::RecvStream,
+    recv: quinn::RecvStream,
     contexts: Arc<Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>>,
 ) -> Result<()> {
+    let mut recv = BufReader::with_capacity(RECEIVE_BUFFER_CAPACITY, recv);
     loop {
         let frame = read_frame(&mut recv).await?;
         if !frame.payload.is_empty() {
@@ -1769,7 +1839,7 @@ pub struct QuicResponseSender {
     // Lane selection is performed exactly once by the pool. Token writes only
     // touch this Arc and its bounded channel.
     lane: Arc<Lane>,
-    priority_lane: Option<Arc<Lane>>,
+    priority_lane: Arc<Lane>,
     contexts: Arc<Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>>,
     registration_id: Uuid,
     prologue_sent: bool,
@@ -1807,10 +1877,12 @@ impl QuicResponseSender {
             Some(error) => (FrameKind::Error, Bytes::from(error), true),
             None => (FrameKind::Prologue, Bytes::new(), false),
         };
-        let lane = self.priority_lane.as_ref().unwrap_or(&self.lane).clone();
-        self.enqueue_on(&lane, Frame::new(kind, self.registration_id, payload))
-            .await
-            .map_err(|error| error.to_string())?;
+        self.enqueue_on(
+            &self.priority_lane,
+            Frame::new(kind, self.registration_id, payload),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         self.prologue_sent = true;
         if terminal {
             self.terminated = true;
@@ -1823,13 +1895,13 @@ impl QuicResponseSender {
             bail!("QUIC response sender is not open for data");
         }
         let first_data = !self.first_data_sent.swap(true, Ordering::AcqRel);
-        let frame = if first_data && self.priority_lane.is_some() {
+        let frame = if first_data {
             Frame::new(FrameKind::FirstData, self.registration_id, payload)
         } else {
             Frame::new(FrameKind::Data, self.registration_id, payload)
         };
-        if first_data && let Some(priority_lane) = &self.priority_lane {
-            self.enqueue_on(priority_lane, frame).await
+        if first_data {
+            self.enqueue_on(&self.priority_lane, frame).await
         } else {
             self.enqueue_on(&self.lane, frame).await
         }
@@ -1839,11 +1911,9 @@ impl QuicResponseSender {
         if !self.prologue_sent || self.terminated {
             return Ok(());
         }
-        if let Some(priority_lane) = &self.priority_lane
-            && !self.first_data_sent.load(Ordering::Acquire)
-        {
+        if !self.first_data_sent.load(Ordering::Acquire) {
             self.enqueue_on(
-                priority_lane,
+                &self.priority_lane,
                 Frame::new(FrameKind::PriorityEnd, self.registration_id, Bytes::new()),
             )
             .await?;
@@ -1902,11 +1972,8 @@ impl Drop for QuicResponseSender {
             return;
         }
         let sender = self.lane.sender.clone();
-        let priority_sender = self
-            .priority_lane
-            .as_ref()
-            .filter(|_| !self.first_data_sent.load(Ordering::Acquire))
-            .map(|lane| lane.sender.clone());
+        let priority_sender = (!self.first_data_sent.load(Ordering::Acquire))
+            .then(|| self.priority_lane.sender.clone());
         let registration_id = self.registration_id;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
@@ -2048,19 +2115,11 @@ mod tests {
                 lanes,
                 batch_interval: Duration::ZERO,
                 max_batch_frames: DEFAULT_MAX_BATCH_FRAMES,
-                coalescing_queue: false,
                 response_buffer_capacity: RESPONSE_BUFFER_CAPACITY,
-                priority_prologue_stream: false,
             },
             endpoints: Mutex::new(HashMap::new()),
             connections: tokio::sync::Mutex::new(HashMap::new()),
         }
-    }
-
-    fn test_priority_pool(connections: usize, lanes: usize) -> QuicResponseClientPool {
-        let mut pool = test_pool(connections, lanes);
-        pool.config.priority_prologue_stream = true;
-        pool
     }
 
     fn context_for_lane(lane: usize, lanes: usize) -> PipelineContext<()> {
@@ -2076,8 +2135,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_drains_available_frames_at_key_boundaries() {
         for available in [1, 63, 64] {
-            let (tx, rx) = mpsc::channel(128);
-            let mut rx = LaneReceiver::Tokio(rx);
+            let (tx, mut rx) = lane_queue(128);
             for index in 0..available {
                 tx.send(frame(index)).await.unwrap();
             }
@@ -2098,8 +2156,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_batch_cap_drains_256_frames() {
-        let (tx, rx) = mpsc::channel(300);
-        let mut rx = LaneReceiver::Tokio(rx);
+        let (tx, mut rx) = lane_queue(300);
         for index in 0..300 {
             tx.send(frame(index)).await.unwrap();
         }
@@ -2115,12 +2172,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coalescing_lane_queue_preserves_capacity_order_and_close() {
-        let (tx, mut rx) = lane_queue(true);
-        let queue = match &tx {
-            LaneSender::Coalescing(queue) => queue.clone(),
-            LaneSender::Tokio(_) => unreachable!(),
-        };
+    async fn lane_queue_preserves_capacity_order_and_close() {
+        let (tx, mut rx) = lane_queue(LANE_QUEUE_CAPACITY);
+        let queue = tx.0.clone();
         for index in 0..LANE_QUEUE_CAPACITY {
             tx.try_send(frame(index)).unwrap();
         }
@@ -2172,8 +2226,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coalescing_lane_queue_prioritizes_prologue_over_full_data_queue() {
-        let (tx, mut rx) = lane_queue(true);
+    async fn lane_queue_prioritizes_prologue_over_full_data_queue() {
+        let (tx, mut rx) = lane_queue(LANE_QUEUE_CAPACITY);
         for index in 0..LANE_QUEUE_CAPACITY {
             tx.try_send(frame(index)).unwrap();
         }
@@ -2195,8 +2249,7 @@ mod tests {
 
     #[tokio::test]
     async fn deadline_flushes_partial_batch_and_reuses_vector() {
-        let (tx, rx) = mpsc::channel(128);
-        let mut rx = LaneReceiver::Tokio(rx);
+        let (tx, mut rx) = lane_queue(128);
         tx.send(frame(0)).await.unwrap();
         let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
         let allocation = batch.as_ptr();
@@ -2217,8 +2270,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn frames_arriving_before_deadline_join_the_same_batch() {
-        let (tx, rx) = mpsc::channel(128);
-        let mut rx = LaneReceiver::Tokio(rx);
+        let (tx, mut rx) = lane_queue(128);
         tx.send(frame(0)).await.unwrap();
         let task = tokio::spawn(async move {
             let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
@@ -2244,8 +2296,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn deadline_wins_when_a_frame_arrives_at_the_boundary() {
-        let (tx, rx) = mpsc::channel(128);
-        let mut rx = LaneReceiver::Tokio(rx);
+        let (tx, mut rx) = lane_queue(128);
         tx.send(frame(0)).await.unwrap();
         let task = tokio::spawn(async move {
             let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
@@ -2271,8 +2322,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_channel_returns_final_batch_then_eof() {
-        let (tx, rx) = mpsc::channel(8);
-        let mut rx = LaneReceiver::Tokio(rx);
+        let (tx, mut rx) = lane_queue(8);
         tx.send(frame(0)).await.unwrap();
         drop(tx);
         let mut batch = Vec::with_capacity(DEFAULT_MAX_BATCH_FRAMES);
@@ -2301,7 +2351,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_lane_queue_blocks_only_after_512_frames() {
-        let (tx, mut rx) = mpsc::channel(LANE_QUEUE_CAPACITY);
+        let (tx, mut rx) = lane_queue(LANE_QUEUE_CAPACITY);
         for index in 0..LANE_QUEUE_CAPACITY {
             tx.try_send(frame(index)).unwrap();
         }
@@ -2321,13 +2371,15 @@ mod tests {
     #[tokio::test]
     async fn eight_connections_eight_lanes_carry_1000_ordered_responses() {
         let shutdown = CancellationToken::new();
-        let server = QuicResponseServer::new(
+        let pool = test_pool(8, 8);
+        let server = QuicResponseServer::new_with_config(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             shutdown.clone(),
+            None,
+            pool.config,
         )
         .unwrap();
-        let pool = test_pool(8, 8);
 
         let mut lane_by_request = HashMap::new();
         for index in 0..1_000 {
@@ -2369,15 +2421,15 @@ mod tests {
         let connections = pool.connections.lock().await;
         assert_eq!(connections.len(), 1);
         let bundle = connections.values().next().unwrap();
-        assert_eq!(bundle.connections.len(), 8);
+        assert_eq!(bundle.connections.len(), 9); // Eight bulk and one priority.
         assert_eq!(bundle.lanes.len(), 8);
         shutdown.cancel();
     }
 
     #[tokio::test]
-    async fn priority_prologue_stream_preserves_response_order() {
+    async fn priority_path_preserves_response_order() {
         let shutdown = CancellationToken::new();
-        let pool = test_priority_pool(1, 1);
+        let pool = test_pool(1, 1);
         let server_config = pool.config;
         let server = QuicResponseServer::new_with_config(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -2417,8 +2469,15 @@ mod tests {
     async fn receiver_drop_sends_logical_reset_without_resetting_lane() {
         let shutdown = CancellationToken::new();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = QuicResponseServer::new(address, address, shutdown.clone()).unwrap();
         let pool = test_pool(1, 4);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            pool.config,
+        )
+        .unwrap();
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let (info, provider) = registered.into_parts();
@@ -2452,8 +2511,8 @@ mod tests {
         let registration_id = Uuid::new_v4();
         let bundle_id = Uuid::new_v4();
         let (response_tx, mut response_rx) = mpsc::channel(4);
-        let state = Arc::new(Mutex::new(ServerState::default()));
-        state.lock().active.insert(
+        let state = Arc::new(ServerState::default());
+        state.registration(registration_id).lock().active.insert(
             registration_id,
             ActiveResponse {
                 sender: response_tx,
@@ -2477,7 +2536,6 @@ mod tests {
             &state,
             &control_tx,
             4,
-            true,
         )
         .await
         .unwrap();
@@ -2487,7 +2545,6 @@ mod tests {
             &state,
             &control_tx,
             4,
-            true,
         )
         .await
         .unwrap();
@@ -2506,7 +2563,6 @@ mod tests {
             &state,
             &control_tx,
             4,
-            true,
         )
         .await
         .unwrap();
@@ -2545,8 +2601,15 @@ mod tests {
     async fn terminal_generate_error_uses_ordered_lane_frame() {
         let shutdown = CancellationToken::new();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = QuicResponseServer::new(address, address, shutdown.clone()).unwrap();
         let pool = test_pool(1, 4);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            pool.config,
+        )
+        .unwrap();
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let (info, provider) = registered.into_parts();
@@ -2566,8 +2629,15 @@ mod tests {
     async fn physical_connection_failure_kills_all_and_reconnects_once() {
         let shutdown = CancellationToken::new();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = QuicResponseServer::new(address, address, shutdown.clone()).unwrap();
-        let pool = Arc::new(test_priority_pool(2, 8));
+        let pool = Arc::new(test_pool(2, 8));
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            pool.config,
+        )
+        .unwrap();
 
         let first_context = PipelineContext::new(());
         let first = server.register_response(first_context.context());
@@ -2629,14 +2699,19 @@ mod tests {
     async fn stalled_lane_does_not_block_sibling_lane() {
         let shutdown = CancellationToken::new();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let server = QuicResponseServer::new_with_stream_window(
+        let mut pool = test_pool(1, 4);
+        // This test needs deterministic backpressure, independent of the
+        // production batch-size default.
+        pool.config.max_batch_frames = 64;
+        let pool = Arc::new(pool);
+        let server = QuicResponseServer::new_with_config(
             address,
             address,
             shutdown.clone(),
             Some(8 * 1024),
+            pool.config,
         )
         .unwrap();
-        let pool = Arc::new(test_pool(1, 4));
 
         let stalled_context = context_for_lane(0, 4);
         let stalled = server.register_response(stalled_context.context());
@@ -2650,7 +2725,7 @@ mod tests {
         let _stalled_receiver = stalled_provider.await.unwrap().unwrap();
         let stall_task = tokio::spawn(async move {
             let payload = Bytes::from(vec![0x5a; 16 * 1024]);
-            for _ in 0..2_000 {
+            for _ in 0..BULK_LANE_QUEUE_CAPACITY + 512 {
                 stalled_sender.send(payload.clone()).await?;
             }
             Ok::<_, anyhow::Error>(())
