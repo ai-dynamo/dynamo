@@ -74,11 +74,10 @@ func TestExpandRolesForComponent_NeverEmitsFollower(t *testing.T) {
 	}
 }
 
-// leaderDCD builds a single-pod elastic-EP leader DynamoComponentDeployment as
-// GenerateDynamoComponentsDeployments would, so synthesizeElasticEPFollowerDCD can derive
-// the follower from it. generateSingleDCD sets both Spec.ComponentName and the label;
-// GetDCDComponentName prefers Spec.ComponentName, so the follower must override it too or
-// the worker-hash computation sees two DCDs named "decode" and fails.
+// leaderDCD builds a single-pod elastic-EP leader as GenerateDynamoComponentsDeployments
+// would. It sets both Spec.ComponentName and the label because GetDCDComponentName
+// prefers the former: the follower must override both, or the worker hash sees two DCDs
+// named "decode".
 func leaderDCD(component *v1beta1.DynamoComponentDeploymentSharedSpec) *v1beta1.DynamoComponentDeployment {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		Spec: v1beta1.DynamoComponentDeploymentSpec{

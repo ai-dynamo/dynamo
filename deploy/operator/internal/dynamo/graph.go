@@ -323,11 +323,9 @@ func GenerateDynamoComponentsDeployments(
 		}
 		deployments[componentName] = dcd
 
-		// On the non-Grove pathway an elastic-EP leader also gets an optional
-		// follower, rendered as its own DynamoComponentDeployment that rests at
-		// zero replicas so it can be scaled up on demand without gang-blocking the
-		// leader. (A Grove clique cannot rest at zero -- grove#676 -- so the
-		// follower lives on this pathway until grove#686 lands.)
+		// An elastic-EP leader also gets an optional follower: its own DCD resting at
+		// zero replicas, scaled up on demand without gang-blocking the leader. It lives
+		// on this pathway because a Grove clique cannot rest at zero (grove#676).
 		if follower := synthesizeElasticEPFollowerDCD(dcd, componentName); follower != nil {
 			deployments[follower.Labels[commonconsts.KubeLabelDynamoComponent]] = follower
 		}
@@ -336,15 +334,13 @@ func GenerateDynamoComponentsDeployments(
 	return deployments, nil
 }
 
-// synthesizeElasticEPFollowerDCD derives the optional follower DCD for an
-// elastic-EP leader, or returns nil when the leader is not an elastic-EP Ray
-// launch. The follower is a deep copy of the leader (same image, GPU, model
-// args) that rests at zero replicas and carries a marker annotation; the
-// workload renderer reads that marker to launch it with the follower Ray-join
-// command (RoleFollower) instead of the leader's serve command. Its component
-// identity is "<leader>-flw" so its Deployment, Service, and selector never
-// collide with the leader's -- the renderer trims that suffix to rejoin the
-// leader's headless Ray Service.
+// synthesizeElasticEPFollowerDCD derives the optional follower DCD for an elastic-EP
+// leader, or nil when the leader is not an elastic-EP Ray launch.
+//
+// The follower is a deep copy of the leader (same image, GPU, model args) resting at
+// zero replicas, marked so the renderer launches it as RoleFollower. Its component
+// identity is "<leader>-flw" so its Deployment, Service, and selector never collide
+// with the leader's; the renderer trims that suffix to rejoin the leader's Ray Service.
 func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string) *v1beta1.DynamoComponentDeployment {
 	if c := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec); c == nil || !IsElasticEPRayLaunch(c) {
 		return nil
@@ -353,10 +349,9 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	follower := leaderDCD.DeepCopy()
 	follower.Name = NormalizeKubeResourceName(leaderDCD.Name + "-" + commonconsts.GroveRoleSuffixFollower)
 	follower.Spec.Replicas = ptr.To(int32(0))
-	// Distinct component identity so the follower's Deployment, Service, selector,
-	// and worker hash never collide with the leader's. GetDCDComponentName prefers
-	// Spec.ComponentName over the label, so both must carry the "-flw" name; the
-	// RoleFollower launch trims the suffix to rejoin the leader's Ray head.
+	// GetDCDComponentName prefers Spec.ComponentName over the label, so both must carry
+	// the "-flw" name or the follower's resources and worker hash collide with the
+	// leader's. The RoleFollower launch trims the suffix to rejoin the leader's Ray head.
 	if follower.Spec.ComponentName != "" {
 		follower.Spec.ComponentName = followerComponentName
 	}
@@ -1368,12 +1363,10 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 	case component.IsGroveScalingGroupForced():
 		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
-		// NOTE: the elastic-EP follower is NOT emitted here. A Grove clique cannot
-		// rest at zero replicas (grove#676: minAvailable must be > 0), so an optional
-		// follower that never gang-blocks the leader is rendered on the non-Grove
-		// pathway instead (see synthesizeElasticEPFollowerDCD). Revisit emitting the
-		// follower as a Grove clique once grove#686 (GREP-0677, replicas:0 as a valid
-		// idle state) lands.
+		// The elastic-EP follower is deliberately NOT emitted here: a Grove clique
+		// cannot rest at zero replicas (grove#676, minAvailable must be > 0), so it
+		// renders on the non-Grove pathway instead (synthesizeElasticEPFollowerDCD).
+		// Revisit once grove#686 makes replicas:0 a valid idle state.
 		return expandSingleNodeRoles(componentName, componentReplicas)
 	}
 }
@@ -1439,11 +1432,10 @@ func LongestPodCliqueNameForDGDComponent(
 		return lowerComponentName
 	}
 
-	// Iterate the concrete roles for every component, not just PCSG ones, so the
-	// budget reflects whatever expandRolesForComponent actually renders. For a
-	// non-PCSG component that expansion is named after the component itself, so this
-	// is a no-op today; gating it on UsesPCSG would silently undercount the moment a
-	// role suffix is added to another pathway.
+	// Iterate every component's concrete roles, not just PCSG ones, so the budget
+	// reflects what expandRolesForComponent actually renders. A no-op today, since a
+	// non-PCSG expansion is named after the component itself, but gating it on UsesPCSG
+	// would silently undercount as soon as another pathway adds a role suffix.
 	longestName := lowerComponentName
 	for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
 		roleName := strings.ToLower(role.Name)

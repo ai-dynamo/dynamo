@@ -814,11 +814,10 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NotEqual(t, service.Name, lws.Name)
 }
 
-// The non-Grove twin of the Grove pathway's leader-Service gate (see
-// isSinglePodElasticEPLeader and TestGroveStableResources_ElasticEPLeaderService). The
-// headless Service selects every pod carrying the component labels, so it addresses
-// exactly one Ray head only while the component renders as one pod; anything else must
-// emit a delete stub instead of a Service pointed at the wrong pods.
+// The non-Grove twin of the Grove leader-Service gate (isSinglePodElasticEPLeader). The
+// Service selects every pod with the component labels, so it addresses one Ray head only
+// while the component is one pod; anything else must emit a delete stub rather than a
+// Service pointed at the wrong pods.
 func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *testing.T) {
 	const elasticEPArgs = "python3 -m dynamo.vllm --enable-elastic-ep --data-parallel-backend ray"
 
@@ -922,10 +921,9 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 	}
 }
 
-// The elastic-EP follower runs a bare Ray join, not the Dynamo runtime, so it never
-// registers a DynamoWorkerMetadata CR. Labelling it for K8s discovery would only make
-// the Rust discovery daemon hold it in its reflector store and wake its debounce loop
-// on every follower scale-up/scale-down.
+// The follower runs a bare Ray join, not the Dynamo runtime, so it never registers a
+// DynamoWorkerMetadata CR. Discovery labels would only keep it in the daemon's reflector
+// store and wake its debounce loop on every scale-up/scale-down.
 func TestDynamoComponentDeploymentReconciler_DiscoveryLabelsByRole(t *testing.T) {
 	tests := []struct {
 		name       string

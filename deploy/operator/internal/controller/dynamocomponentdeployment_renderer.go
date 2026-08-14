@@ -246,11 +246,10 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
-	// The elastic-EP follower is skipped for the same reason buildCliqueForRole skips
-	// RoleGMS: its command is a bare Ray join, not the Dynamo runtime, so it never
-	// registers a DynamoWorkerMetadata CR. Labelling it would only make the Rust
-	// discovery daemon hold it in its reflector store and wake its debounce loop on
-	// every follower scale-up/scale-down.
+	// Skip the follower for the same reason buildCliqueForRole skips RoleGMS: it runs a
+	// bare Ray join, not the Dynamo runtime, so it never registers a DynamoWorkerMetadata
+	// CR. Labelling it would only keep it in the discovery daemon's reflector store and
+	// wake its debounce loop on every scale-up/scale-down.
 	if role != dynamo.RoleFollower &&
 		commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"

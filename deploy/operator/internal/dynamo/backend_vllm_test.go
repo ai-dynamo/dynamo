@@ -410,10 +410,9 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			gpuCount:          2,
 			expectNotModified: true,
 		},
-		// The follower's serve command is replaced with a bare `ray start --block`, so
-		// nothing ever listens on DynamoSystemPort. Keeping the worker probes (liveness
-		// has FailureThreshold 1) would make the kubelet kill it on the first probe and
-		// restart it forever.
+		// The follower runs `ray start --block`, so nothing listens on DynamoSystemPort.
+		// Keeping the worker probes (liveness FailureThreshold 1) would have the kubelet
+		// kill it on the first probe and restart it forever.
 		{
 			name:              "elastic EP follower drops the probes it can never satisfy",
 			numberOfNodes:     1,

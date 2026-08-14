@@ -53,11 +53,9 @@ const (
 	// when the namespace carries istio-injection=enabled.
 	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
 
-	// KubeAnnotationElasticEPFollower marks a synthesized elastic-EP follower
-	// DynamoComponentDeployment on the non-Grove pathway. The workload renderer
-	// reads it to launch the pod with the follower Ray-join command (RoleFollower)
-	// instead of the leader's serve command. It is set by the operator when it
-	// expands an elastic-EP leader; users never set it themselves.
+	// KubeAnnotationElasticEPFollower marks a synthesized elastic-EP follower DCD, so
+	// the renderer launches it with the Ray-join command (RoleFollower) instead of the
+	// leader's serve command. Operator-set when it expands a leader; never user-set.
 	KubeAnnotationElasticEPFollower = "nvidia.com/elastic-ep-follower"
 
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"

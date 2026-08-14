@@ -710,11 +710,10 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	return modified || modifiedRay, nil
 }
 
-// generateElasticEPHeadlessService returns the headless "<component>-ray" Service
-// for an elastic-EP leader DCD, or a delete stub for any other DCD (including the
-// follower, which joins the Service but does not own it). Keeping the generator
-// total lets SyncResource garbage-collect the Service if a component stops being
-// an elastic-EP launch.
+// generateElasticEPHeadlessService returns the headless "<component>-ray" Service for a
+// single-pod elastic-EP leader, or a delete stub for anything else -- including the
+// follower, which joins the Service but never owns it. Staying total lets SyncResource
+// garbage-collect the Service once a component stops qualifying.
 func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {
 	dcd := opt.dynamoComponentDeployment
 	componentName := dynamo.GetDCDComponentName(dcd)
@@ -728,11 +727,10 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	if dcd.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
 		return deleteStub, true, nil
 	}
-	// Same gate the Grove pathway applies, for the same reason: the selector matches
-	// every pod carrying the component labels, so the Service addresses exactly one Ray
-	// head only while the component renders as one pod. replicas > 1 would round-robin
-	// one DNS name across independent Ray clusters, and numberOfNodes > 1 would publish
-	// worker pods as if they were the head.
+	// Same gate as the Grove pathway: the selector matches every pod with the component
+	// labels, so this addresses one Ray head only while the component is one pod.
+	// replicas > 1 round-robins across independent clusters; numberOfNodes > 1 publishes
+	// workers as if they were the head.
 	if !isSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 		return deleteStub, true, nil
 	}
@@ -871,11 +869,10 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		},
 	}
 
-	// A synthesized elastic-EP follower carries the leader's serve command but must
-	// launch as a Ray-join (RoleFollower); every other single-pod Deployment is a
-	// RoleMain serve. The marker lives on the DCD's own metadata (set by
-	// synthesizeElasticEPFollowerDCD) -- read it there, not via GetDCDKubeAnnotations,
-	// which returns pod-template annotations. The operator sets this marker; users never do.
+	// A synthesized follower carries the leader's serve command but must launch as a
+	// Ray-join; every other single-pod Deployment is a RoleMain serve. The marker sits on
+	// the DCD's own metadata, so read it there -- GetDCDKubeAnnotations would return
+	// pod-template annotations instead.
 	role := dynamo.RoleMain
 	if opt.dynamoComponentDeployment.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
 		role = dynamo.RoleFollower

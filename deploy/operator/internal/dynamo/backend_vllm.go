@@ -119,13 +119,10 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
 				},
 			})
-			// Drop the worker health probes. component_worker.go points all three at
-			// /live and /health on DynamoSystemPort, but the launch command above
-			// replaced the serve command with a bare `ray start --block`: this pod
-			// never runs the Dynamo system server, so nothing ever listens on that
-			// port. The liveness probe has FailureThreshold 1, so the kubelet would
-			// kill the follower on its first probe and restart it forever. The
-			// follower's health is the raylet's, which Ray reports to the leader.
+			// Drop the worker probes: this pod runs `ray start --block`, not the Dynamo
+			// system server, so nothing listens on DynamoSystemPort. Liveness has
+			// FailureThreshold 1, so the kubelet would kill it on the first probe and
+			// restart it forever. Ray reports the raylet's health to the leader instead.
 			container.LivenessProbe = nil
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
@@ -564,21 +561,17 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 			healthGate, leaderHostname, VLLMPort,
 		)}
 	case RoleFollower:
-		// The follower is an optional pod that is not a worker in the leader's gang,
-		// so it reaches the leader through the headless elastic-EP Service (Phase 3)
-		// rather than the deployment framework's leader hostname. Same /live gate as
-		// the worker so the join lands after the leader has placed its data-parallel
-		// group. Its container carries the leader's vLLM serve command, but the
-		// follower never serves -- the leader spawns the real DP-rank worker on this
-		// pod's GPU as a Ray actor -- so that command is dropped and replaced with a
-		// bare Ray join. --node-ip-address pins the node to the pod IP so the leader's
-		// engine finds this rank's GPU under the address Ray registers.
+		// The follower is not in the leader's gang, so it reaches the leader through the
+		// headless elastic-EP Service rather than the framework's leader hostname. It
+		// never serves -- the leader spawns the real DP-rank worker on its GPU as a Ray
+		// actor -- so the serve command is dropped for a bare Ray join, with
+		// --node-ip-address pinned to the pod IP so the leader finds this rank's GPU.
+		// The /live gate matches the worker's: join only after the leader has placed its
+		// data-parallel group.
 		//
-		// serviceName is the follower's own component name. On the Grove pathway the
-		// follower is a role inside the leader component, so serviceName already is
-		// the leader's name; on the non-Grove pathway the follower is a synthesized
-		// "<leader>-flw" component, so trim that suffix to recover the leader's
-		// headless Service. TrimSuffix is a no-op when the suffix is absent.
+		// serviceName is the follower's own component name: "<leader>-flw" on the
+		// non-Grove pathway, already the leader's name on Grove. TrimSuffix recovers the
+		// leader's Service either way.
 		leaderComponentName := strings.TrimSuffix(serviceName, "-"+commonconsts.GroveRoleSuffixFollower)
 		leaderHostname := ElasticEPLeaderServiceName(leaderComponentName)
 		healthGate := fmt.Sprintf(
