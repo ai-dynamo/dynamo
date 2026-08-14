@@ -21,6 +21,11 @@ from typing import Optional
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
+from dynamo.common.kubernetes import (
+    client_go_api_client,
+    retry_kubernetes_read,
+    retry_kubernetes_write,
+)
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError, RolloutFailedError
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
@@ -72,12 +77,12 @@ class KubernetesAPI:
         except ConfigException:
             config.load_kube_config()  # for out-of-cluster deployment
 
-        self.custom_api = client.CustomObjectsApi()
-        self.core_api = client.CoreV1Api()
+        api_client = client_go_api_client()
+        self.custom_api = client.CustomObjectsApi(api_client)
+        self.core_api = client.CoreV1Api(api_client)
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
-    def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
-        """Get the graph deployment from the dynamo graph deployment name"""
+    def _read_graph_deployment_once(self, graph_deployment_name: str) -> dict:
         return self.custom_api.get_namespaced_custom_object(
             group=NVIDIA_API_GROUP,
             version=DYNAMO_API_VERSION,
@@ -86,13 +91,34 @@ class KubernetesAPI:
             name=graph_deployment_name,
         )
 
+    def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
+        """Get the graph deployment from the dynamo graph deployment name"""
+        return retry_kubernetes_read(
+            lambda: self._read_graph_deployment_once(graph_deployment_name)
+        )
+
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
-        result = self.custom_api.list_namespaced_custom_object(
-            group=NVIDIA_API_GROUP,
-            version=DYNAMO_API_VERSION,
-            namespace=self.current_namespace,
-            plural=DGD_PLURAL,
+        result = retry_kubernetes_read(
+            lambda: self.custom_api.list_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGD_PLURAL,
+            )
+        )
+        return result.get("items", [])
+
+    def list_worker_metadata(self) -> list[dict]:
+        """List all DynamoWorkerMetadata resources in the current namespace."""
+
+        result = retry_kubernetes_read(
+            lambda: self.custom_api.list_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_WORKER_METADATA_API_VERSION,
+                namespace=self.current_namespace,
+                plural="dynamoworkermetadatas",
+            )
         )
         return result.get("items", [])
 
@@ -131,16 +157,29 @@ class KubernetesAPI:
         # DGDSA naming convention: <dgd-name>-<lowercase-service-name>
         adapter_name = f"{graph_deployment_name}-{service_name.lower()}"
 
-        try:
-            # Try to scale via DGDSA Scale subresource
+        def update_dgdsa_scale() -> None:
+            scale = self.custom_api.get_namespaced_custom_object_scale(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGDSA_PLURAL,
+                name=adapter_name,
+            )
+            resource_version = self._resource_version(scale, adapter_name)
             self.custom_api.patch_namespaced_custom_object_scale(
                 group=NVIDIA_API_GROUP,
                 version=DYNAMO_API_VERSION,
                 namespace=self.current_namespace,
                 plural=DGDSA_PLURAL,
                 name=adapter_name,
-                body={"spec": {"replicas": replicas}},
+                body={
+                    "metadata": {"resourceVersion": resource_version},
+                    "spec": {"replicas": replicas},
+                },
             )
+
+        try:
+            retry_kubernetes_write(update_dgdsa_scale)
             logger.info(f"Scaled DGDSA {adapter_name} to {replicas} replicas")
 
         except client.ApiException as e:
@@ -157,14 +196,40 @@ class KubernetesAPI:
         self, graph_deployment_name: str, service_name: str, replicas: int
     ) -> None:
         """Update replicas directly in DGD when no DGDSA is available."""
-        deployment = self.get_graph_deployment(graph_deployment_name)
-        components = self._dgd_components(deployment, graph_deployment_name)
-        self._patch_component_replicas(
-            graph_deployment_name, components, service_name, replicas
-        )
+
+        def update_dgd() -> None:
+            try:
+                deployment = self._read_graph_deployment_once(graph_deployment_name)
+            except client.ApiException as error:
+                if error.status == 404:
+                    raise DynamoGraphDeploymentNotFoundError(
+                        deployment_name=graph_deployment_name,
+                        namespace=self.current_namespace,
+                    ) from error
+                raise
+            resource_version = self._resource_version(deployment, graph_deployment_name)
+            components = self._dgd_components(deployment, graph_deployment_name)
+            self._patch_component_replicas(
+                graph_deployment_name,
+                resource_version,
+                components,
+                service_name,
+                replicas,
+            )
+
+        retry_kubernetes_write(update_dgd)
         logger.info(
             f"Updated DGD {graph_deployment_name} component {service_name} to {replicas} replicas"
         )
+
+    @staticmethod
+    def _resource_version(resource: dict, resource_name: str) -> str:
+        resource_version = resource.get("metadata", {}).get("resourceVersion")
+        if not resource_version:
+            raise KeyError(
+                f"resource {resource_name!r} has no metadata.resourceVersion"
+            )
+        return resource_version
 
     @staticmethod
     def _dgd_components(deployment: dict, graph_deployment_name: str) -> list[dict]:
@@ -182,6 +247,7 @@ class KubernetesAPI:
     def _patch_component_replicas(
         self,
         graph_deployment_name: str,
+        resource_version: str,
         components: list[dict],
         component_name: str,
         replicas: int,
@@ -189,7 +255,9 @@ class KubernetesAPI:
         index = self._find_component_index(
             graph_deployment_name, components, component_name
         )
-        patch = self._component_replicas_json_patch(index, component_name, replicas)
+        patch = self._component_replicas_json_patch(
+            resource_version, index, component_name, replicas
+        )
         self._patch_dgd_with_json_patch(graph_deployment_name, patch)
 
     @staticmethod
@@ -205,9 +273,14 @@ class KubernetesAPI:
 
     @staticmethod
     def _component_replicas_json_patch(
-        index: int, component_name: str, replicas: int
+        resource_version: str, index: int, component_name: str, replicas: int
     ) -> list[dict]:
         return [
+            {
+                "op": "replace",
+                "path": "/metadata/resourceVersion",
+                "value": resource_version,
+            },
             {
                 "op": "test",
                 "path": f"/spec/components/{index}/name",
@@ -358,9 +431,11 @@ class KubernetesAPI:
     def list_pods_for_graph(self, dgd_name: str) -> list:
         """List all Pods for a DGD using its stable graph label."""
         return (
-            self.core_api.list_namespaced_pod(
-                namespace=self.current_namespace,
-                label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
+            retry_kubernetes_read(
+                lambda: self.core_api.list_namespaced_pod(
+                    namespace=self.current_namespace,
+                    label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
+                )
             ).items
             or []
         )

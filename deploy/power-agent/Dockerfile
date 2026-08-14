@@ -104,7 +104,7 @@ ENV PYTHONUNBUFFERED=1 \
 # prometheus_client (metrics). pydcgm bindings are vendored below.
 RUN pip install --no-cache-dir \
     pynvml==12.0.* \
-    kubernetes==30.* \
+    "kubernetes @ https://github.com/kubernetes-client/python/archive/5d5e3ed698940a5e403f2f95ccf4a1f42d1a5c6c.tar.gz" \
     prometheus-client==0.20.*
 
 COPY --from=dcgm-vendor /vendor/dcgm-python /opt/dcgm/python

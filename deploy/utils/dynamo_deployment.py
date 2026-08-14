@@ -32,6 +32,11 @@ import kubernetes_asyncio as kubernetes
 import yaml
 from kubernetes_asyncio import client, config
 
+from dynamo.common.kubernetes_asyncio import (
+    retry_kubernetes_read,
+    retry_kubernetes_request,
+)
+
 # Container `state.waiting.reason` values that indicate the pod is in a
 # non-recoverable failure state. Once a container reports one of these,
 # kubectl-style retries are pointless — the kubelet has already failed at
@@ -292,12 +297,14 @@ class DynamoDeploymentClient:
                 print(f"Added ownerReference to DGDR {dgdr_name} for auto-cleanup")
 
         try:
-            await self.custom_api.create_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural="dynamographdeployments",
-                body=self.deployment_spec,
+            await retry_kubernetes_request(
+                lambda: self.custom_api.create_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    body=self.deployment_spec,
+                )
             )
             print(f"Successfully created deployment {self.deployment_name}")
         except kubernetes.client.rest.ApiException as e:
@@ -328,8 +335,10 @@ class DynamoDeploymentClient:
                 f"nvidia.com/dynamo-component={original_name}"
             )
             try:
-                pods = await self.core_api.list_namespaced_pod(
-                    namespace=self.namespace, label_selector=label_selector
+                pods = await retry_kubernetes_read(
+                    lambda: self.core_api.list_namespaced_pod(
+                        namespace=self.namespace, label_selector=label_selector
+                    )
                 )
             except kubernetes.client.rest.ApiException:
                 continue
@@ -402,12 +411,14 @@ class DynamoDeploymentClient:
 
         while (time.time() - start_time) < timeout:
             try:
-                status = await self.custom_api.get_namespaced_custom_object(
-                    group="nvidia.com",
-                    version="v1alpha1",
-                    namespace=self.namespace,
-                    plural="dynamographdeployments",
-                    name=self.deployment_name,
+                status = await retry_kubernetes_read(
+                    lambda: self.custom_api.get_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural="dynamographdeployments",
+                        name=self.deployment_name,
+                    )
                 )
 
                 status_obj = status.get("status", {})
@@ -584,8 +595,10 @@ class DynamoDeploymentClient:
 
             pods = None
             for attempt in range(max_retries + 1):
-                pods = await self.core_api.list_namespaced_pod(
-                    namespace=self.namespace, label_selector=label_selector
+                pods = await retry_kubernetes_read(
+                    lambda: self.core_api.list_namespaced_pod(
+                        namespace=self.namespace, label_selector=label_selector
+                    )
                 )
                 if pods.items:
                     break
@@ -607,8 +620,10 @@ class DynamoDeploymentClient:
             # Get logs for each pod
             for i, pod in enumerate(pods.items):
                 try:
-                    logs = await self.core_api.read_namespaced_pod_log(
-                        name=pod.metadata.name, namespace=self.namespace
+                    logs = await retry_kubernetes_read(
+                        lambda: self.core_api.read_namespaced_pod_log(
+                            name=pod.metadata.name, namespace=self.namespace
+                        )
                     )
                     async with aiofiles.open(component_dir / f"{i}.log", "w") as f:
                         await f.write(logs)
@@ -620,12 +635,14 @@ class DynamoDeploymentClient:
         Delete the DynamoGraphDeployment CR.
         """
         try:
-            await self.custom_api.delete_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural="dynamographdeployments",
-                name=self.deployment_name,
+            await retry_kubernetes_request(
+                lambda: self.custom_api.delete_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    name=self.deployment_name,
+                )
             )
         except kubernetes.client.rest.ApiException as e:
             if e.status != 404:  # Ignore if already deleted

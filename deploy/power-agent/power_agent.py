@@ -55,10 +55,18 @@ try:
     from kubernetes import client as k8s_client
     from kubernetes import config as k8s_config
     from kubernetes.config.config_exception import ConfigException
+    from kubernetes.utils.retry import DEFAULT_BACKOFF as K8S_DEFAULT_BACKOFF
+    from kubernetes.utils.retry import (
+        is_retry_after_response as k8s_is_retry_after_response,
+    )
+    from kubernetes.utils.retry import on_error as k8s_on_error
 except ImportError:
     k8s_client = None  # type: ignore
     k8s_config = None  # type: ignore
     ConfigException = Exception  # type: ignore
+    K8S_DEFAULT_BACKOFF = None  # type: ignore
+    k8s_is_retry_after_response = None  # type: ignore
+    k8s_on_error = None  # type: ignore
 
 try:
     from prometheus_client import Counter, Gauge, start_http_server
@@ -827,26 +835,24 @@ def _release_managed_gpu(
 
 
 def _build_k8s_core_v1() -> "k8s_client.CoreV1Api":
-    """Build a CoreV1Api whose transport does NOT retry.
+    """Build a CoreV1Api with client-go-compatible read retries enabled.
 
-    The default ``kubernetes`` client retries requests at the urllib3 layer.
-    For the pod LIST that is the wrong policy on two counts: (1) a retried LIST
-    multiplies apiserver load exactly when it is already throttling under
-    Priority & Fairness (the amplification sttts flagged), and (2) transport
-    retries stretch the effective wall-clock time of a single
-    ``list_pods_on_node`` call, undermining the SIGTERM grace-period budget the
-    LIST timeouts are meant to protect.
-
-    The reconcile loop already retries at the application level every
-    ``RECONCILE_INTERVAL_S`` and treats a failed LIST as a fail-safe skip, so
-    transport-level retries add nothing but risk here. Disable them (retries=0)
-    on a dedicated client so this choice is local to the Power Agent and does
-    not mutate global client state.
+    The generated client retries GET/LIST responses only when the apiserver
+    returns 429 or 5xx with a valid Retry-After header. Honoring that delay
+    avoids an immediate retry storm while keeping the policy local to this
+    client instead of mutating the process-wide default configuration.
     """
     configuration = k8s_client.Configuration.get_default_copy()
-    # urllib3 Retry(0) → no retries; the reconcile loop is the retry policy.
-    configuration.retries = 0
+    configuration.client_go_retries = True
     return k8s_client.CoreV1Api(k8s_client.ApiClient(configuration))
+
+
+def _is_transient_k8s_error_without_retry_after(error: Exception) -> bool:
+    status = getattr(error, "status", None)
+    transient = (
+        status == 0 or status == 429 or (isinstance(status, int) and status >= 500)
+    )
+    return transient and not k8s_is_retry_after_response(error)
 
 
 # ---------------------------------------------------------------------------
@@ -1338,6 +1344,7 @@ class PowerAgent:
             field_selector = (
                 f"spec.nodeName={self.node_name}" if self.node_name else None
             )
+
             # TODO(#9682 follow-up): this polls a full pod LIST per agent every
             # RECONCILE_INTERVAL_S. Even with the node field-selector that is one
             # apiserver request per node per cycle, so aggregate request rate
@@ -1366,23 +1373,29 @@ class PowerAgent:
             #     stalls the server timeout can't cover.
             # A timeout raises, which the `except` below maps to the `None`
             # fail-safe (skip the cycle, freeze last-known-good caps). Transport
-            # retries are disabled on this client (see `_build_k8s_core_v1`), so
-            # a timeout is not silently multiplied into extra apiserver load.
-            if self.k8s_namespace:
-                result = self._core_v1.list_namespaced_pod(
-                    namespace=self.k8s_namespace,
+            # The generated client handles valid Retry-After responses; the
+            # outer helper below backs off for transient errors without one.
+            def list_pods():
+                if self.k8s_namespace:
+                    return self._core_v1.list_namespaced_pod(
+                        namespace=self.k8s_namespace,
+                        field_selector=field_selector,
+                        resource_version="0",
+                        timeout_seconds=K8S_LIST_SERVER_TIMEOUT_S,
+                        _request_timeout=K8S_LIST_CLIENT_TIMEOUT_S,
+                    )
+                return self._core_v1.list_pod_for_all_namespaces(
                     field_selector=field_selector,
                     resource_version="0",
                     timeout_seconds=K8S_LIST_SERVER_TIMEOUT_S,
                     _request_timeout=K8S_LIST_CLIENT_TIMEOUT_S,
                 )
-            else:
-                result = self._core_v1.list_pod_for_all_namespaces(
-                    field_selector=field_selector,
-                    resource_version="0",
-                    timeout_seconds=K8S_LIST_SERVER_TIMEOUT_S,
-                    _request_timeout=K8S_LIST_CLIENT_TIMEOUT_S,
-                )
+
+            result = k8s_on_error(
+                K8S_DEFAULT_BACKOFF,
+                _is_transient_k8s_error_without_retry_after,
+                list_pods,
+            )
             return result.items
         except Exception as e:
             # Explicit failure result — see the contract in the docstring.

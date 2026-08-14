@@ -21,11 +21,7 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.clients.kubernetes_api import (
-    DYNAMO_WORKER_METADATA_API_VERSION,
-    NVIDIA_API_GROUP,
-    KubernetesAPI,
-)
+from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.mdc import (
     MdcEntry,
     is_model_card,
@@ -547,13 +543,7 @@ class KubernetesConnector(PlannerConnector):
         from kubernetes.client import ApiException
 
         try:
-            result = self.kube_api.custom_api.list_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_WORKER_METADATA_API_VERSION,
-                namespace=self.kube_api.current_namespace,
-                plural="dynamoworkermetadatas",
-            )
-            return result.get("items", [])
+            return self.kube_api.list_worker_metadata()
         except ApiException as e:
             if e.status == 404:
                 logger.info("DynamoWorkerMetadata CRD not found, skipping MDC")

@@ -76,10 +76,8 @@ class TestListPodsExplicitResult(unittest.TestCase):
         """The cluster-scoped LIST must carry BOTH an apiserver-side
         ``timeout_seconds`` and a client-side ``_request_timeout`` so a
         throttled/stuck apiserver substantially limits how long it can delay
-        SIGTERM cleanup (sttts P1). This intentionally supersedes the earlier
-        "no client timeout" stance: transport retries are disabled on this
-        client, so the amplification risk that motivated the old stance is
-        controlled (see test_k8s_client_disables_transport_retries)."""
+        SIGTERM cleanup (sttts P1). Retry-After responses can extend a call,
+        but every individual attempt remains bounded on both sides."""
         core_v1 = MagicMock()
         core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
         agent = _make_agent(core_v1)
@@ -124,6 +122,27 @@ class TestListPodsExplicitResult(unittest.TestCase):
         self.assertEqual(
             kwargs.get("_request_timeout"), power_agent.K8S_LIST_CLIENT_TIMEOUT_S
         )
+
+    def test_429_without_retry_after_uses_backoff(self):
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.side_effect = [
+            power_agent.k8s_client.ApiException(status=429),
+            MagicMock(items=[]),
+        ]
+        agent = _make_agent(core_v1)
+
+        self.assertEqual(agent._list_pods_on_node(), [])
+        self.assertEqual(core_v1.list_pod_for_all_namespaces.call_count, 2)
+
+    def test_retry_after_error_is_not_retried_by_outer_backoff(self):
+        error = power_agent.k8s_client.ApiException(status=429)
+        error.headers = {"Retry-After": "1"}
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.side_effect = error
+        agent = _make_agent(core_v1)
+
+        self.assertIsNone(agent._list_pods_on_node())
+        core_v1.list_pod_for_all_namespaces.assert_called_once()
 
     def test_client_timeout_at_least_server_timeout(self):
         """The client-side bound must be >= the server-side bound so the
@@ -232,14 +251,9 @@ class TestReconcileStopsOnShutdown(unittest.TestCase):
 
 
 class TestK8sClientTransport(unittest.TestCase):
-    """The agent's CoreV1Api must be built on a client whose transport does NOT
-    retry: a retried pod LIST amplifies apiserver load under P&F throttling
-    (sttts's original concern) AND stretches a single LIST's wall-clock time,
-    both of which the reconcile loop's own 15s application-level retry already
-    covers. Disabling transport retries is what keeps the best-effort
-    client-side LIST timeout from being silently multiplied."""
+    """The agent must honor apiserver Retry-After responses."""
 
-    def test_k8s_client_disables_transport_retries(self):
+    def test_k8s_client_enables_client_go_read_retries(self):
         fake_config = MagicMock()
         fake_client_mod = MagicMock()
         fake_client_mod.Configuration.get_default_copy.return_value = fake_config
@@ -247,9 +261,8 @@ class TestK8sClientTransport(unittest.TestCase):
         with patch.object(power_agent, "k8s_client", fake_client_mod):
             power_agent._build_k8s_core_v1()
 
-        # retries set to 0 on the per-agent configuration copy...
-        self.assertEqual(fake_config.retries, 0)
-        # ...and CoreV1Api built on an ApiClient using THAT configuration, so
+        self.assertIs(fake_config.client_go_retries, True)
+        # CoreV1Api is built on an ApiClient using that configuration, so
         # the choice is local to the agent and does not mutate global state.
         fake_client_mod.ApiClient.assert_called_once_with(fake_config)
         fake_client_mod.CoreV1Api.assert_called_once_with(

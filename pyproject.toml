@@ -16,7 +16,8 @@ dependencies = [
     "ai-dynamo-runtime==1.4.0",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
-    "kubernetes>=32.0.1,<33.0.0",
+    # First upstream revision with client-go-compatible read/write retry helpers.
+    "kubernetes @ https://github.com/kubernetes-client/python/archive/5d5e3ed698940a5e403f2f95ccf4a1f42d1a5c6c.tar.gz",
     "prometheus_client>=0.23.1,<1.0",
     "msgspec>=0.19.0",
     "zstandard>=0.23.0,<1.0",
