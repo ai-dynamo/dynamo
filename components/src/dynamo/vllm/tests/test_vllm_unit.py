@@ -457,10 +457,8 @@ def test_should_prefetch_model_for_default_load_format():
 @pytest.mark.parametrize(
     ("structured_outputs_config", "expected_excludes_reasoning"),
     [
-        (None, False),
-        (SimpleNamespace(enable_in_reasoning=False), False),
         (
-            SimpleNamespace(enable_in_reasoning=False, reasoning_parser=None),
+            SimpleNamespace(enable_in_reasoning=False, reasoning_parser=""),
             False,
         ),
         (

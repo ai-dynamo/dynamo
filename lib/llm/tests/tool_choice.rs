@@ -650,7 +650,7 @@ async fn apply_jail_with_parser_and_choice(
     drive_moved_jail(jail, chunks).collect().await
 }
 
-/// Run the production jail mapping for a model-native structural-tag payload.
+/// Parse a model-native payload with structural-tag response handling enabled.
 async fn apply_structural_tag_jail_with_parser_and_choice(
     payload: &str,
     parser: &str,

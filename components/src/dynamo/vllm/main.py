@@ -92,7 +92,7 @@ def should_prefetch_model(config: Config) -> bool:
 
 
 def publish_vllm_structural_tag_reasoning_policy(
-    runtime_config, vllm_config: VllmConfig
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
 ) -> None:
     """Tell the frontend whether the vLLM tool tag must exclude reasoning.
 
@@ -103,13 +103,9 @@ def publish_vllm_structural_tag_reasoning_policy(
     Otherwise, keep the frontend's compatibility behavior so its response
     parser can close the prompt-injected reasoning block before parsing tools.
     """
-    structured_outputs_config = getattr(vllm_config, "structured_outputs_config", None)
-    enable_in_reasoning = bool(
-        getattr(structured_outputs_config, "enable_in_reasoning", False)
-    )
-    has_reasoning_parser = bool(
-        getattr(structured_outputs_config, "reasoning_parser", None)
-    )
+    structured_outputs_config = vllm_config.structured_outputs_config
+    enable_in_reasoning = structured_outputs_config.enable_in_reasoning
+    has_reasoning_parser = bool(structured_outputs_config.reasoning_parser)
     runtime_config.set_engine_specific(
         TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(has_reasoning_parser and not enable_in_reasoning),
