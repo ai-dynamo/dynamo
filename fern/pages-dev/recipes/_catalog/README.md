@@ -83,8 +83,10 @@ python3 docs/fern/pages/recipes/_catalog/validate.py
 (The single script validates **both** catalogs.) It checks: index ↔ file
 correspondence (no orphans, no dangling entries), internal-`id`/filename match,
 no duplicate ids, schema conformance, that every `page:` resolves under `docs/fern/`,
-that every deploy/perf/benchmark asset path resolves in the repo, and
-cross-catalog referential integrity (recipe `related_benchmarks` ↔ benchmark
+that every deploy/perf/benchmark asset path resolves in the repo, that declared
+recipe-specific images are exact `image:` fields in their owning deploy assets
+and are not assigned to multiple recipes, and cross-catalog referential
+integrity (recipe `related_benchmarks` ↔ benchmark
 ids; benchmark `related_recipes` and `promotion_candidate.deferred_recipe_id` ↔
 recipe ids, including deferred). It exits non-zero on any failure.
 
@@ -93,11 +95,8 @@ The validator uses **stdlib only** and degrades gracefully: it prefers `pyyaml`
 parser and falls back to a required-keys check. It prints which mode it ran in.
 For full schema validation, `pip install pyyaml jsonschema`.
 
-<Note>
-CI does not yet run this validator. **Follow-up:** wire
-`python3 docs/fern/pages/recipes/_catalog/validate.py` into the docs CI job so catalog
-changes are gated on it.
-</Note>
+The pre-merge recipe catalog tests run this validator, so catalog changes are
+gated on its path, attribution, and referential-integrity checks.
 
 ## Page blueprint
 
