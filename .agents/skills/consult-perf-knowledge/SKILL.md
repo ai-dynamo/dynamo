@@ -96,8 +96,9 @@ Record:
 - absolute current metrics and client-visible symptoms;
 - comparisons with the series baseline, previous valid iteration, best prior result per objective, and relevant
   same-series history when available;
-- run count, repeat rationale when applicable, the `0.5%` noise floor, and AIPerf confidence intervals or coefficient
-  of variation only when deliberate repetitions made them useful;
+- run count, repeat rationale when applicable, the measured noise floor of the active benchmark series (per
+  `comparison-uncertainty.md`), and AIPerf confidence intervals or coefficient of variation only when deliberate
+  repetitions made them useful;
 - proxy limitations, missing metrics, resource or placement differences, or other uncertainty; and
 - whether any surprising prior result needs engagement or plausibility rechecking.
 
@@ -126,10 +127,13 @@ Before generating a hypothesis, determine whether a broad or narrow knob adjustm
   remains untested or has not been ruled out by current evidence.
 - Prefer a narrow move only after the broad landscape has been screened and valid measurements
   show a demonstrated, meaningful signal in the selected family.
-- Return to exploration when a narrow change is invalid, inconclusive, within the `0.5%` noise floor, reverses the
-  expected direction, or reveals a different limiting regime.
+- Return to exploration when a narrow change is invalid, inconclusive, within the measured noise floor of the
+  active benchmark series, reverses the expected direction, or reveals a different limiting regime.
 
-Perform a fresh broad-lever scan before every hypothesis. Explicitly screen:
+Maintain one persistent search-calibration ledger for the engagement at
+`EXP_ROOT/analysis/search-calibration.md` instead of regenerating a scan for every
+hypothesis; each iteration's `knowledge-consult.md` records only the delta applied to it. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
+(a topology adoption, new variance data, an answered ask). The ledger explicitly covers:
 
 1. deployment topology and fit, including model fit, parallelism, replication, aggregated versus disaggregated
    serving, disaggregated rate matching, GPU allocation, and placement or fabric constraints;
@@ -138,8 +142,11 @@ Perform a fresh broad-lever scan before every hypothesis. Explicitly screen:
    routing and prefix reuse; KVBM or engine KV offload; and frontend, transport, and pod resources; and
 3. Local Planner only when its conditional lane applies.
 
-For each family, record its coverage as `tested`, `ruled-out`, `not-applicable`, `untested-promising`, or
-`reopened-by-new-evidence`, plus its expected upside and the evidence for that disposition. Compare all applicable families for potential benefit and information value before choosing one.
+For each family, record its coverage as `tested`, `ruled-out`, `not-applicable`, `untested-promising`, `deferred`,
+or `reopened-by-new-evidence`, plus its expected upside and the evidence for that disposition. A `ruled-out` row must
+cite a measurement, a sourced hard constraint, a confirmed incompatibility, or an explicit operator decision;
+expected upside below the minimum detectable effect is `deferred` (still visible, and stackable under a documented
+one-variable exception), never `ruled-out`. Compare all applicable families for potential benefit and information value before choosing one.
 
 During exploration, prefer an independently testable change that crosses into a different high-impact family or tests
 a coarse, documented operating regime. Do not keep adjusting the same knob in single-digit or otherwise near-neighbor
@@ -152,7 +159,8 @@ Follow `agent-docs/guides/knob-tuning/tuning-hierarchy.md`:
 
 1. Classify the exact model and compute memory fit, minimum parallelism, and headroom.
 2. Complete the exploration-versus-exploitation calibration and full broad-lever scan above.
-3. Screen topology first. Keep it unchanged unless current evidence supports a structural mismatch.
+3. Consider topology first as a hypothesis category per the tuning hierarchy; an inherited layout is a candidate,
+   not a settled decision.
 4. When topology is viable, consider Tier 2 families in default priority order, then finish screening the remaining
    families before selecting a candidate.
 5. Record why each major family was retained, skipped, rejected, or superseded by stronger current-run evidence.
@@ -236,7 +244,8 @@ distinct categories, including AIPerf profiler data, but keep each entry concise
 official documentation that supplied a constraint or recommendation.
 
 Include relevant same-series history and tuning-hierarchy decisions without reproducing every rejected option. Treat
-cross-series results as context only. Classify an absolute change of `0.5%` or less as noise. A clear, substantial,
+cross-series results as context only. Classify an absolute change at or below the measured noise floor of the active
+benchmark series (per `comparison-uncertainty.md`) as noise. A clear, substantial,
 plausible improvement may be supported by one valid run; do not require a repeat or confidence intervals solely to
 support it. Preserve an `inconclusive` analysis when the evidence cannot support the direction or magnitude. Always
 include the search calibration, even for `no-proposal` or `blocked`, so the next iteration does not forget unexplored

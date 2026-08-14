@@ -66,6 +66,18 @@ exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hoo
 `validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
 a maintainer comments `/nvskills-ci` on the PR.
 
+## Improving These Instructions
+
+If these skills or instructions misled you, blocked you, or contradicted what you verified live, prepare an issue for
+this repository with the `agent-reported` label and ask your operator to approve filing it — filing is an external
+write and requires operator consent. Rules:
+
+1. Search existing `agent-reported` issues first; propose commenting on a duplicate instead of filing a new one.
+2. Prepare at most one issue per optimization session; batch findings into it.
+3. Identify yourself as an AI agent, including your driver model and the skills commit you were running.
+4. Sanitize completely: no user workload details, traffic numbers, cluster or namespace names, company names, or
+   credentials. Describe the instruction gap, not the engagement. Show the operator the full draft before filing.
+
 ## Optimization Role Dispatch
 
 When the first user message starts a new Dynamo recipe optimization run, dispatch `user_interviewer` before any other
@@ -75,6 +87,40 @@ user supplied. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_g
 `hypothesis_challenger` until both exact paths and SHA256 values are available. Pass both inputs directly to
 `recipe_deployer`; pass the same immutable workload path and hash to every later role. Do not insert a recipe
 exploration or selection step before the baseline deployment.
+
+## Long-Running Runs And Harness Compatibility
+
+An optimization loop is long-running, unattended work. An interactive harness ends its turn whenever the agent stops
+calling tools — a turn that ends on narrated intent ("now I'll test disagg") silently stalls the loop until a human
+notices. Two rules:
+
+1. **Operators: launch unattended runs inside your harness's goal mode.** Goal mode is an operator action at launch,
+   not something these instructions can enable mid-run. On Codex CLI, wrap the run in `/goal` with a token budget. On
+   Claude Code (v2.1.139+), wrap it in `/goal`; its completion condition is model-evaluated and may include a bound
+   such as "or stop after N turns" as part of the condition text (a soft limit, not a hard budget). A validated
+   condition template: "Test every lever family that is testable within the authorized budget. Never stop because a
+   report exists. Parked on pending asks with nothing else testable is a valid pause, not completion. Valid stops: an
+   operator-granted stop-request, the authorized budget exhausted, access lost, or operator interrupt." Always name
+   the budget (GPU-hours, wall-clock, failed-deployment limit) in the condition; a bare "never stop" silently relies
+   on credential expiry as its budget. Tell the operator at the START of any optimization
+   engagement — not only when they say "unattended" — that this is long-running work and how to arm goal mode; the
+   user-interviewer's contract handoff is the natural moment. Arm goal mode only AFTER the contract questions are
+   answered: a goal hook armed while questions are outstanding forces the run past them onto its own defaults. The template's parked-on-asks pause assumes a
+   reachable operator: for runs where the operator will be away, instruct the agent not to park on asks (asks are
+   logged and the loop continues) and keep only the hard stops. Blocking question tools suspend the turn BEFORE the
+   goal hook can evaluate, so one blocking question can hang an unattended run for hours; harnesses that support
+   tool restrictions should disallow blocking question tools in goal mode.
+2. **Never end a turn on narrated intent during a loop.** Either perform the next step in the same turn, launch it as
+   background work that will re-invoke you, or return the specific blocking question you need answered.
+
+**Harness tiers.** These roles and skills are developed and tested on Claude Code and Codex CLI. Isolated role
+configurations currently ship for Codex only (`.codex/agents/*.toml`); on Claude Code the roles run in-context within
+one session (no `.claude/agents/` configurations yet), so adversarial review there is same-context review, not an
+independent reviewer. The skills follow the Agent Skills open standard and load on other compliant harnesses (for
+example, OpenCode includes `.agents/skills/` among its standard skill search paths), with the same in-context role
+caveat plus two more degradations: no native goal mode (run lights-out sessions under an external loop), and every
+rule in this pack is prompt-enforced, so discipline depends on the driver model. If you hit an instruction gap on any
+harness, prepare a sanitized issue describing the gap and ask your operator to approve filing it on this repository.
 
 ## Ecosystem
 

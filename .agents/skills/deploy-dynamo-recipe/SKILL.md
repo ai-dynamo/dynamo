@@ -102,7 +102,18 @@ Review the assigned DGD and any support manifests explicitly included in the han
 - GPU requests, node selectors, tolerations, and GPU SKU expectations
 
 Stop before mutation if required namespace, CRDs, PVC prerequisites, secret names, storage class, images, or GPU
-capacity are missing.
+capacity are missing. Also verify before mutation that the assigned manifest changes no knob listed in the
+contract's `resources.pinned` and that total concurrent GPU holdings stay within `resources.gpu_ceiling`.
+
+When checking GPU capacity, count every pod that is bound to a node (`spec.nodeName` set) and not in a terminal phase
+(`Succeeded`/`Failed`) as holding its full GPU request. Do not filter on `phase == Running`: pods in
+`ImagePullBackOff`, `ContainerCreating`, or init hold their reservations. Exclude nodes whose taints the
+assigned manifest does not already tolerate, and never add new tolerations for other tenants' reservation taints.
+Evaluate fit by expanding the DGD into its full multiset of pod demands (every component, every replica) and placing
+them against per-node free blocks while decrementing remaining capacity — two pods cannot count the same free GPUs.
+Honor each pod's node selectors, required affinity/anti-affinity, and tolerations during placement. If the DGD cannot
+be faithfully expanded into pod demands, report capacity as unknown, not sufficient. When `resources.gpu_ceiling` is
+set in the workload contract, also verify the run's total concurrent GPU holdings stay within it.
 
 If a manifest must change only to work with the target cluster, such as resolving a storage class placeholder or adding
 a required node-taint toleration, update only the copy under `applied_manifests/`. Preserve the handed-off source

@@ -66,7 +66,12 @@ not contradict the user workload. Do not edit, replace, or select an alternative
 
 Give the exact assigned DGD path and SHA256, `user_workload.yaml` path and SHA256, iteration, and previous
 `DEPLOY_ROOT` when applicable to `recipe-deployer`. For iteration 0, the assigned DGD is the immutable
-`user_provided_dgd.yaml`; later iterations use the exact challenger-approved draft. The deployer creates:
+`user_provided_dgd.yaml` when it can run on the target as provided. When it cannot — an adaptation engagement, where
+the user's DGD targets different hardware, checkpoints, or fabric — the deployer instead selects the closest viable
+recipe for the target as the iteration-0 base, records the selection evidence, and diffs it against the immutable
+user DGD so every inherited constraint and deviation is explicit. Do not carry hardware-bound topology, transport, or
+checkpoint choices from an incompatible source manifest into the baseline without evidence they fit the target.
+Later iterations use the exact challenger-approved draft. The deployer creates:
 
 ```text
 <EXP_ROOT>/artifacts/deploy-iter-<NNN>/
@@ -136,10 +141,48 @@ Keep every previous manifest, consultation, review, and benchmark artifact uncha
 After deployment, choose the benchmark based on the approved performance question. It may reuse an applicable series
 or create a new one. Never claim a direct gain across series.
 
-Stop when the user constraints are met, no useful optimization ideas remain, the user-specified budget is exhausted,
-or the generator returns `no-proposal`.
+The loop is always in exactly one state: `ACTIVE`, `PARKED_ON_ASKS`, `STOP_REQUESTED`, `STOP_GRANTED`, or
+`BUDGET_STOP`. A `no-proposal` consultation never ends the engagement; it obligates the generator to produce exactly
+one of:
+
+- the next candidate;
+- an **ask**: a recorded question whose answer would unblock the highest-value deferred lever family. Asks are
+  non-blocking: record the ask, surface it in one line of passing output, and keep working any still-testable
+  family. Never deliver an ask through a blocking question tool during the loop — a blocking question suspends the
+  turn before any goal hook can evaluate and can hang an unattended run; asks go to the artifact and the loop
+  continues. Deduplicate pending asks, surface only the highest-value few, and lead the next operator-facing response
+  with them. Enter `PARKED_ON_ASKS` (a pause, not a stop) only when pending asks are the only remaining work, and
+  record how deployed resources are held and when they scale down;
+- a **stop-request**: the search-calibration record in a terminal state, meaning every lever family is `tested`,
+  `asked` and answered, `ruled-out`, or `deferred`. Prepare the Finalize artifacts (section 7), including the
+  recommendation's `Correctness status:` line, BEFORE submitting the stop-request — the stop-request references the
+  draft recommendation, and operator grant closes the engagement rather than starting its write-up. A `ruled-out` row must cite a measurement, a sourced hard
+  constraint, a confirmed incompatibility, or an explicit operator decision; the generator's own unsourced reasoning
+  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. While
+  more than half of any granted budget remains, `deferred` is not a terminal state for a family whose recorded
+  expected upside is medium or higher: test it, ask about it, or rule it out with qualifying evidence before
+  requesting a stop. Hand the stop-request to `hypothesis-challenger` for evidence-class validation.
+
+While a stop-request awaits challenger validation and operator grant (`STOP_REQUESTED`), continue confirmatory
+runs, cleanup, and any still-testable work; launch no new candidate families. If the challenger or operator returns
+objections, re-enter `ACTIVE`.
+
+Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), the authorized budget is exhausted
+(`BUDGET_STOP`), or access is lost and cannot be restored. Never stop because a report exists.
 
 ## 7. Finalize
+
+Before recommending, run a correctness regression check whenever the recommended configuration differs from the
+user-provided baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
+quantization, attention or MoE backend, KV dtype or reuse): replay 8-16 fixed representative prompts with frozen
+continuations through both configurations and compare teacher-forced per-token log-probabilities, calibrating the
+tolerance with a baseline-versus-baseline repeat; require zero request failures, malformed responses, non-finite
+scores, and no unexpected truncation. If no such check is possible, record an ask; report a waived check as
+`correctness: unverified`, never as a pass. Record the correctness status in `recommended_config.md`.
+
+When the recommended or baseline configuration has speculative decoding enabled, state in the recommendation that
+its acceptance behavior was measured on synthetic benchmark content and the measured magnitude may not transfer to
+production traffic; acceptance length is passively observable in production telemetry and should be confirmed there.
 
 Recommend the best valid candidate for the target objective, not automatically the most recent iteration. Write the
 final configuration to `EXP_ROOT/final/recommended_config.md`, reproduction commands to

@@ -84,7 +84,8 @@ Attack the proposal from these directions:
 
 - **Evidence**: Does it contain at least three distinct qualifying categories, including AIPerf profiler data? Does
   each source support the stated mechanism, or has contextual evidence been promoted beyond its limits?
-- **Uncertainty**: Are changes of `0.5%` or less classified as noise? For larger changes, does the conclusion match the
+- **Uncertainty**: Are changes at or below the measured noise floor of the active benchmark series classified as
+  noise (per `comparison-uncertainty.md`)? For larger changes, does the conclusion match the
   available single-run or multi-run evidence? Were confidence intervals used only when deliberate repetitions made
   them useful, and is every requested repeat necessary enough to justify its GPU cost? Are degraded single-run
   statistics or surprising gains treated cautiously?
