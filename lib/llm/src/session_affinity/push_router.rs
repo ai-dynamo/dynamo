@@ -499,6 +499,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
 mod tests {
     use std::time::Instant;
 
+    use super::*;
+    use crate::lora::{
+        LoadEstimator, LoraFilter, LoraReplicaConfig, LoraRoutingTable, LoraStateTracker,
+    };
+    use crate::protocols::common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        preprocessor::RoutingHints,
+        timing::RequestTracker,
+    };
+    use crate::session_affinity::AffinityAcquire;
     use dynamo_kv_router::{
         KvRouterConfig, WorkerSelectionPolicyError,
         protocols::WorkerWithDpRank,
@@ -514,18 +524,6 @@ mod tests {
         pipeline::{Context, RouterMode},
         storage::kv::Selector,
     };
-    use futures::StreamExt;
-
-    use super::*;
-    use crate::lora::{
-        LoadEstimator, LoraFilter, LoraReplicaConfig, LoraRoutingTable, LoraStateTracker,
-    };
-    use crate::protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-        preprocessor::RoutingHints,
-        timing::RequestTracker,
-    };
-    use crate::session_affinity::AffinityAcquire;
 
     fn request(worker_id: Option<u64>, query_only: bool) -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -644,7 +642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisory_query_uses_common_path_without_admission_or_dispatch() {
+    async fn explicit_advisory_selection_does_not_admit() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -667,13 +665,20 @@ mod tests {
         let mut content = request(None, true);
         content.tracker = Some(tracker.clone());
 
-        let mut stream = router.generate(Context::new(content)).await.unwrap();
-        let output = stream.next().await.unwrap().data.unwrap();
+        let request = Context::new(content);
+        let advisory = router
+            .select(
+                &request,
+                RequestPhase::Aggregated,
+                SelectionIntent::Advisory,
+                None,
+            )
+            .await
+            .unwrap();
+        router.observe_advisory(&request, &advisory);
 
         assert_eq!(tracker.decode_worker_id(), Some(worker_id));
         assert_eq!(router.occupancy_for_test(worker_id), 0);
-        assert!(output.routing_data.is_some());
-        assert!(stream.next().await.is_none());
 
         runtime.shutdown();
     }

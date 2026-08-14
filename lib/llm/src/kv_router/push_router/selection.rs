@@ -33,7 +33,6 @@ pub(super) struct WorkerSelection {
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) router_hint: Option<RouterHint>,
-    pub(super) fallback_worker_ids: Option<HashSet<WorkerId>>,
 }
 
 #[derive(Clone, Copy)]
@@ -127,7 +126,6 @@ where
                 cached_tokens,
                 routing_hashes,
                 router_hint,
-                fallback_worker_ids: None,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
@@ -198,8 +196,7 @@ where
             merge_affinity_pin(explicit_pin, affinity_pin)
         else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
-            let fallback_worker_ids = allowed_worker_ids.clone();
-            let mut selection = self
+            let selection = self
                 .select_best_match(BestMatchArgs {
                     context_id,
                     routing_parts,
@@ -218,8 +215,6 @@ where
                     routing_constraints: routing_constraints.clone(),
                 })
                 .await?;
-            selection.fallback_worker_ids = fallback_worker_ids;
-
             if !is_query_only {
                 let total_blocks = routing_parts
                     .token_ids

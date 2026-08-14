@@ -289,6 +289,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
         is_query_only: bool,
+        count_started: bool,
     ) -> Result<RequestGuard<Sel>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -302,6 +303,7 @@ where
             selected_worker,
             request,
             !is_query_only,
+            count_started,
         );
 
         let record_result: Result<(), Error> = async {
@@ -373,6 +375,35 @@ where
         Ok(guard)
     }
 
+    async fn select_attempt(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        intent: SelectionIntent,
+        pinned_target: Option<AffinityTarget>,
+        count_started: bool,
+    ) -> Result<KvAttempt<Sel>, Error> {
+        let is_query_only = intent == SelectionIntent::Advisory;
+        let affinity_worker = pinned_target.and_then(affinity_worker);
+        let mut selection = self
+            .select_request(request, phase, is_query_only, affinity_worker)
+            .await?;
+        let guard = if is_query_only {
+            None
+        } else {
+            Some(
+                self.track_selection(request, &mut selection, false, count_started)
+                    .await?,
+            )
+        };
+        Ok(KvAttempt {
+            selection,
+            guard,
+            exact: pinned_target.is_some(),
+            route: None,
+        })
+    }
+
     fn warn_if_output_replay_annotation_ignored(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -424,6 +455,10 @@ where
 {
     type Attempt = KvAttempt<Sel>;
 
+    fn supports_advisory(&self) -> bool {
+        true
+    }
+
     fn affinity(&self) -> Option<&AffinityCoordinator> {
         self.affinity.as_ref()
     }
@@ -439,22 +474,8 @@ where
         intent: SelectionIntent,
         pinned_target: Option<AffinityTarget>,
     ) -> Result<Self::Attempt, Error> {
-        let is_query_only = intent == SelectionIntent::Advisory;
-        let affinity_worker = pinned_target.and_then(affinity_worker);
-        let mut selection = self
-            .select_request(request, phase, is_query_only, affinity_worker)
-            .await?;
-        let guard = if is_query_only {
-            None
-        } else {
-            Some(self.track_selection(request, &mut selection, false).await?)
-        };
-        Ok(KvAttempt {
-            selection,
-            guard,
-            exact: pinned_target.is_some(),
-            route: None,
-        })
+        self.select_attempt(request, phase, intent, pinned_target, true)
+            .await
     }
 
     fn observe_advisory(&self, request: &SingleIn<PreprocessedRequest>, attempt: &Self::Attempt) {
@@ -513,7 +534,7 @@ where
                         guard.abort().await;
                     }
                     *attempt = self
-                        .select(request, phase, SelectionIntent::Committed, None)
+                        .select_attempt(request, phase, SelectionIntent::Committed, None, false)
                         .await?;
                 }
             }
@@ -828,6 +849,7 @@ mod tests {
             WorkerWithDpRank::from_worker_id(0),
             &request(),
             false,
+            false,
         );
         let monitored = monitor_response_stream(source, context, guard);
         tokio::pin!(monitored);
@@ -853,7 +875,7 @@ mod tests {
             .unwrap();
         let failed_worker = failed_selection.worker;
         let failed_guard = router
-            .track_selection(&failed_request, &mut failed_selection, false)
+            .track_selection(&failed_request, &mut failed_selection, false, true)
             .await
             .unwrap();
         let failure = Annotated {
@@ -890,7 +912,7 @@ mod tests {
             .unwrap();
         assert_eq!(retry_selection.worker, failed_worker);
         let mut retry_guard = router
-            .track_selection(&retry_request, &mut retry_selection, false)
+            .track_selection(&retry_request, &mut retry_selection, false, true)
             .await
             .expect("same-worker booking must be released before yielding the error");
         retry_guard.abort().await;
@@ -972,7 +994,7 @@ mod tests {
             .await
             .unwrap();
         let guard = router
-            .track_selection(&request, &mut selection, is_query_only)
+            .track_selection(&request, &mut selection, is_query_only, true)
             .await
             .unwrap();
         (request, selection, guard)
@@ -1042,6 +1064,26 @@ mod tests {
         drop(completed_guard);
         assert_eq!(metrics.requests_started_total().get(), started_before + 3);
         assert_eq!(metrics.requests_total.get(), completed_before + 1);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn predispatch_reselection_counts_one_logical_request_start() {
+        let (router, runtime) = router_with_workers(None, &[7, 8]).await;
+        let started_before = router.request_metrics.requests_started_total().get();
+
+        assert!(
+            crate::routing_attempt::generate(&router, Context::new(request()))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            router.request_metrics.requests_started_total().get(),
+            started_before + 1
+        );
 
         drop(router);
         runtime.shutdown();
@@ -1241,11 +1283,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selection.worker.worker_id, 8);
-        assert_eq!(
-            selection.fallback_worker_ids,
-            Some(HashSet::from([8])),
-            "transport fallback must stay inside the post-migration candidate set"
-        );
         router.chooser.free(retry_request.id()).await.unwrap();
         drop(operation);
 

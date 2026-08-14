@@ -297,6 +297,7 @@ where
         worker: WorkerWithDpRank,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
+        count_started: bool,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -308,7 +309,7 @@ where
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        if scheduler_tracked {
+        if scheduler_tracked && count_started {
             request_metrics.requests_started_total().inc();
         }
 

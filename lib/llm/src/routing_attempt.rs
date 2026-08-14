@@ -40,6 +40,11 @@ pub(crate) enum AttemptKind {
 }
 
 pub(crate) trait AttemptBackend: Send + Sync {
+    /// Return whether `query_instance_id` requests are advisory for this backend.
+    fn supports_advisory(&self) -> bool {
+        false
+    }
+
     type Attempt: Send;
 
     fn affinity(&self) -> Option<&AffinityCoordinator>;
@@ -248,7 +253,9 @@ pub(crate) async fn generate<B: AttemptBackend>(
     request: SingleIn<PreprocessedRequest>,
 ) -> Result<ManyOut<LlmResponse>, Error> {
     let phase = phase(&request);
-    let intent = if request.get_annotation_value("query_instance_id").is_some() {
+    let intent = if backend.supports_advisory()
+        && request.get_annotation_value("query_instance_id").is_some()
+    {
         SelectionIntent::Advisory
     } else {
         SelectionIntent::Committed
@@ -307,4 +314,148 @@ where
         None => stream,
     };
     Ok((metadata, stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use dynamo_runtime::pipeline::Context;
+    use futures::StreamExt;
+
+    use super::*;
+
+    struct TestBackend {
+        advisory: bool,
+        intents: Mutex<Vec<SelectionIntent>>,
+    }
+
+    impl TestBackend {
+        fn new(advisory: bool) -> Self {
+            Self {
+                advisory,
+                intents: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AttemptBackend for TestBackend {
+        type Attempt = ();
+
+        fn supports_advisory(&self) -> bool {
+            self.advisory
+        }
+
+        fn affinity(&self) -> Option<&AffinityCoordinator> {
+            None
+        }
+
+        fn direct(&self) -> bool {
+            false
+        }
+
+        async fn select(
+            &self,
+            _request: &SingleIn<PreprocessedRequest>,
+            _phase: RequestPhase,
+            intent: SelectionIntent,
+            _pinned_target: Option<AffinityTarget>,
+        ) -> Result<Self::Attempt, Error> {
+            self.intents.lock().unwrap().push(intent);
+            Ok(())
+        }
+
+        fn observe_advisory(
+            &self,
+            _request: &SingleIn<PreprocessedRequest>,
+            _attempt: &Self::Attempt,
+        ) {
+        }
+
+        async fn begin_dispatch(
+            &self,
+            _request: &mut SingleIn<PreprocessedRequest>,
+            _attempt: &mut Self::Attempt,
+            _kind: AttemptKind,
+        ) -> Result<AffinityTarget, Error> {
+            Ok(AffinityTarget::new(1, None))
+        }
+
+        fn after_prepare(
+            &self,
+            _request: &mut SingleIn<PreprocessedRequest>,
+            _attempt: &mut Self::Attempt,
+        ) {
+        }
+
+        async fn dispatch_prepared(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+            _attempt: &mut Self::Attempt,
+            _kind: AttemptKind,
+        ) -> Result<ManyOut<LlmResponse>, Error> {
+            let context = request.context().clone();
+            let output = Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![9],
+                ..Default::default()
+            });
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter([output])),
+                context,
+            ))
+        }
+
+        async fn abort(&self, _attempt: &mut Self::Attempt) {}
+
+        fn finish_dispatch(
+            &self,
+            _attempt: Self::Attempt,
+            _target: AffinityTarget,
+            stream: ManyOut<LlmResponse>,
+        ) -> ManyOut<LlmResponse> {
+            stream
+        }
+    }
+
+    fn query_request() -> SingleIn<PreprocessedRequest> {
+        Context::new(
+            PreprocessedRequest::builder()
+                .model("test".to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .annotations(vec!["query_instance_id:true".to_string()])
+                .build()
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn query_annotation_dispatches_when_backend_does_not_support_advisory() {
+        let backend = TestBackend::new(false);
+        let mut response = generate(&backend, query_request()).await.unwrap();
+
+        assert_eq!(
+            response.next().await.unwrap().data.unwrap().token_ids,
+            vec![9]
+        );
+        assert_eq!(
+            backend.intents.into_inner().unwrap(),
+            vec![SelectionIntent::Committed]
+        );
+    }
+
+    #[tokio::test]
+    async fn query_annotation_remains_advisory_for_kv_style_backend() {
+        let backend = TestBackend::new(true);
+        let mut response = generate(&backend, query_request()).await.unwrap();
+
+        let output = response.next().await.unwrap().data.unwrap();
+        assert!(output.routing_data.is_some());
+        assert_eq!(
+            backend.intents.into_inner().unwrap(),
+            vec![SelectionIntent::Advisory]
+        );
+    }
 }
