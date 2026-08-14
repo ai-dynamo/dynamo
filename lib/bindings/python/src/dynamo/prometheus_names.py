@@ -23,6 +23,15 @@ Usage (both patterns supported):
     from dynamo.prometheus_names import frontend_service, work_handler
     print(frontend_service.REQUESTS_TOTAL)  # "requests_total"
     print(work_handler.ERRORS_TOTAL)  # "errors_total"
+
+Nested Rust modules become nested classes, so the Python path matches the Rust path:
+    from dynamo.prometheus_names import transport, frontend_service
+    print(transport.tcp.ERRORS_TOTAL)  # "tcp_errors_total"
+    print(transport.nats.ERRORS_TOTAL)  # "nats_errors_total"
+
+    # Nested classes also carry label *values*, not just metric names
+    print(frontend_service.operation.TOKENIZE)  # "tokenize"
+    print(frontend_service.error_type.VALIDATION)  # "validation"
 """
 
 from __future__ import annotations
@@ -203,6 +212,60 @@ class frontend_service:
     MIGRATION_OUTCOME_LABEL = "outcome"
     # Label name for tokenizer operation
     OPERATION_LABEL = "operation"
+
+    class error_type:
+        """Error type label values for fine-grained error classification"""
+
+        # No error (used for successful requests)
+        NONE = ""
+        # Client validation error (4xx with "Validation:" prefix)
+        VALIDATION = "validation"
+        # Model or resource not found (404)
+        NOT_FOUND = "not_found"
+        # Service overloaded or rate limited (429 or 529)
+        OVERLOAD = "overload"
+        # Service unavailable because no backend worker can serve the request
+        UNAVAILABLE = "unavailable"
+        # Request cancelled by client or timeout
+        CANCELLED = "cancelled"
+        # Backend accepted the request but stopped responding (response inactivity timeout)
+        RESPONSE_TIMEOUT = "response_timeout"
+        # Internal server error (500 and other unexpected errors)
+        INTERNAL = "internal"
+        # Feature not implemented (501)
+        NOT_IMPLEMENTED = "not_implemented"
+
+    class migration_type:
+        """Migration type label values"""
+
+        # Migration during initial stream creation (NoResponders error)
+        NEW_REQUEST = "new_request"
+        # Migration during ongoing request (stream disconnected)
+        ONGOING_REQUEST = "ongoing_request"
+
+    class operation:
+        """Operation label values for tokenizer latency metric"""
+
+        # Tokenization operation
+        TOKENIZE = "tokenize"
+        # Detokenization operation
+        DETOKENIZE = "detokenize"
+
+    class request_type:
+        """Request type label values"""
+
+        # Value for streaming requests
+        STREAM = "stream"
+        # Value for unary requests
+        UNARY = "unary"
+
+    class status:
+        """Status label values"""
+
+        # Value for successful requests
+        SUCCESS = "success"
+        # Value for failed requests
+        ERROR = "error"
 
 
 class kv_publisher:
@@ -466,6 +529,17 @@ class tokio_perf:
 class transport:
     """Transport-specific metrics (TCP / NATS)"""
 
+    class nats:
+        ERRORS_TOTAL = "nats_errors_total"
+
+    class tcp:
+        POOL_ACTIVE = "tcp_pool_active"
+        POOL_IDLE = "tcp_pool_idle"
+        BYTES_SENT_TOTAL = "tcp_bytes_sent_total"
+        BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
+        ERRORS_TOTAL = "tcp_errors_total"
+        SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
+
 
 class trtllm_additional:
     """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
@@ -531,3 +605,21 @@ class work_handler:
     POOL_CAPACITY = "pool_capacity"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"
+
+    class error_types:
+        """Error type values for work handler metrics"""
+
+        # Deserialization error
+        DESERIALIZATION = "deserialization"
+        # Invalid message format error
+        INVALID_MESSAGE = "invalid_message"
+        # Response stream creation error
+        RESPONSE_STREAM = "response_stream"
+        # Generation error
+        GENERATE = "generate"
+        # Response serialization error
+        SERIALIZATION = "serialization"
+        # Response publishing error
+        PUBLISH_RESPONSE = "publish_response"
+        # Final message publishing error
+        PUBLISH_FINAL = "publish_final"
