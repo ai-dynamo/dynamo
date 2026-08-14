@@ -45,7 +45,7 @@ spec:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub==1.16.4
-              hf download Qwen/Qwen3.8-2.4T-A95B
+              hf download Qwen/Qwen3.8-2.4T-A95B-FP8
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache
