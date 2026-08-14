@@ -3,9 +3,9 @@
   <!-- Background -->
   <rect width="660" height="460" fill="#000000"/>
 
-  <!-- Bulwark Worker (Pod) boundary -->
+  <!-- Failover Worker (Pod) boundary -->
   <rect x="40" y="40" width="580" height="320" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="5 4" stroke-width="1.5" rx="8"/>
-  <text x="56" y="62" font-size="11" font-weight="600" fill="#76b900">Bulwark Worker</text>
+  <text x="56" y="62" font-size="11" font-weight="600" fill="#76b900">Failover Worker</text>
 
   <!-- engine A (Active) -->
   <rect x="80" y="84" width="220" height="80" fill="#152008" stroke="#76b900" stroke-width="2" rx="4"/>

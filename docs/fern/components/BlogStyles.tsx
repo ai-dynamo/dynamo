@@ -588,7 +588,7 @@ article:has(.dynamo-blog-article) pre {
 
 /* Date-first archive labels, inspired by editorial blog indexes. */
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/dynamo-bulwark"]::before,
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/dynamo-bulwark"]::before { content: "AUG 12"; }
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/dynamo-bulwark"]::before { content: "AUG 13"; }
 
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/dynosim-pareto-frontier"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/dynosim-pareto-frontier"]::before { content: "MAY 29"; }
@@ -966,7 +966,7 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"]::before {
 }
 
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/dynamo-bulwark"] .fern-sidebar-link-title-inner::before,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/dynamo-bulwark"] .fern-sidebar-link-title-inner::before { content: "AUG 12"; }
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/dynamo-bulwark"] .fern-sidebar-link-title-inner::before { content: "AUG 13"; }
 
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/dynosim-pareto-frontier"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/dynosim-pareto-frontier"] .fern-sidebar-link-title-inner::before { content: "MAY 29"; }
