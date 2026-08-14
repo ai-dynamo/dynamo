@@ -317,6 +317,43 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
 
+# Same treatment, same reason, for the rest of the packages requirements.trtllm.txt
+# floors. The comment at the top of that file says naming a package there is enough
+# to refresh the bundled copy in place. For these it is not: those installs run with
+# VIRTUAL_ENV set, so they land in /opt/dynamo/venv and the base image's copy stays
+# on disk under dist-packages, which is where the image inventory reads. The floors
+# and the shipped versions disagreed on every one of them:
+#
+#   pillow          floor >=12.3.0   bundled 12.2.0
+#   mistune         floor >=3.3.0    bundled 3.2.1
+#   tornado         floor >=6.5.6    bundled 6.5.5
+#   jupyter-server  floor >=2.20.0   bundled 2.18.2
+#   jupyterlab      floor >=4.5.10   bundled 4.5.7
+#   gitpython       floor >=3.1.58   bundled 3.1.50
+#   soupsieve       floor >=2.8.4    bundled 2.8.3
+#
+# aiohttp was the only floor in that file that took, and it took because of the
+# explicit system-interpreter install above rather than because of the floor.
+#
+# Named packages only, no re-solve, matching the narrow-by-design rule above.
+# Mirrored by the pre_runtime whiteout below for the same dist-info-rename reason.
+#
+# The guard normalizes distribution names before comparing (PEP 503: runs of
+# -_. collapse and case folds), because the on-disk directories do not agree on
+# spelling -- jupyter_server-*.dist-info and GitPython-*.dist-info both appear.
+# It requires exactly one dist-info per package and a version at or above the
+# floor, so a venv-only install, a missed whiteout, or an old copy surviving
+# beside the new one all fail the build here rather than in a scan afterwards.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        "pillow>=12.3.0" \
+        "mistune>=3.3.0" \
+        "tornado>=6.5.6" \
+        "jupyter-server>=2.20.0" \
+        "jupyterlab>=4.5.10" \
+        "gitpython>=3.1.58" \
+        "soupsieve>=2.8.4" && \
+    /usr/bin/python3 -c 'import os, re, sys; D = "/usr/local/lib/python3.12/dist-packages"; W = {"pillow": (12, 3, 0), "mistune": (3, 3, 0), "tornado": (6, 5, 6), "jupyter-server": (2, 20, 0), "jupyterlab": (4, 5, 10), "gitpython": (3, 1, 58), "soupsieve": (2, 8, 4)}; norm = lambda s: re.sub(r"[-_.]+", "-", s).lower(); tv = lambda s: tuple(int(x) for x in re.findall(r"\d+", s)[:3]); stems = [d[:-10].rsplit("-", 1) for d in os.listdir(D) if d.endswith(".dist-info") and "-" in d[:-10]]; found = {k: [] for k in W}; [found[norm(n)].append(v) for n, v in stems if norm(n) in found]; print("system-site dist-info:", found); bad = [(k, v) for k, v in sorted(found.items()) if len(v) != 1 or tv(v[0]) < W[k]]; print("FAILED:", bad) if bad else None; sys.exit(1 if bad else 0)'
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -394,7 +431,22 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs-* \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
-    /usr/local/lib/python3.12/dist-packages/attrs-* && \
+    /usr/local/lib/python3.12/dist-packages/attrs-* \
+    /usr/local/lib/python3.12/dist-packages/PIL \
+    /usr/local/lib/python3.12/dist-packages/PIL.libs \
+    /usr/local/lib/python3.12/dist-packages/pillow-* \
+    /usr/local/lib/python3.12/dist-packages/mistune \
+    /usr/local/lib/python3.12/dist-packages/mistune-* \
+    /usr/local/lib/python3.12/dist-packages/tornado \
+    /usr/local/lib/python3.12/dist-packages/tornado-* \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server-* \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab-* \
+    /usr/local/lib/python3.12/dist-packages/git \
+    /usr/local/lib/python3.12/dist-packages/GitPython-* \
+    /usr/local/lib/python3.12/dist-packages/soupsieve \
+    /usr/local/lib/python3.12/dist-packages/soupsieve-* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
