@@ -221,7 +221,7 @@ spec:
           nvidia.com/dynamo-sub-component-type: decode
           nvidia.com/metrics-enabled: "true"
           nvidia.com/selector: aic-profiler-dgd-decode
-          nvidia.com/dynamo-worker-hash: 1ba1cf28
+          nvidia.com/dynamo-worker-hash: 2f745c61
         name: decode
         spec:
           minAvailable: 1
@@ -269,7 +269,7 @@ spec:
                   - name: DYN_NAMESPACE
                     value: $glob:clusterenv-*-aic-profiler-dgd
                   - name: DYN_NAMESPACE_WORKER_SUFFIX
-                    value: 1ba1cf28
+                    value: 2f745c61
                   - name: DYN_PARENT_DGD_K8S_NAME
                     value: aic-profiler-dgd
                   - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -361,7 +361,7 @@ spec:
           nvidia.com/dynamo-sub-component-type: prefill
           nvidia.com/metrics-enabled: "true"
           nvidia.com/selector: aic-profiler-dgd-prefill
-          nvidia.com/dynamo-worker-hash: 1ba1cf28
+          nvidia.com/dynamo-worker-hash: 2f745c61
         name: prefill
         spec:
           minAvailable: 1
@@ -409,7 +409,7 @@ spec:
                   - name: DYN_NAMESPACE
                     value: $glob:clusterenv-*-aic-profiler-dgd
                   - name: DYN_NAMESPACE_WORKER_SUFFIX
-                    value: 1ba1cf28
+                    value: 2f745c61
                   - name: DYN_PARENT_DGD_K8S_NAME
                     value: aic-profiler-dgd
                   - name: DYN_PARENT_DGD_K8S_NAMESPACE
