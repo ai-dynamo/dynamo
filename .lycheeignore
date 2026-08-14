@@ -55,3 +55,6 @@
 # The v1.4.0 release entry lands with the current-release promotion; the tag
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+# docs.rs pages for the 1.4.0 crates exist only after the GA crates publish.
+# Remove after v1.4.0 crates are on crates.io.
+^https://docs\.rs/[a-z0-9-]+/1\.4\.0$
