@@ -26,7 +26,7 @@ pytestmark = [
 
 def _workflow() -> Workflow:
     workflow = Workflow("physical-plan")
-    text = workflow.input("text", type="text")
+    text = workflow.input("text", ValueSpec(type="text"))
     stage = workflow.stage(
         "normalize",
         StageContract(
