@@ -83,18 +83,6 @@ def _cases():
             yield pytest.param(cls, name, id=name)
 
 
-@pytest.fixture(scope="module")
-def endpoint_client(attached_endpoint):
-    """An OpenAI client addressed at the deployed frontend."""
-    return openai.OpenAI(
-        base_url=f"{attached_endpoint.base_url}/v1",
-        api_key="not-used",  # Dynamo does not authenticate by default
-        timeout=300.0,
-        max_retries=0,  # retries would mask a real protocol failure
-        default_headers=dict(attached_endpoint.headers or {}),
-    )
-
-
 @pytest.mark.parametrize("cls,method", _cases())
 def test_tool_calling(cls, method, endpoint_client, attached_endpoint, request):
     """Drive one upstream tool-calling scenario against the deployment."""
