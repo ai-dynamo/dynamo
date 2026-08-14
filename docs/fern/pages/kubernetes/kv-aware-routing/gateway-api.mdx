@@ -84,7 +84,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -124,7 +124,7 @@ spec:
         - name: main
           # Keep the existing worker configuration.
         - name: sidecar-frontend
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           args:
           - -m
           - dynamo.frontend
