@@ -39,6 +39,39 @@ type fakeCheckpointer struct {
 	err    error
 }
 
+func TestWriteSnapshotCompleteSentinelForCheckpointJob(t *testing.T) {
+	pod := makeSourcePod("abc")
+	pod.Labels[snapshotprotocol.CheckpointSourceLabel] = "true"
+	var gotPID int
+	var gotName string
+
+	err := writeSnapshotCompleteSentinel(
+		CheckpointParams{Pod: pod, ContainerPID: 4242},
+		func(pid int, name string) error {
+			gotPID = pid
+			gotName = name
+			return nil
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 4242, gotPID)
+	assert.Equal(t, snapshotprotocol.SnapshotCompleteFile, gotName)
+}
+
+func TestWriteSnapshotCompleteSentinelSkipsDirectPodSnapshotSource(t *testing.T) {
+	pod := makeSourcePod("abc")
+
+	err := writeSnapshotCompleteSentinel(
+		CheckpointParams{Pod: pod, ContainerPID: 4242},
+		func(int, string) error {
+			return errors.New("sentinel writer must not be called")
+		},
+	)
+
+	require.NoError(t, err)
+}
+
 // fn is the checkpointFn seam the NodeController invokes for the dump.
 func (fc *fakeCheckpointer) fn(_ context.Context, params CheckpointParams) error {
 	fc.mu.Lock()

@@ -5,10 +5,14 @@ package cuda
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
@@ -158,7 +162,7 @@ func TestStageJobFileRequiresLaunchJobStateForMultiGPU(t *testing.T) {
 	}
 }
 
-func TestCheckpointProcessTreePersistsStateAfterEveryProcessCheckpoint(t *testing.T) {
+func TestCheckpointProcessTreePersistsStateThenRecoversEveryProcess(t *testing.T) {
 	tempDir := t.TempDir()
 	trace := filepath.Join(tempDir, "trace")
 	helper := filepath.Join(tempDir, "cuda-checkpoint-helper")
@@ -180,6 +184,7 @@ if [ "$job_file" != "$DYNAMO_TEST_JOB_FILE" ]; then
 fi
 printf '%s %s\n' "$action" "$pid" >> "$DYNAMO_TEST_TRACE"
 if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
+if [ "$action" = restore ]; then printf '|restored-%s' "$pid" >> "$job_file"; fi
 `
 	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
@@ -202,14 +207,30 @@ if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
 	t.Setenv("DYNAMO_TEST_TRACE", trace)
 	t.Setenv("DYNAMO_TEST_JOB_FILE", liveJobFile)
 
-	if _, err := CheckpointProcessTree(context.Background(), []int{101, 202}, liveJobFile, checkpointDir, logr.Discard()); err != nil {
+	capture := func() error {
+		artifact, err := os.ReadFile(filepath.Join(checkpointDir, snapshotprotocol.CUDAJobFileName))
+		if err != nil {
+			return err
+		}
+		if got, want := string(artifact), "initial|101|202"; got != want {
+			return fmt.Errorf("persisted job state during capture = %q, want %q", got, want)
+		}
+		f, err := os.OpenFile(trace, os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = f.WriteString("persist artifact\n")
+		return err
+	}
+	if _, err := CheckpointProcessTree(context.Background(), []int{101, 202}, liveJobFile, checkpointDir, time.Second, capture, logr.Discard()); err != nil {
 		t.Fatalf("CheckpointProcessTree() error = %v", err)
 	}
 	traceContent, err := os.ReadFile(trace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(traceContent), "lock 101\nlock 202\ncheckpoint 101\ncheckpoint 202\n"; got != want {
+	if got, want := string(traceContent), "lock 101\nlock 202\ncheckpoint 101\ncheckpoint 202\npersist artifact\nrestore 101\nrestore 202\nunlock 101\nunlock 202\n"; got != want {
 		t.Fatalf("helper call order = %q, want %q", got, want)
 	}
 	artifact, err := os.ReadFile(filepath.Join(checkpointDir, snapshotprotocol.CUDAJobFileName))
@@ -218,6 +239,232 @@ if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
 	}
 	if got, want := string(artifact), "initial|101|202"; got != want {
 		t.Fatalf("persisted job state = %q, want %q", got, want)
+	}
+	liveState, err := os.ReadFile(liveJobFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(liveState), "initial|101|202|restored-101|restored-202"; got != want {
+		t.Fatalf("live job state after recovery = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointProcessTreeRecoversWithFreshContextAfterCaptureCancellation(t *testing.T) {
+	tempDir := t.TempDir()
+	trace := filepath.Join(tempDir, "trace")
+	installFakeCUDAHelper(t, `
+action=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --action) action="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$action" >> "$DYNAMO_TEST_TRACE"
+`)
+	t.Setenv("DYNAMO_TEST_TRACE", trace)
+	ctx, cancel := context.WithCancel(context.Background())
+	liveJobFile := filepath.Join(tempDir, "live-job")
+	checkpointDir := filepath.Join(tempDir, "checkpoint")
+	if err := os.Mkdir(checkpointDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(liveJobFile, []byte("job-state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointDir, snapshotprotocol.CUDAJobFileName), []byte("validation-copy"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := CheckpointProcessTree(
+		ctx,
+		[]int{101},
+		liveJobFile,
+		checkpointDir,
+		time.Second,
+		func() error {
+			cancel()
+			return ctx.Err()
+		},
+		logr.Discard(),
+	)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CheckpointProcessTree() error = %v, want context.Canceled", err)
+	}
+	traceContent, readErr := os.ReadFile(trace)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(traceContent), "lock\ncheckpoint\nrestore\nunlock\n"; got != want {
+		t.Fatalf("helper call order = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointProcessTreeGetStateCancellationKillsChild(t *testing.T) {
+	const (
+		recoveryTimeout = 100 * time.Millisecond
+		returnTimeout   = time.Second
+	)
+	tempDir := t.TempDir()
+	childPIDFile := filepath.Join(tempDir, "child-pid")
+	installFakeCUDAHelper(t, `
+if [ "$1" = "--get-state" ]; then
+    sleep 300 &
+    printf '%s\n' "$!" > "$DYNAMO_TEST_CHILD_PID_FILE"
+    wait
+fi
+action=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --action) action="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ "$action" = unlock ]; then exit 1; fi
+`)
+	t.Setenv("DYNAMO_TEST_CHILD_PID_FILE", childPIDFile)
+	liveJobFile := filepath.Join(tempDir, "live-job")
+	checkpointDir := filepath.Join(tempDir, "checkpoint")
+	if err := os.Mkdir(checkpointDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(liveJobFile, []byte("job-state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointDir, snapshotprotocol.CUDAJobFileName), []byte("validation-copy"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := CheckpointProcessTree(
+			context.Background(),
+			[]int{101},
+			liveJobFile,
+			checkpointDir,
+			recoveryTimeout,
+			func() error { return nil },
+			logr.Discard(),
+		)
+		result <- err
+	}()
+
+	cleanupChild := true
+	killChild := func() {
+		content, err := os.ReadFile(childPIDFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(content)))
+		if err == nil {
+			_ = unix.Kill(pid, unix.SIGKILL)
+		}
+	}
+	t.Cleanup(func() {
+		if cleanupChild {
+			killChild()
+		}
+	})
+
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(returnTimeout):
+		killChild()
+		select {
+		case <-result:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("CheckpointProcessTree() did not return after recovery deadline")
+	}
+	if duration := time.Since(start); duration > returnTimeout {
+		t.Fatalf("CheckpointProcessTree() took %s after recovery cancellation", duration)
+	}
+	if err == nil || !strings.Contains(err.Error(), "recover source CUDA process tree") {
+		t.Fatalf("CheckpointProcessTree() error = %v, want recovery failure", err)
+	}
+
+	content, readErr := os.ReadFile(childPIDFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	childPID, parseErr := strconv.Atoi(strings.TrimSpace(string(content)))
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		processErr := unix.Kill(childPID, 0)
+		if errors.Is(processErr, unix.ESRCH) {
+			cleanupChild = false
+			break
+		}
+		if processErr != nil {
+			t.Fatalf("probe get-state child %d: %v", childPID, processErr)
+		}
+		if time.Now().After(deadline) {
+			killChild()
+			t.Fatalf("get-state child %d remains after recovery cancellation", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCheckpointProcessTreeJoinsCaptureAndRecoveryErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	trace := filepath.Join(tempDir, "trace")
+	installFakeCUDAHelper(t, `
+action=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --action) action="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$action" >> "$DYNAMO_TEST_TRACE"
+if [ "$action" = restore ]; then
+    sleep 300 &
+    wait
+fi
+`)
+	t.Setenv("DYNAMO_TEST_TRACE", trace)
+	liveJobFile := filepath.Join(tempDir, "live-job")
+	checkpointDir := filepath.Join(tempDir, "checkpoint")
+	if err := os.Mkdir(checkpointDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(liveJobFile, []byte("job-state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointDir, snapshotprotocol.CUDAJobFileName), []byte("validation-copy"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	captureErr := errors.New("capture failed")
+	_, err := CheckpointProcessTree(
+		context.Background(),
+		[]int{101},
+		liveJobFile,
+		checkpointDir,
+		100*time.Millisecond,
+		func() error { return captureErr },
+		logr.Discard(),
+	)
+
+	if !errors.Is(err, captureErr) {
+		t.Fatalf("CheckpointProcessTree() error = %v, want capture error", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CheckpointProcessTree() error = %v, want recovery deadline", err)
+	}
+	traceContent, readErr := os.ReadFile(trace)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(traceContent), "lock\ncheckpoint\nrestore\n"; got != want {
+		t.Fatalf("helper call order = %q, want %q", got, want)
 	}
 }
 

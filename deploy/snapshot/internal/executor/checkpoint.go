@@ -90,8 +90,8 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
-	// Phase 3: Capture — CRIU dump, rootfs diff
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	// Phase 3: Capture — CUDA state, CRIU dump, rootfs diff, then live CUDA recovery
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, cfg.Restore.RestoreTimeout(), log)
 	if err != nil {
 		return err
 	}
@@ -254,37 +254,52 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, cudaRecoveryTimeout time.Duration, log logr.Logger) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
-	// CUDA lock+checkpoint must happen before CRIU dump
-	if len(state.CUDAHostPIDs) > 0 {
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+	capture := func() error {
+		criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 		if err != nil {
-			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+			return err
 		}
-		timings.CUDADuration = cudaTimings.TotalDuration
+		timings.CRIUDumpDuration = criuDumpDuration
+
+		// Overlay rootfs diff capture is best-effort. Failures are logged but not
+		// propagated — a checkpoint without overlay diffs is still valid for restore
+		// (the base container image provides the filesystem).
+		if state.UpperDir != "" {
+			overlayCaptureStart := time.Now()
+			if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
+				log.Error(err, "Failed to capture rootfs diff")
+			}
+			if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
+				log.Error(err, "Failed to capture deleted files")
+			}
+			timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
+		}
+		return nil
 	}
 
-	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
+	if len(state.CUDAHostPIDs) == 0 {
+		if err := capture(); err != nil {
+			return nil, err
+		}
+		return timings, nil
+	}
+
+	cudaTimings, err := cuda.CheckpointProcessTree(
+		ctx,
+		state.CUDAHostPIDs,
+		cudaJobFile,
+		checkpointDir,
+		cudaRecoveryTimeout,
+		capture,
+		log,
+	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("CUDA checkpoint capture failed: %w", err)
 	}
-	timings.CRIUDumpDuration = criuDumpDuration
-
-	// Overlay rootfs diff capture is best-effort. Failures are logged but not
-	// propagated — a checkpoint without overlay diffs is still valid for restore
-	// (the base container image provides the filesystem).
-	if state.UpperDir != "" {
-		overlayCaptureStart := time.Now()
-		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
-			log.Error(err, "Failed to capture rootfs diff")
-		}
-		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
-			log.Error(err, "Failed to capture deleted files")
-		}
-		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
-	}
+	timings.CUDADuration = cudaTimings.TotalDuration
 
 	return timings, nil
 }

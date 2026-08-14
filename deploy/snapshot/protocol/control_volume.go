@@ -27,8 +27,8 @@ const (
 	// mount path to the workload.
 	SnapshotControlDirEnv = "DYN_SNAPSHOT_CONTROL_DIR"
 
-	// SnapshotCompleteFile is written by the snapshot agent inside the
-	// control volume when a checkpoint has completed successfully.
+	// SnapshotCompleteFile is written by the snapshot agent inside a
+	// cooperative checkpoint Job's control volume when capture succeeds.
 	SnapshotCompleteFile = "snapshot-complete"
 
 	// RestoreCompleteFile is written by the snapshot agent inside the
