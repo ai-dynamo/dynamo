@@ -113,7 +113,9 @@ For a proposed candidate, write these files under `DEPLOY_ROOT/next-candidate/` 
 - `deploy-draft.yaml`: the complete candidate DGD containing only the resolved selected change.
 
 For `no-proposal` or `blocked`, write `knowledge-consult.md` with the decision and supporting evidence, but do not
-create a misleading `deploy-draft.yaml`.
+create a misleading `deploy-draft.yaml`. Neither outcome ends the engagement: follow the ask and stop-request
+obligations in the optimization loop's Iterate Or Stop step, including its evidence classes for terminal
+dispositions.
 
 Return exact paths and SHA256 hashes, not only filenames or iteration numbers. Never overwrite an existing
 `next-candidate/` record whose source hash or semantic diff identifies a different proposal.

@@ -44,6 +44,8 @@ benchmarking begins. Define the performance question before selecting the benchm
 - Verify config engagement and benchmark isolation, and record the runtime, resources, and execution details.
 - Default to one measured run of 30 minutes or less. Preserve its configuration and raw artifacts unchanged.
 - Evaluate target SLOs and compare only valid same-series results, reporting absolute metrics, deltas, and uncertainty.
+- When the measured SLO boundary falls within one concurrency step of the operating point, report throughput at the
+  floor and one step past it, so the operator can judge whether the floor's exact value is load-bearing.
 - Write the required machine-readable and Markdown outputs, or return a structured blocker.
 
 ## Do Not

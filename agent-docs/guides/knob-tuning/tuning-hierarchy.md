@@ -26,21 +26,36 @@ If the current configuration did not engage or the run is invalid, repair or rem
 optimization.
 
 
-## Category 1 — Deployment Topology and Fit
+## Category 1 — Deployment Topology and Operating Regime
 
-First ask whether the deployment shape can efficiently serve the user workload. This is a screening decision, not an
-automatic topology experiment. Evaluate topology in this order:
+First ask whether the deployment shape can efficiently serve the user workload. Topology sets four things at once,
+and only one of them is memory: per-rank effective batch and arithmetic intensity (the throughput axis); weight and
+KV memory footprint (the fit axis); the collective-communication pattern and volume (TP all-reduce, EP all-to-all,
+none for DP); and whether attention and weights are replicated or sharded. Do not evaluate a topology change on
+memory alone: when memory is not binding, the topology question is not closed; it moves to compute and
+communication. A configuration that fits can still be the wrong shape for the operating point. Evaluate topology in
+this order:
 
 1. Compute the model, activation, and KV-memory fit and establish the minimum viable TP, PP, and EP.
-2. Prefer the smallest parallelism that fits with operating headroom, then use remaining fixed-budget GPUs for
-   replicas when the workload can benefit from them.
-3. Consider aggregated versus disaggregated serving only when workload shape, scale, or independent prefill/decode
+2. Compute the effective per-rank batch at the target concurrency: data parallelism serves batch/N per replica,
+   shrinking per-rank batch and starving compute even though everything fits, while tensor parallelism runs the
+   whole batch through one sharded forward pass, raising per-rank batch and freeing memory at the cost of
+   collective communication.
+3. Among layouts that fit with operating headroom, prefer the one that maximizes useful per-rank batch and compute
+   efficiency at the target concurrency, then weigh its communication cost; fit is a constraint, not the objective.
+   Use remaining fixed-budget GPUs for replicas when the workload can benefit from them.
+4. Consider aggregated versus disaggregated serving only when workload shape, scale, or independent prefill/decode
    objectives justify the transfer and coordination cost.
-4. For an existing disaggregated deployment, check prefill/decode allocation and rate matching before adding workers.
-5. Verify node placement and the required fast fabric when the selected topology crosses GPUs or nodes.
+5. For an existing disaggregated deployment, check prefill/decode allocation and rate matching before adding workers.
+6. Verify node placement and the required fast fabric when the selected topology crosses GPUs or nodes.
 
-Choose a topology hypothesis only when model sizing, Kubernetes or engine evidence, rate imbalance, transfer behavior,
-or same-regime history supports a structural mismatch. Consult the
+Choose a topology hypothesis when model-sizing arithmetic, per-rank batch at the target concurrency, Kubernetes or
+engine evidence, rate imbalance, transfer behavior, same-regime history, or a sibling recipe for the same model on
+other hardware supports a structural mismatch. Sibling recipes are hypothesis priors, not adoption evidence: even
+when their checkpoint or hardware is incompatible, their parallelism and serving-mode choices transfer as candidates.
+Rank candidate layouts cheaply (sizing arithmetic, projections, published same-model recipes) before spending a
+deployment on one, and revisit topology after baseline characterization and whenever the measured regime changes; an
+inherited layout is a candidate like any other, not a settled decision. Consult the
 [model-sizing guides](../model-sizing/classification.md) and, for disaggregated serving,
 [rate matching](../rate-matching/matching.md).
 

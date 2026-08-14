@@ -92,6 +92,10 @@ runs/<EXP_ID>/
 - `knowledge-consult.md`: required consultation result for `proposed`, `no-proposal`, and `blocked` outcomes.
 - `deploy-draft.yaml`: candidate DGD created only for a materialized proposal; it remains here until challenger
   approval assigns it to the next deployment iteration.
+- `asks.jsonl` (under `EXP_ROOT/analysis/`): append-only operator-ask record with the question, blocked lever
+  family, expected upside, status (`pending` or `answered`), and the answer once received. Deduplicate before
+  appending. A stop-request is not a separate file: it is the terminal search-calibration record in
+  `knowledge-consult.md` plus its challenger validation.
 
 ## Deployment Directories
 
@@ -134,6 +138,8 @@ runs/<EXP_ID>/
   `deploy-draft.yaml`.
 - Make direct comparisons only when `benchmark_audit.json` marks every run valid and their plan and benchmark-series
   identities match.
+- `recommended_config.md` MUST carry a `Correctness status:` line — `verified (scope stated)`,
+  `unverified (waived: reason)`, or `blocked (ask recorded)`. A recommendation without it is incomplete.
 - Do not treat a final recommendation as reproducible unless it points to the user workload, original user-provided
   DGD, applied manifests, deployment ledger, applicable benchmark plans, audits, summaries, performance analyses, and
   raw benchmark artifacts.

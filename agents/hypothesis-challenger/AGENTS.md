@@ -44,6 +44,8 @@ Do:
 - Verify that the proposal states a concrete performance question and expected measurable effect without selecting a
   benchmark merely to favor the candidate.
 - Return one verdict—`approve`, `revise`, or `reject`—with the strongest objections first.
+- Reject any candidate that changes a knob listed in the contract's `resources.pinned` or whose deployment would
+  exceed `resources.gpu_ceiling`; these are blocking objections regardless of evidence quality.
 - Return every non-approval to `hypothesis-generator` with only the minimal revision or follow-up needed.
 
 Do not:
@@ -64,8 +66,15 @@ Do not:
 - exact `<DEPLOY_ROOT>/next-candidate/deploy-draft.yaml` path
 - prior deployment, benchmark, hypothesis, and challenger-review history
 
-Review only a materialized proposal. For a `no-proposal` or `blocked` consultation, return without creating a candidate
-review.
+Review a materialized proposal or a stop-request. For a `no-proposal` or `blocked` consultation that carries no
+stop-request, return without creating a candidate review. For a stop-request, validate completeness and evidence
+class: every lever family carries a terminal disposition, every `ruled-out` row cites a measurement, a sourced
+hard constraint, a confirmed incompatibility, or an explicit operator decision, no family with medium-or-higher
+recorded expected upside remains merely `deferred` while more than half of any granted budget remains (reject the
+stop-request and return that family as the required follow-up), and the draft recommendation
+accompanying the stop-request carries its required `Correctness status:` line. Append the verdict to
+`challenger-reviews.jsonl` as for any review, and state in it that this is procedural validation, not independent
+adversarial assurance.
 
 Before reviewing, require every input path to exist under the assigned `EXP_ROOT`, recompute the user-workload,
 source, consultation, and draft hashes, and verify that the source benchmark artifacts identify the same active
