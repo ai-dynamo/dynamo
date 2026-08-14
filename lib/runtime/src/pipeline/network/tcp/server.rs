@@ -598,8 +598,7 @@ impl ResponseService for TcpStreamServer {
     }
 }
 
-/// First retry delay applied after a descriptor- or memory-exhaustion accept
-/// failure (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`).
+/// First retry delay applied after an `AcceptFailure::Exhaustion`.
 const ACCEPT_BACKOFF_INITIAL_DELAY: Duration = Duration::from_millis(5);
 /// Ceiling the retry delay saturates at, so the listener keeps polling often
 /// enough to notice recovery while no longer spinning.
@@ -611,8 +610,8 @@ const ACCEPT_BACKOFF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AcceptFailure {
     /// The process or the host is out of file descriptors or kernel memory
-    /// (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`). Retrying immediately cannot
-    /// succeed, so the loop must back off.
+    /// — see `AcceptBackoff::classify` for the exact errno set. Retrying
+    /// immediately cannot succeed, so the loop must back off.
     Exhaustion,
     /// Anything else — a per-connection error that the client is expected to
     /// retry. Keeps the historical warn-and-retry-immediately behavior.
@@ -641,13 +640,12 @@ struct AcceptBackoff {
     initial_delay: Duration,
     max_delay: Duration,
     log_interval: Duration,
-    /// Delay the *next* exhaustion failure will be told to sleep.
     current_delay: Duration,
-    /// Failures observed since the last emitted summary.
     suppressed: u64,
-    /// When the last summary was emitted, in the caller's clock.
     last_log_at: Option<std::time::Instant>,
-    /// Whether the loop is currently inside an exhaustion episode.
+    /// Whether the loop is currently inside an exhaustion episode — the flag
+    /// `record_success` checks to tell a real recovery from an ordinary
+    /// steady-state accept.
     in_backoff: bool,
 }
 
@@ -672,14 +670,11 @@ impl AcceptBackoff {
     fn classify(err: &std::io::Error) -> AcceptFailure {
         #[cfg(unix)]
         {
-            // `std::io::ErrorKind` has no stable variant for any of these
-            // errnos, so the raw value is the portable-with-cfg way to
-            // recognize them.
-            //
-            // `EMFILE`/`ENFILE`: the process or host is out of file descriptors.
-            // `ENOBUFS`/`ENOMEM`: the kernel is out of network buffers or
-            // memory for the socket. All four make an immediate retry
-            // deterministic, so they get the backoff path.
+            // `std::io::ErrorKind` has no stable variant for these errnos, so
+            // the raw value is the portable-with-cfg way to recognize them.
+            // `EMFILE`/`ENFILE` are descriptor exhaustion; `ENOBUFS`/`ENOMEM`
+            // are kernel out-of-memory for the socket. All four make an
+            // immediate retry deterministic, so they get the backoff path.
             if matches!(
                 err.raw_os_error(),
                 Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
@@ -722,24 +717,16 @@ impl AcceptBackoff {
         }
     }
 
-    /// Record a successful accept. Returns `Some(suppressed)` when this success
-    /// ended an exhaustion episode *and* the shared log-rate window allows a
-    /// line, so a listener flapping at the descriptor ceiling cannot emit an
-    /// unbounded stream of recovery warnings; `None` during ordinary
-    /// steady-state accepts, or when the window has not yet elapsed. The
-    /// schedule is reset either way. A suppressed recovery keeps its count
-    /// rather than discarding it, so the next emitted summary — on either
-    /// path — still accounts for every failure observed.
-    ///
-    /// The clock arrives as a closure rather than an `Instant` so that the
-    /// steady-state accept — every ordinary connection, and this listener opens
-    /// one per request — takes the early return below without reading a clock
-    /// at all.
+    /// Record a successful accept. `Some(suppressed)` only when this success
+    /// both ended an exhaustion episode and the shared log-rate window allows
+    /// a line — so a listener flapping at the descriptor ceiling cannot emit
+    /// an unbounded stream of recovery lines, and a suppressed recovery keeps
+    /// its count for the next emission rather than discarding it. The clock
+    /// arrives as a closure, not an `Instant`, so the steady-state accept
+    /// (every ordinary connection) hits the early return below without
+    /// reading a clock at all.
     fn record_success(&mut self, now: impl FnOnce() -> std::time::Instant) -> Option<u64> {
         if !self.in_backoff {
-            // Outside an episode `current_delay` already equals `initial_delay`,
-            // because the `record_success` that closed the previous episode set
-            // it. There is nothing to reset and nothing to log.
             return None;
         }
         self.current_delay = self.initial_delay;
@@ -2617,13 +2604,9 @@ mod tests {
         );
     }
 
-    /// Regression guard for the recovery notice. A listener flapping at the
-    /// descriptor ceiling alternates success -> `EMFILE` -> success, so every
-    /// accepted connection ends an episode. If the recovery line were not held
-    /// to the same window as the failure summary, that alternation would emit
-    /// an unbounded stream of `warn!`s -- reinstating the exact log storm this
-    /// policy exists to bound. Deleting the window check inside `record_success`
-    /// makes the third assertion fail.
+    /// A flapping listener (success -> `EMFILE` -> success) must not emit an
+    /// unbounded stream of recovery lines, so the recovery notice shares its
+    /// rate-limit window with the failure summary.
     #[cfg(unix)]
     #[test]
     fn accept_backoff_rate_limits_recovery_notice() {
@@ -2772,12 +2755,9 @@ mod tests {
         );
     }
 
-    /// Deterministic socket recovery: a real listener that has just been through
-    /// an injected exhaustion episode still accepts a real client connection,
-    /// and the policy is back at its initial delay afterwards. Proves recovery
-    /// end-to-end without manipulating the host's descriptor limit — no real
-    /// `EMFILE` is ever provoked. Also asserts the loop actually sleeps (the
-    /// anti-spin property) and that the Prometheus counter advances.
+    /// End-to-end: a real listener still accepts a client after an injected
+    /// exhaustion episode (no real `EMFILE` provoked), the loop actually
+    /// slept rather than spun, and the Prometheus counter advanced.
     #[cfg(unix)]
     #[tokio::test]
     async fn accept_backoff_socket_recovers_after_injected_exhaustion() {
