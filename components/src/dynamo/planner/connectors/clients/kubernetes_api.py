@@ -22,6 +22,11 @@ from typing import Optional
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
+from dynamo.common.kubernetes import (
+    client_go_api_client,
+    retry_kubernetes_request,
+    retry_kubernetes_write,
+)
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError, RolloutFailedError
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
@@ -75,12 +80,12 @@ class KubernetesAPI:
         except ConfigException:
             config.load_kube_config()  # for out-of-cluster deployment
 
-        self.custom_api = client.CustomObjectsApi()
-        self.core_api = client.CoreV1Api()
+        api_client = client_go_api_client()
+        self.custom_api = client.CustomObjectsApi(api_client)
+        self.core_api = client.CoreV1Api(api_client)
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
-    def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
-        """Get the graph deployment from the dynamo graph deployment name"""
+    def _read_graph_deployment_once(self, graph_deployment_name: str) -> dict:
         return self.custom_api.get_namespaced_custom_object(
             group=NVIDIA_API_GROUP,
             version=DYNAMO_API_VERSION,
@@ -89,6 +94,10 @@ class KubernetesAPI:
             name=graph_deployment_name,
         )
 
+    def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
+        """Get the graph deployment from the dynamo graph deployment name"""
+        return self._read_graph_deployment_once(graph_deployment_name)
+
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
         result = self.custom_api.list_namespaced_custom_object(
@@ -96,6 +105,17 @@ class KubernetesAPI:
             version=DYNAMO_API_VERSION,
             namespace=self.current_namespace,
             plural=DGD_PLURAL,
+        )
+        return result.get("items", [])
+
+    def list_worker_metadata(self) -> list[dict]:
+        """List all DynamoWorkerMetadata resources in the current namespace."""
+
+        result = self.custom_api.list_namespaced_custom_object(
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_WORKER_METADATA_API_VERSION,
+            namespace=self.current_namespace,
+            plural="dynamoworkermetadatas",
         )
         return result.get("items", [])
 
@@ -220,18 +240,37 @@ class KubernetesAPI:
         loudly instead of creating a second replica owner.
         """
         adapter_name = self.scaling_adapter_name(graph_deployment_name, service_name)
-        body: dict[str, object] = {"spec": {"replicas": replicas}}
-        if resource_version is not None:
-            body["metadata"] = {"resourceVersion": resource_version}
 
-        self.custom_api.patch_namespaced_custom_object_scale(
-            group=NVIDIA_API_GROUP,
-            version=DYNAMO_API_VERSION,
-            namespace=self.current_namespace,
-            plural=DGDSA_PLURAL,
-            name=adapter_name,
-            body=body,
-        )
+        def patch_scale(version: str) -> None:
+            self.custom_api.patch_namespaced_custom_object_scale(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGDSA_PLURAL,
+                name=adapter_name,
+                body={
+                    "metadata": {"resourceVersion": version},
+                    "spec": {"replicas": replicas},
+                },
+            )
+
+        if resource_version is not None:
+            # The caller owns retries because it must revalidate the DGDSA
+            # writer fence before using a new resource version.
+            patch_scale(resource_version)
+        else:
+
+            def update_scale() -> None:
+                scale = self.custom_api.get_namespaced_custom_object_scale(
+                    group=NVIDIA_API_GROUP,
+                    version=DYNAMO_API_VERSION,
+                    namespace=self.current_namespace,
+                    plural=DGDSA_PLURAL,
+                    name=adapter_name,
+                )
+                patch_scale(self._resource_version(scale, adapter_name))
+
+            retry_kubernetes_write(update_scale)
         logger.info("Scaled DGDSA %s to %s replicas", adapter_name, replicas)
 
     def patch_scaling_adapter_writer_fence(
@@ -267,26 +306,28 @@ class KubernetesAPI:
                 "value": updated_annotations,
             },
         ]
-        self.custom_api.api_client.call_api(
-            "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
-            "PATCH",
-            {
-                "group": NVIDIA_API_GROUP,
-                "version": DYNAMO_API_VERSION,
-                "namespace": self.current_namespace,
-                "plural": DGDSA_PLURAL,
-                "name": adapter_name,
-            },
-            [],
-            {
-                "Accept": "application/json",
-                "Content-Type": JSON_PATCH_CONTENT_TYPE,
-            },
-            body=patch,
-            response_type="object",
-            auth_settings=["BearerToken"],
-            _return_http_data_only=True,
-            collection_formats={},
+        retry_kubernetes_request(
+            lambda: self.custom_api.api_client.call_api(
+                "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
+                "PATCH",
+                {
+                    "group": NVIDIA_API_GROUP,
+                    "version": DYNAMO_API_VERSION,
+                    "namespace": self.current_namespace,
+                    "plural": DGDSA_PLURAL,
+                    "name": adapter_name,
+                },
+                [],
+                {
+                    "Accept": "application/json",
+                    "Content-Type": JSON_PATCH_CONTENT_TYPE,
+                },
+                body=patch,
+                response_type="object",
+                auth_settings=["BearerToken"],
+                _return_http_data_only=True,
+                collection_formats={},
+            )
         )
         logger.info("Claimed DGDSA %s for Planner writer %s", adapter_name, writer_id)
 
@@ -294,11 +335,28 @@ class KubernetesAPI:
         self, graph_deployment_name: str, service_name: str, replicas: int
     ) -> None:
         """Update replicas directly in DGD when no DGDSA is available."""
-        deployment = self.get_graph_deployment(graph_deployment_name)
-        components = self._dgd_components(deployment, graph_deployment_name)
-        self._patch_component_replicas(
-            graph_deployment_name, components, service_name, replicas
-        )
+
+        def update_dgd() -> None:
+            try:
+                deployment = self._read_graph_deployment_once(graph_deployment_name)
+            except client.ApiException as error:
+                if error.status == 404:
+                    raise DynamoGraphDeploymentNotFoundError(
+                        deployment_name=graph_deployment_name,
+                        namespace=self.current_namespace,
+                    ) from error
+                raise
+            resource_version = self._resource_version(deployment, graph_deployment_name)
+            components = self._dgd_components(deployment, graph_deployment_name)
+            self._patch_component_replicas(
+                graph_deployment_name,
+                resource_version,
+                components,
+                service_name,
+                replicas,
+            )
+
+        retry_kubernetes_write(update_dgd)
         logger.info(
             f"Updated DGD {graph_deployment_name} component {service_name} to {replicas} replicas"
         )
@@ -314,6 +372,7 @@ class KubernetesAPI:
         second DGD read closes the connector-to-client preflight window, while
         the JSON Patch tests fence changes between that read and the write.
         """
+
         deployment = self.get_graph_deployment(graph_deployment_name)
         metadata = deployment.get("metadata", {}) or {}
         resource_version = metadata.get("resourceVersion")
@@ -329,7 +388,7 @@ class KubernetesAPI:
         component = components[index]
         if "scalingAdapter" in component:
             # The component changed authority after the connector preflight.
-            # Surface a retryable conflict rather than writing around DGDSA.
+            # Surface a conflict so the connector retries through the new owner.
             raise client.ApiException(
                 status=409,
                 reason=(f"component {service_name!r} now declares a scalingAdapter"),
@@ -365,6 +424,15 @@ class KubernetesAPI:
         )
 
     @staticmethod
+    def _resource_version(resource: dict, resource_name: str) -> str:
+        resource_version = resource.get("metadata", {}).get("resourceVersion")
+        if not resource_version:
+            raise KeyError(
+                f"resource {resource_name!r} has no metadata.resourceVersion"
+            )
+        return resource_version
+
+    @staticmethod
     def _dgd_components(deployment: dict, graph_deployment_name: str) -> list[dict]:
         components = deployment.get("spec", {}).get("components")
         if components is None:
@@ -380,6 +448,7 @@ class KubernetesAPI:
     def _patch_component_replicas(
         self,
         graph_deployment_name: str,
+        resource_version: str,
         components: list[dict],
         component_name: str,
         replicas: int,
@@ -387,7 +456,9 @@ class KubernetesAPI:
         index = self._find_component_index(
             graph_deployment_name, components, component_name
         )
-        patch = self._component_replicas_json_patch(index, component_name, replicas)
+        patch = self._component_replicas_json_patch(
+            resource_version, index, component_name, replicas
+        )
         self._patch_dgd_with_json_patch(graph_deployment_name, patch)
 
     @staticmethod
@@ -403,9 +474,14 @@ class KubernetesAPI:
 
     @staticmethod
     def _component_replicas_json_patch(
-        index: int, component_name: str, replicas: int
+        resource_version: str, index: int, component_name: str, replicas: int
     ) -> list[dict[str, object]]:
         return [
+            {
+                "op": "test",
+                "path": "/metadata/resourceVersion",
+                "value": resource_version,
+            },
             {
                 "op": "test",
                 "path": f"/spec/components/{index}/name",

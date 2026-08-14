@@ -902,6 +902,40 @@ async def test_set_component_replicas_undeclared_adapter_ignores_stray_dgdsa(
 
 
 @pytest.mark.asyncio
+async def test_set_component_replicas_retries_dgd_conflict_through_new_adapter(
+    kubernetes_connector, mock_kube_api
+):
+    initial = _deployment(_component("worker", "decode", replicas=0))
+    transitioned = _deployment(_adapter_component("worker", "decode", replicas=0))
+    mock_kube_api.get_graph_deployment.side_effect = [initial, transitioned]
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.update_dgd_replicas_directly.side_effect = client.ApiException(
+        status=409
+    )
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ],
+        blocking=False,
+    )
+
+    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
+        "test-graph", "worker", 1
+    )
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+
+
+@pytest.mark.asyncio
 async def test_batch_writer_fence_retries_conflict_then_refreshes_authority(
     kubernetes_connector, mock_kube_api
 ):
@@ -1467,31 +1501,38 @@ async def test_set_component_replicas_ready_rejects_missing_dgd_uid(
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_ready_propagates_adapter_conflict(
+async def test_set_component_replicas_ready_retries_adapter_conflict(
     kubernetes_connector, mock_kube_api
 ):
     deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
     mock_kube_api.get_graph_deployment.return_value = deployment
     mock_kube_api.is_deployment_ready.return_value = True
-    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
-        "worker", replicas=0
-    )
-    mock_kube_api.update_scaling_adapter_replicas.side_effect = client.ApiException(
-        status=409
+    initial_adapter = _scaling_adapter("worker", replicas=0)
+    refreshed_adapter = deepcopy(initial_adapter)
+    refreshed_adapter["metadata"]["resourceVersion"] = "102"
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial_adapter,
+        refreshed_adapter,
+    ]
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = [
+        client.ApiException(status=409),
+        None,
+    ]
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
     )
 
-    with pytest.raises(client.ApiException) as exc_info:
-        await kubernetes_connector.set_component_replicas(
-            [
-                TargetReplica(
-                    sub_component_type=SubComponentType.DECODE,
-                    component_name="worker",
-                    desired_replicas=1,
-                )
-            ]
-        )
-
-    assert exc_info.value.status == 409
+    assert mock_kube_api.update_scaling_adapter_replicas.call_args_list == [
+        call("test-graph", "worker", 1, resource_version="101"),
+        call("test-graph", "worker", 1, resource_version="102"),
+    ]
     mock_kube_api.update_graph_replicas.assert_not_called()
 
 

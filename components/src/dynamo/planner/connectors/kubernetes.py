@@ -25,11 +25,10 @@ from typing import Optional
 
 from kubernetes.client import ApiException
 
+from dynamo.common.kubernetes import retry_kubernetes_write
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
-    DYNAMO_WORKER_METADATA_API_VERSION,
-    NVIDIA_API_GROUP,
     PLANNER_WRITER_FENCE_ANNOTATION,
     KubernetesAPI,
 )
@@ -616,13 +615,7 @@ class KubernetesConnector(PlannerConnector):
         handle them explicitly.
         """
         try:
-            result = self.kube_api.custom_api.list_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_WORKER_METADATA_API_VERSION,
-                namespace=self.kube_api.current_namespace,
-                plural="dynamoworkermetadatas",
-            )
-            return result.get("items", [])
+            return self.kube_api.list_worker_metadata()
         except ApiException as e:
             if e.status == 404:
                 logger.info("DynamoWorkerMetadata CRD not found, skipping MDC")
@@ -1440,18 +1433,38 @@ class KubernetesConnector(PlannerConnector):
     def _write_preflighted_replica_target(
         self, service: Service, replicas: int, scaling_adapter: dict | None
     ) -> None:
-        """Write through the same replica authority selected during preflight."""
-        if scaling_adapter is None:
-            self.kube_api.update_dgd_replicas_directly(
-                self.graph_deployment_name, service.name, replicas
+        """Write through the current authority, revalidating after conflicts."""
+        first_attempt = True
+
+        def write() -> None:
+            nonlocal first_attempt
+            current_service = service
+            current_adapter = scaling_adapter
+            if first_attempt:
+                first_attempt = False
+            else:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
+                )
+                component = get_components_by_name(deployment)[service.name]
+                current_service = Service(name=service.name, service=component)
+                _, current_adapter = self._authoritative_replica_state(
+                    deployment, current_service
+                )
+
+            if current_adapter is None:
+                self.kube_api.update_dgd_replicas_directly(
+                    self.graph_deployment_name, current_service.name, replicas
+                )
+                return
+            self.kube_api.update_scaling_adapter_replicas(
+                self.graph_deployment_name,
+                current_service.name,
+                replicas,
+                resource_version=current_adapter["metadata"]["resourceVersion"],
             )
-            return
-        self.kube_api.update_scaling_adapter_replicas(
-            self.graph_deployment_name,
-            service.name,
-            replicas,
-            resource_version=scaling_adapter["metadata"]["resourceVersion"],
-        )
+
+        retry_kubernetes_write(write)
 
     def _unready_recovery_dgd_rejection(self, deployment: dict) -> str | None:
         """Reject unsafe parent snapshots before reading any DGDSA target."""
