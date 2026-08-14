@@ -311,29 +311,30 @@ type MultinodeContainerResourceOverrides struct {
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
 // may change without notice.
 type ExperimentalSpec struct {
-	// FlagsInjection controls automatic backend-specific multinode flag and
-	// launch injection. Automatic is the default.
-	// For vLLM multiprocessing, Automatic injects
-	// --distributed-executor-backend=mp, --nnodes, --master-addr,
-	// --master-port=29500, --node-rank, and --headless on workers. Manual omits
-	// all of those except --master-port=29500, which remains operator-owned when
-	// the supplied command selects multiprocessing. The wait-for-leader-mp init
-	// container and other operator-owned pod wiring also remain in both modes.
-	// For vLLM Ray, Automatic constructs the Ray head or worker launch command and
-	// adds --distributed-executor-backend=ray to the leader; Manual preserves the
-	// supplied commands. For vLLM data parallelism, Automatic injects
-	// --data-parallel-hybrid-lb, --data-parallel-size when absent,
-	// --data-parallel-size-local, --data-parallel-start-rank,
-	// --data-parallel-address, and --data-parallel-rpc-port; Manual omits them.
-	// For SGLang, Automatic injects --dist-init-addr, --nnodes, and --node-rank;
-	// Manual omits them. For TensorRT-LLM, Automatic constructs the mpirun or sshd
-	// launch command; Manual preserves the supplied command and arguments. The
-	// TensorRT-LLM SSH and worker-probe wiring remains in both modes.
-	// Manual is valid only for multinode worker components and cannot initially
-	// be combined with GPU memory service or failover.
+	// FlagsInjection controls backend-specific multinode flag and launch injection:
+	//
+	//   - Automatic (default): For vLLM multiprocessing, injects
+	//     --distributed-executor-backend=mp, --nnodes, --master-addr,
+	//     --master-port=29500, --node-rank, and --headless on workers. For vLLM
+	//     Ray, constructs the Ray head or worker launch command and adds
+	//     --distributed-executor-backend=ray to the leader. For vLLM data
+	//     parallelism, injects --data-parallel-hybrid-lb, --data-parallel-size
+	//     when absent, --data-parallel-size-local, --data-parallel-start-rank,
+	//     --data-parallel-address, and --data-parallel-rpc-port. For SGLang,
+	//     injects --dist-init-addr, --nnodes, and --node-rank. For TensorRT-LLM,
+	//     constructs the mpirun or sshd launch command. User-provided topology
+	//     flags are not rejected or rewritten and may therefore be duplicated.
+	//   - Manual: Omits the Automatic backend-specific injections and preserves
+	//     supplied launch commands. For vLLM multiprocessing,
+	//     --master-port=29500 remains operator-owned and is still injected when
+	//     the supplied command selects multiprocessing. Operator-owned pod wiring,
+	//     including the wait-for-leader-mp init container, TensorRT-LLM SSH, and
+	//     worker-probe handling, remains enabled. Manual is valid only for
+	//     multinode worker components and cannot initially be combined with GPU
+	//     memory service or failover.
+	//
 	// Multinode.Worker.PodTemplateOverrides is independent of this field and may
-	// be used in either mode. Automatic injection does not reject or rewrite
-	// user-provided topology flags, so specifying them can produce duplicates.
+	// be used with either value.
 	// +optional
 	// +kubebuilder:default=Automatic
 	FlagsInjection FlagsInjectionMode `json:"flagsInjection,omitempty"`
