@@ -24,6 +24,7 @@ use clap::Parser;
 use dynamo_kv_router::TrackingHashAlgorithm;
 #[cfg(feature = "custom-policy")]
 use dynamo_kv_router::WorkerSelectionPolicy;
+use dynamo_kv_router::WorkerSelectionPolicyFactory;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
@@ -40,7 +41,6 @@ use dynamo_kv_router::services::selection::{
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
-use dynamo_kv_router::WorkerSelectionPolicyFactory;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
