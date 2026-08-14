@@ -11,9 +11,12 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Reconciliation and Admission Semantics
 
-- Reconcilers must be level-based. Derive actions from desired and observed
-  state on every invocation; never depend on the request operation or an event
-  edge to determine what to do.
+- Reconciler state convergence must be level-based. Derive actions from desired
+  and observed state on every invocation; never depend on the request operation
+  or informer event edge to determine what to do.
+- Kubernetes Event emission is intentionally edge-based. Derive these edges
+  from explicit object state, such as a spec/status difference or a durable
+  annotation, never from informer delivery semantics.
 - Admission validation should enforce state invariants independent of the
   request operation. Distinguish between `CREATE` and `UPDATE` only for
   exceptional, intentional API semantics, and document why the distinction is
