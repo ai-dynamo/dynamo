@@ -30,6 +30,10 @@ SPDX-License-Identifier: Apache-2.0
   non-nil precondition before calling the function.
 - If a function validates caller-provided input, return an error for invalid
   values. Do not disguise an invalid call by returning a zero value.
+- Do not overload a zero value to mean "not found" when absence must be
+  distinguished from a valid zero value. Return an explicit presence boolean
+  alongside the value, for example:
+  `func NestedValue(x any, path ...string) (value any, found bool)`.
 - Getters and transformation functions must not translate a `nil` input into a
   zero value by default. Do so only when nil-tolerant behavior is an intentional,
   documented API convention, such as JSON-path-style getters.
