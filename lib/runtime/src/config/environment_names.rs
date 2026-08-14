@@ -219,11 +219,20 @@ pub mod kvbm {
     /// Disable disk offload filter
     pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
 
-    /// Override the device (G1) layout type instead of detecting it from the KV cache
-    /// tensor shapes. Accepts `fully_contiguous` or `layer_separate`.
+    /// Override the device (G1) layout type of the vLLM connector instead of detecting it
+    /// from the KV cache tensor shapes. Accepts:
+    ///
+    /// - `fully_contiguous`
+    /// - `layer_separate` (family only; `outer_contiguous` still comes from the shapes)
+    /// - `layer_separate_outer_contiguous`
+    /// - `layer_separate_block_contiguous`
     ///
     /// A `layer_separate` device tier forces every NIXL transfer to be split into
     /// `num_layers * outer_dim` descriptors per block, which is costly on network storage.
+    /// `fully_contiguous` is only valid when the engine hands KVBM a single cross-layer
+    /// KV cache buffer; on vLLM's usual per-layer registration it fails at startup.
+    /// A `layer_separate_*` variant that contradicts the tensor shapes is also rejected
+    /// at startup rather than applied.
     pub const DYN_KVBM_DEVICE_LAYOUT_TYPE: &str = "DYN_KVBM_DEVICE_LAYOUT_TYPE";
 
     /// CPU cache configuration

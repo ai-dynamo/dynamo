@@ -12,7 +12,7 @@ use llm_rs::block_manager::distributed::{
 };
 #[cfg(feature = "nccl")]
 use llm_rs::block_manager::distributed::{NcclBootstrap, NcclCommOwned};
-use llm_rs::block_manager::layout::LayoutType;
+use llm_rs::block_manager::layout::{LayoutType, LayoutTypeRequest};
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
 
 /// Build NcclConfig from Python parameters.
@@ -97,6 +97,17 @@ impl From<PyLayoutType> for LayoutType {
             PyLayoutType::FullyContiguous => LayoutType::FullyContiguous,
             // Layout (outer_contiguous vs block_contiguous) is auto-detected from tensor shapes
             PyLayoutType::LayerSeparate => LayoutType::layer_separate_auto_default(),
+        }
+    }
+}
+
+impl From<PyLayoutType> for LayoutTypeRequest {
+    fn from(py_layout: PyLayoutType) -> Self {
+        match py_layout {
+            PyLayoutType::FullyContiguous => LayoutTypeRequest::Pinned(LayoutType::FullyContiguous),
+            // `LayerSeparate` names the family only; on paths that see the KV cache
+            // tensors, `outer_contiguous` still comes from their shapes.
+            PyLayoutType::LayerSeparate => LayoutTypeRequest::LayerSeparateAuto,
         }
     }
 }

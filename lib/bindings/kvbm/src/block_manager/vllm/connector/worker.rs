@@ -19,7 +19,7 @@ use crate::{
 };
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
-use dynamo_llm::block_manager::layout::LayoutType;
+use dynamo_llm::block_manager::layout::{LayoutType, LayoutTypeRequest};
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
@@ -27,17 +27,28 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 /// Reads the device layout override from [`env_kvbm::DYN_KVBM_DEVICE_LAYOUT_TYPE`].
 ///
-/// Returns `None` when the variable is unset, empty, or holds an unparsable value, in
+/// Returns `None` when the variable is unset, empty, or holds an unusable value, in
 /// which case the caller keeps its shape-based auto-detection.
-fn device_layout_type_from_env() -> Option<LayoutType> {
-    let raw = std::env::var(env_kvbm::DYN_KVBM_DEVICE_LAYOUT_TYPE).ok()?;
+fn device_layout_type_from_env() -> Option<LayoutTypeRequest> {
+    let raw = match std::env::var(env_kvbm::DYN_KVBM_DEVICE_LAYOUT_TYPE) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            tracing::warn!(
+                "Ignoring {}={raw:?}: value is not valid unicode",
+                env_kvbm::DYN_KVBM_DEVICE_LAYOUT_TYPE
+            );
+            return None;
+        }
+    };
+
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
 
-    match raw.parse::<LayoutType>() {
-        Ok(layout) => Some(layout),
+    match raw.parse::<LayoutTypeRequest>() {
+        Ok(request) => Some(request),
         Err(e) => {
             tracing::warn!(
                 "Ignoring {}={raw}: {e}",
@@ -58,7 +69,7 @@ pub trait Worker: Send + Sync {
         dtype_width_bytes: usize,
         kv_caches: Vec<(String, Arc<VllmTensor>)>,
         raw_event_handles: Vec<u64>,
-        device_layout_type: Option<LayoutType>,
+        device_layout_type: Option<LayoutTypeRequest>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
         outer_dim: Option<usize>,
@@ -155,7 +166,7 @@ impl Worker for KvConnectorWorker {
         dtype_width_bytes: usize,
         kv_caches: Vec<(String, Arc<VllmTensor>)>,
         raw_event_handles: Vec<u64>,
-        device_layout_type: Option<LayoutType>,
+        device_layout_type: Option<LayoutTypeRequest>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
         outer_dim: Option<usize>,
@@ -193,42 +204,17 @@ impl Worker for KvConnectorWorker {
 
         self.layer_events = raw_event_handles;
 
-        // Auto-detect device layout type if neither the caller nor the environment set it.
         // A LayerSeparate device tier fragments every disk/host transfer into
         // `num_layers * outer_dim` NIXL descriptors per block, so operators whose engine
         // allocates a cross-layer contiguous KV cache can force FullyContiguous instead.
-        let requested_device_layout_type = device_layout_type.or_else(device_layout_type_from_env);
+        // Precedence is caller argument, then environment, then shape-based detection;
+        // a request for LayerSeparate still leaves `outer_contiguous` to the shapes.
+        let requested_device_layout_type = device_layout_type
+            .or_else(device_layout_type_from_env)
+            .unwrap_or(LayoutTypeRequest::LayerSeparateAuto);
 
-        let detected_device_layout_type = match requested_device_layout_type {
-            Some(layout) => {
-                tracing::info!("Using explicit device layout: {:?}", layout);
-                layout
-            }
-            None => {
-                if let Some(ref shape) = first_tensor_shape {
-                    match LayoutType::layer_separate_auto(shape, num_device_blocks) {
-                        Ok(detected) => {
-                            tracing::info!(
-                                "Auto-detected device layout from tensor shape: {:?}",
-                                detected
-                            );
-                            detected
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to auto-detect layout from shape {:?}: {}. Using default.",
-                                shape,
-                                e
-                            );
-                            LayoutType::layer_separate_auto_default()
-                        }
-                    }
-                } else {
-                    tracing::warn!("No tensors available for layout detection. Using default.");
-                    LayoutType::layer_separate_auto_default()
-                }
-            }
-        };
+        let detected_device_layout_type = requested_device_layout_type
+            .resolve(first_tensor_shape.as_deref(), num_device_blocks)?;
 
         let mut config_builder = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())

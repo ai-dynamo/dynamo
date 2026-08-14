@@ -11,6 +11,10 @@ class PyLayoutType:
     is emitted as num_layers * outer_dim descriptors per block. FullyContiguous
     describes a single cross-layer contiguous region and is transferred as one
     descriptor per block.
+
+    LayerSeparate names the layout family only. Where the KV cache tensors are
+    available, as on the vLLM connector, whether the outer dimension or the block
+    dimension comes first is still detected from their shapes.
     """
 
     FullyContiguous: ClassVar["PyLayoutType"]
@@ -167,7 +171,7 @@ class KvbmWorker:
         layout_blocking: bool
             Whether to block on layout initialization, defaults to False
         device_layout_type: Optional[PyLayoutType]
-            Layout type for device blocks; auto-detected from the tensor shapes when None
+            Layout type for device blocks, defaults to FullyContiguous
         host_layout_type: Optional[PyLayoutType]
             Layout type for host blocks, defaults to FullyContiguous
         disk_layout_type: Optional[PyLayoutType]

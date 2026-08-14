@@ -51,7 +51,8 @@ def _check_kvbm_imports():
         assert KvbmWorker is not None, "KvbmWorker class not available"
 
         # PyLayoutType is the only way to supply the `*_layout_type` arguments of
-        # KvbmWorker/register_kv_caches, so it has to be registered on the module.
+        # KvbmWorker.__init__ and of PyKvConnectorWorker.register_kv_caches, so it
+        # has to be registered on the module.
         assert PyLayoutType is not None, "PyLayoutType class not available"
         assert PyLayoutType.FullyContiguous != PyLayoutType.LayerSeparate
     except ImportError as e:
