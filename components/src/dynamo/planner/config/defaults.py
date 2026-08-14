@@ -64,6 +64,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         "PROMETHEUS_EXTRA_QUERY_PARAMS"
     )
     metric_pulling_prometheus_ca_bundle = os.environ.get("PROMETHEUS_CA_BUNDLE")
+    metric_pulling_prometheus_request_timeout_seconds = float(
+        os.environ.get("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "10")
+    )
     profile_results_dir = "profiling_results"
 
     isl = 3000  # in number of tokens

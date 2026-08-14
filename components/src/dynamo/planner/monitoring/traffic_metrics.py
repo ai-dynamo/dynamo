@@ -116,8 +116,13 @@ class PrometheusAPIClient:
         ssl_verify: bool = False,
         extra_query_params: Optional[Dict[str, str]] = None,
         ca_bundle: Optional[str] = None,
+        request_timeout_seconds: float = 10.0,
     ):
-        self.prom = PrometheusConnect(url=url, disable_ssl=not ssl_verify)
+        self.prom = PrometheusConnect(
+            url=url,
+            disable_ssl=not ssl_verify,
+            timeout=request_timeout_seconds,
+        )
         if bearer_token:
             self.prom._session.headers["Authorization"] = f"Bearer {bearer_token}"
         if bearer_token_file:

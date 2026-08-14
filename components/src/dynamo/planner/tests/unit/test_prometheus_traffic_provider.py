@@ -77,6 +77,26 @@ def test_accept_length_uses_current_runtime_namespace():
     )
 
 
+def test_provider_passes_prometheus_request_timeout():
+    config = _config()
+    config.metric_pulling_prometheus_request_timeout_seconds = 3.5
+    client_patch = patch(
+        "dynamo.planner.environment.metrics_provider."
+        "prometheus_traffic_provider.PrometheusAPIClient"
+    )
+    client_class = client_patch.start()
+    try:
+        PrometheusTrafficProvider(
+            config=config,
+            state_source=_state_source(),
+            metrics_state=Metrics(),
+        )
+    finally:
+        client_patch.stop()
+
+    assert client_class.call_args.kwargs["request_timeout_seconds"] == 3.5
+
+
 def test_accept_length_falls_back_to_configured_namespace():
     provider, client, client_patch = _provider()
     client.get_avg_spec_decode_accept_length.return_value = 2.5

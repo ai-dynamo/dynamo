@@ -579,6 +579,18 @@ class PlannerConfig(BaseModel):
             "regardless of ssl_verify."
         ),
     )
+    metric_pulling_prometheus_request_timeout_seconds: float = Field(
+        default_factory=lambda: float(
+            os.environ.get("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "10")
+        ),
+        gt=0,
+        exclude=True,
+        description=(
+            "Maximum time in seconds for each Prometheus API request. This bounds "
+            "metric collection when Prometheus is slow or unreachable so the planner "
+            "control loop can continue."
+        ),
+    )
 
     @field_validator("metric_pulling_prometheus_ca_bundle", mode="after")
     @classmethod

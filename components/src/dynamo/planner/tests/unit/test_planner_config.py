@@ -223,6 +223,29 @@ def test_throughput_metrics_source_invalid():
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
 
 
+def test_prometheus_request_timeout_defaults_to_ten_seconds():
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 10.0
+
+
+def test_prometheus_request_timeout_uses_environment_default(monkeypatch):
+    monkeypatch.setenv("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "2.5")
+
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 2.5
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_prometheus_request_timeout_rejects_non_positive_values(timeout):
+    with pytest.raises(ValidationError):
+        PlannerConfig(
+            namespace="test-ns",
+            metric_pulling_prometheus_request_timeout_seconds=timeout,
+        )
+
+
 @pytest.mark.parametrize("bucket_size", [1, 4, 9, 16, 25])
 def test_fpm_sample_bucket_size_accepts_perfect_squares(bucket_size):
     """fpm_sample_bucket_size must be a perfect square (valid values)."""
