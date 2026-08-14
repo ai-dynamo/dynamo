@@ -43,8 +43,24 @@ def install_graceful_shutdown(
     deferred_handlers_ran = False
 
     async def _drain() -> None:
-        if drain_callbacks is not None:
-            await asyncio.gather(*(callback() for callback in drain_callbacks))
+        if drain_callbacks is None:
+            return
+
+        callbacks = tuple(drain_callbacks)
+        results = await asyncio.gather(
+            *(callback() for callback in callbacks), return_exceptions=True
+        )
+        for callback, result in zip(callbacks, results):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
+                logging.error(
+                    "Drain callback failed: %r",
+                    callback,
+                    exc_info=(type(result), result, result.__traceback__),
+                )
+            elif isinstance(result, BaseException):
+                raise result
 
     async def run_deferred_handlers() -> None:
         nonlocal deferred_handlers_ran

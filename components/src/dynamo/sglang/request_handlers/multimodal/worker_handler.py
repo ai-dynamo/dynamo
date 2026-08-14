@@ -773,7 +773,7 @@ class MultimodalPrefillWorkerHandler(
         self,
         disagg_request: DisaggSglangMultimodalRequest,
         bootstrap_room: int,
-        context=None,
+        context: Context,
     ):
         """Process multimodal input and start prefill generation"""
         # Get the SglangMultimodalRequest from the DisaggSglangMultimodalRequest
@@ -820,21 +820,33 @@ class MultimodalPrefillWorkerHandler(
             # Consume through terminal state (prefill doesn't return text, but the
             # stream owns the KV transfer lifecycle used by shutdown drain).
             result_consumption_started = True
-            await self._consume_results(results, tensor_id)
+            await self._consume_results(results, tensor_id, context)
         finally:
             # _consume_results owns release once entered. This fallback covers
             # cancellation or engine failure before result consumption starts.
             if tensor_id is not None and not result_consumption_started:
                 self.embeddings_processor.release_embeddings(tensor_id)
 
-    async def _consume_results(self, results, tensor_id: Optional[int]):
+    async def _consume_results(
+        self, results, tensor_id: Optional[int], context: Context
+    ) -> None:
         """Consume prefill results without returning them (like regular SGLang)"""
         released = False
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         try:
-            async for _ in results:
-                if tensor_id is not None and not released:
-                    self.embeddings_processor.release_embeddings(tensor_id)
-                    released = True
+            async with self._cancellation_monitor(request_id_future, context):
+                async for result in results:
+                    if not request_id_future.done() and isinstance(result, dict):
+                        sglang_request_id = result.get("meta_info", {}).get("id")
+                        if sglang_request_id:
+                            request_id_future.set_result(sglang_request_id)
+                            logger.debug(
+                                "New multimodal prefill request ID: %s",
+                                sglang_request_id,
+                            )
+                    if tensor_id is not None and not released:
+                        self.embeddings_processor.release_embeddings(tensor_id)
+                        released = True
         finally:
             if tensor_id is not None and not released:
                 self.embeddings_processor.release_embeddings(tensor_id)

@@ -37,13 +37,25 @@ class PrefillResultDrain:
             )
 
     async def drain(self) -> None:
-        """Wait for all tracked work without letting waiter cancellation cancel it."""
-        while tasks := tuple(self._tasks):
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in tasks), return_exceptions=True
-            )
+        """Wait for tracked work, cancelling it if the bounded drain is cancelled."""
+        try:
+            while tasks := tuple(self._tasks):
+                await asyncio.gather(
+                    *(asyncio.shield(task) for task in tasks), return_exceptions=True
+                )
+        except asyncio.CancelledError:
+            await self.cancel_and_wait()
+            raise
+
+    async def cancel_and_wait(self) -> None:
+        """Cancel tracked work and wait for its cancellation cleanup to finish."""
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def cancel(self) -> None:
-        """Cancel tracked work as a final cleanup fallback after drain timeout."""
+        """Request cancellation as a final synchronous cleanup fallback."""
         for task in tuple(self._tasks):
             task.cancel()
