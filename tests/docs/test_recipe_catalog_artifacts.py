@@ -17,6 +17,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CATALOG = REPO_ROOT / "docs/fern/pages/recipes/_catalog"
 VALIDATOR_PATH = CATALOG / "validate.py"
 
+if not VALIDATOR_PATH.is_file():
+    pytest.skip(
+        "recipe catalog sources are not present in this runtime image",
+        allow_module_level=True,
+    )
+
 _SPEC = importlib.util.spec_from_file_location(
     "recipe_catalog_validate", VALIDATOR_PATH
 )
