@@ -23,6 +23,7 @@ const DEFAULT_LEGACY_AUDIT_NATS_SUBJECT: &str = "dynamo.audit.v1";
 const DEFAULT_OTEL_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_S3_ROLL_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_S3_FLUSH_INTERVAL_MS: u64 = 10_000;
+const DEFAULT_S3_MAX_CONCURRENT_UPLOADS: usize = 4;
 
 const CAPTURE_UNINITIALIZED: u8 = 0;
 const CAPTURE_ACTIVE: u8 = 1;
@@ -103,6 +104,7 @@ pub struct RequestTracePolicy {
     pub s3_prefix: Option<String>,
     pub s3_roll_uncompressed_bytes: u64,
     pub s3_flush_interval_ms: u64,
+    pub s3_max_concurrent_uploads: usize,
 }
 
 impl RequestTracePolicy {
@@ -234,6 +236,10 @@ fn load_from_env() -> RequestTracePolicy {
         env_u64(&[env_request_trace::DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS])
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_S3_FLUSH_INTERVAL_MS);
+    let s3_max_concurrent_uploads =
+        env_usize(&[env_request_trace::DYN_REQUEST_TRACE_S3_MAX_CONCURRENT_UPLOADS])
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_S3_MAX_CONCURRENT_UPLOADS);
 
     RequestTracePolicy {
         enabled,
@@ -256,6 +262,7 @@ fn load_from_env() -> RequestTracePolicy {
         s3_prefix,
         s3_roll_uncompressed_bytes,
         s3_flush_interval_ms,
+        s3_max_concurrent_uploads,
     }
 }
 

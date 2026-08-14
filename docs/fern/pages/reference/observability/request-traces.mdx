@@ -49,12 +49,42 @@ Setting `DYN_REQUEST_TRACE_SINKS=stderr` does not enable OTLP export. Include `o
 The `s3` sink writes records directly to an S3 bucket as gzipped JSONL objects, one object per rolled
 batch. Records are batched in-process and uploaded when the batch reaches
 `DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES` or when `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS`
-elapses. Object keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`, where
-`run_id` is a per-process UUID that keeps container restarts and hostname collisions from overwriting
-earlier batches. Credentials come from the shared object-store client's provider chain (environment
-variables, IMDS, IRSA, and Pod Identity). Shared AWS config and credential profiles are not loaded;
-how the frontend pod is credentialed is a deployment concern. On terminal upload failure the batch
-is dropped and a warning is logged; no on-disk retry queue is kept.
+elapses. Object keys use Hive-style time partitions,
+`{prefix}/date=YYYY-MM-DD/hour=HH/{MMSS}-{seq}-{pod}-{run_id}.jsonl.gz`, so Athena and Glue can
+prune by day and hour. Time is the only partition column: a batch can hold records for several models,
+and every row carries its own `model` field, so query that column instead of partitioning on it.
+
+The prefix defaults to the parent `DynamoGraphDeployment`, qualified by its namespace as
+`{namespace}/{name}` (the operator injects `DYN_PARENT_DGD_K8S_NAMESPACE` and
+`DYN_PARENT_DGD_K8S_NAME`), so each deployment writes under its own prefix with no configuration.
+The namespace is included because DGD names are unique only within a namespace.
+Set `DYN_REQUEST_TRACE_S3_PREFIX` to override that — for example to nest traces under an
+organizational path or to reserve a prefix in a bucket shared with other data.
+
+In the filename, `MMSS` is the minute and second the batch was flushed, ordering objects within the
+hour partition, and `seq` is a per-process counter that keeps two batches flushed in the same second
+distinct. `pod` identifies the writing pod (`POD_NAME`, falling back to the hostname), and
+`run_id` is a per-process UUID that keeps container restarts and pod-name collisions from overwriting
+earlier batches. Per-record timing lives in each row's `event_time_unix_ms`. Credentials come from the shared
+object-store client's provider chain (environment variables, IMDS, IRSA, and Pod Identity). Shared AWS
+config and credential profiles are not loaded; how the frontend pod is credentialed is a deployment
+concern.
+
+Uploads run on separate tasks. At most `DYN_REQUEST_TRACE_S3_MAX_CONCURRENT_UPLOADS` `PutObject` calls
+are in flight, with a queue of ready batches behind them, so a slow `PutObject` does not stall record
+ingestion. Loss is
+bounded and always counted: if S3 stays slow long enough to fill both the in-flight set and the queue,
+further batches are discarded, and if the record channel fills first, individual records are dropped.
+Either way the sink warns on the first drop and logs the running total at shutdown rather than one line
+per record. On terminal upload failure the batch is dropped and a warning is logged; no on-disk retry
+queue is kept.
+
+To query the objects with Athena, declare the two partition keys and let partition projection or
+`MSCK REPAIR TABLE` discover them:
+
+```sql
+PARTITIONED BY (`date` string, `hour` string)
+```
 
 ```bash
 export DYN_REQUEST_TRACE=1

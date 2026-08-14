@@ -605,6 +605,14 @@ pub mod llm {
         /// still land in S3. Default `10000` (10 s).
         pub const DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS: &str =
             "DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS";
+
+        /// Maximum S3 uploads in flight concurrently. Finished batches are
+        /// uploaded on separate tasks so a slow `PutObject` cannot stall record
+        /// ingestion. A bounded queue holds a few more ready batches behind
+        /// these; once both fill, further batches are dropped and counted.
+        /// Default `4`.
+        pub const DYN_REQUEST_TRACE_S3_MAX_CONCURRENT_UPLOADS: &str =
+            "DYN_REQUEST_TRACE_S3_MAX_CONCURRENT_UPLOADS";
     }
 }
 
@@ -771,6 +779,25 @@ pub mod discovery {
 
     /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
     pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+}
+
+/// Pod metadata injected by the Dynamo operator.
+///
+/// The operator sets these on every component container, so they are always
+/// present on operator-managed Kubernetes deployments and absent elsewhere
+/// (local runs, plain Docker, bare metal).
+pub mod kubernetes {
+    /// Kubernetes name of the parent `DynamoGraphDeployment` resource.
+    pub const DYN_PARENT_DGD_K8S_NAME: &str = "DYN_PARENT_DGD_K8S_NAME";
+
+    /// Kubernetes namespace of the parent `DynamoGraphDeployment` resource.
+    pub const DYN_PARENT_DGD_K8S_NAMESPACE: &str = "DYN_PARENT_DGD_K8S_NAMESPACE";
+
+    /// Pod name, injected from `metadata.name`.
+    pub const POD_NAME: &str = "POD_NAME";
+
+    /// Pod namespace, injected from `metadata.namespace`.
+    pub const POD_NAMESPACE: &str = "POD_NAMESPACE";
 }
 
 /// CUDA and GPU environment variables
