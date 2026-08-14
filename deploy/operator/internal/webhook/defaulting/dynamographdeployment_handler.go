@@ -133,6 +133,10 @@ func defaultWorkloadProvider(
 		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse {
 		provider = consts.WorkloadProviderGrove
 	}
+	if provider == consts.WorkloadProviderComponent &&
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet]) == consts.KubeLabelValueTrue {
+		provider = consts.WorkloadProviderDisaggregatedSet
+	}
 
 	// Allocate annotation storage before materializing the selected provider.
 	if dgd.Annotations == nil {

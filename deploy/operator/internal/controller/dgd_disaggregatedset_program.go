@@ -22,10 +22,12 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // disaggregatedSetEligibleConditionType reports whether the DisaggregatedSet
@@ -33,12 +35,12 @@ import (
 const disaggregatedSetEligibleConditionType = "DisaggregatedSetEligible"
 
 type disaggregatedSetProgram struct {
-	sharedResources   *dgdSharedResourcesReconciler
-	rollout           *dgdWorkerRolloutReconciler
-	restart           *dgdRestartReconciler
-	workloads         *disaggregatedSetWorkloadsReconciler
-	scalingAdapters   *dgdScalingAdaptersReconciler
-	unsupportedReason string
+	sharedResources *dgdSharedResourcesReconciler
+	rollout         *dgdWorkerRolloutReconciler
+	restart         *dgdRestartReconciler
+	workloads       *disaggregatedSetWorkloadsReconciler
+	scalingAdapters *dgdScalingAdaptersReconciler
+	gate            features.Gate
 }
 
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggregatedSetProgram {
@@ -58,6 +60,7 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggre
 		restart:         newDGDRestartReconciler(),
 		workloads:       r.newDisaggregatedSetWorkloadsReconciler(rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
+		gate:            r.RuntimeConfig.Gate,
 	}
 }
 
@@ -66,6 +69,14 @@ func (p *disaggregatedSetProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	if p.gate == nil || !p.gate.Enabled(features.DisaggregatedSet) {
+		err := failWorkloadProgram(
+			reasonSelectedWorkloadProviderUnavailable,
+			fmt.Errorf("selected workload provider %q is unavailable because DisaggregatedSet prerequisites are unavailable", workloadProviderDisaggregatedSet),
+		)
+		programResult.Fail(req.DGD.Generation, reasonSelectedWorkloadProviderUnavailable, err)
+		return programResult, reconcile.TerminalError(err)
+	}
 	defer func() {
 		if retErr == nil {
 			return
@@ -76,26 +87,26 @@ func (p *disaggregatedSetProgram) Reconcile(
 		}
 		programResult.Fail(req.DGD.Generation, reason, retErr)
 	}()
-	if p.unsupportedReason != "" {
+	if reason := disaggregatedSetEligibilityReason(req.DGD, p.gate); reason != "" {
 		changed := setDisaggregatedSetEligibilityCondition(
 			&programResult,
 			req.DGD.Generation,
 			metav1.ConditionFalse,
 			"UnsupportedIntent",
-			p.unsupportedReason,
+			reason,
 		)
 		if changed {
 			programResult.Eventf(
 				corev1.EventTypeWarning,
 				"DisaggregatedSetUnsupported",
 				"DisaggregatedSet request cannot be reconciled: %s",
-				p.unsupportedReason,
+				reason,
 			)
 		}
 		programResult.applyReconcileResult(req.DGD.Generation, ReconcileResult{
 			State:   nvidiacomv1beta1.DGDStateFailed,
 			Reason:  "disaggregated_set_intent_unsupported",
-			Message: Message(p.unsupportedReason),
+			Message: Message(reason),
 		})
 		return programResult, nil
 	}

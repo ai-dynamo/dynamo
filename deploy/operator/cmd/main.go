@@ -417,13 +417,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	gates, capabilities, err := features.New(mainCtx, mgr, operatorCfg)
+	gates, err := features.New(mainCtx, mgr, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to resolve operator feature gates")
 		os.Exit(1)
 	}
 	runtimeConfig.Gate = gates
-	runtimeConfig.Capabilities = capabilities
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated

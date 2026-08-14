@@ -10,7 +10,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -126,170 +125,23 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(completedResult.Status.Restart.Phase).To(Equal(nvidiacomv1beta1.RestartPhaseCompleted))
 	})
 
-	It("preserves component services across DCD to DS cutover and back to DCD", func() {
+	It("does not switch the durable provider when routing annotations change", func() {
 		ctx := context.Background()
-		dgd := newEnvtestDSHappyPathDGD("demo-ds-cutover")
+		dgd := newEnvtestDSHappyPathDGD("demo-ds-immutable-provider")
 		dgd.Annotations = nil
-		for i := range dgd.Spec.Components {
-			dgd.Spec.Components[i].ModelRef = &nvidiacomv1beta1.ModelReference{Name: "shared-smoke-model"}
-		}
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
 
-		reconciler, dcdReconciler := newEnvtestDSReconcilers()
+		reconciler, _ := newEnvtestDSReconcilers()
+		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(current.Annotations[consts.KubeAnnotationWorkloadProvider]).To(Equal(consts.WorkloadProviderComponent))
 
-		By("creating the initial DCD pathway resources and component services")
-		result, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
-		legacyDCDs := ownedEnvtestCutoverDCDs(ctx, current)
-		Expect(legacyDCDs).To(HaveLen(2))
-		serviceUIDs := createComponentServices(ctx, dcdReconciler, legacyDCDs, false)
-
-		By("enabling DisaggregatedSet and keeping DCD services while DS is pending")
-		markEnvtestCutoverDCDsReady(ctx, current)
-		_, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		if current.Annotations == nil {
-			current.Annotations = map[string]string{}
-		}
 		current.Annotations[consts.KubeAnnotationEnableDisaggregatedSet] = consts.KubeLabelValueTrue
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		_, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 
-		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
-		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(HaveLen(2))
-		Expect(envtestCutoverServiceUIDs(ctx, current.Namespace, serviceUIDs)).To(Equal(serviceUIDs))
-
-		By("marking the DisaggregatedSet ready and handing service ownership to the DGD")
-		markDisaggregatedSetReady(ctx, current)
-
-		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
-		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(BeEmpty())
-		Expect(envtestCutoverServiceUIDs(ctx, current.Namespace, serviceUIDs)).To(Equal(serviceUIDs))
-		for name := range serviceUIDs {
-			service := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
-			owner := metav1.GetControllerOf(service)
-			Expect(owner).NotTo(BeNil())
-			Expect(owner.Kind).To(Equal(dynamoGraphDeploymentKind))
-			Expect(owner.UID).To(Equal(current.UID))
-		}
-		typedDS := fetchTypedDisaggregatedSet(ctx, current)
-		activeRevision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
-		for name := range serviceUIDs {
-			service := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
-			Expect(service.Spec.Selector).To(HaveKeyWithValue(disaggregatedsetv1.SetNameLabelKey, disaggregatedSetName(current)))
-			Expect(service.Spec.Selector).To(HaveKeyWithValue(disaggregatedsetv1.RevisionLabelKey, activeRevision))
-			Expect([]string{"prefill", "decode"}).To(ContainElement(service.Spec.Selector[disaggregatedsetv1.RoleLabelKey]))
-		}
-
-		modelServiceName := dynamo.GenerateServiceName("shared-smoke-model")
-		modelService := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: current.Namespace}, modelService)).To(Succeed())
-		Expect(metav1.GetControllerOf(modelService)).NotTo(BeNil())
-		Expect(metav1.GetControllerOf(modelService).Kind).To(Equal("DynamoGraphDeployment"))
-		modelServiceUID := modelService.UID
-
-		By("falling back to DCDs and restoring service ownership before deleting the DS")
-		delete(current.Annotations, consts.KubeAnnotationEnableDisaggregatedSet)
-		Expect(k8sClient.Update(ctx, current)).To(Succeed())
-
-		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
-		replacementDCDs := ownedEnvtestCutoverDCDs(ctx, current)
-		Expect(replacementDCDs).To(HaveLen(2))
-		for name := range serviceUIDs {
-			service := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
-			owner := metav1.GetControllerOf(service)
-			Expect(owner).NotTo(BeNil())
-			Expect(owner.Kind).To(Equal(dynamoGraphDeploymentKind))
-		}
-		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs, false)
-		for name := range serviceUIDs {
-			service := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: current.Namespace}, service)).To(Succeed())
-			Expect(isDisaggregatedSetServiceSelector(service)).To(BeTrue(), "pending DCDs must not take traffic from the ready DisaggregatedSet")
-		}
-		markEnvtestCutoverDCDsReady(ctx, current)
-		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs, true)
-
-		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+		Expect(current.Annotations[consts.KubeAnnotationWorkloadProvider]).To(Equal(consts.WorkloadProviderComponent))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
-
-		fallbackDCDs := ownedEnvtestCutoverDCDs(ctx, current)
-		fallbackDCDNames := map[string]struct{}{}
-		for _, dcd := range fallbackDCDs {
-			fallbackDCDNames[dcd.Name] = struct{}{}
-			service := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dynamo.NormalizeKubeResourceName(dcd.Name), Namespace: current.Namespace}, service)).To(Succeed())
-			Expect(isDisaggregatedSetServiceSelector(service)).To(BeFalse(), "ready DCDs must take over the Service before the DisaggregatedSet is deleted")
-			owner := metav1.GetControllerOf(service)
-			Expect(owner).NotTo(BeNil())
-			Expect(owner.Kind).To(Equal("DynamoComponentDeployment"))
-			Expect(owner.Name).To(Equal(dcd.Name))
-		}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: current.Namespace}, modelService)).To(Succeed())
-		Expect(modelService.UID).To(Equal(modelServiceUID))
-		modelOwner := metav1.GetControllerOf(modelService)
-		Expect(modelOwner).NotTo(BeNil())
-		Expect(modelOwner.Kind).To(Equal("DynamoComponentDeployment"))
-		Expect(fallbackDCDNames).To(HaveKey(modelOwner.Name))
-	})
-
-	It("recreates a missing shared model service before DS fallback completes", func() {
-		ctx := context.Background()
-		dgd := newEnvtestDSHappyPathDGD("demo-ds-missing-service")
-		for i := range dgd.Spec.Components {
-			dgd.Spec.Components[i].ModelRef = &nvidiacomv1beta1.ModelReference{Name: "shared-missing-model"}
-		}
-		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
-
-		reconciler, dcdReconciler := newEnvtestDSReconcilers()
-
-		By("creating a DS-owned shared model service")
-		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		markDisaggregatedSetReady(ctx, current)
-		result, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
-
-		By("creating replacement DCDs and deleting the shared model service before ownership handoff")
-		delete(current.Annotations, consts.KubeAnnotationEnableDisaggregatedSet)
-		Expect(k8sClient.Update(ctx, current)).To(Succeed())
-		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
-
-		replacementDCDs := ownedEnvtestCutoverDCDs(ctx, current)
-		Expect(replacementDCDs).To(HaveLen(2))
-		_ = createComponentServices(ctx, dcdReconciler, replacementDCDs, false)
-
-		modelServiceName := dynamo.GenerateServiceName("shared-missing-model")
-		modelService := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: current.Namespace}, modelService)).To(Succeed())
-		Expect(k8sClient.Delete(ctx, modelService)).To(Succeed())
-		Eventually(func() bool {
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: current.Namespace}, &corev1.Service{})
-			return apierrors.IsNotFound(err)
-		}, time.Minute, time.Second).Should(BeTrue())
-		markEnvtestCutoverDCDsReady(ctx, current)
-
-		By("recreating the missing model service under a replacement DCD owner")
-		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
-
-		replacementDCDNames := map[string]struct{}{}
-		for _, dcd := range ownedEnvtestCutoverDCDs(ctx, current) {
-			replacementDCDNames[dcd.Name] = struct{}{}
-		}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: current.Namespace}, modelService)).To(Succeed())
-		modelOwner := metav1.GetControllerOf(modelService)
-		Expect(modelOwner).NotTo(BeNil())
-		Expect(modelOwner.Kind).To(Equal("DynamoComponentDeployment"))
-		Expect(replacementDCDNames).To(HaveKey(modelOwner.Name))
 	})
 
 	It("keeps the selected DisaggregatedSet when later intent is unsupported", func() {
@@ -325,8 +177,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 
 func newEnvtestDSReconcilers() (*DynamoGraphDeploymentReconciler, *DynamoComponentDeploymentReconciler) {
 	runtimeConfig := &commoncontroller.RuntimeConfig{
-		Gate:         features.Gates{LWS: true, DisaggregatedSet: true},
-		Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
+		Gate: features.Gates{LWS: true, DisaggregatedSet: true},
 	}
 	operatorConfig := &configv1alpha1.OperatorConfiguration{
 		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
@@ -355,7 +206,11 @@ func reconcileCurrentDGDProgram(
 ) (workloadProgramResult, *nvidiacomv1beta1.DynamoGraphDeployment) {
 	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current)).To(Succeed())
-	result, err := reconciler.selectWorkloadProgram(current).Reconcile(ctx, workloadProgramRequest{DGD: current})
+	provider, err := reconciler.ensureWorkloadProvider(ctx, current)
+	Expect(err).NotTo(HaveOccurred())
+	program, err := reconciler.selectWorkloadProgram(provider)
+	Expect(err).NotTo(HaveOccurred())
+	result, err := program.Reconcile(ctx, workloadProgramRequest{DGD: current})
 	Expect(err).NotTo(HaveOccurred())
 	return result, current
 }

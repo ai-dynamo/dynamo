@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 

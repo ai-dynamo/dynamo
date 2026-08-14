@@ -322,6 +322,22 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			},
 		},
 		{
+			name:         "CREATE selects DisaggregatedSet after Grove opt-out",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove:            consts.KubeLabelValueFalse,
+				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+			wantProvider: consts.WorkloadProviderDisaggregatedSet,
+		},
+		{
 			name:         "preserves explicit minAvailable",
 			op:           admissionv1.Create,
 			groveEnabled: true,

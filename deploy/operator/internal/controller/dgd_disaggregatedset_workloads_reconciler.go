@@ -47,12 +47,6 @@ type disaggregatedSetWorkloadsReconciler struct {
 	componentRestartProgress *componentRestartProgressResolver
 }
 
-type disaggregatedSetCompatibilityCleanup struct {
-	apiAvailable       bool
-	restoreDCDServices bool
-	workloads          *disaggregatedSetWorkloadsReconciler
-}
-
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *disaggregatedSetWorkloadsReconciler {
@@ -69,34 +63,6 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler
 	}
 	return workloads
 }
-
-func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetCompatibilityCleanup(
-	restoreDCDServices bool,
-) *disaggregatedSetCompatibilityCleanup {
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
-	apiAvailable := r.RuntimeConfig != nil && r.RuntimeConfig.Capabilities.DisaggregatedSetAPI
-	return &disaggregatedSetCompatibilityCleanup{
-		apiAvailable:       apiAvailable,
-		restoreDCDServices: restoreDCDServices,
-		workloads:          r.newDisaggregatedSetWorkloadsReconciler(rollout),
-	}
-}
-
-func (r *disaggregatedSetCompatibilityCleanup) Reconcile(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) error {
-	if !r.apiAvailable {
-		return nil
-	}
-	if r.restoreDCDServices {
-		if err := r.workloads.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, dgd); err != nil {
-			return err
-		}
-	}
-	return r.workloads.deleteDisaggregatedSetIfExists(ctx, dgd)
-}
-
 func newDisaggregatedSetWorkloadsReconciler(
 	k8sClient client.Client,
 	recorder events.EventRecorder,

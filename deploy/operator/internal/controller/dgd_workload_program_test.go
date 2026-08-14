@@ -60,6 +60,11 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			provider:    workloadProviderGrove,
 			wantProgram: &groveProgram{},
 		},
+		{
+			name:        "DisaggregatedSet provider selects DisaggregatedSet program",
+			provider:    workloadProviderDisaggregatedSet,
+			wantProgram: &disaggregatedSetProgram{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -91,6 +96,13 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 				assert.NotNil(t, grove.scalingAdapters)
 				assert.NotNil(t, grove.topology)
 			}
+			if disaggregatedSet, ok := got.(*disaggregatedSetProgram); ok {
+				assert.NotNil(t, disaggregatedSet.sharedResources)
+				assert.NotNil(t, disaggregatedSet.rollout)
+				assert.NotNil(t, disaggregatedSet.restart)
+				assert.NotNil(t, disaggregatedSet.workloads)
+				assert.NotNil(t, disaggregatedSet.scalingAdapters)
+			}
 		})
 	}
 }
@@ -113,6 +125,26 @@ func TestSelectedGroveProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonSelectedWorkloadProviderUnavailable), ready.Reason)
 	assert.Contains(t, ready.Message, "Grove is disabled")
+}
+
+func TestSelectedDisaggregatedSetProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
+	t.Log("Create a DGD request and an unavailable DisaggregatedSet program")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 3},
+	}
+	program := &disaggregatedSetProgram{gate: features.Gates{LWS: true}}
+
+	t.Log("Reconcile the durably selected DisaggregatedSet program while prerequisites are unavailable")
+	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, reconcile.TerminalError(nil))
+
+	t.Log("Verify DisaggregatedSet reports provider unavailability without falling back")
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, string(reasonSelectedWorkloadProviderUnavailable), ready.Reason)
+	assert.Contains(t, ready.Message, "DisaggregatedSet prerequisites are unavailable")
 }
 
 func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
@@ -140,7 +172,8 @@ func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 func TestDisaggregatedSetUnsupportedIntentIsSticky(t *testing.T) {
 	dgd := newEnvtestDSHappyPathDGD("unsupported-intent")
 	dgd.Generation = 7
-	program := &disaggregatedSetProgram{unsupportedReason: "component uses scalingAdapter"}
+	dgd.Spec.Components[0].ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+	program := &disaggregatedSetProgram{gate: features.Gates{LWS: true, DisaggregatedSet: true}}
 
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 	require.NoError(t, err)

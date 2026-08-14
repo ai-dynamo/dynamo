@@ -6,14 +6,12 @@
 package controller
 
 import (
-	"context"
 	"maps"
 	"strings"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/require"
@@ -22,7 +20,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -35,45 +32,31 @@ import (
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 )
 
-func TestShouldUseDisaggregatedSetSeparatesAPIAvailabilityFromSelection(t *testing.T) {
-	dgd := newEnvtestDSHappyPathDGD("selection-capabilities")
+func TestDisaggregatedSetEligibilityDoesNotSelectAProvider(t *testing.T) {
+	dgd := newEnvtestDSHappyPathDGD("selection-eligibility")
 	tests := []struct {
-		name          string
-		runtimeConfig *commoncontroller.RuntimeConfig
-		wantUse       bool
-		wantReason    string
+		name       string
+		gate       features.Gate
+		wantReason string
 	}{
 		{
-			name:          "API unavailable",
-			runtimeConfig: &commoncontroller.RuntimeConfig{},
-			wantReason:    "API is not available",
+			name:       "LWS gate supports all eligible roles",
+			gate:       features.Gates{LWS: true},
+			wantReason: "",
 		},
 		{
-			name: "API available but pathway disabled",
-			runtimeConfig: &commoncontroller.RuntimeConfig{
-				Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
-			},
-			wantReason: "pathway is disabled",
-		},
-		{
-			name: "API and pathway available",
-			runtimeConfig: &commoncontroller.RuntimeConfig{
-				Gate:         features.Gates{LWS: true, DisaggregatedSet: true},
-				Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
-			},
-			wantUse: true,
+			name:       "selection validation rejects scaling adapter",
+			gate:       features.Gates{LWS: true},
+			wantReason: "scalingAdapter",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			use, reason := shouldUseDisaggregatedSet(dgd, tt.runtimeConfig)
-			require.Equal(t, tt.wantUse, use)
-			if tt.wantReason == "" {
-				require.Empty(t, reason)
-			} else {
-				require.Contains(t, reason, tt.wantReason)
+			if tt.wantReason != "" {
+				dgd.Spec.Components[0].ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
 			}
+			require.Contains(t, disaggregatedSetEligibilityReason(dgd, tt.gate), tt.wantReason)
 		})
 	}
 }
@@ -199,72 +182,6 @@ func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
 			require.Equal(t, tt.want, service.Spec.Selector)
 		})
 	}
-}
-
-func TestDisaggregatedSetCleanupUsesAPICapabilityWhenSelectionIsDisabled(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	scheme.AddKnownTypeWithName(disaggregatedSetGVK, &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(disaggregatedSetGVK.GroupVersion().WithKind("DisaggregatedSetList"), &unstructured.UnstructuredList{})
-
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "dgd-uid"},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
-			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "prefill"}},
-		},
-	}
-	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{ObjectMeta: metav1.ObjectMeta{
-		Name:            "demo-prefill",
-		Namespace:       dgd.Namespace,
-		UID:             "dcd-uid",
-		Labels:          map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
-		OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(dgd)},
-	}}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
-		Name:            dynamo.NormalizeKubeResourceName(dcd.Name),
-		Namespace:       dgd.Namespace,
-		OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(dgd)},
-	}}
-	ds := newDisaggregatedSetObject()
-	ds.SetName(disaggregatedSetName(dgd))
-	ds.SetNamespace(dgd.Namespace)
-	ds.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, dcd, service, ds).Build()
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client:    &staleDisaggregatedSetClient{Client: k8sClient},
-		APIReader: k8sClient,
-		Recorder:  events.NewFakeRecorder(10),
-		RuntimeConfig: &commoncontroller.RuntimeConfig{
-			Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
-		},
-	}
-
-	require.NoError(t, reconciler.newDisaggregatedSetCompatibilityCleanup(true).Reconcile(t.Context(), dgd))
-	persistedService := &corev1.Service{}
-	require.NoError(t, k8sClient.Get(t.Context(), client.ObjectKeyFromObject(service), persistedService))
-	require.True(t, metav1.IsControlledBy(persistedService, dcd))
-	err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(ds), newDisaggregatedSetObject())
-	require.True(t, apierrors.IsNotFound(err))
-}
-
-type staleDisaggregatedSetClient struct {
-	client.Client
-}
-
-func (c *staleDisaggregatedSetClient) Get(
-	ctx context.Context,
-	key client.ObjectKey,
-	obj client.Object,
-	opts ...client.GetOption,
-) error {
-	if obj.GetObjectKind().GroupVersionKind() == disaggregatedSetGVK {
-		return apierrors.NewNotFound(schema.GroupResource{
-			Group:    disaggregatedSetGVK.Group,
-			Resource: "disaggregatedsets",
-		}, key.Name)
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
 }
 
 func TestDeleteStaleDisaggregatedSetServicesRemovesUndesiredModelService(t *testing.T) {

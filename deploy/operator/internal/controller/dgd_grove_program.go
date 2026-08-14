@@ -144,13 +144,6 @@ func (p *groveProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
-	if result.State == nvidiacomv1beta1.DGDStateSuccessful && p.legacyCleanup != nil {
-		if err := p.legacyCleanup.Reconcile(ctx, req.DGD); err != nil {
-			return programResult, err
-		}
-		apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, disaggregatedSetEligibleConditionType)
-	}
-
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
 }
