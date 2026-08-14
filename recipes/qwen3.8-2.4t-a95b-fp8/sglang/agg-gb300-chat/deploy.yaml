@@ -7,7 +7,7 @@ metadata:
   name: sglang-qwen38max-agg-chat-config
 data:
   agg.yaml: |-
-    served-model-name: Qwen/Qwen3.8-2.4T-A95B
+    served-model-name: Qwen/Qwen3.8-2.4T-A95B-FP8
     trust-remote-code: true
     quantization: fp8
     kv-cache-dtype: fp8_e4m3
@@ -151,7 +151,7 @@ spec:
                   unset DYN_FORWARDPASS_METRIC_PORT
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/agg.yaml \
-                    --model-path Qwen/Qwen3.8-2.4T-A95B \
+                    --model-path Qwen/Qwen3.8-2.4T-A95B-FP8 \
                     --dyn-reasoning-parser qwen3 \
                     --dyn-tool-call-parser qwen3_coder \
                     --cuda-graph-backend-prefill breakable \
