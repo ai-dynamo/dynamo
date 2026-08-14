@@ -21,6 +21,9 @@ filelock==3.25.1
 # For faster model downloads
 hf-xet==1.4.3
 # For Kubernetes operations in deploy tests
+# Tool-calling tests validate tool_call argument schemas; without this the
+# whole module pytest.importorskip()s away silently.
+jsonschema==4.26.0
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0
 matplotlib-stubs
