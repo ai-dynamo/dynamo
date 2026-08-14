@@ -335,8 +335,17 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=
 # aiohttp was the only floor in that file that took, and it took because of the
 # explicit system-interpreter install above rather than because of the floor.
 #
-# Named packages only, no re-solve, matching the narrow-by-design rule above.
-# Mirrored by the pre_runtime whiteout below for the same dist-info-rename reason.
+# Named packages only, and --no-deps keeps that literal: without it pip's default
+# only-if-needed strategy will upgrade a transitive dependency whenever a newly
+# selected release wants one the base image does not satisfy, which both re-solves
+# part of upstream's graph and leaves that dependency's old metadata behind (it is
+# not in the whiteout list, which names only the seven). These are patch-level
+# bumps within the same major, so the base image's existing dependencies satisfy
+# them.
+#
+# Mirrored by the pre_runtime whiteout below for the same dist-info-rename reason,
+# and re-asserted after the overlay -- see the post-overlay guard near the end of
+# this file for why the in-stage guard cannot cover the whiteout.
 #
 # The guard normalizes distribution names before comparing (PEP 503: runs of
 # -_. collapse and case folds), because the on-disk directories do not agree on
@@ -344,7 +353,7 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=
 # It requires exactly one dist-info per package and a version at or above the
 # floor, so a venv-only install, a missed whiteout, or an old copy surviving
 # beside the new one all fail the build here rather than in a scan afterwards.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade --no-deps \
         "pillow>=12.3.0" \
         "mistune>=3.3.0" \
         "tornado>=6.5.6" \
@@ -433,7 +442,7 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attrs \
     /usr/local/lib/python3.12/dist-packages/attrs-* \
     /usr/local/lib/python3.12/dist-packages/PIL \
-    /usr/local/lib/python3.12/dist-packages/PIL.libs \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs \
     /usr/local/lib/python3.12/dist-packages/pillow-* \
     /usr/local/lib/python3.12/dist-packages/mistune \
     /usr/local/lib/python3.12/dist-packages/mistune-* \
@@ -444,7 +453,7 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/jupyterlab \
     /usr/local/lib/python3.12/dist-packages/jupyterlab-* \
     /usr/local/lib/python3.12/dist-packages/git \
-    /usr/local/lib/python3.12/dist-packages/GitPython-* \
+    /usr/local/lib/python3.12/dist-packages/[Gg]it[Pp]ython-* \
     /usr/local/lib/python3.12/dist-packages/soupsieve \
     /usr/local/lib/python3.12/dist-packages/soupsieve-* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
@@ -467,6 +476,20 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done
+
+# Post-overlay guard for the system-site floor whiteouts above, for the same
+# reason DALI has one: the in-stage assertion runs inside runtime_full, before
+# `COPY --from=runtime_full / /`, so by construction it cannot observe a whiteout
+# mistake. A duplicate only exists after the overlay re-adds the base image's
+# copy beside the upgraded one, and the metadata directory rename is what makes
+# the copy survive. Two real cases were shipped past the in-stage guard before
+# this existed: a case-sensitive `GitPython-*` that never matched the base
+# image's lowercase `gitpython-*.dist-info`, and `PIL.libs` for a directory
+# auditwheel actually names `pillow.libs`.
+#
+# Same normalized comparison as the in-stage guard, re-run here where the
+# duplicate can appear. Exactly one dist-info per package, at or above the floor.
+RUN /usr/bin/python3 -c 'import os, re, sys; D = "/usr/local/lib/python3.12/dist-packages"; W = {"pillow": (12, 3, 0), "mistune": (3, 3, 0), "tornado": (6, 5, 6), "jupyter-server": (2, 20, 0), "jupyterlab": (4, 5, 10), "gitpython": (3, 1, 58), "soupsieve": (2, 8, 4)}; norm = lambda s: re.sub(r"[-_.]+", "-", s).lower(); tv = lambda s: tuple(int(x) for x in re.findall(r"\d+", s)[:3]); stems = [d[:-10].rsplit("-", 1) for d in os.listdir(D) if d.endswith(".dist-info") and "-" in d[:-10]]; found = {k: [] for k in W}; [found[norm(n)].append(v) for n, v in stems if norm(n) in found]; print("post-overlay system-site dist-info:", found); bad = [(k, v) for k, v in sorted(found.items()) if len(v) != 1 or tv(v[0]) < W[k]]; print("FAILED:", bad) if bad else None; sys.exit(1 if bad else 0)'
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
