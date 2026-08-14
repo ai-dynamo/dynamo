@@ -22,6 +22,7 @@ import pytest
 from dynamo.vllm.kv_connector_protocols import (
     KV_CONNECTOR_PROTOCOLS,
     KvConnectorProtocol,
+    LMCacheMPConnectorProtocol,
     MooncakeConnectorProtocol,
     NixlConnectorProtocol,
     make_kv_connector_protocol,
@@ -210,8 +211,60 @@ def test_mooncake_decode_does_not_reimport_per_call(fake_mooncake):
 
 
 # ---------------------------------------------------------------------------
+# LMCacheMPConnectorProtocol
+# ---------------------------------------------------------------------------
+
+
+def test_lmcache_mp_prefill_request_is_empty():
+    proto = LMCacheMPConnectorProtocol(_config("LMCacheMPConnector"))
+    assert proto.prefill_request_kv_transfer_params() == {}
+
+
+def test_lmcache_mp_decode_returns_empty_and_ignores_engine_params():
+    """Cache-mediated: nothing from the prefill response reaches decode,
+    but the result is an empty dict (not None) so the prefill response
+    keeps its disaggregated_params envelope for the prefill router."""
+    proto = LMCacheMPConnectorProtocol(_config("LMCacheMPConnector"))
+    response = SimpleNamespace(kv_transfer_params={"remote_engine_id": "decoy"})
+    assert proto.decode_request_kv_transfer_params(response) == {}
+
+
+# ---------------------------------------------------------------------------
 # Factory + registry
 # ---------------------------------------------------------------------------
+
+
+def test_make_kv_connector_protocol_dispatches_lmcache_mp():
+    proto = make_kv_connector_protocol(_config("LMCacheMPConnector"))
+    assert isinstance(proto, LMCacheMPConnectorProtocol)
+
+
+def test_multiconnector_prefers_transport_child_over_lmcache_mp():
+    """A cache-mediated child must not make the wrapper ambiguous."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "LMCacheMPConnector"},
+                    {"kv_connector": "NixlConnector"},
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_multiconnector_dispatches_lone_lmcache_mp_child():
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [{"kv_connector": "LMCacheMPConnector"}]
+            },
+        )
+    )
+    assert isinstance(proto, LMCacheMPConnectorProtocol)
 
 
 def test_make_kv_connector_protocol_dispatches_nixl():
@@ -475,7 +528,11 @@ def test_make_kv_connector_protocol_raises_on_unknown_connector():
 def test_registry_keys_match_vllm_connector_names():
     """Wire-format guard: KV_CONNECTOR_PROTOCOLS keys must match the strings
     vLLM uses in ``KVTransferConfig.kv_connector``."""
-    assert set(KV_CONNECTOR_PROTOCOLS) == {"NixlConnector", "MooncakeConnector"}
+    assert set(KV_CONNECTOR_PROTOCOLS) == {
+        "NixlConnector",
+        "MooncakeConnector",
+        "LMCacheMPConnector",
+    }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
         assert issubclass(cls, KvConnectorProtocol)
 

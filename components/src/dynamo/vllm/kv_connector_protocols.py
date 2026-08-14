@@ -6,8 +6,10 @@
 vLLM's KV connectors disagree on the shape of ``kv_transfer_params``:
 NIXL is pull-based (decode reads block locations from the prefill
 response), Mooncake is push-based (prefill pushes blocks under a
-pre-allocated ``transfer_id``). This module isolates each protocol
-behind :class:`KvConnectorProtocol` so the handler stays
+pre-allocated ``transfer_id``), and LMCache MP is cache-mediated (KV
+moves through a shared cache pool keyed by token hash, so no
+per-request params cross the PD boundary at all). This module isolates
+each protocol behind :class:`KvConnectorProtocol` so the handler stays
 connector-agnostic and new connectors are one class + one registry
 entry.
 """
@@ -22,6 +24,10 @@ from typing import Any, Dict, Optional, Tuple, Type
 
 class KvConnectorProtocol(ABC):
     """One instance per prefill request; carries any per-request state."""
+
+    #: False for cache-mediated connectors; wrapper resolution then lets a
+    #: transport child own PD coordination.
+    produces_kv_transfer_params: bool = True
 
     def __init__(self, vllm_config: Any) -> None:
         self._vllm_config = vllm_config
@@ -106,10 +112,30 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         }
 
 
+class LMCacheMPConnectorProtocol(KvConnectorProtocol):
+    """Cache-mediated: prefill saves KV chunks into the shared LMCache MP
+    pool; decode retrieves them by token-hash lookup during its own
+    prefill pass. No per-request params cross the PD boundary; a miss
+    (e.g. the trailing partial chunk) degrades to local recompute."""
+
+    produces_kv_transfer_params = False
+
+    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+        return {}
+
+    def decode_request_kv_transfer_params(
+        self, prefill_response: Any
+    ) -> Optional[Dict[str, Any]]:
+        # Empty, not None: the prefill router requires the
+        # disaggregated_params envelope in the prefill response.
+        return {}
+
+
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
+    "LMCacheMPConnector": LMCacheMPConnectorProtocol,
 }
 
 # Wrapper connectors that compose sub-connectors under
@@ -215,6 +241,15 @@ def _resolve_multi_connector_protocol(
             f"{sub_names}. Supported PD connectors: "
             f"{sorted(KV_CONNECTOR_PROTOCOLS)}."
         )
+    # Transport (param-producing) children take precedence; a cache-mediated
+    # child owns PD coordination only when it is the only match.
+    producing = [
+        (name, sub)
+        for name, sub in matches
+        if KV_CONNECTOR_PROTOCOLS[name].produces_kv_transfer_params
+    ]
+    if producing:
+        matches = producing
     if len(matches) > 1:
         raise ValueError(
             f"{wrapper} has multiple PD-capable sub-connectors "
