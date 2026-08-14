@@ -24,7 +24,7 @@ pub enum WorkerType {
 
 impl WorkerType {
     /// Canonical lowercase string form used for wire values, logs, and metric labels.
-    pub const fn as_str(self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Prefill => "prefill",
             Self::Decode => "decode",
@@ -37,7 +37,7 @@ impl WorkerType {
     ///
     /// The built-in selector historically distinguishes only prefill pools from all other pools.
     /// Keep that scoring and metric-label contract while typed roles select custom policies.
-    pub const fn default_selector_label(self) -> &'static str {
+    pub const fn default_selector_label(&self) -> &'static str {
         match self {
             Self::Prefill => "prefill",
             Self::Decode | Self::Encode | Self::Aggregated => "decode",
@@ -91,6 +91,12 @@ mod tests {
         assert_eq!(WorkerType::Decode.to_string(), "decode");
         assert_eq!(WorkerType::Encode.to_string(), "encode");
         assert_eq!(WorkerType::Aggregated.to_string(), "aggregated");
+    }
+
+    #[test]
+    fn as_str_keeps_the_borrowed_receiver_api() {
+        let as_str: fn(&WorkerType) -> &'static str = WorkerType::as_str;
+        assert_eq!(as_str(&WorkerType::Prefill), "prefill");
     }
 
     #[test]

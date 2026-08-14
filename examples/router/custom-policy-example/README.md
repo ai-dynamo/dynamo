@@ -112,6 +112,8 @@ fn provider(
 }
 ```
 
+`worker_type` is a typed `WorkerType`. `WorkerSelectionPolicy` accepts a static worker label for its routing logs, so `as_str()` converts only at the constructor boundary. Match on the enum before this conversion when each role needs different behavior.
+
 The provider and factory have different lifetimes:
 
 1. The registry matches the YAML `type` to a provider.

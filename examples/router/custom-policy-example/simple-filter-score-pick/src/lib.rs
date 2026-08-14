@@ -62,6 +62,7 @@ fn provider(
     ))
 }
 
+/// Register the `simple-filter-score-pick` policy type.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {

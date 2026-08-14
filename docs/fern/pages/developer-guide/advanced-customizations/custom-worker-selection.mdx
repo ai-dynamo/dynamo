@@ -401,6 +401,8 @@ python3 -m dynamo.frontend \
   --router-decode-policy least-busy
 ```
 
+The role-specific CLI flags override the matching YAML fields for this process. In this command, `prefill-least-busy` replaces `worker_selection.prefill`, and `least-busy` replaces `worker_selection.decode`.
+
 The linked extension also applies custom policies in `python3 -m dynamo.router`. That process waits for a worker model card so it can choose built-in or custom policy behavior from the card's typed role. `DYN_ROUTER_MODEL_CARD_WAIT_SECS` bounds the startup wait and defaults to 600 seconds.
 
 </Tab>
@@ -446,7 +448,7 @@ cd "$POLICY_DIR/epp"
 DYN_EPP_MODE=standalone DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
 ```
 
-Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. It uses `worker_selection.aggregated` and logs a startup warning when it ignores a prefill, decode, or encode selection.
+Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. It resolves only `worker_selection.aggregated` and logs a startup warning when it ignores a prefill, decode, or encode selection. Its catalog does not need policy types referenced only by those ignored selections.
 
 </Tab>
 </Tabs>

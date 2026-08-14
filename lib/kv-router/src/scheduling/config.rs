@@ -1102,6 +1102,9 @@ impl KvRouterConfig {
     }
 
     /// Return the custom worker-selection instance selected for one explicit worker role.
+    ///
+    /// Prefill and decode overrides take precedence over the global environment override. The
+    /// global override takes precedence over all YAML role selections.
     pub fn selected_worker_selection_policy_instance_for(
         &self,
         worker_type: WorkerType,

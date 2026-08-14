@@ -67,6 +67,7 @@ pub struct WorkerSelectionPolicyRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
 }
 
+/// An error from policy registration or startup resolution.
 #[derive(Debug, Error)]
 pub enum WorkerSelectionPolicyRegistryError {
     #[error("worker-selection policy type must not be empty")]
@@ -112,8 +113,8 @@ impl WorkerSelectionPolicyRegistry {
 
     /// Resolve the configured policy instances once at process startup.
     ///
-    /// Aggregated, prefill, and decode pools can select separate instances. The returned factory
-    /// dispatches by the typed role that the host supplies when it constructs each worker pool.
+    /// Aggregated, prefill, decode, and encode pools can select separate instances. The returned
+    /// factory dispatches by the typed role that the host supplies for each worker pool.
     pub fn resolve(
         &self,
         config: &KvRouterConfig,
@@ -123,6 +124,22 @@ impl WorkerSelectionPolicyRegistry {
             crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
         })?;
         self.resolve_selections(policy_config, selected)
+    }
+
+    /// Resolve only the policy selected for one worker role.
+    ///
+    /// Single-pool hosts use this method to avoid loading policy types for worker pools that they
+    /// do not construct.
+    pub fn resolve_for_worker_type(
+        &self,
+        config: &KvRouterConfig,
+        worker_type: WorkerType,
+    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
+        let selected = config.selected_worker_selection_policy_instance_for(worker_type)?;
+        let policy_config = config.worker_selection_config().map_err(|source| {
+            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
+        })?;
+        self.resolve_selected(policy_config, selected.as_deref())
     }
 
     fn resolve_selections(
@@ -406,6 +423,45 @@ worker_selection:
                 (2, "encode".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn role_scoped_resolution_ignores_unlinked_policy_types_for_other_roles() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: epp
+  prefill: frontend
+  instances:
+    - name: epp
+      type: alpha
+      parameters:
+        threshold: 1
+    - name: frontend
+      type: unlinked
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry.register("alpha", Arc::new(provider)).unwrap();
+
+        assert!(
+            registry
+                .resolve_for_worker_type(&config, WorkerType::Aggregated)
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            registry.resolve(&config),
+            Err(WorkerSelectionPolicyRegistryError::UnknownType { name, .. }) if name == "unlinked"
+        ));
     }
 
     #[test]

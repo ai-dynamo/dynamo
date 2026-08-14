@@ -170,7 +170,9 @@ pub async fn run_with_selection_service(service: SelectionService) -> Result<()>
     .await
 }
 
-/// Run EPP with policy types statically linked into the image and instances selected from YAML.
+/// Run EPP with linked policy types and the aggregated instance selected from YAML.
+///
+/// Standalone EPP ignores and does not resolve prefill, decode, or encode selections.
 pub async fn run_with_worker_selection_policy_registry(
     registry: WorkerSelectionPolicyRegistry,
 ) -> Result<()> {
@@ -184,7 +186,10 @@ pub async fn run_with_worker_selection_policy_registry(
     {
         return run_inner(mode, StandaloneSelectionService::Default).await;
     }
-    let Some(factory) = registry.resolve(&kv_router_config)? else {
+    // TODO: Resolve the stage-specific roles when EPP supports disaggregated worker pools.
+    let Some(factory) = registry
+        .resolve_for_worker_type(&kv_router_config, dynamo_kv_router::WorkerType::Aggregated)?
+    else {
         return run_inner(mode, StandaloneSelectionService::Default).await;
     };
     require_standalone_mode_for_linked_worker_selection_policy(mode)?;

@@ -106,6 +106,7 @@ fn provider(
     }))
 }
 
+/// Register the `disagg-filter-score-pick` policy type.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {

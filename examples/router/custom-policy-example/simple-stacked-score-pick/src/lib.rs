@@ -41,6 +41,7 @@ fn provider(
     ))
 }
 
+/// Register the `simple-stacked-score-pick` policy type.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
