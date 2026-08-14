@@ -127,6 +127,7 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+http = "1"
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 

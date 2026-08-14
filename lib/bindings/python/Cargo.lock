@@ -2526,6 +2526,7 @@ dependencies = [
  "dynamo-sglang-sidecar",
  "dynamo-worker-selection-policy-catalog",
  "futures",
+ "http 1.4.2",
  "once_cell",
  "opentelemetry",
  "opentelemetry_sdk",
