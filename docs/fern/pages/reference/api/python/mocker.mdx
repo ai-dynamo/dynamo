@@ -96,7 +96,7 @@ from dynamo.mocker.args import ProfileDataResult
 ProfileDataResult(npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None)
 ```
 
-[`components/src/dynamo/mocker/args.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L51)
+[`components/src/dynamo/mocker/args.py#L55`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L55)
 
 **Public methods**
 
@@ -108,7 +108,7 @@ __init__(npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None)
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L54)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L58)
 </Accordion>
 
 <Accordion id="api-dynamo-core-reasoningconfig" title="ReasoningConfig (class)">
@@ -242,7 +242,7 @@ from dynamo.mocker.main import compute_stagger_delay
 compute_stagger_delay(num_workers: int, stagger_delay: float) -> float
 ```
 
-[`components/src/dynamo/mocker/main.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L104)
+[`components/src/dynamo/mocker/main.py#L105`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L105)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-main-graceful-shutdown" title="graceful_shutdown (function)">
@@ -256,7 +256,7 @@ from dynamo.mocker.main import graceful_shutdown
 graceful_shutdown(runtimes: list)
 ```
 
-[`components/src/dynamo/mocker/main.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L34)
+[`components/src/dynamo/mocker/main.py#L35`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L35)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-main-launch-workers" title="launch_workers (function)">
@@ -276,7 +276,7 @@ Each worker gets its own DistributedRuntime, which means:
 - Independent service registration and stats scraping
 - But still sharing the same tokio runtime (efficient)
 
-[`components/src/dynamo/mocker/main.py#L126`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L126)
+[`components/src/dynamo/mocker/main.py#L127`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L127)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-config-load-mocker-engine-args" title="load_mocker_engine_args (function)">
@@ -304,7 +304,7 @@ from dynamo.mocker.main import main
 main()
 ```
 
-[`components/src/dynamo/mocker/main.py#L254`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L254)
+[`components/src/dynamo/mocker/main.py#L266`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L266)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-non-negative-float" title="non_negative_float (function)">
@@ -318,7 +318,7 @@ from dynamo.mocker.args import non_negative_float
 non_negative_float(value: str) -> float
 ```
 
-[`components/src/dynamo/mocker/args.py#L41`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L41)
+[`components/src/dynamo/mocker/args.py#L45`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L45)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-non-negative-int" title="non_negative_int (function)">
@@ -332,7 +332,7 @@ from dynamo.mocker.args import non_negative_int
 non_negative_int(value: str) -> int
 ```
 
-[`components/src/dynamo/mocker/args.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L31)
+[`components/src/dynamo/mocker/args.py#L35`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L35)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-parse-args" title="parse_args (function)">
@@ -350,7 +350,7 @@ parse_args(argv: list[str] | None = None) -> argparse.Namespace
 
 - `argparse.Namespace` — argparse.Namespace: Parsed command-line arguments.
 
-[`components/src/dynamo/mocker/args.py#L175`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L175)
+[`components/src/dynamo/mocker/args.py#L179`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L179)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-parse-bootstrap-ports" title="parse_bootstrap_ports (function)">
@@ -364,7 +364,7 @@ from dynamo.mocker.args import parse_bootstrap_ports
 parse_bootstrap_ports(ports_str: str | None) -> list[int]
 ```
 
-[`components/src/dynamo/mocker/args.py#L168`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L168)
+[`components/src/dynamo/mocker/args.py#L172`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L172)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-positive-int" title="positive_int (function)">
@@ -378,7 +378,7 @@ from dynamo.mocker.args import positive_int
 positive_int(value: str) -> int
 ```
 
-[`components/src/dynamo/mocker/args.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L21)
+[`components/src/dynamo/mocker/args.py#L25`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L25)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-main-prefetch-model" title="prefetch_model (function)">
@@ -392,7 +392,7 @@ from dynamo.mocker.main import prefetch_model
 prefetch_model(model_path: str) -> None
 ```
 
-[`components/src/dynamo/mocker/main.py#L45`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L45)
+[`components/src/dynamo/mocker/main.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L46)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-resolve-planner-profile-data" title="resolve_planner_profile_data (function)">
@@ -424,7 +424,7 @@ Path from --planner-profile-data argument.
 
 - `FileNotFoundError` — If path doesn't contain valid profile data in any supported format.
 
-[`components/src/dynamo/mocker/args.py#L69`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L69)
+[`components/src/dynamo/mocker/args.py#L73`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L73)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-run-mocker-trace-replay" title="run_mocker_trace_replay (function)">
@@ -452,7 +452,7 @@ from dynamo.mocker.args import validate_worker_type_args
 validate_worker_type_args(args: argparse.Namespace) -> None
 ```
 
-[`components/src/dynamo/mocker/args.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L122)
+[`components/src/dynamo/mocker/args.py#L126`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L126)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-main-worker" title="worker (function)">
@@ -469,5 +469,5 @@ worker()
 Each mocker gets its own DistributedRuntime instance for true isolation,
 while still sharing the same event loop and tokio runtime.
 
-[`components/src/dynamo/mocker/main.py#L63`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L63)
+[`components/src/dynamo/mocker/main.py#L64`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L64)
 </Accordion>
