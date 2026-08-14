@@ -140,7 +140,7 @@ func (p *componentProgram) Reconcile(
 		if err := p.legacyCleanup.Reconcile(ctx, req.DGD); err != nil {
 			return programResult, err
 		}
-		apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, "DisaggregatedSetEligible")
+		apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, disaggregatedSetEligibleConditionType)
 	}
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)

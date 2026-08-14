@@ -143,7 +143,7 @@ func TestDisaggregatedSetUnsupportedIntentIsSticky(t *testing.T) {
 
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 	require.NoError(t, err)
-	condition := meta.FindStatusCondition(result.Status.Conditions, "DisaggregatedSetEligible")
+	condition := meta.FindStatusCondition(result.Status.Conditions, disaggregatedSetEligibleConditionType)
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
 	assert.Equal(t, "UnsupportedIntent", condition.Reason)

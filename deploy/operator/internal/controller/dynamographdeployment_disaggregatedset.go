@@ -59,9 +59,12 @@ var disaggregatedSetGVK = schema.GroupVersionKind{
 }
 
 const (
-	maxDisaggregatedSetRoles            = 10
-	disaggregatedSetRevisionLength      = 8
-	maxDisaggregatedSetNameLength       = 31
+	maxDisaggregatedSetRoles       = 10
+	disaggregatedSetRevisionLength = 8
+	maxDisaggregatedSetNameLength  = 31
+	// The name budget assumes at most two slice-index digits (slices <= 99).
+	// The transitional pathway always renders one slice; when a future
+	// grouping API raises the slice cardinality, extend this budget first.
 	maxDisaggregatedSetSliceIndexLength = len("99")
 	disaggregatedSetServiceSuffixLength = len("-prv")
 	maxDisaggregatedSetRoleNameLength   = 63 - maxDisaggregatedSetNameLength - maxDisaggregatedSetSliceIndexLength - disaggregatedSetRevisionLength - 3 - disaggregatedSetServiceSuffixLength
@@ -383,7 +386,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 
 	result := r.checkResourcesReadiness(resources)
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
-		if err := r.deleteStaleDisaggregatedSetComponentServices(ctx, dgd, desiredServiceNames); err != nil {
+		if err := r.deleteStaleDisaggregatedSetServices(ctx, dgd, desiredServiceNames); err != nil {
 			return ReconcileResult{}, err
 		}
 	}
@@ -933,6 +936,9 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteDisaggregatedSetIfExists(
 ) error {
 	ds := newDisaggregatedSetObject()
 	key := types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}
+	// Uncached read: the pathway switch must delete the authoritative object
+	// rather than wait for the informer to deliver a write from a previous
+	// reconcile.
 	if err := r.reader.Get(ctx, key, ds); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
@@ -966,7 +972,7 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteOwnedSelectedDCDs(
 	return nil
 }
 
-func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetComponentServices(
+func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetServices(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desiredServiceNames map[string]struct{},
@@ -975,7 +981,7 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetCompone
 	if err := r.List(ctx, serviceList, client.InNamespace(dgd.Namespace), client.MatchingLabels{
 		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
 	}); err != nil {
-		return fmt.Errorf("failed to list DisaggregatedSet component Services: %w", err)
+		return fmt.Errorf("failed to list DisaggregatedSet Services: %w", err)
 	}
 
 	for i := range serviceList.Items {
@@ -983,15 +989,19 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetCompone
 		if !isControlledByBetaDGD(service, dgd) {
 			continue
 		}
+		// Only the Services this pathway adopts are candidates: per-component
+		// discovery Services carry the component label and headless model
+		// Services carry the base-model hash label.
 		componentName := service.Labels[consts.KubeLabelDynamoComponent]
-		if componentName == "" {
+		modelHash := service.Labels[consts.KubeLabelDynamoBaseModelHash]
+		if componentName == "" && modelHash == "" {
 			continue
 		}
 		if _, desired := desiredServiceNames[service.Name]; desired {
 			continue
 		}
 		if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete stale component service %s/%s: %w", service.Namespace, service.Name, err)
+			return fmt.Errorf("failed to delete stale Service %s/%s: %w", service.Namespace, service.Name, err)
 		}
 	}
 	return nil
@@ -1058,6 +1068,8 @@ func (r *disaggregatedSetWorkloadsReconciler) restoreDisaggregatedSetServiceOwne
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
 	ds := newDisaggregatedSetObject()
+	// Uncached read: ownership restoration must observe the authoritative
+	// DisaggregatedSet before handing Services back to replacement DCDs.
 	if err := r.reader.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
