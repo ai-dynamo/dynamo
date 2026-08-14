@@ -191,6 +191,8 @@ pub struct WorkerConfig {
     /// roles -- setting it on `Decode` or `Encode` is rejected at
     /// `Worker::run` validation time with `BackendError::InvalidArgument`.
     pub route_to_encoder: bool,
+    /// Publish the worker's engine routes through an auxiliary RL discovery endpoint.
+    pub enable_rl: bool,
     /// Optional frontend media decoding and fetch policy advertised on the
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
@@ -235,6 +237,7 @@ impl Default for WorkerConfig {
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
+            enable_rl: false,
             media_decoder: None,
             media_fetcher: None,
             default_thinking_mode: None,
@@ -922,6 +925,16 @@ impl Worker {
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
+        let rl_config = if self.config.enable_rl {
+            Some(crate::rl::prepare_endpoint(&endpoint).map_err(|error| {
+                err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    format!("RL endpoint configuration: {error}"),
+                )
+            })?)
+        } else {
+            None
+        };
         let mut local_model =
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
@@ -1096,6 +1109,25 @@ impl Worker {
         // the exact primary discovery instance is callable.
         self.activate_engine_routes().await;
 
+        let rl_endpoint = if let Some(rl_config) = rl_config {
+            match crate::rl::serve_endpoint(&endpoint, rl_config).await {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    self.begin_engine_route_shutdown().await;
+                    if let Err(shutdown_error) = primary_endpoint.shutdown().await {
+                        tracing::warn!(%shutdown_error, "primary endpoint shutdown failed");
+                    }
+                    self.orchestrator_steps(&endpoint).await;
+                    return Err(err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("RL endpoint setup: {error}"),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
 
@@ -1131,6 +1163,12 @@ impl Worker {
         // guards and any discovery-mutation critical section, then close the
         // routes. No resume callback can re-register after the final unregister.
         self.begin_engine_route_shutdown().await;
+
+        if let Some(rl_endpoint) = rl_endpoint
+            && let Err(error) = rl_endpoint.shutdown().await
+        {
+            tracing::warn!(%error, "RL discovery endpoint shutdown failed");
+        }
 
         self.orchestrator_steps(&endpoint).await;
         serve_result

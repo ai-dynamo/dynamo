@@ -133,6 +133,7 @@ impl VllmSidecarEngine {
             enable_kv_routing: true,
             disaggregation_mode: mode,
             route_to_encoder: false,
+            enable_rl: args.sidecar.common.enable_rl,
             ..Default::default()
         };
         Ok((engine, config))
