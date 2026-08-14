@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Mapping
-from typing import Any
-
 import pytest
 
 from dynamo.experimental.workflow import (
@@ -69,7 +66,7 @@ def test_execution_plan_rejects_invalid_physical_edges() -> None:
 
     with pytest.raises(WorkflowValidationError, match="does not match"):
         ExecutionPlan(
-            definition=plan.definition,
+            workflow=plan.workflow,
             bindings=plan.bindings,
             edges=(
                 EdgePlan(
@@ -80,26 +77,3 @@ def test_execution_plan_rejects_invalid_physical_edges() -> None:
                 ),
             ),
         )
-
-
-def test_handler_plan_contains_bindings_without_graph_edges() -> None:
-    workflow = Workflow("imperative-plan")
-    echo = StageContract(
-        id="echo",
-        inputs={"text": ValueSpec(type="text")},
-        outputs={"text": ValueSpec(type="text")},
-    )
-    workflow.use("echo", echo)
-
-    @workflow.handler(
-        inputs={"text": ValueSpec(type="text")},
-        outputs={"text": ValueSpec(type="text")},
-    )
-    async def run(inputs: Mapping[str, Any], context: Any) -> Mapping[str, Any]:
-        return {"text": inputs["text"]}
-
-    plan = compile_workflow(workflow)
-
-    assert plan.bindings == {"echo": LocalBinding(runner_key="echo")}
-    assert plan.stage_contracts == {"echo": echo}
-    assert plan.edges == ()

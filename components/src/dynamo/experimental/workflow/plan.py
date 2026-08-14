@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping, Tuple
 
-from dynamo.experimental.workflow.definition import WorkflowDefinition, WorkflowHandler
 from dynamo.experimental.workflow.ir import WorkflowIR
 from dynamo.experimental.workflow.types import (
     StageContract,
@@ -56,15 +55,13 @@ class EdgePlan:
 class ExecutionPlan:
     """A workflow plus in-memory placement and carrier decisions."""
 
-    definition: WorkflowDefinition
+    workflow: WorkflowIR
     bindings: Mapping[str, Binding]
     edges: Tuple[EdgePlan, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.definition, (WorkflowIR, WorkflowHandler)):
-            raise WorkflowValidationError(
-                "execution plan requires WorkflowIR or WorkflowHandler"
-            )
+        if not isinstance(self.workflow, WorkflowIR):
+            raise WorkflowValidationError("execution plan requires WorkflowIR")
         if not isinstance(self.bindings, Mapping):
             raise WorkflowValidationError("execution plan bindings must be a mapping")
 
@@ -98,14 +95,11 @@ class ExecutionPlan:
                 )
             actual_edges[key] = edge
 
-        if isinstance(self.definition, WorkflowIR):
-            expected_edges = {
-                (stage.id, port): source
-                for stage in self.definition.stages
-                for port, source in stage.inputs.items()
-            }
-        else:
-            expected_edges = {}
+        expected_edges = {
+            (stage.id, port): source
+            for stage in self.workflow.stages
+            for port, source in stage.inputs.items()
+        }
         if set(actual_edges) != set(expected_edges):
             missing = sorted(set(expected_edges) - set(actual_edges))
             extra = sorted(set(actual_edges) - set(expected_edges))
@@ -138,8 +132,6 @@ class ExecutionPlan:
     def stage_contracts(self) -> Mapping[str, StageContract]:
         """Return every stage contract keyed by its authored stage ID."""
 
-        if isinstance(self.definition, WorkflowIR):
-            return MappingProxyType(
-                {stage.id: stage.contract for stage in self.definition.stages}
-            )
-        return self.definition.stages
+        return MappingProxyType(
+            {stage.id: stage.contract for stage in self.workflow.stages}
+        )

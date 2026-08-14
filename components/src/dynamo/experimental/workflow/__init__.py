@@ -5,7 +5,7 @@
 
 from dynamo.experimental.workflow.builder import StageHandle, Workflow
 from dynamo.experimental.workflow.compiler import DeploymentSpec, compile_workflow
-from dynamo.experimental.workflow.executor import WorkflowContext, WorkflowExecutor
+from dynamo.experimental.workflow.executor import WorkflowExecutor
 from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
 from dynamo.experimental.workflow.plan import EdgePlan, ExecutionPlan, LocalBinding
 from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
@@ -25,7 +25,6 @@ __all__ = [
     "StageRunner",
     "ValueRef",
     "Workflow",
-    "WorkflowContext",
     "WorkflowIR",
     "WorkflowExecutionError",
     "WorkflowExecutor",
