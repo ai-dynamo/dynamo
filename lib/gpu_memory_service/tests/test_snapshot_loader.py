@@ -16,6 +16,7 @@ from _fake_vmm import FakeVMM
 
 try:
     from gpu_memory_service.cli.snapshot import loader
+    from gpu_memory_service.v1.snapshot import loader as v1_loader
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -114,3 +115,30 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
             "clear_existing": True,
         },
     )
+
+
+def test_v1_cli_keeps_alive_after_loading_weights(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(v1_loader, "init_vmm", lambda _device_type: None)
+    monkeypatch.setattr(v1_loader, "get_socket_path", lambda *_args: "/gms.sock")
+    monkeypatch.setattr(
+        v1_loader,
+        "load_weights",
+        lambda *_args, **_kwargs: calls.append("load"),
+    )
+
+    def stop_keepalive(_seconds):
+        calls.append("keepalive")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(v1_loader.time, "sleep", stop_keepalive)
+
+    with pytest.raises(KeyboardInterrupt):
+        v1_loader.main(
+            [
+                "--checkpoint-dir",
+                str(tmp_path),
+            ]
+        )
+
+    assert calls == ["load", "keepalive"]

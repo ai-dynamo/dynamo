@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GMS V1 one-shot exact-allocation weight loader CLI."""
+"""GMS V1 exact-allocation weight loader sidecar CLI."""
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 
 from gpu_memory_service.cli.snapshot.loader import _build_parser as _build_v0_parser
 from gpu_memory_service.common.vmm import VMMDeviceType, init_vmm
@@ -84,7 +85,9 @@ def main(argv: list[str] | None = None) -> None:
         sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
         posix_backend_params=posix_backend_params,
     )
-    logger.info("GMS V1 loader complete; exiting")
+    logger.info("GMS V1 loader complete; waiting for termination")
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":
