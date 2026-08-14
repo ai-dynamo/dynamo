@@ -189,6 +189,26 @@ def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     assert kwargs["decode_active_request_weight"] == 64.0
 
 
+def test_conditional_disagg_environment_flows_to_binding_kwargs(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_CONDITIONAL_DISAGG", "true")
+    monkeypatch.setenv("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY", "isl_or_load")
+    monkeypatch.setenv("DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD", "1024")
+    monkeypatch.setenv("DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD", "0.5")
+    monkeypatch.setenv("DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD", "0.8")
+    monkeypatch.setenv("DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD", "0.9")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
+
+    assert kwargs["conditional_disagg_enabled"] is True
+    assert kwargs["conditional_disagg_policy"] == "isl_or_load"
+    assert kwargs["conditional_disagg_eff_isl_threshold"] == 1024
+    assert kwargs["conditional_disagg_eff_isl_ratio_threshold"] == 0.5
+    assert kwargs["conditional_disagg_prefill_busy_threshold"] == 0.8
+    assert kwargs["conditional_disagg_decode_busy_threshold"] == 0.9
+
+
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

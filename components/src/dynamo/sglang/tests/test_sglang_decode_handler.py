@@ -13,8 +13,11 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import (
+    BYPASS_REMOTE_PREFILL_ANNOTATION,
     DecodeWorkerHandler,
+    _decode_bootstrap_info,
     _extract_sglang_stop_reason,
+    _local_prefill_kwargs,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _user_stop_token_ids,
@@ -241,6 +244,7 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
         "session_id": "session-1",
         "bootstrap_host": "client.example",
         "routed_dp_rank": 7,
+        "do_local_prefill": True,
     }
 
     native = build_native_generate_request(
@@ -265,12 +269,69 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     assert native.routed_experts_start_len == 4
     assert native.bootstrap_host == "prefill.internal"
     assert native.routed_dp_rank == 3
+    assert getattr(native, "do_local_prefill", False) is False
     assert native.sampling_params == {
         "max_new_tokens": 1,
         "n": 1,
         "sampling_seed": 17,
         "custom_params": {"future_engine_control": True},
     }
+
+
+def test_engine_generate_sets_router_owned_local_prefill():
+    from sglang.srt.managers.io_struct import GenerateReqInput
+
+    if "do_local_prefill" not in GenerateReqInput.__dataclass_fields__:
+        with pytest.raises(ValueError, match="does not support conditional"):
+            build_native_generate_request(
+                {"do_local_prefill": False},
+                input_ids=[1],
+                fallback_rid="request",
+                priority=None,
+                do_local_prefill=True,
+            )
+        return
+
+    native = build_native_generate_request(
+        {"do_local_prefill": False},
+        input_ids=[1],
+        fallback_rid="request",
+        priority=None,
+        do_local_prefill=True,
+    )
+
+    assert native.do_local_prefill is True
+
+
+def test_conditional_disagg_bypass_does_not_require_bootstrap_info():
+    bootstrap_info, do_local_prefill = _decode_bootstrap_info(
+        {"annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION]}
+    )
+
+    assert bootstrap_info == {}
+    assert do_local_prefill is True
+
+
+def test_disaggregated_decode_still_requires_bootstrap_info():
+    with pytest.raises(RuntimeError, match="bootstrap_info is required"):
+        _decode_bootstrap_info({})
+
+
+def test_conditional_disagg_requires_new_sglang_engine():
+    class OldEngine:
+        async def async_generate(self, *, stream):
+            pass
+
+    with pytest.raises(HttpError, match="does not support conditional"):
+        _local_prefill_kwargs(OldEngine(), True)
+
+
+def test_conditional_disagg_passes_local_prefill_to_sglang():
+    class NewEngine:
+        async def async_generate(self, *, stream, do_local_prefill=False):
+            pass
+
+    assert _local_prefill_kwargs(NewEngine(), True) == {"do_local_prefill": True}
 
 
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():

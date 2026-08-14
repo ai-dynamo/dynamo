@@ -42,6 +42,7 @@ def build_native_generate_request(
     external_trace_header: dict[str, str] | None = None,
     routed_dp_rank: int | None = None,
     lora_path: str | None = None,
+    do_local_prefill: bool = False,
 ) -> GenerateReqInput:
     """Reconstruct the installed SGLang version native request.
 
@@ -58,6 +59,16 @@ def build_native_generate_request(
         payload.pop("priority", None)
     else:
         payload["priority"] = priority
+
+    # The router owns this field. Do not accept a client-supplied bypass.
+    payload.pop("do_local_prefill", None)
+    if do_local_prefill:
+        if "do_local_prefill" not in GenerateReqInput.__dataclass_fields__:
+            raise ValueError(
+                "The installed SGLang version does not support conditional "
+                "disaggregation"
+            )
+        payload["do_local_prefill"] = True
 
     if sampling_overrides:
         sampling_params = payload.get("sampling_params")

@@ -49,15 +49,34 @@ _SAMPLING_OPTION_FIELDS = (
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
 
-def _raise_if_conditional_disagg_bypass(request: Dict[str, Any]) -> None:
-    if BYPASS_REMOTE_PREFILL_ANNOTATION not in (request.get("annotations") or []):
-        return
-    raise HttpError(
-        400,
-        f"Detected request annotation {BYPASS_REMOTE_PREFILL_ANNOTATION!r}, but "
-        "SGLang backend does not support conditional disaggregation yet. "
-        "Use vLLM or TensorRT-LLM for conditional disaggregation.",
-    )
+def _is_conditional_disagg_bypass(request: Mapping[str, Any]) -> bool:
+    return BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+
+
+def _decode_bootstrap_info(
+    request: Mapping[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    do_local_prefill = _is_conditional_disagg_bypass(request)
+    bootstrap_info = request.get("bootstrap_info") or {}
+    if not bootstrap_info and not do_local_prefill:
+        raise RuntimeError(
+            "bootstrap_info is required for disaggregated decode but was not provided"
+        )
+    return bootstrap_info, do_local_prefill
+
+
+def _local_prefill_kwargs(engine: Any, do_local_prefill: bool) -> dict[str, bool]:
+    if not do_local_prefill:
+        return {}
+    kwargs = filter_supported_async_generate_kwargs(engine, {"do_local_prefill": True})
+    if "do_local_prefill" not in kwargs:
+        raise HttpError(
+            400,
+            "The installed SGLang version does not support conditional "
+            "disaggregation. Upgrade SGLang and enable conditional aggregation "
+            "on the decode worker.",
+        )
+    return kwargs
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -193,9 +212,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[
-            str, Any
-        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._routed_experts_kwargs: Dict[str, Any] = (
+            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        )
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
         if self._enable_frontend_decoding:
@@ -359,12 +378,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             raise ValueError("native SGLang Generate requires token input")
 
         bootstrap_info: dict[str, Any] = {}
+        do_local_prefill = False
         if self.serving_mode == DisaggregationMode.DECODE:
-            bootstrap_info = request.get("bootstrap_info") or {}
-            if not bootstrap_info:
-                raise RuntimeError(
-                    "bootstrap_info is required for disaggregated decode but was not provided"
-                )
+            bootstrap_info, do_local_prefill = _decode_bootstrap_info(request)
+            _local_prefill_kwargs(self.engine, do_local_prefill)
 
         routing = request.get("routing") or {}
         native_request = build_native_generate_request(
@@ -380,6 +397,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             else None,
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
+            do_local_prefill=do_local_prefill,
         )
         return native_generate_stream(self.engine, native_request)
 
@@ -399,7 +417,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
-        _raise_if_conditional_disagg_bypass(request)
         trace_id = context.trace_id
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
@@ -434,20 +451,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self.serving_mode == DisaggregationMode.DECODE:
             raise_if_unextracted_multimodal(request)
 
-            # Check if bootstrap_info is pre-computed in the request (from frontend)
-            bootstrap_info = request.get("bootstrap_info")
-
-            if not bootstrap_info:
-                raise RuntimeError(
-                    "bootstrap_info is required for disaggregated decode but was not provided"
+            bootstrap_info, do_local_prefill = _decode_bootstrap_info(request)
+            local_prefill_kwargs = _local_prefill_kwargs(self.engine, do_local_prefill)
+            bootstrap_kwargs: dict[str, Any] = {}
+            if bootstrap_info:
+                logging.debug(
+                    f"Using bootstrap_info: "
+                    f"host={bootstrap_info['bootstrap_host']}, "
+                    f"port={bootstrap_info['bootstrap_port']}, "
+                    f"room={bootstrap_info['bootstrap_room']}"
                 )
-
-            logging.debug(
-                f"Using bootstrap_info: "
-                f"host={bootstrap_info['bootstrap_host']}, "
-                f"port={bootstrap_info['bootstrap_port']}, "
-                f"room={bootstrap_info['bootstrap_room']}"
-            )
+                bootstrap_kwargs = {
+                    "bootstrap_host": bootstrap_info["bootstrap_host"],
+                    "bootstrap_port": bootstrap_info["bootstrap_port"],
+                    "bootstrap_room": bootstrap_info["bootstrap_room"],
+                }
 
             trace_header = context.trace_headers() if self.enable_trace else None
 
@@ -466,9 +484,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
+                **bootstrap_kwargs,
+                **local_prefill_kwargs,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
@@ -686,9 +703,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "total_tokens": input_tokens + completion_tokens,
                         }
                         if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                            completion_usage["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
                         out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:

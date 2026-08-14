@@ -53,6 +53,12 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_multiplier",
     "shared_cache_type",
     "router_predicted_ttl_secs",
+    "conditional_disagg_enabled",
+    "conditional_disagg_policy",
+    "conditional_disagg_eff_isl_threshold",
+    "conditional_disagg_eff_isl_ratio_threshold",
+    "conditional_disagg_prefill_busy_threshold",
+    "conditional_disagg_decode_busy_threshold",
 )
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
@@ -136,6 +142,12 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     router_predicted_ttl_secs: Optional[float] = None
+    conditional_disagg_enabled: bool = False
+    conditional_disagg_policy: str = "isl_bounding"
+    conditional_disagg_eff_isl_threshold: int = 2048
+    conditional_disagg_eff_isl_ratio_threshold: float = 0.7
+    conditional_disagg_prefill_busy_threshold: Optional[float] = None
+    conditional_disagg_decode_busy_threshold: Optional[float] = None
     load_aware: bool = False
 
     def apply_load_aware_preset(self) -> None:
@@ -498,4 +510,72 @@ class KvRouterArgGroup(ArgGroup):
                 "Independent of --router-ttl-secs, which covers pure approximate mode."
             ),
             arg_type=float,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-conditional-disagg",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Let selected requests bypass remote "
+                "prefill and run prefill plus decode on a decode worker."
+            ),
+            dest="conditional_disagg_enabled",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-disagg-policy",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_POLICY",
+            default="isl_bounding",
+            choices=["isl_bounding", "prefill_load", "isl_or_load"],
+            help="[EXPERIMENTAL] KV Router: Conditional-disaggregation bypass policy.",
+            dest="conditional_disagg_policy",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-disagg-eff-isl-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD",
+            default=2048,
+            help=(
+                "[EXPERIMENTAL] KV Router: Maximum effective input length in tokens "
+                "for the conditional-disaggregation ISL policy."
+            ),
+            arg_type=int,
+            dest="conditional_disagg_eff_isl_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-disagg-eff-isl-ratio-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
+            default=0.7,
+            help=(
+                "[EXPERIMENTAL] KV Router: Maximum effective-input-to-prompt ratio "
+                "for the conditional-disaggregation ISL policy."
+            ),
+            arg_type=float,
+            dest="conditional_disagg_eff_isl_ratio_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-disagg-prefill-busy-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Prefill-worker busy fraction used by "
+                "conditional-disaggregation load policies."
+            ),
+            arg_type=float,
+            dest="conditional_disagg_prefill_busy_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-disagg-decode-busy-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Disable conditional bypass when the "
+                "selected decode worker exceeds this projected-load fraction."
+            ),
+            arg_type=float,
+            dest="conditional_disagg_decode_busy_threshold",
         )
