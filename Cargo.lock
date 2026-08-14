@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "1.4.0"
+version = "0.1.0-dev.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-python"
-version = "1.4.0"
+version = "0.1.0-dev.1"
 dependencies = [
  "aisimulate-core",
  "anyhow",

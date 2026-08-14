@@ -7,7 +7,7 @@ build-backend = "maturin"
 
 [project]
 name = "aisimulate"
-version = "0.1.0"
+version = "0.1.0.dev1"
 description = "Backend-neutral inference simulation and deployment configuration search"
 readme = "README.md"
 license = { text = "Apache-2.0" }

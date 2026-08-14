@@ -126,10 +126,29 @@ def test_aisimulate_builds_a_planner_local_native_runtime_wheel():
     assert project["tool"]["maturin"]["module-name"] == "aisimulate._runtime"
     assert project["tool"]["maturin"]["profile"] == "release"
     assert '{% if target == "planner" %}' in wheel_builder
-    assert "uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/aisimulate" in (
-        wheel_builder
-    )
+    assert "cd /opt/dynamo/aisimulate" in wheel_builder
+    assert "maturin build --release" in wheel_builder
+    assert "--auditwheel repair" in wheel_builder
+    assert "--compatibility manylinux_2_28" in wheel_builder
+    assert "--out /opt/dynamo/dist" in wheel_builder
     assert "aisimulate-*" not in release_workflow
+
+
+def test_aisimulate_source_versions_are_synchronized():
+    root, repo_root = _source_checkout_roots()
+    project = tomllib.loads((root / "pyproject.toml").read_text())
+    core = tomllib.loads((root / "crates/core/Cargo.toml").read_text())
+    python = tomllib.loads((root / "crates/python/Cargo.toml").read_text())
+    workspace = tomllib.loads((repo_root / "Cargo.toml").read_text())
+
+    expected_python = "0.1.0.dev1"
+    expected_cargo = "0.1.0-dev.1"
+    assert project["project"]["version"] == expected_python
+    assert core["package"]["version"] == expected_cargo
+    assert python["package"]["version"] == expected_cargo
+    assert workspace["workspace"]["dependencies"]["aisimulate-core"]["version"] == (
+        expected_cargo
+    )
 
 
 def test_runtime_wheel_context_covers_every_root_workspace_member():

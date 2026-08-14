@@ -55,7 +55,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-aisimulate-core = { path = "aisimulate/crates/core", version = "1.4.0" }
+aisimulate-core = { path = "aisimulate/crates/core", version = "0.1.0-dev.1" }
 dynamo-runtime = { path = "lib/runtime", version = "1.4.0" }
 dynamo-llm = { path = "lib/llm", version = "1.4.0" }
 dynamo-rl = { path = "lib/rl", version = "1.4.0" }

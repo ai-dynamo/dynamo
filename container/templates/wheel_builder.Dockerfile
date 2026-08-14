@@ -609,7 +609,11 @@ COPY aisimulate/ /opt/dynamo/aisimulate/
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/aisimulate
+    cd /opt/dynamo/aisimulate && \
+    maturin build --release \
+        --auditwheel repair \
+        --compatibility manylinux_2_28 \
+        --out /opt/dynamo/dist
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
