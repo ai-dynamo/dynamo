@@ -76,9 +76,8 @@ use route_lookup::{
     TieredLookupOptions, TieredLookupResult, query_tiered_matches, split_retained_block_hashes,
 };
 
-pub(crate) type WorkerSelectorFactory<Sel> = Arc<
-    dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
->;
+pub(crate) type WorkerSelectorFactory<Sel> =
+    Arc<dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> Sel + Send + Sync>;
 
 pub(crate) fn to_worker_selection_session_context(
     context: &crate::protocols::common::extensions::AgentContext,
@@ -91,6 +90,7 @@ pub(crate) fn to_worker_selection_session_context(
         session_id,
         parent_session_id,
         session_final,
+        compaction: _,
         kv_hints,
         input_trigger,
     } = context;
@@ -364,6 +364,8 @@ where
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
+    teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
 }
 
 fn resolve_tracking_model_name(
@@ -571,7 +573,26 @@ where
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
+            endpoint_registration: None,
+            teardown_task_guard: None,
         })
+    }
+
+    pub(crate) fn set_endpoint_registration(
+        &mut self,
+        registration: dynamo_runtime::discovery::EndpointRegistrationLease,
+    ) {
+        self.endpoint_registration = Some(registration);
+    }
+
+    pub(crate) fn set_teardown_task_guard(
+        &mut self,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) {
+        if let Some(subscription) = self.kv_event_subscription.as_mut() {
+            subscription.set_task_guard(task_guard.clone());
+        }
+        self.teardown_task_guard = Some(task_guard);
     }
 
     /// Get a reference to the client used by this KvRouter
@@ -1716,6 +1737,7 @@ mod tests {
             session_id: "child-session".into(),
             parent_session_id: Some("root-session".into()),
             session_final: Some(true),
+            compaction: None,
             kv_hints: Some(KvHints {
                 evict_session: true,
             }),

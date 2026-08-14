@@ -335,6 +335,7 @@ rules:
   - resource.k8s.io
   resources:
   - deviceclasses
+  - resourceclaims
   verbs:
   - get
   - list
