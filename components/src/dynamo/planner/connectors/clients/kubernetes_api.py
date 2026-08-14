@@ -21,11 +21,7 @@ from typing import Optional
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
-from dynamo.common.kubernetes import (
-    client_go_api_client,
-    retry_kubernetes_read,
-    retry_kubernetes_write,
-)
+from dynamo.common.kubernetes import client_go_api_client, retry_kubernetes_write
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError, RolloutFailedError
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
@@ -93,32 +89,26 @@ class KubernetesAPI:
 
     def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
         """Get the graph deployment from the dynamo graph deployment name"""
-        return retry_kubernetes_read(
-            lambda: self._read_graph_deployment_once(graph_deployment_name)
-        )
+        return self._read_graph_deployment_once(graph_deployment_name)
 
     def list_graph_deployments(self) -> list[dict]:
         """List all DynamoGraphDeployments in the current namespace."""
-        result = retry_kubernetes_read(
-            lambda: self.custom_api.list_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                namespace=self.current_namespace,
-                plural=DGD_PLURAL,
-            )
+        result = self.custom_api.list_namespaced_custom_object(
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_API_VERSION,
+            namespace=self.current_namespace,
+            plural=DGD_PLURAL,
         )
         return result.get("items", [])
 
     def list_worker_metadata(self) -> list[dict]:
         """List all DynamoWorkerMetadata resources in the current namespace."""
 
-        result = retry_kubernetes_read(
-            lambda: self.custom_api.list_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_WORKER_METADATA_API_VERSION,
-                namespace=self.current_namespace,
-                plural="dynamoworkermetadatas",
-            )
+        result = self.custom_api.list_namespaced_custom_object(
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_WORKER_METADATA_API_VERSION,
+            namespace=self.current_namespace,
+            plural="dynamoworkermetadatas",
         )
         return result.get("items", [])
 
@@ -431,11 +421,9 @@ class KubernetesAPI:
     def list_pods_for_graph(self, dgd_name: str) -> list:
         """List all Pods for a DGD using its stable graph label."""
         return (
-            retry_kubernetes_read(
-                lambda: self.core_api.list_namespaced_pod(
-                    namespace=self.current_namespace,
-                    label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
-                )
+            self.core_api.list_namespaced_pod(
+                namespace=self.current_namespace,
+                label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
             ).items
             or []
         )

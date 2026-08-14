@@ -184,8 +184,9 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
 
     k8s_api.update_service_replicas("test-deployment", "test-component", 1)
 
-    # Should have tried DGDSA first
-    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
+    # Should have tried DGDSA first, but the GET failed before the Scale patch.
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_not_called()
 
     # Should fall back to a narrow DGD JSON Patch.
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()

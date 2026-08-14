@@ -34,16 +34,3 @@ def test_transient_api_errors_are_retryable(status) -> None:
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
 def test_non_transient_api_errors_are_not_retryable(status) -> None:
     assert not kubernetes.is_transient_api_error(client.ApiException(status=status))
-
-
-def test_read_retry_does_not_duplicate_retry_after_handling() -> None:
-    error = client.ApiException(status=429)
-    error.headers = {"Retry-After": "2"}
-
-    assert not kubernetes.is_transient_without_retry_after(error)
-
-
-def test_read_retry_uses_backoff_without_retry_after() -> None:
-    error = client.ApiException(status=429)
-
-    assert kubernetes.is_transient_without_retry_after(error)
