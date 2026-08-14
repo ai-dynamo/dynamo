@@ -13,6 +13,7 @@ from dynamo.common.configuration.groups.aic_perf_args import (
     AicPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
+    CONDITIONAL_DISAGG_POLICY_CHOICES,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
@@ -100,6 +101,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_load_aware_preset()
+        self.apply_conditional_disagg_config()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
@@ -164,6 +166,39 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        if self.conditional_disagg_policy not in CONDITIONAL_DISAGG_POLICY_CHOICES:
+            raise ValueError(
+                "--router-conditional-disagg-config policy must be one of "
+                + ", ".join(
+                    f"'{choice}'" for choice in CONDITIONAL_DISAGG_POLICY_CHOICES
+                )
+            )
+        if self.conditional_disagg_eff_isl_threshold < 0:
+            raise ValueError(
+                "--router-conditional-disagg-config eff_isl_threshold must be >= 0"
+            )
+        if not 0.0 <= self.conditional_disagg_eff_isl_ratio_threshold <= 1.0:
+            raise ValueError(
+                "--router-conditional-disagg-config eff_isl_ratio_threshold must be in [0.0, 1.0]"
+            )
+        if (
+            self.conditional_disagg_prefill_busy_threshold is not None
+            and self.conditional_disagg_prefill_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config prefill_busy_threshold must be >= 0"
+            )
+        if (
+            self.conditional_disagg_decode_busy_threshold is not None
+            and self.conditional_disagg_decode_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config decode_busy_threshold must be >= 0"
+            )
+        if self.conditional_disagg_enabled and self.router_mode != "kv":
+            raise ValueError("--router-conditional-disagg requires --router-mode=kv")
+        if self.conditional_disagg_enabled and not self.use_kv_events:
+            raise ValueError("--router-conditional-disagg requires --router-kv-events")
         self.validate_rejection_thresholds()
         self.log_rejection_thresholds()
 
