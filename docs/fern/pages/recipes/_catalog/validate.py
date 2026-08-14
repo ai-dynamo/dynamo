@@ -426,12 +426,14 @@ def check_page(obj, label):
 
 
 def check_assets_recipe(obj, label):
+    deploy_assets = []
     for t in obj.get("targets") or []:
         if not isinstance(t, dict):
             continue
         dep = t.get("deploy") or {}
         asset = dep.get("asset") if isinstance(dep, dict) else None
         if asset:
+            deploy_assets.append(asset)
             if not os.path.isfile(resolve_repo_path(asset)):
                 err(
                     "[%s] target %s deploy asset missing: %s"
@@ -445,6 +447,23 @@ def check_assets_recipe(obj, label):
                     "[%s] target %s benchmark asset missing: %s"
                     % (label, t.get("id"), basset)
                 )
+    check_recipe_specific_images(obj, deploy_assets, label)
+
+
+def check_recipe_specific_images(obj, deploy_assets, label):
+    configured_images = (obj.get("artifacts") or {}).get("recipe_specific_images") or []
+    deploy_documents = []
+    for asset in deploy_assets:
+        path = resolve_repo_path(asset)
+        if os.path.isfile(path):
+            with open(path, "r") as f:
+                deploy_documents.append(f.read())
+    for image in configured_images:
+        if not any(image in document for document in deploy_documents):
+            err(
+                "[%s] recipe-specific image is not referenced by a deploy asset: %s"
+                % (label, image)
+            )
 
 
 def check_assets_benchmark(obj, label):

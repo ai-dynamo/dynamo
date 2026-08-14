@@ -47,6 +47,23 @@
       "type": "string",
       "enum": ["validated", "experimental"]
     },
+    "artifacts": {
+      "type": "object",
+      "description": "Recipe-owned published artifacts used for exact adoption attribution.",
+      "required": ["recipe_specific_images"],
+      "properties": {
+        "recipe_specific_images": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^nvcr\\.io/nvidia/ai-dynamo/[A-Za-z0-9._-]+:[^\\s@]+$"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "targets": {
       "type": "array",
       "minItems": 1,
