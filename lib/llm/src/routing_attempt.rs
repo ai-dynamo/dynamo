@@ -208,7 +208,9 @@ pub(crate) async fn dispatch_attempt<B, M, F>(
     backend: &B,
     mut request: SingleIn<PreprocessedRequest>,
     mut attempt: B::Attempt,
+    phase: RequestPhase,
     kind: AttemptKind,
+    operation: &mut Option<AffinityAcquire>,
     prepare: F,
 ) -> Result<(M, AffinityTarget, ManyOut<LlmResponse>), Error>
 where
@@ -223,7 +225,54 @@ where
         Ok(target) => target,
         Err(error) => {
             backend.abort(&mut attempt).await;
-            return Err(error);
+            let retry_bound_affinity = !is_cancelled(&error)
+                && operation
+                    .as_ref()
+                    .and_then(AffinityAcquire::target)
+                    .is_some()
+                && explicit_target(&request, phase)?.is_none();
+            if !retry_bound_affinity {
+                return Err(error);
+            }
+
+            operation
+                .take()
+                .expect("bound affinity retry has an acquisition")
+                .invalidate();
+            let affinity = backend
+                .affinity()
+                .expect("bound affinity retry has a coordinator");
+            let session_id =
+                affinity_id(&request)?.expect("bound affinity retry has a validated session ID");
+            let request_context = request.context();
+            let retry = affinity
+                .acquire_with_context(&session_id, None, request_context.as_ref())
+                .await?;
+            let retry_target = retry.target();
+            attempt = match backend
+                .select(&request, phase, SelectionIntent::Committed, retry_target)
+                .await
+            {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    retry.invalidate();
+                    return Err(error);
+                }
+            };
+            match backend
+                .begin_dispatch(&mut request, &mut attempt, kind)
+                .await
+            {
+                Ok(target) => {
+                    *operation = Some(retry);
+                    target
+                }
+                Err(error) => {
+                    backend.abort(&mut attempt).await;
+                    retry.invalidate();
+                    return Err(error);
+                }
+            }
         }
     };
     let metadata = match prepare(&mut request, target) {
@@ -268,9 +317,15 @@ pub(crate) async fn generate<B: AttemptBackend>(
     }
 
     drop(route_guard);
-    let dispatch = dispatch_attempt(backend, request, attempt, AttemptKind::Generate, |_, _| {
-        Ok(())
-    })
+    let dispatch = dispatch_attempt(
+        backend,
+        request,
+        attempt,
+        phase,
+        AttemptKind::Generate,
+        &mut operation,
+        |_, _| Ok(()),
+    )
     .await;
     let ((), target, stream) = match dispatch {
         Ok(result) => result,
@@ -301,7 +356,16 @@ where
     let (attempt, mut operation) =
         select_with_affinity(backend, &request, phase, SelectionIntent::Committed).await?;
     drop(route_guard);
-    let dispatch = dispatch_attempt(backend, request, attempt, AttemptKind::Prefill, prepare).await;
+    let dispatch = dispatch_attempt(
+        backend,
+        request,
+        attempt,
+        phase,
+        AttemptKind::Prefill,
+        &mut operation,
+        prepare,
+    )
+    .await;
     let (metadata, target, stream) = match dispatch {
         Ok(result) => result,
         Err(error) => {
@@ -417,6 +481,87 @@ mod tests {
         }
     }
 
+    struct StaleAffinityBackend {
+        affinity: AffinityCoordinator,
+        selections: Mutex<Vec<AffinityTarget>>,
+    }
+
+    impl AttemptBackend for StaleAffinityBackend {
+        type Attempt = AffinityTarget;
+
+        fn affinity(&self) -> Option<&AffinityCoordinator> {
+            Some(&self.affinity)
+        }
+
+        fn direct(&self) -> bool {
+            false
+        }
+
+        async fn select(
+            &self,
+            _request: &SingleIn<PreprocessedRequest>,
+            _phase: RequestPhase,
+            _intent: SelectionIntent,
+            pinned_target: Option<AffinityTarget>,
+        ) -> Result<Self::Attempt, Error> {
+            let target = pinned_target.unwrap_or_else(|| AffinityTarget::new(2, None));
+            self.selections.lock().unwrap().push(target);
+            Ok(target)
+        }
+
+        fn observe_advisory(
+            &self,
+            _request: &SingleIn<PreprocessedRequest>,
+            _attempt: &Self::Attempt,
+        ) {
+        }
+
+        async fn begin_dispatch(
+            &self,
+            _request: &mut SingleIn<PreprocessedRequest>,
+            attempt: &mut Self::Attempt,
+            _kind: AttemptKind,
+        ) -> Result<AffinityTarget, Error> {
+            if attempt.worker_id == 1 {
+                anyhow::bail!("bound worker disappeared before dispatch");
+            }
+            Ok(*attempt)
+        }
+
+        fn after_prepare(
+            &self,
+            _request: &mut SingleIn<PreprocessedRequest>,
+            _attempt: &mut Self::Attempt,
+        ) {
+        }
+
+        async fn dispatch_prepared(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+            _attempt: &mut Self::Attempt,
+            _kind: AttemptKind,
+        ) -> Result<ManyOut<LlmResponse>, Error> {
+            let context = request.context().clone();
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::default(),
+                )])),
+                context,
+            ))
+        }
+
+        async fn abort(&self, _attempt: &mut Self::Attempt) {}
+
+        fn finish_dispatch(
+            &self,
+            _attempt: Self::Attempt,
+            _target: AffinityTarget,
+            stream: ManyOut<LlmResponse>,
+        ) -> ManyOut<LlmResponse> {
+            stream
+        }
+    }
+
     fn query_request() -> SingleIn<PreprocessedRequest> {
         Context::new(
             PreprocessedRequest::builder()
@@ -456,6 +601,41 @@ mod tests {
         assert_eq!(
             backend.intents.into_inner().unwrap(),
             vec![SelectionIntent::Advisory]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_bound_target_rebinds_before_request_preparation() {
+        use std::time::Duration;
+
+        use crate::protocols::common::extensions::{
+            SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        };
+
+        let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+        let session_id = SessionAffinityId::new("stale-bound-target");
+        let AffinityAcquire::Initialize(initializer) =
+            affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize affinity");
+        };
+        drop(initializer.commit(AffinityTarget::new(1, None)).unwrap());
+        let backend = StaleAffinityBackend {
+            affinity: affinity.clone(),
+            selections: Mutex::new(Vec::new()),
+        };
+        let mut request = query_request();
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        let _response = generate(&backend, request).await.unwrap();
+
+        assert_eq!(
+            backend.selections.into_inner().unwrap(),
+            vec![AffinityTarget::new(1, None), AffinityTarget::new(2, None)]
+        );
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(AffinityTarget::new(2, None))
         );
     }
 }

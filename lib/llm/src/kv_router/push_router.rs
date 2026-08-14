@@ -1572,11 +1572,14 @@ mod tests {
         // This attempt exercises the pre-dispatch worker-loss path: the old scheduler booking
         // must be released before the same request ID is admitted on its replacement.
         dispatch.reject_next.store(false, Ordering::Release);
+        let mut no_affinity = None;
         let ((), replacement, replacement_stream) = crate::routing_attempt::dispatch_attempt(
             kv_router.as_ref(),
             stale_request,
             stale_attempt,
+            RequestPhase::Aggregated,
             AttemptKind::Generate,
+            &mut no_affinity,
             |_, _| Ok(()),
         )
         .await

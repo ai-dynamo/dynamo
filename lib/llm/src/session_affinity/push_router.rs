@@ -262,7 +262,7 @@ impl AttemptBackend for SessionAffinityPushRouter {
     async fn select(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
+        _phase: RequestPhase,
         intent: SelectionIntent,
         pinned_target: Option<AffinityTarget>,
     ) -> Result<Self::Attempt, Error> {
@@ -393,7 +393,7 @@ impl AttemptBackend for SessionAffinityPushRouter {
         Ok(SimpleAttempt {
             target: AffinityTarget::new(selected.worker_id, dp_rank),
             reservation,
-            exact: crate::session_affinity::explicit_target(request, phase)?.is_some(),
+            exact: pinned_target.is_some(),
             allowed_fallback,
             load_guard,
             route: None,
