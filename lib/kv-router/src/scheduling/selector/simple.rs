@@ -143,7 +143,19 @@ impl RouteCandidates for NativeRows<'_> {
     }
 
     fn load(&self, index: usize) -> u64 {
-        self.input.candidates()[index].cost() as u64
+        ordered_cost(self.input.candidates()[index].cost())
+    }
+}
+
+/// Map a finite `f64` onto an integer key with the same total ordering.
+#[inline(always)]
+fn ordered_cost(cost: f64) -> u64 {
+    debug_assert!(cost.is_finite());
+    let bits = cost.to_bits();
+    if bits & (1 << 63) == 0 {
+        bits ^ (1 << 63)
+    } else {
+        !bits
     }
 }
 
@@ -187,7 +199,41 @@ impl WorkerPicker for SimpleWorkerPicker {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ScoredWorkerCandidate;
     use super::*;
+
+    fn scored_candidates(costs: &[f64]) -> Vec<ScoredWorkerCandidate> {
+        costs
+            .iter()
+            .enumerate()
+            .map(|(worker_id, &cost)| ScoredWorkerCandidate {
+                worker: crate::protocols::WorkerWithDpRank::from_worker_id(worker_id as u64),
+                cost,
+            })
+            .collect()
+    }
+
+    fn selection_context() -> WorkerSelectionContext<'static> {
+        WorkerSelectionContext {
+            request_id: "test",
+            request_blocks: 1,
+            block_size: 1,
+            track_prefill_tokens: false,
+            weights: super::super::LogitWeights {
+                overlap_score_credit: 0.0,
+                overlap_score_credit_decay: 0.0,
+                prefill_load_scale: 0.0,
+                shared_cache_multiplier: 0.0,
+            },
+            min_active_prefill_tokens: 0,
+            router_temperature_override: None,
+            session_context: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            advisory: false,
+        }
+    }
 
     struct Loads<'a>(&'a [u64]);
 
@@ -262,5 +308,33 @@ mod tests {
         let scorer = SimpleWorkerScorer::new(SimpleRoutingPolicy::PowerOfTwoChoices);
         assert_eq!(scorer.required_worker_inputs(), WorkerInputs::LOAD);
         assert_eq!(scorer.score_load(19), 19);
+    }
+
+    #[test]
+    fn worker_picker_preserves_fractional_cost_ordering() {
+        let mut picker = SimpleWorkerPicker::new(SimpleRoutingPolicy::LeastLoaded);
+        let candidates = scored_candidates(&[0.9, 0.4]);
+        let input = WorkerInputView {
+            candidates: &candidates,
+            cache: None,
+            load: None,
+            routing: None,
+        };
+
+        assert_eq!(picker.pick(&selection_context(), input).unwrap(), 1);
+    }
+
+    #[test]
+    fn worker_picker_preserves_negative_cost_ordering_for_p2c() {
+        let mut picker = SimpleWorkerPicker::new(SimpleRoutingPolicy::PowerOfTwoChoices);
+        let candidates = scored_candidates(&[-1.0, -5.0]);
+        let input = WorkerInputView {
+            candidates: &candidates,
+            cache: None,
+            load: None,
+            routing: None,
+        };
+
+        assert_eq!(picker.pick(&selection_context(), input).unwrap(), 1);
     }
 }

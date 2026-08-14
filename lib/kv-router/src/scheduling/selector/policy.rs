@@ -839,6 +839,14 @@ mod tests {
     use super::*;
     use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
+    fn committed_request(isl_tokens: usize) -> SchedulingRequest {
+        let mut request = base_request(isl_tokens);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".to_string(),
+        };
+        request
+    }
+
     #[test]
     fn default_policy_components_match_default_selector() {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
@@ -847,7 +855,7 @@ mod tests {
             (0, TaintedWorkerConfig::default()),
             (1, TaintedWorkerConfig::default()),
         ]);
-        let mut request = base_request(16);
+        let mut request = committed_request(16);
         request.worker_loads =
             worker_loads_with_active_decode(FxHashMap::from_iter([(worker0, 8), (worker1, 1)]));
         let config = KvRouterConfig {
@@ -915,7 +923,7 @@ mod tests {
             (0, TaintedWorkerConfig::default()),
             (1, TaintedWorkerConfig::default()),
         ]);
-        let mut request = base_request(16);
+        let mut request = committed_request(16);
         request.overlap.tier_overlap_blocks.device =
             FxHashMap::from_iter([(worker0, 1), (worker1, 3)]);
         let policy = WorkerSelectionPolicy::new(
@@ -955,7 +963,7 @@ mod tests {
 
         let worker = WorkerWithDpRank::from_worker_id(0);
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
-        let mut request = base_request(16);
+        let mut request = committed_request(16);
         request.overlap.effective_overlap_blocks.insert(worker, 3.5);
         let policy = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
@@ -996,7 +1004,7 @@ mod tests {
         }
 
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
-        let mut request = base_request(16);
+        let mut request = committed_request(16);
         request.session_context = Some(SessionContext::new(
             "session-1".into(),
             Some("root".into()),
@@ -1053,7 +1061,7 @@ mod tests {
         }
 
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
-        let request = base_request(16);
+        let request = committed_request(16);
         let policy = WorkerSelectionPolicy::new_with_filters(
             KvRouterConfig::default(),
             "test",
@@ -1105,7 +1113,7 @@ mod tests {
             (0, TaintedWorkerConfig::default()),
             (1, TaintedWorkerConfig::default()),
         ]);
-        let mut request = base_request(16);
+        let mut request = committed_request(16);
         request.track_prefill_tokens = true;
         request.worker_loads.insert(
             worker0,
@@ -1153,7 +1161,7 @@ mod tests {
         }
 
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
-        let mut request = base_request(16);
+        let mut request = committed_request(16);
         request.track_prefill_tokens = true;
 
         let no_filter_config = KvRouterConfig {
@@ -1252,5 +1260,46 @@ mod tests {
         assert_eq!(policy.pick_worker(&advisory, &rows, worker_id).unwrap(), 7);
         assert_eq!(policy.pick_worker(&committed, &rows, worker_id).unwrap(), 7);
         assert_eq!(policy.pick_worker(&committed, &rows, worker_id).unwrap(), 8);
+    }
+
+    #[test]
+    fn kv_advisory_does_not_advance_custom_picker_state() {
+        use crate::scheduling::selector::{SimpleRoutingPolicy, SimpleWorkerPicker};
+
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            Vec::new(),
+            Box::new(SimpleWorkerPicker::new(SimpleRoutingPolicy::RoundRobin)),
+        );
+
+        let first_advisory = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap()
+            .worker;
+        let second_advisory = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap()
+            .worker;
+        assert_eq!(second_advisory, first_advisory);
+
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "committed".to_string(),
+        };
+        let first_committed = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap()
+            .worker;
+        let second_committed = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap()
+            .worker;
+        assert_eq!(first_committed, first_advisory);
+        assert_ne!(second_committed, first_committed);
     }
 }

@@ -415,7 +415,11 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::ROUTING)
                         .then_some(routing_inputs.as_slice()),
                 };
-                let row = picker.pick(&input.context, picker_input)?;
+                let row = if input.context.advisory {
+                    picker.peek(&input.context, picker_input)?
+                } else {
+                    picker.pick(&input.context, picker_input)?
+                };
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,
