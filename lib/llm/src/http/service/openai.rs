@@ -2003,14 +2003,17 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
 }
 
 fn ensure_json_content_type(headers: &HeaderMap) -> Result<(), ErrorResponse> {
-    // FastAPI treats an absent Content-Type as JSON, so vLLM/SGLang accept these. A header
-    // that is present but not JSON still fails: the caller asserted a format we cannot parse.
-    let Some(content_type) = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-    else {
+    // FastAPI treats an absent or empty Content-Type as JSON, so vLLM/SGLang accept these.
+    // A header that is present and asserts some other format still fails.
+    let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) else {
         return Ok(());
     };
+    let Ok(content_type) = content_type.to_str() else {
+        return Err(unsupported_media_type_error());
+    };
+    if content_type.trim().is_empty() {
+        return Ok(());
+    }
 
     if is_json_content_type(content_type) {
         Ok(())
@@ -4643,6 +4646,24 @@ mod tests {
     fn test_ensure_json_content_type_accepts_absent_header() {
         let headers = HeaderMap::new();
         assert!(ensure_json_content_type(&headers).is_ok());
+    }
+
+    #[test]
+    fn test_ensure_json_content_type_accepts_empty_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::CONTENT_TYPE, "".parse().unwrap());
+        assert!(ensure_json_content_type(&headers).is_ok());
+    }
+
+    #[test]
+    fn test_ensure_json_content_type_rejects_undecodable_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        let err = ensure_json_content_type(&headers).expect_err("undecodable must be rejected");
+        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
     #[test]
