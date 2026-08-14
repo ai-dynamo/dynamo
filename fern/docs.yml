@@ -96,6 +96,9 @@ versions:
     path: ./versions/v0.7.0.yml
     availability: stable
 redirects:
+  # Recipe slug renamed to include -fp8 suffix to match HF model ID.
+  - source: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b"
+    destination: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b-fp8"
   # The per-class NIXL Connect pages were replaced by the generated Python API
   # reference, which covers the same classes from source plus seven more.
   # Keep their published URLs serving, anchored at the matching class.
