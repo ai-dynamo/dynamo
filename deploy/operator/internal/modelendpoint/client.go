@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
@@ -197,14 +196,14 @@ func (c *Client) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 	unloadCtx, cancel := context.WithTimeout(ctx, TotalTimeout)
 	defer cancel()
 
-	var successCount atomic.Int64
+	succeeded := make([]bool, len(candidates))
 
 	// Unload one candidate and count successful or compatible outcomes.
 	unloadCandidate := func(index int) {
 		candidate := candidates[index]
 		err := c.unloadLoRA(unloadCtx, candidate.Address, modelName)
 		if err == nil || candidate.AllowLoRAManagementUnavailable && isLoRAManagementUnavailable(err) {
-			successCount.Add(1)
+			succeeded[index] = true
 			return
 		}
 
@@ -216,18 +215,27 @@ func (c *Client) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 
 	workqueue.ParallelizeUntil(unloadCtx, MaxConcurrentOperations, len(candidates), unloadCandidate)
 
-	// Treat work not started due to cancellation as failed, matching the batch contract.
-	completedCount := successCount.Load()
-	failureCount := int64(len(candidates)) - completedCount
+	// Treat work not started due to cancellation as failed, matching the batch contract,
+	// and retain their identities for cleanup diagnostics.
+	successCount := 0
+	failedEndpoints := make([]string, 0)
+	for index, candidate := range candidates {
+		if succeeded[index] {
+			successCount++
+		} else {
+			failedEndpoints = append(failedEndpoints, candidate.Address)
+		}
+	}
 
 	logs.Info("Completed parallel LoRA unload",
 		"total", len(candidates),
-		"successful", completedCount,
+		"successful", successCount,
 		"loraManagementUnavailableFallbackEligible", fallbackEligibleCount,
-		"failed", failureCount)
+		"failed", len(failedEndpoints),
+		"failedEndpoints", failedEndpoints)
 
-	if failureCount > 0 {
-		return fmt.Errorf("%d task(s) failed", failureCount)
+	if len(failedEndpoints) > 0 {
+		return fmt.Errorf("%d task(s) failed", len(failedEndpoints))
 	}
 	return nil
 }
