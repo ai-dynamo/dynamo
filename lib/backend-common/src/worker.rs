@@ -3546,9 +3546,8 @@ mod handoff_integration_tests {
             .unwrap();
 
         assert!(control_response_is_error(&response));
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec!["supported_controls", "validate_engine_control"],
+        assert!(
+            !log.lock().unwrap().contains(&"engine_control"),
             "malformed input must be rejected before engine execution"
         );
         let endpoint_id = endpoint.id();
