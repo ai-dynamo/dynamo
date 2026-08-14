@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.vllm import state_agent
-from dynamo.vllm.args import parse_args
 
 pytestmark = [
     pytest.mark.unit,
@@ -66,6 +65,8 @@ def test_state_agent_config_rejects_ambiguous_identity_and_host_before_start():
 
 
 def test_cli_validates_state_agent_after_vllm_engine_config():
+    from dynamo.vllm.args import parse_args
+
     transfer = {
         "kv_connector": "OffloadingConnector",
         "kv_role": "kv_both",
