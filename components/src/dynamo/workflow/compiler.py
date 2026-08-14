@@ -11,7 +11,12 @@ from typing import Mapping, Optional, Union
 
 from dynamo.workflow.builder import Workflow
 from dynamo.workflow.ir import WorkflowIR
-from dynamo.workflow.plan import Binding, ExecutionPlan, InlineBinding
+from dynamo.workflow.plan import (
+    Binding,
+    ExecutionPlan,
+    InlineBinding,
+    RemoteBinding,
+)
 from dynamo.workflow.types import StreamSpec, WorkflowValidationError, validate_name
 
 
@@ -27,7 +32,7 @@ class DeploymentSpec:
         bindings: dict[str, Binding] = {}
         for stage_id, binding in sorted(self.bindings.items()):
             validate_name(stage_id, "deployment stage id")
-            if not isinstance(binding, InlineBinding):
+            if not isinstance(binding, (InlineBinding, RemoteBinding)):
                 raise WorkflowValidationError(
                     f"binding for stage {stage_id!r} uses an unsupported type"
                 )
@@ -42,6 +47,17 @@ class DeploymentSpec:
             bindings={
                 stage_id: InlineBinding(runner_key)
                 for stage_id, runner_key in runner_keys.items()
+            }
+        )
+
+    @classmethod
+    def remote(cls, **endpoint_ids: str) -> "DeploymentSpec":
+        """Build round-robin bindings to discovered Dynamo endpoints."""
+
+        return cls(
+            bindings={
+                stage_id: RemoteBinding(endpoint_id)
+                for stage_id, endpoint_id in endpoint_ids.items()
             }
         )
 
