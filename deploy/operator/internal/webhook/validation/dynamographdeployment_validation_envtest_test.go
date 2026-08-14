@@ -1815,7 +1815,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 				dgd.Labels = map[string]string{"updated": "true"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "unknown": supported values: "component", "grove"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "unknown": supported values: "component", "grove", "disaggregatedset"`},
 		},
 		{
 			name:               "user cannot materialize a legacy workload provider",

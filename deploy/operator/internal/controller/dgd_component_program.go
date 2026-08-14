@@ -24,7 +24,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
-	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -35,7 +34,6 @@ type componentProgram struct {
 	restartProgress *componentRestartProgressResolver
 	workloads       *componentWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
-	legacyCleanup   *disaggregatedSetCompatibilityCleanup
 	lwsEnabled      bool
 }
 
@@ -58,7 +56,6 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		restartProgress: newComponentRestartProgressResolver(r.Client),
 		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		legacyCleanup:   r.newDisaggregatedSetCompatibilityCleanup(true),
 		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}
 }
@@ -136,13 +133,6 @@ func (p *componentProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
-	if result.State == nvidiacomv1beta1.DGDStateSuccessful && p.legacyCleanup != nil {
-		if err := p.legacyCleanup.Reconcile(ctx, req.DGD); err != nil {
-			return programResult, err
-		}
-		apiMeta.RemoveStatusCondition(&programResult.Status.Conditions, disaggregatedSetEligibleConditionType)
-	}
-
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
 }

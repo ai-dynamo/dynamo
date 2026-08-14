@@ -26,13 +26,14 @@ For multinode deployments, the operator applies this routing precedence:
 2. Opt-in DisaggregatedSet (DS), when Grove is not selected and the DGD sets `nvidia.com/enable-disaggregatedset: "true"`.
 3. The standard DynamoComponentDeployment (DCD) pathway, which requires LWS and Volcano for multinode components.
 
-Installing the DS API does not move existing DGDs to DS. DS requires explicit opt-in, and Grove has higher priority during initial selection. After Dynamo selects DS, it keeps that pathway until you remove the DS annotation, even if Grove becomes available later.
+Installing the DS API does not move existing DGDs to DS. DS requires explicit opt-in, and Grove has higher priority during initial selection. Dynamo persists the selected provider in `nvidia.com/workload-provider`; the enable annotations are creation/adoption-time intent only. Changing them does not migrate an existing DGD. To change providers, delete and recreate the DGD.
 
 | Cluster state | Operator behavior |
 | --- | --- |
 | Grove is available and `nvidia.com/enable-grove` is not `"false"` | Uses Grove. |
 | Grove is disabled or unavailable and DS is explicitly requested | Uses DS when the DS API and requested roles are supported. |
-| Grove and DS are not selected or DS cannot be used | Uses the standard DCD pathway. |
+| Grove and DS are not selected | Uses the standard DCD pathway. |
+| A selected provider is unavailable | Reports `Ready=False` with `selected_workload_provider_unavailable`; it does not fall back to another provider. |
 | No selected pathway supports the multinode components | Rejects the deployment. |
 
 To force the LWS path when Grove is also present:
@@ -50,9 +51,9 @@ spec:
 
 ## DisaggregatedSet Path
 
-Use DS when one object should own multiple multinode worker roles. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`), then add `nvidia.com/enable-disaggregatedset: "true"` to the DGD. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`.
+Use DS when one object should own multiple multinode worker roles. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`), then add `nvidia.com/enable-disaggregatedset: "true"` to a new DGD. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`.
 
-Dynamo keeps the DS pathway selected while the opt-in annotation remains. If the DS API is unavailable or the requested roles are unsupported, including when a selected worker uses `scalingAdapter`, the operator reports `DisaggregatedSetEligible=False` and leaves the current DS workloads in place. Remove the annotation to switch explicitly to the standard DCD pathway.
+Once DS is selected, Dynamo keeps it as the provider even if the annotations or cluster capabilities change. If the DS API or its prerequisites become unavailable, the operator reports `Ready=False` with reason `selected_workload_provider_unavailable`; it does not fall back to DCD or Grove. Unsupported DS roles, including a selected worker using `scalingAdapter`, report `DisaggregatedSetEligible=False`. Delete and recreate the DGD to select a different pathway.
 
 DS supports two to ten eligible multinode worker roles. All selected roles must use either zero replicas or positive replicas. Dynamo's component discovery Services select one DS revision at a time; during a rollout they continue serving the active revision until the target revision is ready.
 

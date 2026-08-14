@@ -63,6 +63,15 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			wantProvider: workloadProviderComponent,
 		},
 		{
+			name: "materialized DisaggregatedSet remains authoritative when Grove is enabled",
+			gate: features.Gates{Grove: true},
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderDisaggregatedSet,
+			},
+			workloads:    []providerTestWorkload{{provider: workloadProviderGrove, owned: true}},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
 			name:         "no owned workloads select Grove from current intent",
 			gate:         features.Gates{Grove: true},
 			wantProvider: workloadProviderGrove,
@@ -74,6 +83,22 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 				consts.KubeAnnotationEnableGrove: "FALSE",
 			},
 			wantProvider: workloadProviderComponent,
+		},
+		{
+			name: "explicit DisaggregatedSet intent selects DisaggregatedSet after Grove opt-out",
+			gate: features.Gates{Grove: true},
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove:            consts.KubeLabelValueFalse,
+				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+			},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
+			name: "explicit DisaggregatedSet intent is durable even when its gate is unavailable",
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+			},
+			wantProvider: workloadProviderDisaggregatedSet,
 		},
 		{
 			name:         "owned DCD adopts component despite current Grove intent",
@@ -90,12 +115,20 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			wantProvider: workloadProviderGrove,
 		},
 		{
+			name: "owned DisaggregatedSet adopts DS despite current component intent",
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse,
+			},
+			workloads:    []providerTestWorkload{{provider: workloadProviderDisaggregatedSet, owned: true}},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
 			name: "mixed owned workload families fail closed",
 			workloads: []providerTestWorkload{
 				{provider: workloadProviderComponent, owned: true},
-				{provider: workloadProviderGrove, owned: true},
+				{provider: workloadProviderDisaggregatedSet, owned: true},
 			},
-			wantErr:   "owns DynamoComponentDeployments and PodCliqueSets",
+			wantErr:   "owns workloads from multiple providers",
 			wantErrIs: errConflictingWorkloadProviders,
 		},
 		{
@@ -104,6 +137,7 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			workloads: []providerTestWorkload{
 				{provider: workloadProviderComponent},
 				{provider: workloadProviderGrove},
+				{provider: workloadProviderDisaggregatedSet},
 			},
 			wantProvider: workloadProviderGrove,
 		},
@@ -228,6 +262,12 @@ func newProviderTestWorkload(
 		return &nvidiacomv1beta1.DynamoComponentDeployment{ObjectMeta: objectMeta}
 	case workloadProviderGrove:
 		return &grovev1alpha1.PodCliqueSet{ObjectMeta: objectMeta}
+	case workloadProviderDisaggregatedSet:
+		ds := newDisaggregatedSetObject()
+		ds.SetName(disaggregatedSetName(dgd))
+		ds.SetNamespace(dgd.Namespace)
+		ds.SetOwnerReferences(ownerReferences)
+		return ds
 	default:
 		t.Fatalf("unsupported test workload provider %q", workload.provider)
 		return nil

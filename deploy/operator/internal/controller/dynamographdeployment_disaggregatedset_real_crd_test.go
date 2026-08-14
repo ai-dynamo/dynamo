@@ -49,8 +49,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	require.Empty(t, reason)
 
 	runtimeConfig := &commoncontroller.RuntimeConfig{
-		Gate:         features.Gates{LWS: true, DisaggregatedSet: true},
-		Capabilities: features.Capabilities{DisaggregatedSetAPI: true},
+		Gate: features.Gates{LWS: true, DisaggregatedSet: true},
 	}
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        testEnv.Client(),
