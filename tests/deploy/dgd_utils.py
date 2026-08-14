@@ -1598,30 +1598,30 @@ class ManagedDeployment:
     def _stop_port_forward(self, port_forward: Any) -> None:
         """Stop a kr8s port forward and wait for its background thread to exit."""
         try:
-            port_forward.stop()
-        except RuntimeError as e:
-            # Expected when the pod is terminated while kr8s is cleaning up its
-            # async generator.
-            if "anext()" in str(e) or "already running" in str(e):
-                self._logger.debug(f"Port forward cleanup: {e}")
-            else:
-                self._logger.warning(f"Unexpected error stopping port forward: {e}")
-        except Exception as e:
-            self._logger.debug(f"Error stopping port forward: {e}")
-
-        # kr8s 0.20.x stop() closes the asyncio servers but does not join the
-        # thread created by start(). Reaping it prevents a subsequent forward
-        # from racing the old listener for the same ephemeral port.
-        background_thread = getattr(port_forward, "_bg_thread", None)
-        if background_thread is None:
-            return
-
-        background_thread.join(timeout=_PORT_FORWARD_STOP_TIMEOUT)
-        if background_thread.is_alive():
-            self._logger.warning(
-                "Port forward background thread did not stop within %.1fs",
-                _PORT_FORWARD_STOP_TIMEOUT,
-            )
+            try:
+                port_forward.stop()
+            except RuntimeError as e:
+                # Expected when the pod is terminated while kr8s is cleaning up
+                # its async generator.
+                if "anext()" in str(e) or "already running" in str(e):
+                    self._logger.debug("Port forward cleanup: %s", e)
+                else:
+                    self._logger.warning(
+                        "Unexpected error stopping port forward: %s", e
+                    )
+                    raise
+        finally:
+            # kr8s 0.20.x stop() closes the asyncio servers but does not join the
+            # thread created by start(). Reaping it prevents a subsequent forward
+            # from racing the old listener for the same ephemeral port.
+            background_thread = getattr(port_forward, "_bg_thread", None)
+            if background_thread is not None:
+                background_thread.join(timeout=_PORT_FORWARD_STOP_TIMEOUT)
+                if background_thread.is_alive():
+                    self._logger.warning(
+                        "Port forward background thread did not stop within %.1fs",
+                        _PORT_FORWARD_STOP_TIMEOUT,
+                    )
 
     async def _cleanup(self):
         try:
