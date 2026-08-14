@@ -334,15 +334,15 @@ def test_stage_policy_cli_and_environment_precedence(
     assert kwargs["router_decode_policy"] == "env-decode"
 
 
-def test_stage_policy_help_describes_frontend_pool_roles() -> None:
+def test_stage_policy_help_describes_router_process_pool_roles() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
     help_by_dest = {action.dest: action.help for action in parser._actions}
 
-    assert "Frontend-only" in help_by_dest["router_prefill_policy"]
+    assert "Process-local" in help_by_dest["router_prefill_policy"]
     assert "disaggregated prefill workers" in help_by_dest["router_prefill_policy"]
-    assert "Frontend-only" in help_by_dest["router_decode_policy"]
-    assert "disaggregated deployment" in help_by_dest["router_decode_policy"]
+    assert "Process-local" in help_by_dest["router_decode_policy"]
+    assert "this router process" in help_by_dest["router_decode_policy"]
 
 
 def test_load_aware_clears_predicted_ttl() -> None:

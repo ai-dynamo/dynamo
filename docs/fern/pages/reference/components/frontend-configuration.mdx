@@ -303,18 +303,18 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-prefill-policy" type="string" default="null">
-  Frontend-only worker-selection instance for disaggregated prefill workers. This option overrides
-  `worker_selection.prefill` from `--router-policy-config`. Set it to `default` to use Dynamo's
-  built-in worker selector.
+  Worker-selection instance for disaggregated prefill workers in the current router process. This
+  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
+  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
 
   Environment variable: `DYN_ROUTER_PREFILL_POLICY`
 </ParamField>
 
 <ParamField path="--router-decode-policy" type="string" default="null">
-  Frontend-only worker-selection instance for decode workers in a disaggregated deployment. This
-  option overrides `worker_selection.decode` from `--router-policy-config`. Set it to `default` to
-  use Dynamo's built-in worker selector. Configure an aggregated pool with
-  `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+  Worker-selection instance for decode workers in the current router process. This option
+  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
+  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
+  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
 
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>

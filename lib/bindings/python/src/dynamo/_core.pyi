@@ -1816,10 +1816,10 @@ class KvRouterConfig:
             router_policy_config: Startup-only policy-family and cache-bucket queue
                 YAML path. When omitted, router_queue_threshold and
                 router_queue_policy define one synthetic policy class.
-            router_prefill_policy: Frontend-only override of
+            router_prefill_policy: Process-local override of
                 worker_selection.prefill for disaggregated prefill workers.
-            router_decode_policy: Frontend-only override of worker_selection.decode
-                for decode workers in a disaggregated deployment.
+            router_decode_policy: Process-local override of worker_selection.decode
+                for decode workers in this router process.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.

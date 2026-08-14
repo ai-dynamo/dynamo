@@ -461,7 +461,7 @@ where
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
-        // are frontend-only, so preserve them when the MDC supplies the base config.
+        // are process-local, so preserve them when the MDC supplies the base config.
         let router_config =
             effective_router_config(card.router_config.as_ref(), &self.router_config);
 

@@ -2480,12 +2480,12 @@ YAML path. When omitted, router_queue_threshold and
 router_queue_policy define one synthetic policy class.
 </ParamField>
 <ParamField path="router_prefill_policy" type="Optional[str]">
-Frontend-only override of
+Process-local override of
 worker_selection.prefill for disaggregated prefill workers.
 </ParamField>
 <ParamField path="router_decode_policy" type="Optional[str]">
-Frontend-only override of worker_selection.decode
-for decode workers in a disaggregated deployment.
+Process-local override of worker_selection.decode
+for decode workers in this router process.
 </ParamField>
 <ParamField path="router_event_threads" type="int">
 Number of KV indexer worker threads (default: 4).

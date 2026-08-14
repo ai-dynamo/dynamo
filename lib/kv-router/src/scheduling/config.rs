@@ -739,13 +739,13 @@ pub struct KvRouterConfig {
 
     /// Optional prefill worker-selection instance override.
     ///
-    /// This frontend-only value is not serialized into worker model cards.
+    /// This process-local value is not serialized into worker model cards.
     #[serde(skip)]
     pub router_prefill_policy: Option<String>,
 
     /// Optional decode worker-selection instance override.
     ///
-    /// This frontend-only value is not serialized into worker model cards.
+    /// This process-local value is not serialized into worker model cards.
     #[serde(skip)]
     pub router_decode_policy: Option<String>,
 
