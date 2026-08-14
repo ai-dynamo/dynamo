@@ -12,10 +12,10 @@ pub use default::DefaultWorkerSelector;
 
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
-    CacheUnawareRequestContext, CacheUnawareWorkerSelectionPolicy, ScoredWorkerCandidate,
-    WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    CacheUnawarePolicyDecision, CacheUnawareRequestContext, CacheUnawareWorkerSelectionPolicy,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
+    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
 };
 pub use simple::{SimpleRoutingPolicy, SimpleWorkerPicker, SimpleWorkerScorer};
 

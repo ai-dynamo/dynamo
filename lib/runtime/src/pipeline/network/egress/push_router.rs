@@ -1610,18 +1610,10 @@ where
                     self.client.endpoint.id()
                 ));
             }
-            let permit = match self.router_mode {
-                RouterMode::LeastLoaded
-                | RouterMode::PowerOfTwoChoices
-                | RouterMode::DeviceAwareWeighted => {
-                    let state = self.occupancy_state()?;
-                    Some(OccupancyPermit::acquire(state, instance_id))
-                }
-                RouterMode::RoundRobin
-                | RouterMode::Random
-                | RouterMode::Direct
-                | RouterMode::KV => None,
-            };
+            let permit = self
+                .occupancy_state
+                .clone()
+                .map(|state| OccupancyPermit::acquire(state, instance_id));
             return Ok(RouteReservation::new(
                 RouteTarget::worker(instance_id),
                 permit,
@@ -1721,25 +1713,34 @@ where
             RoutePolicyContext,
         ) -> anyhow::Result<Option<RoutePolicyDecision>>,
     {
-        if let Some(instance_id) = pinned_worker {
-            return self
-                .reserve_within(request, Some(instance_id), allowed)
-                .await;
-        }
-
         let routing_instances = self.client.routing_instances();
+        let pinned;
         let constrained;
-        let instance_ids = match allowed {
-            Some(allowed) => {
-                constrained = routing_instances
-                    .free_ids()
-                    .iter()
-                    .copied()
-                    .filter(|instance_id| allowed.contains(instance_id))
-                    .collect::<Vec<_>>();
-                constrained.as_slice()
+        let instance_ids = match pinned_worker {
+            Some(instance_id) => {
+                if !routing_instances.routable_ids().contains(&instance_id)
+                    || allowed.is_some_and(|allowed| !allowed.contains(&instance_id))
+                {
+                    return Err(anyhow::anyhow!(
+                        "instance_id={instance_id} not found for endpoint {}",
+                        self.client.endpoint.id()
+                    ));
+                }
+                pinned = [instance_id];
+                pinned.as_slice()
             }
-            None => routing_instances.free_ids(),
+            None => match allowed {
+                Some(allowed) => {
+                    constrained = routing_instances
+                        .free_ids()
+                        .iter()
+                        .copied()
+                        .filter(|instance_id| allowed.contains(instance_id))
+                        .collect::<Vec<_>>();
+                    constrained.as_slice()
+                }
+                None => routing_instances.free_ids(),
+            },
         };
         if instance_ids.is_empty() {
             return Err(self.empty_free_pool_error(&routing_instances));
@@ -1879,23 +1880,34 @@ where
             RoutePolicyContext,
         ) -> anyhow::Result<Option<RoutePolicyDecision>>,
     {
-        if let Some(instance_id) = pinned_worker {
-            return self.peek_within(request, Some(instance_id), allowed);
-        }
-
         let routing_instances = self.client.routing_instances();
+        let pinned;
         let constrained;
-        let instance_ids = match allowed {
-            Some(allowed) => {
-                constrained = routing_instances
-                    .free_ids()
-                    .iter()
-                    .copied()
-                    .filter(|instance_id| allowed.contains(instance_id))
-                    .collect::<Vec<_>>();
-                constrained.as_slice()
+        let instance_ids = match pinned_worker {
+            Some(instance_id) => {
+                if !routing_instances.routable_ids().contains(&instance_id)
+                    || allowed.is_some_and(|allowed| !allowed.contains(&instance_id))
+                {
+                    return Err(anyhow::anyhow!(
+                        "instance_id={instance_id} not found for endpoint {}",
+                        self.client.endpoint.id()
+                    ));
+                }
+                pinned = [instance_id];
+                pinned.as_slice()
             }
-            None => routing_instances.free_ids(),
+            None => match allowed {
+                Some(allowed) => {
+                    constrained = routing_instances
+                        .free_ids()
+                        .iter()
+                        .copied()
+                        .filter(|instance_id| allowed.contains(instance_id))
+                        .collect::<Vec<_>>();
+                    constrained.as_slice()
+                }
+                None => routing_instances.free_ids(),
+            },
         };
         if instance_ids.is_empty() {
             return Err(self.empty_free_pool_error(&routing_instances));

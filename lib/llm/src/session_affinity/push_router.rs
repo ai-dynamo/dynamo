@@ -192,18 +192,12 @@ impl SessionAffinityPushRouter {
         policy: &CacheUnawareWorkerSelectionPolicy,
         request: &CacheUnawareRequestContext<'_>,
         candidates: &RoutePolicyCandidates<'_>,
+        allowed_worker_ids: &mut Option<HashSet<u64>>,
     ) -> Result<Option<RoutePolicyDecision>, Error> {
-        let worker_id =
-            policy.pick_worker(request, candidates, |index| candidates.worker_id(index))?;
-        let index = (0..candidates.len())
-            .find(|&index| candidates.worker_id(index) == worker_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "custom policy selected worker {worker_id} outside the host candidate table"
-                )
-            })?;
+        let decision = policy.select(request, candidates, |index| candidates.worker_id(index))?;
+        *allowed_worker_ids = Some(decision.allowed_worker_ids);
         Ok(Some(RoutePolicyDecision {
-            index,
+            index: decision.index,
             admission: RouteAdmissionKind::Occupancy,
         }))
     }
@@ -268,32 +262,27 @@ impl AttemptBackend for SessionAffinityPushRouter {
     async fn select(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-        _phase: RequestPhase,
+        phase: RequestPhase,
         intent: SelectionIntent,
         pinned_target: Option<AffinityTarget>,
     ) -> Result<Self::Attempt, Error> {
         let pinned_worker = pinned_target.map(|target| target.worker_id);
-        let (allowed_fallback, load_guard) = self.lora_candidates(request.content(), intent)?;
-        let native_policy = if pinned_worker.is_none() {
-            if allowed_fallback.is_some() {
-                self.lora
-                    .as_ref()
-                    .and_then(|constraint| constraint.policy.as_ref())
-            } else {
-                self.policy.as_ref()
-            }
+        let (mut allowed_fallback, load_guard) = self.lora_candidates(request.content(), intent)?;
+        let native_policy = if allowed_fallback.is_some() {
+            self.lora
+                .as_ref()
+                .and_then(|constraint| constraint.policy.as_ref())
         } else {
-            None
+            self.policy.as_ref()
         };
-        let custom_policy = if pinned_worker.is_some() {
-            None
-        } else if allowed_fallback.is_some() {
+        let custom_policy = if allowed_fallback.is_some() {
             self.lora
                 .as_ref()
                 .and_then(|constraint| constraint.custom_policy.as_deref())
         } else {
             self.custom_policy.as_deref()
         };
+        let mut policy_allowed_workers = None;
         let custom_selection = if let Some(policy) = custom_policy {
             let session_context = request
                 .agent_context
@@ -320,10 +309,15 @@ impl AttemptBackend for SessionAffinityPushRouter {
                 SelectionIntent::Advisory => {
                     let target = self.inner.peek_within_policy(
                         request.content(),
-                        None,
+                        pinned_worker,
                         allowed_fallback.as_ref(),
                         |candidates, _context| {
-                            Self::custom_policy_decision(policy, &custom_context, candidates)
+                            Self::custom_policy_decision(
+                                policy,
+                                &custom_context,
+                                candidates,
+                                &mut policy_allowed_workers,
+                            )
                         },
                     )?;
                     (target, None)
@@ -333,10 +327,15 @@ impl AttemptBackend for SessionAffinityPushRouter {
                         .inner
                         .reserve_within_policy(
                             request.content(),
-                            None,
+                            pinned_worker,
                             allowed_fallback.as_ref(),
                             |candidates, _context| {
-                                Self::custom_policy_decision(policy, &custom_context, candidates)
+                                Self::custom_policy_decision(
+                                    policy,
+                                    &custom_context,
+                                    candidates,
+                                    &mut policy_allowed_workers,
+                                )
                             },
                         )
                         .await?;
@@ -351,7 +350,7 @@ impl AttemptBackend for SessionAffinityPushRouter {
             (None, SelectionIntent::Advisory, Some((scorer, picker))) => {
                 let target = self.inner.peek_within_policy(
                     request.content(),
-                    None,
+                    pinned_worker,
                     allowed_fallback.as_ref(),
                     |candidates, context| Ok(picker.peek(scorer, candidates, context)),
                 )?;
@@ -362,7 +361,7 @@ impl AttemptBackend for SessionAffinityPushRouter {
                     .inner
                     .reserve_within_policy(
                         request.content(),
-                        None,
+                        pinned_worker,
                         allowed_fallback.as_ref(),
                         |candidates, context| Ok(picker.select(scorer, candidates, context)),
                     )
@@ -385,13 +384,16 @@ impl AttemptBackend for SessionAffinityPushRouter {
                 (reservation.target(), Some(reservation))
             }
         };
+        if policy_allowed_workers.is_some() {
+            allowed_fallback = policy_allowed_workers;
+        }
         let dp_rank = pinned_target
             .filter(|target| target.worker_id == selected.worker_id)
             .and_then(|target| target.dp_rank);
         Ok(SimpleAttempt {
             target: AffinityTarget::new(selected.worker_id, dp_rank),
             reservation,
-            exact: pinned_target.is_some(),
+            exact: crate::session_affinity::explicit_target(request, phase)?.is_some(),
             allowed_fallback,
             load_guard,
             route: None,
@@ -500,7 +502,10 @@ mod tests {
     use dynamo_kv_router::{
         KvRouterConfig, WorkerSelectionPolicyError,
         protocols::WorkerWithDpRank,
-        selector::{WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy},
+        selector::{
+            WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerSelectionContext,
+            WorkerSelectionPolicy,
+        },
     };
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
@@ -895,6 +900,140 @@ mod tests {
         assert_eq!(router.occupancy_for_test(expected), 1);
         drop(committed);
         assert_eq!(router.occupancy_for_test(expected), 0);
+
+        let pinned = router
+            .select(
+                &request,
+                RequestPhase::Aggregated,
+                SelectionIntent::Committed,
+                Some(AffinityTarget::new(expected, None)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pinned.target.worker_id, expected);
+        assert_eq!(router.occupancy_for_test(expected), 1);
+        drop(pinned);
+        assert_eq!(router.occupancy_for_test(expected), 0);
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn custom_policy_validates_pins_and_constrains_transport_fallback() {
+        struct RejectWorker(u64);
+
+        impl WorkerFilter for RejectWorker {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: &WorkerCandidate,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(candidate.worker().worker_id != self.0)
+            }
+        }
+
+        struct HighestWorkerPicker;
+
+        impl WorkerPicker for HighestWorkerPicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, candidate)| candidate.worker().worker_id)
+                    .map(|(index, _)| index)
+                    .expect("candidate"))
+            }
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("custom_policy_fallback".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let real_worker = client.wait_for_instances().await.unwrap()[0].id();
+        let stale_worker = real_worker.wrapping_add(1);
+        let rejected_worker = real_worker.wrapping_add(2);
+        client.override_instance_avail(vec![real_worker, stale_worker, rejected_worker]);
+
+        let mut inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        inner.enable_policy_occupancy().await;
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "decode",
+            vec![Box::new(RejectWorker(rejected_worker))],
+            Vec::new(),
+            Box::new(HighestWorkerPicker),
+        )
+        .into_cache_unaware()
+        .unwrap();
+        let router = SessionAffinityPushRouter::new_with_coordinator_and_lora(
+            inner,
+            None,
+            false,
+            None,
+            Some(Arc::new(policy)),
+            None,
+        )
+        .unwrap();
+        let mut request = Context::new(request(None, false));
+
+        assert!(
+            router
+                .select(
+                    &request,
+                    RequestPhase::Aggregated,
+                    SelectionIntent::Committed,
+                    Some(AffinityTarget::new(rejected_worker, None)),
+                )
+                .await
+                .is_err(),
+            "custom filters must reject an ineligible pinned target"
+        );
+
+        let mut pinned = router
+            .select(
+                &request,
+                RequestPhase::Aggregated,
+                SelectionIntent::Committed,
+                Some(AffinityTarget::new(real_worker, None)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(router.occupancy_for_test(real_worker), 1);
+        router.abort(&mut pinned).await;
+        assert_eq!(router.occupancy_for_test(real_worker), 0);
+
+        let mut attempt = router
+            .select(
+                &request,
+                RequestPhase::Aggregated,
+                SelectionIntent::Committed,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(attempt.target.worker_id, stale_worker);
+        let target = router
+            .begin_dispatch(&mut request, &mut attempt, AttemptKind::Generate)
+            .await
+            .unwrap();
+        assert_eq!(target.worker_id, real_worker);
+        router.abort(&mut attempt).await;
 
         runtime.shutdown();
     }

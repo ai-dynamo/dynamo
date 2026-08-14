@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::BitOr;
 
 use dynamo_router_policy::RouteCandidates;
@@ -415,7 +415,19 @@ impl<'a> CacheUnawareRequestContext<'a> {
 /// Thread-safe host adapter for custom filters, scorers, and pickers in
 /// cache-unaware routing modes.
 pub struct CacheUnawareWorkerSelectionPolicy {
-    state: Mutex<CustomWorkerSelectionState>,
+    state: Mutex<CacheUnawareWorkerSelectionState>,
+}
+
+struct CacheUnawareWorkerSelectionState {
+    policy: CustomWorkerSelectionState,
+    source_indices: Vec<usize>,
+}
+
+/// One custom cache-unaware policy decision and the complete post-filter worker set.
+#[derive(Debug)]
+pub struct CacheUnawarePolicyDecision {
+    pub index: usize,
+    pub allowed_worker_ids: HashSet<u64>,
 }
 
 impl WorkerSelectionPolicy {
@@ -477,7 +489,10 @@ impl WorkerSelectionPolicy {
     ) -> Result<CacheUnawareWorkerSelectionPolicy, WorkerSelectionPolicyError> {
         match self.state {
             WorkerSelectionPolicyState::Custom(state) => Ok(CacheUnawareWorkerSelectionPolicy {
-                state: Mutex::new(state.into_inner()),
+                state: Mutex::new(CacheUnawareWorkerSelectionState {
+                    policy: state.into_inner(),
+                    source_indices: Vec::new(),
+                }),
             }),
             WorkerSelectionPolicyState::Default(_) => Err(WorkerSelectionPolicyError::failed(
                 "only custom filter/scorer/picker policies can be adapted to cache-unaware routing",
@@ -491,18 +506,18 @@ impl CacheUnawareWorkerSelectionPolicy {
     ///
     /// Cache-unaware routing supplies worker identity and active-request load.
     /// Policies requesting KV-cache or routing-taint columns are rejected.
-    pub fn pick_worker<C, F>(
+    pub fn select<C, F>(
         &self,
         request: &CacheUnawareRequestContext<'_>,
         candidates_source: &C,
         worker_id: F,
-    ) -> Result<u64, WorkerSelectionPolicyError>
+    ) -> Result<CacheUnawarePolicyDecision, WorkerSelectionPolicyError>
     where
         C: RouteCandidates + ?Sized,
         F: Fn(usize) -> u64,
     {
         let mut state = self.state.lock();
-        let required_inputs = state.filter_inputs | state.scorer_picker_inputs;
+        let required_inputs = state.policy.filter_inputs | state.policy.scorer_picker_inputs;
         if required_inputs.without(WorkerInputs::LOAD) != WorkerInputs::NONE {
             return Err(WorkerSelectionPolicyError::failed(
                 "cache-unaware routing supports only worker identity and active-request load inputs",
@@ -527,6 +542,10 @@ impl CacheUnawareWorkerSelectionPolicy {
             strict_priority: request.strict_priority,
             advisory: request.advisory,
         };
+        let CacheUnawareWorkerSelectionState {
+            policy,
+            source_indices,
+        } = &mut *state;
         let CustomWorkerSelectionState {
             filters,
             scorers,
@@ -539,9 +558,10 @@ impl CacheUnawareWorkerSelectionPolicy {
             cache_inputs,
             load_inputs,
             routing_inputs,
-        } = &mut *state;
+        } = policy;
         unscored_candidates.clear();
         candidates.clear();
+        source_indices.clear();
         cache_inputs.clear();
         load_inputs.clear();
         routing_inputs.clear();
@@ -567,6 +587,7 @@ impl CacheUnawareWorkerSelectionPolicy {
             }
             if keep {
                 unscored_candidates.push(candidate_for(*scorer_picker_inputs));
+                source_indices.push(index);
             }
         }
 
@@ -591,9 +612,12 @@ impl CacheUnawareWorkerSelectionPolicy {
             }
         }
         if candidates.is_empty() {
-            return Err(WorkerSelectionPolicyError::failed(
-                "all eligible workers were rejected by policy filters",
-            ));
+            let message = if candidates_source.is_empty() {
+                "no eligible workers"
+            } else {
+                "all eligible workers were rejected by policy filters"
+            };
+            return Err(WorkerSelectionPolicyError::failed(message));
         }
         let input = WorkerInputView {
             candidates,
@@ -608,13 +632,19 @@ impl CacheUnawareWorkerSelectionPolicy {
         } else {
             picker.pick(&context, input)?
         };
-        candidates
-            .get(row)
-            .map(|candidate| candidate.worker.worker_id)
-            .ok_or(WorkerSelectionPolicyError::InvalidPickerRow {
+        let source_index = source_indices.get(row).copied().ok_or(
+            WorkerSelectionPolicyError::InvalidPickerRow {
                 row,
                 candidate_count: candidates.len(),
-            })
+            },
+        )?;
+        Ok(CacheUnawarePolicyDecision {
+            index: source_index,
+            allowed_worker_ids: candidates
+                .iter()
+                .map(|candidate| candidate.worker.worker_id)
+                .collect(),
+        })
     }
 }
 
@@ -1234,9 +1264,64 @@ mod tests {
         let request = CacheUnawareRequestContext::new("request", 32, false);
 
         let selected = policy
-            .pick_worker(&request, &rows, |index| [41, 42, 43][index])
+            .select(&request, &rows, |index| [41, 42, 43][index])
             .unwrap();
-        assert_eq!(selected, 42);
+        assert_eq!([41, 42, 43][selected.index], 42);
+        assert_eq!(selected.allowed_worker_ids, HashSet::from([41, 42, 43]));
+    }
+
+    #[test]
+    fn cache_unaware_adapter_returns_source_index_and_filtered_set() {
+        use crate::scheduling::selector::{SimpleRoutingPolicy, SimpleWorkerPicker};
+
+        struct RejectWorker(u64);
+
+        impl WorkerFilter for RejectWorker {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: &WorkerCandidate,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(candidate.worker().worker_id != self.0)
+            }
+        }
+
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "decode",
+            vec![Box::new(RejectWorker(41))],
+            Vec::new(),
+            Box::new(SimpleWorkerPicker::new(SimpleRoutingPolicy::RoundRobin)),
+        )
+        .into_cache_unaware()
+        .unwrap();
+        let rows = CacheUnawareRows(vec![0, 0, 0]);
+        let request = CacheUnawareRequestContext::new("request", 32, false);
+
+        let selected = policy
+            .select(&request, &rows, |index| [41, 42, 43][index])
+            .unwrap();
+        assert_eq!(selected.index, 1);
+        assert_eq!(selected.allowed_worker_ids, HashSet::from([42, 43]));
+    }
+
+    #[test]
+    fn cache_unaware_adapter_distinguishes_empty_input() {
+        use crate::scheduling::selector::{SimpleRoutingPolicy, SimpleWorkerPicker};
+
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            Vec::new(),
+            Box::new(SimpleWorkerPicker::new(SimpleRoutingPolicy::RoundRobin)),
+        )
+        .into_cache_unaware()
+        .unwrap();
+        let rows = CacheUnawareRows(Vec::new());
+        let request = CacheUnawareRequestContext::new("request", 32, false);
+
+        let error = policy.select(&request, &rows, |_| 0).unwrap_err();
+        assert!(error.to_string().contains("no eligible workers"));
     }
 
     #[test]
@@ -1256,10 +1341,16 @@ mod tests {
         let committed = CacheUnawareRequestContext::new("request", 8, false);
         let worker_id = |index| [7, 8][index];
 
-        assert_eq!(policy.pick_worker(&advisory, &rows, worker_id).unwrap(), 7);
-        assert_eq!(policy.pick_worker(&advisory, &rows, worker_id).unwrap(), 7);
-        assert_eq!(policy.pick_worker(&committed, &rows, worker_id).unwrap(), 7);
-        assert_eq!(policy.pick_worker(&committed, &rows, worker_id).unwrap(), 8);
+        assert_eq!(policy.select(&advisory, &rows, worker_id).unwrap().index, 0);
+        assert_eq!(policy.select(&advisory, &rows, worker_id).unwrap().index, 0);
+        assert_eq!(
+            policy.select(&committed, &rows, worker_id).unwrap().index,
+            0
+        );
+        assert_eq!(
+            policy.select(&committed, &rows, worker_id).unwrap().index,
+            1
+        );
     }
 
     #[test]
