@@ -10,6 +10,10 @@ model:
   hf_id: Qwen/Qwen3.8-2.4T-A95B-FP8
   precision: FP8 weights, FP8 KV cache
 status: experimental
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1
+  - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-qwen-3.8-2.4t-dev.1
 targets:
 - id: vllm-agg-gb300-chat
   recommended: true
