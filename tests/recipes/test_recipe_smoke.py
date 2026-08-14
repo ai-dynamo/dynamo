@@ -102,7 +102,10 @@ def test_completion_rejects_empty_array_prompt(attached_endpoint):
     body = json.dumps(
         {"model": attached_endpoint.model, "prompt": [], "max_tokens": 1}
     ).encode()
-    headers = {"Content-Type": "application/json", **dict(attached_endpoint.headers or {})}
+    headers = {
+        "Content-Type": "application/json",
+        **dict(attached_endpoint.headers or {}),
+    }
     request = urllib.request.Request(
         f"{attached_endpoint.base_url}/v1/completions", data=body, headers=headers
     )
