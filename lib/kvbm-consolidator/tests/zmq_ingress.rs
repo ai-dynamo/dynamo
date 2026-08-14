@@ -60,16 +60,17 @@ async fn zmq_cache_namespaces_remain_isolated() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .poll_interval(Duration::from_millis(20))
             .build()
             .await
             .expect("build consolidator");
-        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("spawn sub");
+        let mut sub = ZmqSubHandle::spawn(egress_ep.as_str())
+            .await
+            .expect("spawn sub");
         assert!(
             sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await,
             "sync_pulse timed out"
@@ -162,17 +163,18 @@ async fn zmq_ingress_roundtrip() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .poll_interval(Duration::from_millis(20))
             .build()
             .await
             .expect("build consolidator");
 
-        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("spawn sub");
+        let mut sub = ZmqSubHandle::spawn(egress_ep.as_str())
+            .await
+            .expect("spawn sub");
 
         assert!(
             sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await,
@@ -266,17 +268,18 @@ async fn zmq_multipart_parsing() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .poll_interval(Duration::from_millis(20))
             .build()
             .await
             .expect("build");
 
-        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("spawn sub");
+        let mut sub = ZmqSubHandle::spawn(egress_ep.as_str())
+            .await
+            .expect("spawn sub");
         assert!(
             sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await,
             "sync_pulse timed out"
@@ -352,17 +355,18 @@ async fn malformed_msgpack_is_logged_not_fatal() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .poll_interval(Duration::from_millis(20))
             .build()
             .await
             .expect("build");
 
-        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("spawn sub");
+        let mut sub = ZmqSubHandle::spawn(egress_ep.as_str())
+            .await
+            .expect("spawn sub");
         assert!(
             sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await,
             "sync_pulse timed out"
@@ -405,18 +409,17 @@ async fn multiple_subscribers_receive_same_output() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .poll_interval(Duration::from_millis(20))
             .build()
             .await
             .expect("build");
 
-        let mut sub1 = ZmqSubHandle::spawn(&egress_ep).await.expect("sub1");
-        let mut sub2 = ZmqSubHandle::spawn(&egress_ep).await.expect("sub2");
+        let mut sub1 = ZmqSubHandle::spawn(egress_ep.as_str()).await.expect("sub1");
+        let mut sub2 = ZmqSubHandle::spawn(egress_ep.as_str()).await.expect("sub2");
 
         // Use sync_pulse on sub1 only (PUB fanout means sub2 also receives it).
         // Then drain both subs so no stale messages affect assertions.

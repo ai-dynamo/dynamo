@@ -10,7 +10,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{TestBatch, ZmqPubHandle, ZmqSubHandle, init_tracing, pick_port, sync_pulse};
+use common::{IpcEndpoint, TestBatch, ZmqPubHandle, ZmqSubHandle, init_tracing, sync_pulse};
 use kvbm_consolidator::wire::vllm_in::{BlockHashValue, RawKvEvent};
 use kvbm_consolidator::{ConsolidatorBuilder, EventSource};
 use serde::{Deserialize, Serialize};
@@ -214,19 +214,20 @@ async fn run_replay(fixture_path: &str, engine_source: EventSource, snapshot_nam
     let raw = std::fs::read(fixture_path).expect("read fixture");
     let payload_blobs: Vec<Vec<u8>> = rmp_serde::from_slice(&raw).expect("deserialize fixture");
 
-    let egress_port = pick_port();
-    let zmq_out = format!("tcp://127.0.0.1:{egress_port}");
+    let zmq_out = IpcEndpoint::new();
 
     let pub_handle = ZmqPubHandle::spawn().await;
 
-    let consolidator = ConsolidatorBuilder::new(&zmq_out, engine_source)
+    let consolidator = ConsolidatorBuilder::new(zmq_out.as_str(), engine_source)
         .zmq_in(&pub_handle.endpoint)
         .poll_interval(Duration::from_millis(20))
         .build()
         .await
         .expect("build consolidator");
 
-    let mut sub = ZmqSubHandle::spawn(&zmq_out).await.expect("spawn sub");
+    let mut sub = ZmqSubHandle::spawn(zmq_out.as_str())
+        .await
+        .expect("spawn sub");
 
     assert!(
         sync_pulse(&pub_handle, &mut sub, Duration::from_secs(5)).await,

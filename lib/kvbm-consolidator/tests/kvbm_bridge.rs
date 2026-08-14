@@ -88,10 +88,9 @@ async fn kvbm_bridge_plumbing() {
     tokio::time::timeout(Duration::from_secs(8), async {
         let (tx, rx) = broadcast::channel::<KvCacheEvent>(64);
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .kvbm_events(
                 tokio_stream::wrappers::BroadcastStream::new(rx)
@@ -102,7 +101,7 @@ async fn kvbm_bridge_plumbing() {
             .await
             .expect("build");
 
-        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("sub");
+        let mut sub = ZmqSubHandle::spawn(egress_ep.as_str()).await.expect("sub");
         assert!(
             sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await,
             "sync_pulse"
@@ -197,11 +196,10 @@ async fn registry_presence_after_kvbm_store() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let (tx, rx) = broadcast::channel::<KvCacheEvent>(64);
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
         let registry = BlockRegistry::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Kvbm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Kvbm)
             .kvbm_events(
                 tokio_stream::wrappers::BroadcastStream::new(rx)
                     .filter_map(|r| futures::future::ready(r.ok())),

@@ -5318,7 +5318,6 @@ dependencies = [
  "futures",
  "insta",
  "kvbm-logical",
- "portpicker",
  "pretty_assertions",
  "proptest",
  "rmp-serde",
@@ -7193,15 +7192,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
 dependencies = [
  "portable-atomic",
-]
-
-[[package]]
-name = "portpicker"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be97d76faf1bfab666e1375477b23fde79eccf0276e9b63b92a39d676a889ba9"
-dependencies = [
- "rand 0.8.6",
 ]
 
 [[package]]

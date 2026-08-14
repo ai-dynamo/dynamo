@@ -43,17 +43,16 @@ async fn backpressure_ingress() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .poll_interval(Duration::from_millis(10))
             .build()
             .await
             .expect("build");
 
-        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("sub");
+        let mut sub = ZmqSubHandle::spawn(egress_ep.as_str()).await.expect("sub");
         assert!(
             sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await,
             "sync_pulse"
@@ -128,10 +127,9 @@ async fn shutdown_cancellation() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         let pub_handle = ZmqPubHandle::spawn().await;
-        let egress_port = common::pick_port();
-        let egress_ep = common::make_endpoint(egress_port);
+        let egress_ep = common::IpcEndpoint::new();
 
-        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+        let consolidator = ConsolidatorBuilder::new(egress_ep.as_str(), EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
             .poll_interval(Duration::from_millis(50))
             .build()

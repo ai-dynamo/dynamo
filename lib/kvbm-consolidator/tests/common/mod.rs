@@ -70,14 +70,30 @@ pub enum EventMirror {
     AllBlocksCleared {},
 }
 
-// ─── Port allocation ─────────────────────────────────────────────────────────
+// ─── Endpoint allocation ─────────────────────────────────────────────────────
 
-pub fn pick_port() -> u16 {
-    portpicker::pick_unused_port().expect("no free port")
+/// Unique local endpoint for one test socket.
+///
+/// Using a tempfile-backed IPC endpoint avoids the select-then-bind race inherent in
+/// choosing an unused TCP port while integration tests run in parallel processes.
+pub struct IpcEndpoint {
+    endpoint: String,
+    _tempdir: tempfile::TempDir,
 }
 
-pub fn make_endpoint(port: u16) -> String {
-    format!("tcp://127.0.0.1:{port}")
+impl IpcEndpoint {
+    pub fn new() -> Self {
+        let tempdir = tempfile::tempdir().expect("create ZMQ IPC tempdir");
+        let socket_path = tempdir.path().join("socket");
+        Self {
+            endpoint: format!("ipc://{}", socket_path.display()),
+            _tempdir: tempdir,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.endpoint
+    }
 }
 
 // ─── Tracing init ────────────────────────────────────────────────────────────
@@ -101,17 +117,22 @@ pub fn init_tracing() {
 pub struct ZmqPubHandle {
     socket: SharedPubSocket,
     pub endpoint: String,
+    _endpoint_guard: IpcEndpoint,
 }
 
 impl ZmqPubHandle {
-    /// Bind a PUB socket on a free port; simulates the vLLM publisher.
+    /// Bind a PUB socket on a unique local endpoint; simulates the vLLM publisher.
     pub async fn spawn() -> Self {
-        let port = pick_port();
-        let endpoint = make_endpoint(port);
+        let endpoint_guard = IpcEndpoint::new();
+        let endpoint = endpoint_guard.as_str().to_string();
         let socket = bind_pub_socket(&endpoint)
             .await
             .expect("bind_pub_socket failed");
-        Self { socket, endpoint }
+        Self {
+            socket,
+            endpoint,
+            _endpoint_guard: endpoint_guard,
+        }
     }
 
     /// Encode `batch` as msgpack and send as 3-frame multipart `[b"", seq, payload]`.

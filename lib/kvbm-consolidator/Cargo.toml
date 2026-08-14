@@ -30,7 +30,6 @@ testing = []
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml", "redactions"] }
-portpicker = "0.1"
 pretty_assertions = "1.4"
 proptest = "1.5"
 rstest = "0.26"
