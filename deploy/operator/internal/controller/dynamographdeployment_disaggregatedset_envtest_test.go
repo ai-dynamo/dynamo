@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
@@ -334,13 +334,13 @@ func newEnvtestDSReconcilers() (*DynamoGraphDeploymentReconciler, *DynamoCompone
 	}
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        k8sClient,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		Config:        operatorConfig,
 		RuntimeConfig: runtimeConfig,
 	}
 	dcdReconciler := &DynamoComponentDeploymentReconciler{
 		Client:        k8sClient,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		Config:        operatorConfig,
 		RuntimeConfig: runtimeConfig,
 	}

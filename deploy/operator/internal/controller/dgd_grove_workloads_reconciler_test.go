@@ -136,7 +136,7 @@ func TestGroveServiceWaitsForReadyWorkloadBeforeDisaggregatedSetCutover(t *testi
 		Build()
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
-		record.NewFakeRecorder(10),
+		events.NewFakeRecorder(10),
 		&configv1alpha1.OperatorConfiguration{},
 	)
 
