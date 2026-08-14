@@ -728,8 +728,12 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	if dcd.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
 		return deleteStub, true, nil
 	}
-	c := dynamo.GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	if c == nil || !dynamo.IsElasticEPRayLaunch(c) {
+	// Same gate the Grove pathway applies, for the same reason: the selector matches
+	// every pod carrying the component labels, so the Service addresses exactly one Ray
+	// head only while the component renders as one pod. replicas > 1 would round-robin
+	// one DNS name across independent Ray clusters, and numberOfNodes > 1 would publish
+	// worker pods as if they were the head.
+	if !isSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 		return deleteStub, true, nil
 	}
 	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)

@@ -1009,10 +1009,29 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 	return service, nil
 }
 
+// maxServiceNameLength is the Kubernetes limit on a Service name, which must be a
+// DNS-1035 label.
+const maxServiceNameLength = 63
+
 // ElasticEPLeaderServiceName returns the stable headless-Service name a single-pod
 // elastic-EP leader is reachable at (its component service name plus a "-ray" suffix).
+//
+// A DGD/component pair that already sits near the limit would be pushed past it by the
+// four extra characters, and the API server would reject the Service and fail the whole
+// stable-resources reconcile with a permanent error. Truncate instead, the same way
+// PCSNameForDGD keeps Grove names in range: a deterministic hash suffix keeps the name
+// unique and stable across reconciles, which matters because the follower derives this
+// address independently rather than reading it back from the Service.
 func ElasticEPLeaderServiceName(componentServiceName string) string {
-	return NormalizeKubeResourceName(componentServiceName + "-ray")
+	name := NormalizeKubeResourceName(componentServiceName + "-ray")
+	if len(name) <= maxServiceNameLength {
+		return name
+	}
+
+	hash := fnv.New32a()
+	hash.Write([]byte(name))
+	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
+	return name[:maxServiceNameLength-len(suffix)-1] + "-" + suffix
 }
 
 // GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
@@ -1026,26 +1045,37 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 // the engine only starts once its data-parallel ranks (the followers) have joined, so
 // gating the address on readiness would deadlock.
 //
-// The selector matches the elastic-EP component and resolves to exactly the leader pod.
+// The selector matches every pod carrying the component labels, so the Service only
+// resolves to exactly the Ray head while the component renders as one pod. The caller
+// is responsible for that: it emits this Service only for a single-replica, single-node
+// elastic-EP component.
+//
 // The Phase 4 follower does not widen it: the follower is synthesized as its own
 // "<leader>-flw" component (see synthesizeElasticEPFollowerDCD), so it carries a
 // different KubeLabelDynamoComponent value and this selector never matches it. Keep the
 // follower's component identity distinct from the leader's, or this Service starts
 // resolving to followers and `ray start --address=<svc>:6379` will flap between them.
 func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
+	// Copy the caller's metadata so the Service carries the component's labels and
+	// annotations without aliasing the caller's maps.
 	labels := make(map[string]string)
 	for k, v := range params.Labels {
 		labels[k] = v
 	}
+
 	annotations := make(map[string]string)
 	for k, v := range params.Annotations {
 		annotations[k] = v
 	}
+
+	// Select the elastic-EP component itself; the caller's single-pod gate is what makes
+	// this resolve to the one leader pod.
 	selector := map[string]string{
 		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
 		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
 		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
 	}
+
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        ElasticEPLeaderServiceName(params.ServiceName),

@@ -814,6 +814,114 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NotEqual(t, service.Name, lws.Name)
 }
 
+// The non-Grove twin of the Grove pathway's leader-Service gate (see
+// isSinglePodElasticEPLeader and TestGroveStableResources_ElasticEPLeaderService). The
+// headless Service selects every pod carrying the component labels, so it addresses
+// exactly one Ray head only while the component renders as one pod; anything else must
+// emit a delete stub instead of a Service pointed at the wrong pods.
+func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *testing.T) {
+	const elasticEPArgs = "python3 -m dynamo.vllm --enable-elastic-ep --data-parallel-backend ray"
+
+	tests := []struct {
+		name       string
+		mutate     func(*v1alpha1.DynamoComponentDeployment)
+		wantDelete bool
+	}{
+		{
+			name:       "emits for a single-pod elastic-EP leader",
+			mutate:     func(*v1alpha1.DynamoComponentDeployment) {},
+			wantDelete: false,
+		},
+		{
+			name: "deletes for replicas > 1",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Replicas = ptr.To(int32(2))
+			},
+			wantDelete: true,
+		},
+		{
+			name: "deletes for a multinode component",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
+			},
+			wantDelete: true,
+		},
+		{
+			name: "deletes for a component that is not an elastic-EP Ray launch",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec.MainContainer.Args = []string{"python3 -m dynamo.vllm"}
+			},
+			wantDelete: true,
+		},
+		{
+			name: "deletes for the follower, which joins the Service but never owns it",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Annotations = map[string]string{
+					commonconsts.KubeAnnotationElasticEPFollower: commonconsts.KubeLabelValueTrue,
+				}
+			},
+			wantDelete: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := scheme.Scheme
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			require.NoError(t, appsv1.AddToScheme(s))
+			require.NoError(t, corev1.AddToScheme(s))
+
+			t.Log("Build an elastic-EP leader DCD and apply the case's shape")
+			alpha := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "mydgd-decode", Namespace: "default"},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "decode",
+						ComponentType:   commonconsts.ComponentTypeWorker,
+						DynamoNamespace: ptr.To("default"),
+						Replicas:        ptr.To(int32(1)),
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Name:  commonconsts.MainContainerName,
+								Image: "test-image:latest",
+								Args:  []string{elasticEPArgs},
+							},
+						},
+					},
+				},
+			}
+			tt.mutate(alpha)
+			dcd := betaDCD(t, alpha)
+
+			r := &DynamoComponentDeploymentReconciler{
+				Client: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{
+					Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+				},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+				},
+			}
+
+			t.Log("Generate the headless leader Service for this DCD")
+			svc, toDelete, err := r.generateElasticEPHeadlessService(context.Background(), generateResourceOption{
+				dynamoComponentDeployment: dcd,
+			})
+			require.NoError(t, err)
+
+			t.Log("Only the single-pod elastic-EP leader owns a real Service; every other shape is a delete stub")
+			require.Equal(t, tt.wantDelete, toDelete)
+			require.NotNil(t, svc)
+			if !tt.wantDelete {
+				require.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
+				require.Equal(t, "decode", svc.Spec.Selector[commonconsts.KubeLabelDynamoComponent])
+			}
+		})
+	}
+}
+
 // The elastic-EP follower runs a bare Ray join, not the Dynamo runtime, so it never
 // registers a DynamoWorkerMetadata CR. Labelling it for K8s discovery would only make
 // the Rust discovery daemon hold it in its reflector store and wake its debounce loop
