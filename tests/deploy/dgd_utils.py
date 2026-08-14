@@ -1614,7 +1614,7 @@ class ManagedDeployment:
             # kr8s 0.20.x stop() closes the asyncio servers but does not join the
             # thread created by start(). Reaping it prevents a subsequent forward
             # from racing the old listener for the same ephemeral port.
-            background_thread = getattr(port_forward, "_bg_thread", None)
+            background_thread = port_forward._bg_thread
             if background_thread is not None:
                 background_thread.join(timeout=_PORT_FORWARD_STOP_TIMEOUT)
                 if background_thread.is_alive():
