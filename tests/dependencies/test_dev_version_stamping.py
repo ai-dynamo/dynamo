@@ -12,6 +12,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from packaging.requirements import Requirement
 
 try:
     import tomllib
@@ -44,7 +45,7 @@ def _write_project(path: Path, version: str, *, root: bool = False) -> None:
         dependencies = """
 dependencies = [
     "ai-dynamo-runtime==1.4.0",
-    "aisimulate==0.1.0",
+    "aisimulate==0.1.0; python_version < '3.13'",
 ]
 """
     path.write_text(
@@ -95,10 +96,13 @@ def test_ai_dynamo_pins_the_aisimulate_project_version() -> None:
     root_project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     aisimulate_project = tomllib.loads((ROOT / "aisimulate/pyproject.toml").read_text())
 
-    assert (
-        f"aisimulate=={aisimulate_project['project']['version']}"
-        in root_project["project"]["dependencies"]
+    requirement = next(
+        Requirement(value)
+        for value in root_project["project"]["dependencies"]
+        if Requirement(value).name == "aisimulate"
     )
+    assert str(requirement.specifier) == f"=={aisimulate_project['project']['version']}"
+    assert str(requirement.marker) == 'python_version < "3.13"'
 
 
 def test_nightly_stamps_aisimulate_and_root_dependency_pins(tmp_path: Path) -> None:
@@ -115,7 +119,7 @@ def test_nightly_stamps_aisimulate_and_root_dependency_pins(tmp_path: Path) -> N
     assert root_project["project"]["version"] == "1.4.0.dev20260813"
     assert root_project["project"]["dependencies"][:2] == [
         "ai-dynamo-runtime==1.4.0.dev20260813",
-        "aisimulate==0.1.0.dev20260813",
+        "aisimulate==0.1.0.dev20260813; python_version < '3.13'",
     ]
     assert aisimulate_project["project"]["version"] == "0.1.0.dev20260813"
 

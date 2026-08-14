@@ -31,6 +31,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+# The nightly version-stamping tests execute this script against temporary
+# fixture repositories. Keep the production image unchanged and expose only
+# this script in the test image.
+COPY --chmod=664 --chown=dynamo:0 .github/scripts/apply_dev_version.py /workspace/.github/scripts/apply_dev_version.py
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/

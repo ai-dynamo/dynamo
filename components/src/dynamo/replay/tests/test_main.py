@@ -6,6 +6,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -164,6 +165,43 @@ assert module.TITLE == "NVIDIA AIPerf | LLM Metrics"
     assert report_path.parent == tmp_path
     assert report_path.name.startswith("dynamo_replay_report_")
     assert json.loads(report_path.read_text()) == {"completed_requests": 1}
+
+
+def test_cli_reports_missing_aisimulate_clearly() -> None:
+    entrypoint = Path(__file__).resolve().parents[1] / "__main__.py"
+    import_script = r"""
+import builtins
+import runpy
+import sys
+
+original_import = builtins.__import__
+
+def reject_aisimulate(name, *args, **kwargs):
+    if name == "aisimulate" or name.startswith("aisimulate."):
+        raise ModuleNotFoundError(
+            f"No module named {name!r}",
+            name=name,
+        )
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = reject_aisimulate
+try:
+    runpy.run_path(sys.argv[1], run_name="__main__")
+except SystemExit as exc:
+    assert str(exc) == (
+        "Dynamo replay requires the 'aisimulate' package and currently "
+        "supports Python 3.10-3.12."
+    )
+else:
+    raise AssertionError("Dynamo replay unexpectedly loaded without AISimulate")
+"""
+
+    subprocess.run(
+        [sys.executable, "-I", "-c", import_script, str(entrypoint)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_dynamo_cli_reuses_exact_aisimulate_base_schema() -> None:

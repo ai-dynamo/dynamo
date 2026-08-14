@@ -8,8 +8,8 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
   - [project].version in every Dynamo and AISimulate pyproject.toml (PEP 440 form)
   - [package].version / [workspace.package].version in every Cargo.toml
     (SemVer form: dash instead of dot before 'dev', so '1.1.0-dev20260423')
-  - The `ai-dynamo-runtime==1.1.0` and `aisimulate==0.1.0` pins in the
-    root pyproject
+  - The `ai-dynamo-runtime==1.1.0` and conditional `aisimulate==0.1.0`
+    pins in the root pyproject
   - The `version = "1.1.0"` pins on dynamo-*/kvbm-* path deps in root Cargo.toml
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
@@ -56,7 +56,9 @@ VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILIN
 # Root pyproject cross-refs to separately built Python wheels. Each pin keeps
 # its own base version: ai-dynamo-runtime follows Dynamo, while AISimulate is
 # currently versioned independently.
-PY_ROOT_PIN_RE = re.compile(r'("(?:ai-dynamo-runtime|aisimulate)==)([^"]+)(")')
+PY_ROOT_PIN_RE = re.compile(
+    r'("(?:ai-dynamo-runtime|aisimulate)==)([0-9A-Za-z.!+_-]+)([^"]*")'
+)
 
 
 def pep440(suffix: str, base: str) -> str:

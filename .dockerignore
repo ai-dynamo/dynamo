@@ -32,6 +32,9 @@
 !.github/workflows
 .github/workflows/*
 !.github/workflows/release.yml
+!.github/scripts
+.github/scripts/*
+!.github/scripts/apply_dev_version.py
 **/*backup*/
 .dockerignore
 **/target/*
