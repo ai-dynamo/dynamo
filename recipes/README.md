@@ -111,6 +111,11 @@ Each complete recipe follows this standard structure:
         └── perf.yaml (optional)  # AIPerf benchmark job
 ```
 
+In addition, [`accuracy/`](accuracy/) is a shared, model-agnostic accuracy
+check (deliberately outside the per-model structure above): point it at any
+deployed recipe to compare the served model's benchmark score against its
+model card. See [`accuracy/README.md`](accuracy/README.md).
+
 ## Quick Start
 
 ### Prerequisites
