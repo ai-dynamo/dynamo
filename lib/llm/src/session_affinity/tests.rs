@@ -340,7 +340,7 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_error_stream_refreshes_idle_ttl() {
+async fn session_affinity_error_stream_invalidates_before_yielding_error() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
@@ -348,12 +348,14 @@ async fn session_affinity_error_stream_refreshes_idle_ttl() {
         panic!("first request must initialize");
     };
     let lease = initializer.commit(target(7, Some(0))).unwrap();
-    tokio::time::advance(Duration::from_secs(9)).await;
     let mut stream = lease.into_stream(error_response_stream());
     assert!(stream.next().await.unwrap().is_err());
-    assert!(stream.next().await.is_none());
-
-    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_eq!(coordinator.entry_count(), 0);
+    assert!(matches!(
+        coordinator.acquire(&session_id(), None).await.unwrap(),
+        AffinityAcquire::Initialize(_)
+    ));
 }
 
 #[tokio::test(start_paused = true)]

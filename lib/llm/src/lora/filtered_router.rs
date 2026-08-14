@@ -17,9 +17,7 @@ use futures::Stream;
 use rand::Rng;
 
 use dynamo_runtime::{
-    engine::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data,
-    },
+    engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream},
     error::{DynamoError, ErrorType},
     pipeline::{Error, ManyOut, RouterMode, SingleIn, network::egress::push_router::PushRouter},
     protocols::annotated::Annotated,
@@ -58,7 +56,7 @@ impl Drop for LoadGuard {
 /// Thin wrapper around the inner response stream that holds a [`LoadGuard`].
 struct LoadTrackingStream<S> {
     inner: S,
-    _guard: LoadGuard,
+    guard: Option<LoadGuard>,
 }
 
 pub(crate) fn track_response(
@@ -67,26 +65,35 @@ pub(crate) fn track_response(
 ) -> ManyOut<Annotated<LLMEngineOutput>> {
     Box::pin(LoadTrackingStream {
         inner: stream,
-        _guard: guard,
+        guard: Some(guard),
     })
 }
 
 impl<S> std::fmt::Debug for LoadTrackingStream<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoadTrackingStream")
-            .field("lora", &self._guard.lora_name)
+            .field(
+                "lora",
+                &self.guard.as_ref().map(|guard| guard.lora_name.as_str()),
+            )
             .finish()
     }
 }
 
 impl<S> Stream for LoadTrackingStream<S>
 where
-    S: Stream + Unpin,
+    S: Stream<Item = Annotated<LLMEngineOutput>> + Unpin,
 {
-    type Item = S::Item;
+    type Item = Annotated<LLMEngineOutput>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+        let poll = Pin::new(&mut self.inner).poll_next(cx);
+        if matches!(&poll, Poll::Ready(None))
+            || matches!(&poll, Poll::Ready(Some(item)) if item.error.is_some())
+        {
+            self.guard.take();
+        }
+        poll
     }
 }
 
@@ -99,8 +106,8 @@ where
     }
 }
 
-impl<T: Data, S> AsyncEngineStream<T> for LoadTrackingStream<S> where
-    S: Stream<Item = T> + AsyncEngineContextProvider + Send + Unpin
+impl<S> AsyncEngineStream<Annotated<LLMEngineOutput>> for LoadTrackingStream<S> where
+    S: Stream<Item = Annotated<LLMEngineOutput>> + AsyncEngineContextProvider + Send + Unpin
 {
 }
 
@@ -283,5 +290,30 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await?;
         Self::record_worker(tracker.as_deref(), worker_id);
         Ok(track_response(response_stream, guard))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dynamo_runtime::pipeline::{ResponseStream, context::Controller};
+    use futures::{StreamExt, stream};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn lora_load_releases_before_stream_error_is_observable() {
+        let estimator = Arc::new(LoadEstimator::new());
+        let guard = LoadGuard::new(estimator.clone(), "adapter".to_string());
+        let source = ResponseStream::new(
+            Box::pin(stream::iter([Annotated::from_error("backend failed")])),
+            Arc::new(Controller::default()),
+        );
+        let mut tracked = track_response(source, guard);
+        assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
+
+        assert!(tracked.next().await.unwrap().error.is_some());
+        assert!(estimator.get_inflight_counts().is_empty());
     }
 }

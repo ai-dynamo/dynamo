@@ -730,7 +730,14 @@ impl Stream for AffinityTrackedStream {
                 drop(self.lease.take());
                 Poll::Ready(None)
             }
-            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
+            Poll::Ready(Some(item)) => {
+                if item.error.is_some()
+                    && let Some(mut lease) = self.lease.take()
+                {
+                    lease.invalidate();
+                }
+                Poll::Ready(Some(item))
+            }
             poll => poll,
         }
     }
