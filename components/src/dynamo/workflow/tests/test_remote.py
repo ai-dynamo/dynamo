@@ -394,7 +394,7 @@ class _Runtime:
 
 async def test_three_remote_stages_fan_out_and_join_through_envelopes() -> None:
     workflow = Workflow("remote-text-fanout")
-    text = workflow.input("text", type="text")
+    text = workflow.input("text", ValueSpec(type="text"))
     encoder = workflow.stage("encoder", TEXT_ENCODER, text=text)
     classifier = workflow.stage("classifier", KEYWORD_CLASSIFIER, tokens=encoder.tokens)
     generator = workflow.stage("generator", TEXT_GENERATOR, tokens=encoder.tokens)
