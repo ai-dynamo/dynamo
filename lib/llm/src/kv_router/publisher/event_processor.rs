@@ -26,7 +26,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
 ) {
-    let mut batching_state = BatchingState::new();
+    let mut batching_state = BatchingState::new(max_batch_blocks);
     let mut dedup = EventDedupFilter::new();
     let mut last_raw_input_id: Option<u64> = None;
 
@@ -78,56 +78,27 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
 
                     let storage_tier = placement_event.placement.tier;
                     let residency_domain = placement_event.placement.residency_domain;
-                    let event = placement_event.event;
                     tracing::trace!(
                         "Event processor for worker_id {} processing event: {:?}",
                         worker_id,
-                        event.data
+                        placement_event.event.data
                     );
 
-                    let dp_rank_changed =
-                        batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
-                    let storage_tier_changed = batching_state.has_pending()
-                        && storage_tier != batching_state.last_storage_tier;
-                    let residency_domain_changed = batching_state.has_pending()
-                        && residency_domain != batching_state.last_residency_domain;
-
-                    match event.data {
-                        KvCacheEventData::Removed(data) => {
-                            if batching_state.pending_stored.is_some()
-                                || dp_rank_changed
-                                || storage_tier_changed
-                                || residency_domain_changed
-                            {
-                                batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
-                            }
-                            match &mut batching_state.pending_removed {
-                                Some(pending) => pending.block_hashes.extend(data.block_hashes),
-                                None => {
-                                    batching_state.pending_removed = Some(data);
-                                }
-                            }
-                        }
-                        KvCacheEventData::Stored(data) => {
-                            let should_flush = dp_rank_changed
-                                || storage_tier_changed
-                                || residency_domain_changed
-                                || batching_state.pending_removed.is_some()
-                                || batching_state.pending_stored.as_ref().is_some_and(|p| {
-                                    data.parent_hash != p.blocks.last().map(|b| b.block_hash)
-                                });
-                            if should_flush {
-                                batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
-                            }
-                            match &mut batching_state.pending_stored {
-                                Some(pending) => pending.blocks.extend(data.blocks),
-                                None => {
-                                    batching_state.pending_stored = Some(data);
-                                }
-                            }
+                    match &placement_event.event.data {
+                        KvCacheEventData::Removed(_) | KvCacheEventData::Stored(_) => {
+                            batching_state
+                                .push(
+                                    placement_event,
+                                    &local_indexer,
+                                    worker_id,
+                                    &mut dedup,
+                                    &mut output,
+                                )
+                                .await;
                         }
                         KvCacheEventData::Cleared => {
                             batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                            let event = placement_event.event;
                             dedup.clear_rank_domain(event.dp_rank, residency_domain);
                             let applied = emit(
                                 &local_indexer,
@@ -157,20 +128,11 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                 cancellation_token.cancel();
                                 break 'event_batch;
                             }
-                            batching_state.next_publish_id += 1;
+                            batching_state.next_publish_id = batching_state
+                                .next_publish_id
+                                .checked_add(1)
+                                .expect("KV event publisher outbound cursor exhausted");
                         }
-                    }
-
-                    batching_state.last_dp_rank = event.dp_rank;
-                    batching_state.last_storage_tier = storage_tier;
-                    batching_state.last_residency_domain = residency_domain;
-
-                    // Bound coalesced output without splitting an individual source
-                    // event or returning to `select!` midway through the native list.
-                    if batching_state.has_pending()
-                        && batching_state.pending_block_count() >= max_batch_blocks
-                    {
-                        batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                     }
                 }
 

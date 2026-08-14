@@ -18,6 +18,11 @@ except ImportError:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
@@ -41,7 +46,13 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     request_plane: str
     event_plane: Optional[str] = None
     enable_local_indexer: bool = True
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
 
     # GMS configuration
     gms_shadow_mode: bool = False
@@ -97,8 +108,17 @@ def parse_args(argv: list[str] | None = None) -> Config:
             continue
         vg._group_actions.append(action)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto Config: the router's --router-kv-events lands on
+    # `use_kv_events`, which Config already uses for "this worker publishes KV
+    # events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     args, unknown = parser.parse_known_args(argv)
     dynamo_config = Config.from_cli_args(args)
+
+    # Consume the router flags before the engine parser sees the remainder.
+    dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
     # Validate arguments
     dynamo_config.validate()
