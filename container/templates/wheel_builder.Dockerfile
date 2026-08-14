@@ -601,19 +601,23 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 
-{% if target == "planner" %}
+{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 # AI Simulate is a separate, architecture-specific Python distribution used by
-# the planner image. Build it after the Dynamo wheels so Python-only changes do
-# not invalidate the expensive Rust layers above. The wheel remains image-local.
+# Planner and the framework runtime images. Build it after the Dynamo wheels so
+# Python-only changes do not invalidate the expensive Rust layers above.
 COPY aisimulate/ /opt/dynamo/aisimulate/
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo/aisimulate && \
-    maturin build --release \
+{% if device == "cuda" %}    maturin build --release \
         --auditwheel repair \
         --compatibility manylinux_2_28 \
         --out /opt/dynamo/dist
+{% else %}    maturin build --release \
+        --auditwheel repair \
+        --out /opt/dynamo/dist
+{% endif %}
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
