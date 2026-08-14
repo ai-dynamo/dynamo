@@ -61,6 +61,10 @@ vllm = [
     "uvloop",
     "nixl[cu13]==1.3.2",
     "vllm[flashinfer,runai,otel]==0.27.1",
+    # vLLM 0.27.1 predates its Transformers 5.15 Gemma 4 compatibility fix.
+    # Keep this constraint scoped to ai-dynamo[vllm]; other backends solve
+    # their own Transformers requirements.
+    "transformers<5.15.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.

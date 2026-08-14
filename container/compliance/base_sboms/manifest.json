@@ -7,9 +7,9 @@
       "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
       "baseline_tag": "13.0.2-base-ubuntu24.04",
       "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
+      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.22.1-ubuntu2404",
+      "from_tag": "v0.27.1-ubuntu2404",
       "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
@@ -31,9 +31,9 @@
       "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
       "baseline_tag": "13.0.2-base-ubuntu24.04",
       "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
+      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.22.1-ubuntu2404",
+      "from_tag": "v0.27.1-ubuntu2404",
       "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
     },
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-08-11T20:41:13+00:00",
+  "generated_at": "2026-08-13T23:32:12+00:00",
   "schema_version": 2
 }

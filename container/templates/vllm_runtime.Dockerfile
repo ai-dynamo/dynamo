@@ -153,6 +153,27 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+
+# The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
+# `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
+# heterogeneous per-layer configs, but vLLM's corresponding support missed
+# 0.27.1 and the engine crashes during ModelConfig initialization. Install the
+# compatible version before layering vLLM-Omni so its dependency solve sees the
+# final Transformers invariant instead of resolving against 5.15.0 first.
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps \
+        "transformers==${TRANSFORMERS_VERSION}" && \
+    python3 - "${TRANSFORMERS_VERSION}" <<'PY'
+import importlib.metadata as md
+import sys
+
+actual = md.version("transformers")
+expected = sys.argv[1]
+if actual != expected:
+    raise RuntimeError(f"expected transformers {expected}, found {actual}")
+PY
+
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
@@ -258,28 +279,12 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install {{ pip_target }} "google-crc32c>=1.5.0"
 {% endif %}
 
+# Verify the final declared dependency graph after Omni and optional packages
+# have been layered. Unlike the version assertion above, this catches a future
+# vLLM-Omni requirement that is incompatible with the Transformers pin.
+RUN uv pip check {{ pip_target }}
+
 {% endif %}
-
-# The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
-# `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
-# heterogeneous per-layer configs, but vLLM's corresponding support missed
-# 0.27.1 and the engine crashes during ModelConfig initialization. XPU already
-# ships 5.14.1; apply the same final runtime invariant to every device after
-# optional packages are layered. The dev/test requirements do not redeclare
-# Transformers, so derived development images retain this version.
-RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}" && \
-    python3 - "${TRANSFORMERS_VERSION}" <<'PY'
-import importlib.metadata as md
-import sys
-
-actual = md.version("transformers")
-expected = sys.argv[1]
-if actual != expected:
-    raise RuntimeError(f"expected transformers {expected}, found {actual}")
-PY
 
 {% if device == "xpu" %}
 RUN apt-get update && \
