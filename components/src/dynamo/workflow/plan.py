@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping, Tuple
+from typing import Mapping, Tuple, Union
 
 from dynamo.workflow.ir import WorkflowIR
 from dynamo.workflow.types import (
@@ -18,6 +18,8 @@ from dynamo.workflow.types import (
 )
 
 IN_PROCESS_CARRIER = "in_process"
+INLINE_CARRIER = "inline"
+INLINE_VALUE_TYPES = frozenset({"bytes", "json", "text"})
 
 
 @dataclass(frozen=True)
@@ -30,7 +32,34 @@ class InlineBinding:
         validate_name(self.runner_key, "inline runner key")
 
 
-Binding = InlineBinding
+def _validate_endpoint_id(endpoint_id: str) -> None:
+    if not isinstance(endpoint_id, str):
+        raise WorkflowValidationError("remote endpoint id must be a string")
+    parts = endpoint_id.split(".")
+    if len(parts) != 3:
+        raise WorkflowValidationError(
+            "remote endpoint id must use 'namespace.component.endpoint'"
+        )
+    for kind, part in zip(("namespace", "component", "endpoint"), parts):
+        validate_name(part, f"remote {kind}")
+
+
+@dataclass(frozen=True)
+class RemoteBinding:
+    """Resolve one logical stage through a discovered Dynamo endpoint."""
+
+    endpoint_id: str
+    routing_policy: str = "round_robin"
+
+    def __post_init__(self) -> None:
+        _validate_endpoint_id(self.endpoint_id)
+        if self.routing_policy != "round_robin":
+            raise WorkflowValidationError(
+                f"unsupported remote routing policy {self.routing_policy!r}"
+            )
+
+
+Binding = Union[InlineBinding, RemoteBinding]
 
 
 @dataclass(frozen=True)
@@ -47,7 +76,7 @@ class EdgePlan:
             raise WorkflowValidationError("edge source must use ValueRef")
         validate_name(self.target_stage, "edge target stage")
         validate_name(self.target_port, "edge target port")
-        if self.carrier != IN_PROCESS_CARRIER:
+        if self.carrier not in {INLINE_CARRIER, IN_PROCESS_CARRIER}:
             raise WorkflowValidationError(f"unsupported edge carrier {self.carrier!r}")
 
 
@@ -68,11 +97,19 @@ class ExecutionPlan:
         bindings: dict[str, Binding] = {}
         for stage_id, binding in sorted(self.bindings.items()):
             validate_name(stage_id, "binding stage id")
-            if not isinstance(binding, InlineBinding):
+            if not isinstance(binding, (InlineBinding, RemoteBinding)):
                 raise WorkflowValidationError(
                     f"binding for stage {stage_id!r} uses an unsupported type"
                 )
             bindings[stage_id] = binding
+
+        binding_types = {type(binding) for binding in bindings.values()}
+        if len(binding_types) > 1:
+            raise WorkflowValidationError(
+                "workflow placement must be homogeneous; mixed inline and remote "
+                "bindings are unsupported"
+            )
+        remote = bool(binding_types) and binding_types == {RemoteBinding}
 
         expected_stages = set(self.stage_contracts)
         actual_stages = set(bindings)
@@ -83,6 +120,7 @@ class ExecutionPlan:
                 f"extra={sorted(actual_stages - expected_stages)}"
             )
 
+        stages_by_id = {stage.id: stage for stage in self.workflow.stages}
         edges = tuple(self.edges)
         actual_edges: dict[tuple[str, str], EdgePlan] = {}
         for edge in edges:
@@ -114,11 +152,31 @@ class ExecutionPlan:
                     f"edge targeting stage {key[0]!r} port {key[1]!r} "
                     "does not match the workflow definition"
                 )
-            if edge.carrier != IN_PROCESS_CARRIER:
+            expected_carrier = INLINE_CARRIER if remote else IN_PROCESS_CARRIER
+            if edge.carrier != expected_carrier:
                 raise WorkflowValidationError(
-                    f"inline stage {key[0]!r} port {key[1]!r} requires "
-                    "the in-process carrier"
+                    f"stage {key[0]!r} port {key[1]!r} requires "
+                    f"{expected_carrier!r} carrier"
                 )
+            value_spec = stages_by_id[key[0]].contract.inputs[key[1]]
+            if remote and value_spec.type not in INLINE_VALUE_TYPES:
+                raise WorkflowValidationError(
+                    f"remote edge targeting stage {key[0]!r} port {key[1]!r} "
+                    f"cannot carry value type {value_spec.type!r} inline"
+                )
+
+        if remote:
+            for output_name, source in self.workflow.outputs.items():
+                if source.stage_id is None:
+                    continue
+                source_port = source.output_name
+                assert source_port is not None
+                value_spec = stages_by_id[source.stage_id].contract.outputs[source_port]
+                if value_spec.type not in INLINE_VALUE_TYPES:
+                    raise WorkflowValidationError(
+                        f"remote workflow output {output_name!r} cannot carry value "
+                        f"type {value_spec.type!r} inline"
+                    )
 
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
         object.__setattr__(
@@ -135,4 +193,12 @@ class ExecutionPlan:
 
         return MappingProxyType(
             {stage.id: stage.contract for stage in self.workflow.stages}
+        )
+
+    @property
+    def remote(self) -> bool:
+        """Whether every stage is bound to a remote endpoint."""
+
+        return bool(self.bindings) and all(
+            isinstance(binding, RemoteBinding) for binding in self.bindings.values()
         )

@@ -13,10 +13,13 @@ from dynamo.workflow.builder import Workflow
 from dynamo.workflow.ir import WorkflowIR
 from dynamo.workflow.plan import (
     IN_PROCESS_CARRIER,
+    INLINE_CARRIER,
+    INLINE_VALUE_TYPES,
     Binding,
     EdgePlan,
     ExecutionPlan,
     InlineBinding,
+    RemoteBinding,
 )
 from dynamo.workflow.types import StreamSpec, WorkflowValidationError, validate_name
 
@@ -33,7 +36,7 @@ class DeploymentSpec:
         bindings: dict[str, Binding] = {}
         for stage_id, binding in sorted(self.bindings.items()):
             validate_name(stage_id, "deployment stage id")
-            if not isinstance(binding, InlineBinding):
+            if not isinstance(binding, (InlineBinding, RemoteBinding)):
                 raise WorkflowValidationError(
                     f"binding for stage {stage_id!r} uses an unsupported type"
                 )
@@ -48,6 +51,17 @@ class DeploymentSpec:
             bindings={
                 stage_id: InlineBinding(runner_key)
                 for stage_id, runner_key in runner_keys.items()
+            }
+        )
+
+    @classmethod
+    def remote(cls, **endpoint_ids: str) -> "DeploymentSpec":
+        """Build round-robin bindings to discovered Dynamo endpoints."""
+
+        return cls(
+            bindings={
+                stage_id: RemoteBinding(endpoint_id)
+                for stage_id, endpoint_id in endpoint_ids.items()
             }
         )
 
@@ -92,14 +106,47 @@ def compile_workflow(
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
 
+    binding_types = {type(binding) for binding in deployment.bindings.values()}
+    if len(binding_types) > 1:
+        raise WorkflowValidationError(
+            "workflow placement must be homogeneous; mixed inline and remote "
+            "bindings are unsupported"
+        )
+
+    remote = bool(binding_types) and binding_types == {RemoteBinding}
+    stages_by_id = {stage.id: stage for stage in workflow_ir.stages}
+    if remote:
+        for output_name, source in workflow_ir.outputs.items():
+            if source.stage_id is None:
+                continue
+            source_port = source.output_name
+            assert source_port is not None
+            value_spec = stages_by_id[source.stage_id].contract.outputs[source_port]
+            if value_spec.type not in INLINE_VALUE_TYPES:
+                raise WorkflowValidationError(
+                    f"remote workflow output {output_name!r} cannot carry value type "
+                    f"{value_spec.type!r} inline"
+                )
+
     edges = tuple(
         EdgePlan(
             source=source,
             target_stage=stage.id,
             target_port=port,
-            carrier=IN_PROCESS_CARRIER,
+            carrier=INLINE_CARRIER if remote else IN_PROCESS_CARRIER,
         )
         for stage in workflow_ir.stages
         for port, source in stage.inputs.items()
     )
+    if remote:
+        for edge in edges:
+            value_spec = stages_by_id[edge.target_stage].contract.inputs[
+                edge.target_port
+            ]
+            if value_spec.type not in INLINE_VALUE_TYPES:
+                raise WorkflowValidationError(
+                    f"remote edge targeting stage {edge.target_stage!r} port "
+                    f"{edge.target_port!r} cannot carry value type "
+                    f"{value_spec.type!r} inline"
+                )
     return ExecutionPlan(workflow_ir, deployment.bindings, edges)

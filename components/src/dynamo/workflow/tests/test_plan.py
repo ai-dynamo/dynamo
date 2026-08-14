@@ -8,6 +8,7 @@ from dynamo.workflow import (
     EdgePlan,
     ExecutionPlan,
     InlineBinding,
+    RemoteBinding,
     StageContract,
     StreamSpec,
     ValueRef,
@@ -97,3 +98,76 @@ def test_execution_plan_rejects_invalid_physical_edges() -> None:
                 ),
             ),
         )
+
+
+def test_remote_plan_selects_inline_carrier() -> None:
+    plan = compile_workflow(
+        _workflow(),
+        DeploymentSpec.remote(normalize="workflows.normalize.generate"),
+    )
+
+    assert plan.remote
+    assert plan.bindings == {"normalize": RemoteBinding("workflows.normalize.generate")}
+    assert plan.edges[0].carrier == "inline"
+
+
+def test_mixed_placement_is_rejected() -> None:
+    contract = StageContract(
+        id="text-stage",
+        inputs={"text": ValueSpec(type="text")},
+        outputs={"text": ValueSpec(type="text")},
+    )
+    workflow = Workflow("mixed-placement")
+    value = workflow.input("text", ValueSpec(type="text"))
+    first = workflow.stage("first", contract, text=value)
+    second = workflow.stage("second", contract, text=first.text)
+    workflow.output("text", second.text)
+
+    with pytest.raises(WorkflowValidationError, match="homogeneous"):
+        compile_workflow(
+            workflow,
+            DeploymentSpec(
+                {
+                    "first": InlineBinding("first"),
+                    "second": RemoteBinding("workflows.second.generate"),
+                }
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "value_spec",
+    [
+        ValueSpec(type="tensor"),
+        ValueSpec(type="image"),
+        ValueSpec(type="object", class_id="opaque.Value"),
+    ],
+    ids=["tensor", "image", "object"],
+)
+def test_remote_rich_value_requires_a_transport_carrier(
+    value_spec: ValueSpec,
+) -> None:
+    contract = StageContract(
+        id="rich-stage",
+        inputs={"value": value_spec},
+        outputs={"result": ValueSpec(type="json")},
+    )
+    workflow = Workflow("remote-rich-value")
+    value = workflow.input("value", value_spec)
+    result = workflow.stage("stage", contract, value=value)
+    workflow.output("result", result.result)
+
+    with pytest.raises(WorkflowValidationError, match="cannot carry value type"):
+        compile_workflow(
+            workflow,
+            DeploymentSpec.remote(stage="workflows.stage.generate"),
+        )
+
+
+def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
+    assert RemoteBinding("namespace.component.endpoint").endpoint_id == (
+        "namespace.component.endpoint"
+    )
+
+    with pytest.raises(WorkflowValidationError, match="namespace.component.endpoint"):
+        RemoteBinding("component.endpoint")
