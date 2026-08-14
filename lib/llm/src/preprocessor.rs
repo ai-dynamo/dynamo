@@ -44,7 +44,7 @@ use dynamo_runtime::metrics::frontend_perf::{
 };
 use std::{
     any::Any,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     pin::Pin,
     sync::Arc,
 };
@@ -3792,6 +3792,15 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if tool_call_parser
+            .as_deref()
+            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
+        {
+            Box::pin(Self::frame_kimi_k3_xtml_stream(stream))
+        } else {
+            Box::pin(stream)
+        };
+
         // Per-choice recovery state — allocated only for glm47 since only that
         // parser emits <tool_call> XML that can be truncated at max_tokens.
         // Buffers raw input and tracks what the jail emitted per choice.index
@@ -4036,6 +4045,295 @@ impl OpenAIPreprocessor {
 
             futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
         })
+    }
+
+    /// Emits Kimi K3 XTML tags as complete, standalone deltas.
+    fn frame_kimi_k3_xtml_stream<S>(
+        stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        const OPEN: &str = "<|open|>";
+        const CLOSE: &str = "<|close|>";
+        const SEP: &str = "<|sep|>";
+        const MAX_PENDING_TAG_BYTES: usize = 16 * 1024;
+
+        struct State {
+            stream: Pin<
+                Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+            >,
+            pending: HashMap<u32, String>,
+            choice_templates: HashMap<u32, dynamo_protocols::types::ChatChoiceStream>,
+            response_template: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
+            ready: VecDeque<Annotated<NvCreateChatCompletionStreamResponse>>,
+            eof_flushed: bool,
+        }
+
+        fn partial_control_suffix_len(text: &str) -> usize {
+            [OPEN, CLOSE]
+                .into_iter()
+                .flat_map(|control| 1..control.len())
+                .filter(|prefix_len| {
+                    [OPEN, CLOSE]
+                        .into_iter()
+                        .any(|control| text.ends_with(&control[..*prefix_len]))
+                })
+                .max()
+                .unwrap_or(0)
+        }
+
+        fn next_control(text: &str, from: usize) -> Option<usize> {
+            [OPEN, CLOSE]
+                .into_iter()
+                .filter_map(|control| text[from..].find(control).map(|offset| from + offset))
+                .min()
+        }
+
+        fn split_complete_tags(mut text: String) -> (Vec<String>, String) {
+            let mut segments = Vec::new();
+            let mut cursor = 0;
+
+            while cursor < text.len() {
+                let Some(tag_start) = next_control(&text, cursor) else {
+                    let suffix_len = partial_control_suffix_len(&text[cursor..]);
+                    let safe_end = text.len() - suffix_len;
+                    if safe_end > cursor {
+                        segments.push(text[cursor..safe_end].to_string());
+                    }
+                    return (segments, text.split_off(safe_end));
+                };
+
+                if tag_start > cursor {
+                    segments.push(text[cursor..tag_start].to_string());
+                }
+                let tag_body_start = if text[tag_start..].starts_with(OPEN) {
+                    tag_start + OPEN.len()
+                } else {
+                    tag_start + CLOSE.len()
+                };
+                let Some(sep_offset) = text[tag_body_start..].find(SEP) else {
+                    return (segments, text.split_off(tag_start));
+                };
+                let sep_start = tag_body_start + sep_offset;
+                if let Some(nested_start) = next_control(&text, tag_body_start)
+                    && nested_start < sep_start
+                {
+                    segments.push(text[tag_start..nested_start].to_string());
+                    cursor = nested_start;
+                    continue;
+                }
+
+                let tag_end = sep_start + SEP.len();
+                segments.push(text[tag_start..tag_end].to_string());
+                cursor = tag_end;
+            }
+
+            (segments, String::new())
+        }
+
+        fn clear_delta_metadata(choice: &mut dynamo_protocols::types::ChatChoiceStream) {
+            choice.delta.role = None;
+            choice.delta.tool_calls = None;
+            choice.delta.function_call = None;
+            choice.delta.refusal = None;
+            choice.delta.reasoning_content = None;
+        }
+
+        fn frame_response(
+            mut response: Annotated<NvCreateChatCompletionStreamResponse>,
+            pending: &mut HashMap<u32, String>,
+        ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+            let Some(data) = response.data.as_ref() else {
+                return vec![response];
+            };
+            let needs_inspection = data.inner.choices.iter().any(|choice| {
+                pending.contains_key(&choice.index)
+                    || matches!(
+                        choice.delta.content.as_ref(),
+                        Some(ChatCompletionMessageContent::Text(text)) if text.contains('<')
+                    )
+            });
+            if !needs_inspection {
+                return vec![response];
+            }
+
+            let mut segments_by_choice = HashMap::<u32, Vec<String>>::new();
+            let mut max_segments = 0;
+            let response_is_terminal = data.inner.usage.is_some();
+            for choice in &data.inner.choices {
+                let choice_is_terminal = choice.finish_reason.is_some() || response_is_terminal;
+                let mut combined = pending.remove(&choice.index).unwrap_or_default();
+                match choice.delta.content.as_ref() {
+                    Some(ChatCompletionMessageContent::Text(delta)) => combined.push_str(delta),
+                    _ if choice_is_terminal && !combined.is_empty() => {}
+                    _ => {
+                        if !combined.is_empty() {
+                            pending.insert(choice.index, combined);
+                        }
+                        continue;
+                    }
+                }
+
+                let (mut segments, remainder) = split_complete_tags(combined);
+                if choice_is_terminal || remainder.len() > MAX_PENDING_TAG_BYTES {
+                    if !remainder.is_empty() {
+                        segments.push(remainder);
+                    }
+                } else if !remainder.is_empty() {
+                    pending.insert(choice.index, remainder);
+                }
+                max_segments = max_segments.max(segments.len());
+                segments_by_choice.insert(choice.index, segments);
+            }
+
+            if segments_by_choice.is_empty() {
+                return vec![response];
+            }
+            if max_segments == 0 {
+                if let Some(data) = response.data.as_mut() {
+                    for choice in &mut data.inner.choices {
+                        if segments_by_choice.contains_key(&choice.index) {
+                            choice.delta.content = None;
+                        }
+                    }
+                }
+                return vec![response];
+            }
+
+            let mut framed = Vec::with_capacity(max_segments);
+            for phase in 0..max_segments {
+                let mut output = response.clone();
+                let Some(output_data) = output.data.as_mut() else {
+                    continue;
+                };
+                output_data.inner.choices.retain_mut(|choice| {
+                    let Some(segments) = segments_by_choice.get(&choice.index) else {
+                        return phase == 0;
+                    };
+                    if segments.is_empty() {
+                        if phase == 0 {
+                            choice.delta.content = None;
+                            return true;
+                        }
+                        return false;
+                    }
+                    let Some(segment) = segments.get(phase) else {
+                        return false;
+                    };
+
+                    choice.delta.content =
+                        Some(ChatCompletionMessageContent::Text(segment.clone()));
+                    if phase > 0 {
+                        clear_delta_metadata(choice);
+                    }
+                    if phase + 1 < segments.len() {
+                        choice.finish_reason = None;
+                        choice.logprobs = None;
+                    }
+                    true
+                });
+
+                if phase + 1 < max_segments {
+                    output_data.inner.usage = None;
+                    output_data.nvext = None;
+                    output_data.llm_metrics = None;
+                    output.event = None;
+                    output.comment = None;
+                    output.error = None;
+                }
+                let should_emit = !output_data.inner.choices.is_empty()
+                    || output_data.inner.usage.is_some()
+                    || output.event.is_some()
+                    || output.comment.is_some()
+                    || output.error.is_some();
+                if should_emit {
+                    framed.push(output);
+                }
+            }
+            framed
+        }
+
+        fn flush_pending(
+            state: &mut State,
+        ) -> Option<Annotated<NvCreateChatCompletionStreamResponse>> {
+            if state.pending.is_empty() {
+                return None;
+            }
+            let mut response = state.response_template.clone()?;
+            let data = response.data.as_mut()?;
+            data.inner.usage = None;
+            data.nvext = None;
+            data.llm_metrics = None;
+            let mut choices: Vec<_> = state
+                .pending
+                .drain()
+                .filter_map(|(index, remainder)| {
+                    let mut choice = state.choice_templates.get(&index)?.clone();
+                    clear_delta_metadata(&mut choice);
+                    choice.delta.content = Some(ChatCompletionMessageContent::Text(remainder));
+                    choice.finish_reason = None;
+                    choice.logprobs = None;
+                    Some(choice)
+                })
+                .collect();
+            choices.sort_by_key(|choice| choice.index);
+            data.inner.choices = choices;
+            response.event = None;
+            response.comment = None;
+            response.error = None;
+            let has_choices = !data.inner.choices.is_empty();
+            has_choices.then_some(response)
+        }
+
+        let state = State {
+            stream: Box::pin(stream),
+            pending: HashMap::new(),
+            choice_templates: HashMap::new(),
+            response_template: None,
+            ready: VecDeque::new(),
+            eof_flushed: false,
+        };
+
+        stream::unfold(state, |mut state| async move {
+            loop {
+                if let Some(response) = state.ready.pop_front() {
+                    return Some((response, state));
+                }
+
+                if let Some(response) = state.stream.next().await {
+                    let is_usage_only = response.data.as_ref().is_some_and(|data| {
+                        data.inner.choices.is_empty() && data.inner.usage.is_some()
+                    });
+                    if (is_usage_only || response.error.is_some())
+                        && let Some(flushed) = flush_pending(&mut state)
+                    {
+                        state.ready.push_back(flushed);
+                        state.ready.push_back(response);
+                        continue;
+                    }
+                    if let Some(data) = response.data.as_ref() {
+                        state.response_template = Some(response.clone());
+                        for choice in &data.inner.choices {
+                            state.choice_templates.insert(choice.index, choice.clone());
+                        }
+                    }
+                    state
+                        .ready
+                        .extend(frame_response(response, &mut state.pending));
+                    continue;
+                }
+
+                if state.eof_flushed {
+                    return None;
+                }
+                state.eof_flushed = true;
+                if let Some(response) = flush_pending(&mut state) {
+                    return Some((response, state));
+                }
+            }
+        })
+        .fuse()
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
@@ -4393,10 +4691,17 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if matches!(parser_name.as_str(), "kimi_k3" | "kimi-k3") {
+                Box::pin(Self::frame_kimi_k3_xtml_stream(stream))
+            } else {
+                Box::pin(stream)
+            };
+
         // Parsers and bypass decisions are created lazily per `choice.index`
         // inside the unfold loop, so `n > 1` choices never share state.
         let state = ReasoningState {
-            stream: Box::pin(stream),
+            stream,
             parser_name,
             prompt_injected_reasoning,
             bypass_bare_guided_json,
@@ -5359,7 +5664,7 @@ mod tests {
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
-        Role,
+        FinishReason, Role,
     };
 
     fn chat_stream_chunk(
@@ -5394,6 +5699,194 @@ mod tests {
             nvext: None,
             llm_metrics: None,
         })
+    }
+
+    fn xtml_chunk(index: u32, content: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut response = chat_stream_chunk(index, Some(Role::Assistant));
+        response.data.as_mut().unwrap().inner.choices[0].delta.content = Some(
+            ChatCompletionMessageContent::Text(content.to_string()),
+        );
+        response
+    }
+
+    fn framed_texts(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        index: u32,
+    ) -> Vec<&str> {
+        output
+            .iter()
+            .filter_map(|response| response.data.as_ref())
+            .flat_map(|data| &data.inner.choices)
+            .filter(|choice| choice.index == index)
+            .filter_map(|choice| match choice.delta.content.as_ref() {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_handles_dynamic_tags_and_interleaved_choices() {
+        let input = stream::iter(vec![
+            xtml_chunk(0, "<|op"),
+            xtml_chunk(1, "<|cl"),
+            xtml_chunk(0, "en|>call tool=\"weather\" index=\"1\""),
+            xtml_chunk(1, "ose|>response"),
+            xtml_chunk(0, "<|sep|>body"),
+            xtml_chunk(1, "<|sep|>answer"),
+        ]);
+
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(input)
+            .collect()
+            .await;
+
+        assert_eq!(
+            framed_texts(&output, 0),
+            vec!["<|open|>call tool=\"weather\" index=\"1\"<|sep|>", "body"]
+        );
+        assert_eq!(
+            framed_texts(&output, 1),
+            vec!["<|close|>response<|sep|>", "answer"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_flushes_truncated_tag_at_eof() {
+        let raw = "prefix<|open|>call tool=\"weather\"";
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(stream::iter(vec![
+            xtml_chunk(0, raw),
+        ]))
+        .collect()
+        .await;
+
+        assert_eq!(framed_texts(&output, 0).concat(), raw);
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_flushes_before_contentless_finish() {
+        let raw = "<|open|>call tool=\"weather\"";
+        let mut finish = chat_stream_chunk(0, None);
+        let finish_choice = &mut finish.data.as_mut().unwrap().inner.choices[0];
+        finish_choice.delta.content = None;
+        finish_choice.finish_reason = Some(FinishReason::Stop);
+
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(stream::iter(vec![
+            xtml_chunk(0, raw),
+            finish,
+        ]))
+        .collect()
+        .await;
+
+        assert_eq!(framed_texts(&output, 0), vec![raw]);
+        let emitted_choice = output
+            .iter()
+            .filter_map(|response| response.data.as_ref())
+            .flat_map(|data| &data.inner.choices)
+            .find(|choice| choice.delta.content.is_some())
+            .expect("truncated tag should be emitted before stream termination");
+        assert_eq!(emitted_choice.finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_preserves_data_less_events() {
+        let event = Annotated {
+            id: Some("event-id".to_string()),
+            data: None,
+            event: Some("keepalive".to_string()),
+            comment: Some("between fragments".to_string()),
+            error: None,
+        };
+        let input = stream::iter(vec![
+            xtml_chunk(0, "<|op"),
+            event,
+            xtml_chunk(0, "en|>tools<|sep|>"),
+        ]);
+
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(input)
+            .collect()
+            .await;
+
+        assert_eq!(framed_texts(&output, 0), vec!["<|open|>tools<|sep|>"]);
+        assert!(output.iter().any(|response| {
+            response.data.is_none()
+                && response.event.as_deref() == Some("keepalive")
+                && response.comment.as_deref() == Some("between fragments")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_bounds_unterminated_tag_buffer() {
+        let oversized = format!("<|open|>{}", "x".repeat(16 * 1024));
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(stream::iter(vec![
+            xtml_chunk(0, &oversized),
+            xtml_chunk(0, "tail"),
+        ]))
+        .collect()
+        .await;
+
+        assert_eq!(framed_texts(&output, 0), vec![oversized.as_str(), "tail"]);
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_recovers_at_nested_control_token() {
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(stream::iter(vec![
+            xtml_chunk(0, "<|open|>broken<|open|>tools<|sep|>tail"),
+        ]))
+        .collect()
+        .await;
+
+        assert_eq!(
+            framed_texts(&output, 0),
+            vec!["<|open|>broken", "<|open|>tools<|sep|>", "tail"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_flushes_before_terminal_error() {
+        let error = Annotated {
+            id: Some("error-id".to_string()),
+            data: None,
+            event: None,
+            comment: None,
+            error: Some(DynamoError::msg("terminal error")),
+        };
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(stream::iter(vec![
+            xtml_chunk(0, "<|open|>truncated"),
+            error,
+        ]))
+        .collect()
+        .await;
+
+        let content_position = output
+            .iter()
+            .position(|response| !framed_texts(std::slice::from_ref(response), 0).is_empty())
+            .expect("truncated content should be flushed");
+        let error_position = output
+            .iter()
+            .position(|response| response.error.is_some())
+            .expect("terminal error should be preserved");
+        assert!(content_position < error_position);
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_xtml_framer_emits_role_once_when_splitting_delta() {
+        let output: Vec<_> = OpenAIPreprocessor::frame_kimi_k3_xtml_stream(stream::iter(vec![
+            xtml_chunk(0, "prefix<|open|>tools<|sep|>suffix"),
+        ]))
+        .collect()
+        .await;
+
+        assert_eq!(
+            framed_texts(&output, 0),
+            vec!["prefix", "<|open|>tools<|sep|>", "suffix"]
+        );
+        let roles: Vec<_> = output
+            .iter()
+            .filter_map(|response| response.data.as_ref())
+            .flat_map(|data| &data.inner.choices)
+            .map(|choice| choice.delta.role)
+            .collect();
+        assert_eq!(roles, vec![Some(Role::Assistant), None, None]);
     }
 
     #[tokio::test]
