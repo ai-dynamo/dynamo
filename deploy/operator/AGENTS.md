@@ -21,9 +21,13 @@ SPDX-License-Identifier: Apache-2.0
 
 - Treat pointer inputs as non-nil by default. Document non-nil preconditions in
   the function's Go doc.
+- A function may accept `nil` only when this is explicitly supported as part of
+  its domain semantics, such as a mode that does not require the argument.
+  Document the supported `nil` cases in the function's Go doc.
 - Do not defensively check pointer inputs for `nil` unless `nil` has an explicit
   domain meaning.
-- Callers must establish non-nil preconditions before calling the function.
+- When `nil` is not such a supported domain value, callers must establish the
+  non-nil precondition before calling the function.
 - If a function validates caller-provided input, return an error for invalid
   values. Do not disguise an invalid call by returning a zero value.
 - Getters and transformation functions must not translate a `nil` input into a
