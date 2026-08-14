@@ -21,82 +21,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	admissionv1 "k8s.io/api/admission/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
-func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
-	handler := &dynamoComponentDeploymentV1Alpha1Handler{
-		handler: NewDynamoComponentDeploymentHandler(),
-	}
-	ctx := dgdAdmissionContext(admissionv1.Create, nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
-	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			BackendFramework: "vllm",
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:            "worker",
-				ComponentType:          consts.ComponentTypeWorker,
-				RuntimeVersionOverride: "1.1.0",
-				ExtraPodSpec:           &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}},
-			},
-		},
-	}
-
-	warnings, err := handler.ValidateCreate(ctx, dcd)
-	if err != nil {
-		t.Fatalf("ValidateCreate() error = %v", err)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf("ValidateCreate() warnings = %v, want none", warnings)
-	}
-}
-
-func TestCastToDynamoComponentDeployment(t *testing.T) {
-	beta := &nvidiacomv1beta1.DynamoComponentDeployment{
-		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "worker",
-			},
-		},
-	}
-	got, err := castToDynamoComponentDeployment(beta)
-	if err != nil || got != beta {
-		t.Fatalf("castToDynamoComponentDeployment() = (%v, %v), want original DCD", got, err)
-	}
-
-	alpha := &nvidiacomv1alpha1.DynamoComponentDeployment{
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName: "worker",
-			},
-		},
-	}
-	got, err = castToDynamoComponentDeployment(alpha)
-	if err != nil {
-		t.Fatalf("castToDynamoComponentDeployment() error = %v", err)
-	}
-	if got.Spec.ComponentName != alpha.Spec.ServiceName {
-		t.Fatalf("converted component name = %q, want %q", got.Spec.ComponentName, alpha.Spec.ServiceName)
-	}
-
-	if _, err := castToDynamoComponentDeployment(nil); err == nil {
-		t.Fatal("castToDynamoComponentDeployment() error = nil, want type mismatch")
-	}
-}
-
 func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 	scheme := runtime.NewScheme()
-	if err := nvidiacomv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add v1alpha1 scheme: %v", err)
-	}
 	if err := nvidiacomv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1beta1 scheme: %v", err)
 	}
@@ -108,14 +40,20 @@ func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}
 
-	for _, path := range []string{
-		dynamoComponentDeploymentV1Alpha1WebhookPath,
-		dynamoComponentDeploymentV1Beta1WebhookPath,
+	for _, tc := range []struct {
+		path        string
+		wantPattern string
+	}{
+		{
+			path:        dynamoComponentDeploymentV1Beta1WebhookPath,
+			wantPattern: dynamoComponentDeploymentV1Beta1WebhookPath,
+		},
+		{path: "/validate-nvidia-com-v1alpha1-dynamocomponentdeployment"},
 	} {
-		request := httptest.NewRequest("POST", path, nil)
+		request := httptest.NewRequest("POST", tc.path, nil)
 		_, pattern := server.WebhookMux().Handler(request)
-		if pattern != path {
-			t.Fatalf("registered pattern = %q, want %q", pattern, path)
+		if pattern != tc.wantPattern {
+			t.Fatalf("registered pattern for %q = %q, want %q", tc.path, pattern, tc.wantPattern)
 		}
 	}
 }
