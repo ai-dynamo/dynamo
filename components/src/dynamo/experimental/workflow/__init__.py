@@ -10,6 +10,7 @@ from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
 from dynamo.experimental.workflow.orchestrator import WorkflowOrchestrator
 from dynamo.experimental.workflow.plan import (
     ExecutionPlan,
+    GenerateEndpointBinding,
     InlineBinding,
     RemoteBinding,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "WorkflowOrchestrator",
     "WorkflowValidationError",
     "ExecutionPlan",
+    "GenerateEndpointBinding",
     "InlineBinding",
     "RemoteBinding",
     "RemoteStageClient",
