@@ -3439,12 +3439,13 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 		return &grovev1alpha1.PodClique{
 			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3},
 			Status: grovev1alpha1.PodCliqueStatus{
-				Replicas:              3,
-				ReadyReplicas:         1,
-				UpdatedReplicas:       3,
-				ScheduledReplicas:     1,
-				ScheduleGatedReplicas: 0,
-				ObservedGeneration:    ptr.To(int64(1)),
+				Replicas:                          3,
+				ReadyReplicas:                     1,
+				UpdatedReplicas:                   3,
+				ScheduledReplicas:                 1,
+				ScheduleGatedReplicas:             0,
+				ObservedGeneration:                ptr.To(int64(1)),
+				CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
 			},
 		}
 	}
@@ -3497,6 +3498,21 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 			want:   true,
 		},
 		{
+			name: "current PCS revision change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				pc.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
+			},
+			want: true,
+		},
+		{
+			name: "update completion change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				updateEndedAt := metav1.Now()
+				pc.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &updateEndedAt}
+			},
+			want: true,
+		},
+		{
 			name:   "generation-only change is filtered",
 			mutate: func(pc *grovev1alpha1.PodClique) { pc.Generation = 2 },
 			want:   false,
@@ -3541,11 +3557,12 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 		return &grovev1alpha1.PodCliqueScalingGroup{
 			Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3},
 			Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-				Replicas:           3,
-				AvailableReplicas:  1,
-				UpdatedReplicas:    3,
-				ScheduledReplicas:  1,
-				ObservedGeneration: ptr.To(int64(1)),
+				Replicas:                          3,
+				AvailableReplicas:                 1,
+				UpdatedReplicas:                   3,
+				ScheduledReplicas:                 1,
+				ObservedGeneration:                ptr.To(int64(1)),
+				CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
 			},
 		}
 	}
@@ -3591,6 +3608,21 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 			want:   true,
 		},
 		{
+			name: "current PCS revision change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				pcsg.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
+			},
+			want: true,
+		},
+		{
+			name: "update completion change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				updateEndedAt := metav1.Now()
+				pcsg.Status.UpdateProgress = &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &updateEndedAt}
+			},
+			want: true,
+		},
+		{
 			name:   "generation-only change is filtered",
 			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Generation = 2 },
 			want:   false,
@@ -3628,50 +3660,6 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 	newScalingGroup := oldScalingGroup.DeepCopy()
 	newScalingGroup.Status.Conditions[0].Message = "two replicas unavailable"
 	assert.False(t, pcsgStatusChangeIsSignificant(oldScalingGroup, newScalingGroup))
-}
-
-func TestPodCliqueCutoverStatusChangeIsSignificant(t *testing.T) {
-	t.Log("Build matching PodClique status for a Grove worker cutover")
-	oldPodClique := &grovev1alpha1.PodClique{
-		Status: grovev1alpha1.PodCliqueStatus{
-			CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
-		},
-	}
-
-	t.Log("Treat an accepted PCS revision change as significant")
-	hashChangedPodClique := oldPodClique.DeepCopy()
-	hashChangedPodClique.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
-	assert.True(t, podCliqueStatusChangeIsSignificant(oldPodClique, hashChangedPodClique))
-
-	t.Log("Treat Grove completing the child update as significant")
-	updateCompletedPodClique := oldPodClique.DeepCopy()
-	updateEndedAt := metav1.Now()
-	updateCompletedPodClique.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{
-		UpdateEndedAt: &updateEndedAt,
-	}
-	assert.True(t, podCliqueStatusChangeIsSignificant(oldPodClique, updateCompletedPodClique))
-}
-
-func TestPCSGCutoverStatusChangeIsSignificant(t *testing.T) {
-	t.Log("Build matching PodCliqueScalingGroup status for a Grove worker cutover")
-	oldScalingGroup := &grovev1alpha1.PodCliqueScalingGroup{
-		Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-			CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
-		},
-	}
-
-	t.Log("Treat an accepted PCS revision change as significant")
-	hashChangedScalingGroup := oldScalingGroup.DeepCopy()
-	hashChangedScalingGroup.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
-	assert.True(t, pcsgStatusChangeIsSignificant(oldScalingGroup, hashChangedScalingGroup))
-
-	t.Log("Treat Grove completing the child update as significant")
-	updateCompletedScalingGroup := oldScalingGroup.DeepCopy()
-	updateEndedAt := metav1.Now()
-	updateCompletedScalingGroup.Status.UpdateProgress = &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{
-		UpdateEndedAt: &updateEndedAt,
-	}
-	assert.True(t, pcsgStatusChangeIsSignificant(oldScalingGroup, updateCompletedScalingGroup))
 }
 
 func TestGroveChildEventPredicates(t *testing.T) {
