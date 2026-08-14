@@ -146,8 +146,14 @@ impl RawWorkerSelectionConfig {
             }
         }
 
-        let has_explicit_stage_selection =
-            self.prefill.is_some() || self.decode.is_some() || self.encode.is_some();
+        let has_explicit_stage_selection = [
+            self.prefill.as_deref(),
+            self.decode.as_deref(),
+            self.encode.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|selected| selected != "default");
 
         Ok(WorkerSelectionConfig {
             aggregated: self.aggregated,

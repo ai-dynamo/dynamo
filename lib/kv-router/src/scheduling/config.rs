@@ -1123,22 +1123,25 @@ impl KvRouterConfig {
         })
     }
 
-    /// Return whether a stage-specific worker-selection setting was explicitly configured.
+    /// Return whether a custom stage-specific worker-selection setting was configured.
     ///
     /// Standalone hosts use this to warn that prefill, decode, and encode settings only apply to
     /// typed worker pools in the embedded frontend.
     pub fn has_explicit_stage_worker_selection_policy(
         &self,
     ) -> Result<bool, WorkerSelectionPolicyConfigError> {
-        fn is_configured(value: Option<&str>) -> bool {
-            value.is_some_and(|name| !name.trim().is_empty())
+        fn is_custom(value: Option<&str>) -> bool {
+            value.is_some_and(|name| {
+                let name = name.trim();
+                !name.is_empty() && name != "default"
+            })
         }
 
         let policy_config = self
             .worker_selection_config()
             .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
-        Ok(is_configured(self.router_prefill_policy.as_deref())
-            || is_configured(self.router_decode_policy.as_deref())
+        Ok(is_custom(self.router_prefill_policy.as_deref())
+            || is_custom(self.router_decode_policy.as_deref())
             || policy_config.is_some_and(|config| config.has_explicit_stage_selection()))
     }
 
@@ -1900,6 +1903,29 @@ worker_selection:
         assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
         assert!(
             !KvRouterConfig::default()
+                .has_explicit_stage_worker_selection_policy()
+                .unwrap()
+        );
+
+        let default_policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            default_policy_file.path(),
+            r#"
+worker_selection:
+  prefill: default
+  decode: default
+  encode: default
+"#,
+        )
+        .unwrap();
+        let default_config = KvRouterConfig {
+            router_policy_config: Some(default_policy_file.path().display().to_string()),
+            router_prefill_policy: Some(" default ".to_string()),
+            router_decode_policy: Some("default".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            !default_config
                 .has_explicit_stage_worker_selection_policy()
                 .unwrap()
         );
