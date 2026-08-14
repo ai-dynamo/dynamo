@@ -275,17 +275,10 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		Annotations:     desiredAnnotations,
 	})
 
-	// SyncResource resolves the live object by name alone and deletes it without checking
-	// ownership, so a Service this DGD never created must not be removed just because its
-	// name collides.
+	// Handle removal here rather than through SyncResource, which resolves the live object
+	// by name alone and would delete a Service this DGD never created.
 	if toDelete {
-		owned, err := r.ownsService(ctx, dgd, service.Name)
-		if err != nil {
-			return nil, err
-		}
-		if !owned {
-			return nil, nil
-		}
+		return nil, r.deleteOwnedService(ctx, dgd, service.Name)
 	}
 
 	_, syncedService, err := commoncontroller.SyncResource(
@@ -293,15 +286,13 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		r,
 		dgd,
 		func(context.Context) (*corev1.Service, bool, error) {
-			return service, toDelete, nil
+			return service, false, nil
 		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync the elastic-EP leader service: %w", err)
 	}
 
-	// Nil means the sync deleted the Service, or found nothing to delete: no resource to
-	// report either way.
 	if syncedService == nil {
 		return nil, nil
 	}
@@ -317,21 +308,35 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	return resource, nil
 }
 
-// ownsService reports whether the named Service exists and is controlled by this DGD.
-func (r *groveStableResourcesReconciler) ownsService(
+// deleteOwnedService removes the named Service, but only the exact object it verified
+// this DGD controls.
+//
+// The UID precondition is what makes the check and the delete one decision: if the
+// Service is replaced by an unowned object of the same name in between, the delete fails
+// with a conflict and the reconcile retries against the replacement instead of removing
+// a Service this DGD does not own. An already-absent Service is success, not an error.
+func (r *groveStableResourcesReconciler) deleteOwnedService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	name string,
-) (bool, error) {
+) error {
 	existing := &corev1.Service{}
 	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: dgd.Namespace}, existing)
 	if apierrors.IsNotFound(err) {
-		return false, nil
+		return nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to get service %s: %w", name, err)
+		return fmt.Errorf("failed to get service %s: %w", name, err)
 	}
-	return metav1.IsControlledBy(existing, dgd), nil
+	if !metav1.IsControlledBy(existing, dgd) {
+		return nil
+	}
+
+	err = r.Delete(ctx, existing, client.Preconditions{UID: &existing.UID})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete service %s: %w", name, err)
+	}
+	return nil
 }
 
 func (r *groveStableResourcesReconciler) reconcileFrontendIngress(

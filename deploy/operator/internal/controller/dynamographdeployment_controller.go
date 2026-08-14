@@ -262,6 +262,16 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		// Deleting a component or elastic-EP leader Service must bring it back: without
+		// this watch the discovery endpoint stays absent until some unrelated watched
+		// resource happens to trigger a reconcile.
+		Owns(&corev1.Service{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the service
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
 	if r.RuntimeConfig.Gate.Enabled(features.Istio) {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{

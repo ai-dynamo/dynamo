@@ -31,8 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // elasticEPArgs is the command line that marks a component as an elastic-EP Ray launch:
@@ -207,6 +209,11 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 						t.Errorf("Selector[%q] = %q, want %q", key, got, want)
 					}
 				}
+				// The controller reference is what lets the DGD's Owns(&corev1.Service{})
+				// watch map a deleted Service back to its DGD and recreate it.
+				if !metav1.IsControlledBy(service, dgd) {
+					t.Errorf("leader Service is not controlled by the DGD, so the owned-Service watch cannot recreate it: %v", service.OwnerReferences)
+				}
 				return
 			}
 			if !apierrors.IsNotFound(err) {
@@ -273,6 +280,59 @@ func TestGroveStableResourcesReconcilerLeavesAnUnownedNameCollisionAlone(t *test
 	}
 	if survivor.Labels["owner"] != "somebody-else" {
 		t.Errorf("unowned Service was modified: labels = %v", survivor.Labels)
+	}
+}
+
+func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t *testing.T) {
+	t.Log("Seed a DGD-owned leader Service carrying a known UID")
+	ctx := context.Background()
+	dgd := newElasticEPTestDGD(newElasticEPComponent("python3 -m dynamo.vllm"))
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	serviceName := dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, ""))
+	owned := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: dgd.Namespace,
+			UID:       types.UID("leader-service-uid"),
+		},
+	}
+	if err := ctrl.SetControllerReference(dgd, owned, scheme); err != nil {
+		t.Fatalf("failed to set the controller reference: %v", err)
+	}
+
+	t.Log("Reconcile a component that no longer qualifies, so it takes the delete path")
+	var deleteOptions client.DeleteOptions
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(dgd, owned).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				for _, opt := range opts {
+					opt.ApplyToDelete(&deleteOptions)
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := newGroveStableResourcesReconciler(
+		kubeClient,
+		events.NewFakeRecorder(100),
+		&configv1alpha1.OperatorConfiguration{},
+	)
+	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+		t.Fatalf("Reconcile returned an error: %v", err)
+	}
+
+	t.Log("Verify the owned Service was deleted, pinned by UID to the object the ownership check read")
+	err := kubeClient.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dgd.Namespace}, &corev1.Service{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected the owned Service to be deleted, got error %v", err)
+	}
+	if deleteOptions.Preconditions == nil || deleteOptions.Preconditions.UID == nil {
+		t.Fatal("delete carried no UID precondition, so a same-name replacement could be removed instead")
+	}
+	if got := *deleteOptions.Preconditions.UID; got != owned.UID {
+		t.Errorf("precondition UID = %q, want %q", got, owned.UID)
 	}
 }
 
