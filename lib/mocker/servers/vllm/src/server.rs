@@ -131,6 +131,7 @@ impl VllmMockerService {
                     anyhow::anyhow!("max_num_batched_tokens exceeds the Control API range")
                 })?
                 .unwrap_or_default(),
+            rl_capabilities: None,
         };
         Ok(Self {
             config: Arc::new(config),
@@ -320,6 +321,101 @@ impl pb::control_server::Control for VllmMockerService {
             sources: Vec::new(),
         }))
     }
+
+    async fn pause_generation(
+        &self,
+        _request: Request<pb::PauseGenerationRequest>,
+    ) -> Result<Response<pb::PauseGenerationResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn resume_generation(
+        &self,
+        _request: Request<pb::ResumeGenerationRequest>,
+    ) -> Result<Response<pb::ResumeGenerationResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn is_paused(
+        &self,
+        _request: Request<pb::IsPausedRequest>,
+    ) -> Result<Response<pb::IsPausedResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn sleep(
+        &self,
+        _request: Request<pb::SleepRequest>,
+    ) -> Result<Response<pb::SleepResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn wake_up(
+        &self,
+        _request: Request<pb::WakeUpRequest>,
+    ) -> Result<Response<pb::WakeUpResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn is_sleeping(
+        &self,
+        _request: Request<pb::IsSleepingRequest>,
+    ) -> Result<Response<pb::IsSleepingResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn init_weight_transfer_engine(
+        &self,
+        _request: Request<pb::InitWeightTransferEngineRequest>,
+    ) -> Result<Response<pb::InitWeightTransferEngineResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn start_weight_update(
+        &self,
+        _request: Request<pb::StartWeightUpdateRequest>,
+    ) -> Result<Response<pb::StartWeightUpdateResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn start_draft_weight_update(
+        &self,
+        _request: Request<pb::StartDraftWeightUpdateRequest>,
+    ) -> Result<Response<pb::StartDraftWeightUpdateResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn update_weights(
+        &self,
+        _request: Request<pb::UpdateWeightsRequest>,
+    ) -> Result<Response<pb::UpdateWeightsResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn finish_weight_update(
+        &self,
+        _request: Request<pb::FinishWeightUpdateRequest>,
+    ) -> Result<Response<pb::FinishWeightUpdateResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn update_weight_version(
+        &self,
+        _request: Request<pb::UpdateWeightVersionRequest>,
+    ) -> Result<Response<pb::UpdateWeightVersionResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+
+    async fn get_weight_version(
+        &self,
+        _request: Request<pb::GetWeightVersionRequest>,
+    ) -> Result<Response<pb::GetWeightVersionResponse>, Status> {
+        Err(rl_control_unavailable())
+    }
+}
+
+fn rl_control_unavailable() -> Status {
+    Status::failed_precondition("the vLLM mocker does not advertise RL control capabilities")
 }
 
 fn checked_token(signal: &OutputSignal) -> BoxedStatusResult<u32> {
