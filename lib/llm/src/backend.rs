@@ -221,6 +221,32 @@ impl
                         return Some((output, state));
                     }
 
+                    // Top-logprob text is independent of the selected token text. An engine may
+                    // decode the selected token while still omitting candidate text, so repair the
+                    // candidates before the decoded-text fast path below.
+                    //
+                    // Per-entry decode is O(positions * top_k) per delta. Bounded in
+                    // practice (streaming: 1 * top_k <= 20) and dwarfed by serialization
+                    // on the same path, so we ship the simple version. Revisit if a
+                    // streaming flamegraph with top_logprobs=20 puts this above ~1%:
+                    // the cheapest win is a shared LRU on the Tokenizer keyed by
+                    // (token_id, skip_special_tokens) — top-k entries repeat heavily
+                    // across positions and requests. Do NOT batch as a single
+                    // decode(&[ids..]) call: BPE merge / leading-space rules differ
+                    // between single-token and sequence decode and will corrupt strings.
+                    let mut output = output;
+                    if let Some(top_logprobs) = output
+                        .data
+                        .as_mut()
+                        .and_then(|data| data.top_logprobs.as_mut())
+                    {
+                        fill_missing_top_logprob_text(
+                            &state.tokenizer,
+                            top_logprobs,
+                            state.skip_special_tokens,
+                        );
+                    }
+
                     // if we have a data field without an event, then we might need to update the data
                     if let Some(data) = &output.data
                         && data.text.is_some()
@@ -345,7 +371,6 @@ impl
                     }
 
                     // update output in-place
-                    let mut output = output;
                     let mut data = output.data.take().unwrap();
 
                     // NOTE: If `finish_reason.is_some()`, then one of the stop conditions was triggered
@@ -360,23 +385,6 @@ impl
                     }
                     data.text = text;
                     data.tokens = Some(tokens);
-
-                    // Per-entry decode is O(positions * top_k) per delta. Bounded in
-                    // practice (streaming: 1 * top_k <= 20) and dwarfed by serialization
-                    // on the same path, so we ship the simple version. Revisit if a
-                    // streaming flamegraph with top_logprobs=20 puts this above ~1%:
-                    // the cheapest win is a shared LRU on the Tokenizer keyed by
-                    // (token_id, skip_special_tokens) — top-k entries repeat heavily
-                    // across positions and requests. Do NOT batch as a single
-                    // decode(&[ids..]) call: BPE merge / leading-space rules differ
-                    // between single-token and sequence decode and will corrupt strings.
-                    if let Some(top_logprobs) = data.top_logprobs.as_mut() {
-                        fill_missing_top_logprob_text(
-                            &state.tokenizer,
-                            top_logprobs,
-                            state.skip_special_tokens,
-                        );
-                    }
 
                     output.data = Some(data);
 
@@ -831,7 +839,9 @@ mod tests {
 
     impl traits::Tokenizer for CandidateDecoder {}
 
-    struct SyntheticSglangEngine;
+    struct SyntheticSglangEngine {
+        engine_decodes_text: bool,
+    }
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -843,6 +853,10 @@ mod tests {
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             let output = LLMEngineOutput {
                 token_ids: vec![101],
+                tokens: self
+                    .engine_decodes_text
+                    .then(|| vec![Some("Okay".to_string())]),
+                text: self.engine_decodes_text.then(|| "Okay".to_string()),
                 log_probs: Some(vec![-0.125]),
                 top_logprobs: Some(vec![vec![
                     TopLogprob {
@@ -904,8 +918,7 @@ mod tests {
         assert_eq!(top_logprobs[0][1].logprob, -0.2);
     }
 
-    #[tokio::test]
-    async fn test_sglang_top_logprobs_are_decoded_in_openai_response() {
+    async fn assert_sglang_top_logprobs_are_decoded_in_openai_response(engine_decodes_text: bool) {
         let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
         let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
         let request = PreprocessedRequest::builder()
@@ -920,7 +933,9 @@ mod tests {
             .build()
             .expect("valid preprocessed request");
         let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
-            Arc::new(SyntheticSglangEngine);
+            Arc::new(SyntheticSglangEngine {
+                engine_decodes_text,
+            });
 
         let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
             .await
@@ -956,6 +971,16 @@ mod tests {
         assert_eq!(candidates[1].token, " Okay");
         assert_eq!(candidates[1].bytes, Some(b" Okay".to_vec()));
         assert_eq!(candidates[1].logprob, -1.5);
+    }
+
+    #[tokio::test]
+    async fn test_sglang_top_logprobs_are_decoded_in_openai_response() {
+        assert_sglang_top_logprobs_are_decoded_in_openai_response(false).await;
+    }
+
+    #[tokio::test]
+    async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
+        assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
     }
 
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
