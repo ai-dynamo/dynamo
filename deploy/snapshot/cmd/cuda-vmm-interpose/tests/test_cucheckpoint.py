@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
+import re
 import shutil
 import signal
 import socket
@@ -137,7 +138,9 @@ def _worker(
     restore_fds: tuple[int, int],
     sync_dir: Path,
     store_path: Path,
+    multicast: bool,
 ) -> None:
+    _require_launch_job()
     _cuda_call(driver.cuInit, 0)
     device = _cuda_call(driver.cuDeviceGet, rank)
     properties = _allocation_properties(device)
@@ -203,16 +206,26 @@ def _worker(
     input_tensor = symm_mem.empty(NUMEL, dtype=torch.float32, device="cuda")
     input_tensor.fill_(rank + 1)
     symm_handle = symm_mem.rendezvous(input_tensor, group=group_name)
+    if multicast:
+        if not symm_handle.has_multicast_support:
+            raise AssertionError("PyTorch silently fell back from CUDA multicast")
+        if int(symm_handle.multicast_ptr) == 0:
+            raise AssertionError("PyTorch selected multicast without a multicast VA")
+        _replace_local_binding_with_address(
+            rank,
+            input_tensor,
+            symm_handle,
+            properties,
+        )
+        dist.barrier()
     output = torch.empty_like(input_tensor)
 
-    torch.ops.symm_mem.one_shot_all_reduce_out(input_tensor, "sum", group_name, output)
+    _collective(input_tensor, group_name, output, multicast)
     torch.cuda.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        torch.ops.symm_mem.one_shot_all_reduce_out(
-            input_tensor, "sum", group_name, output
-        )
+        _collective(input_tensor, group_name, output, multicast)
     graph.replay()
     torch.cuda.synchronize()
     _assert_exact_result(output, "before checkpoint")
@@ -265,6 +278,67 @@ def _worker(
     torch.cuda.empty_cache()
     dist.destroy_process_group()
     _destroy_mapped_allocation(private_address, private_size, private_handle)
+
+
+def _collective(
+    input_tensor: torch.Tensor,
+    group_name: str,
+    output: torch.Tensor,
+    multicast: bool,
+) -> None:
+    operation = (
+        torch.ops.symm_mem.multimem_one_shot_all_reduce_out
+        if multicast
+        else torch.ops.symm_mem.one_shot_all_reduce_out
+    )
+    operation(input_tensor, "sum", group_name, output)
+
+
+def _replace_local_binding_with_address(
+    rank: int,
+    input_tensor: torch.Tensor,
+    symm_handle,
+    properties: driver.CUmemAllocationProp,
+) -> None:
+    granularity = int(
+        _cuda_call(
+            driver.cuMemGetAllocationGranularity,
+            properties,
+            driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
+        )
+    )
+    buffer_size = input_tensor.numel() * input_tensor.element_size()
+    signal_offset = (buffer_size + 15) // 16 * 16
+    unrounded_size = signal_offset + symm_mem.get_signal_pad_size()
+    block_size = (unrounded_size + granularity - 1) // granularity * granularity
+    multicast_handle = _cuda_call(
+        driver.cuMemRetainAllocationHandle,
+        int(symm_handle.multicast_ptr),
+    )
+    _assert_handle_namespace(
+        multicast_handle,
+        True,
+        "retained multicast handle",
+    )
+    device = _cuda_call(driver.cuDeviceGet, rank)
+    try:
+        _cuda_call(
+            driver.cuMulticastUnbind,
+            multicast_handle,
+            device,
+            0,
+            block_size,
+        )
+        _cuda_call(
+            driver.cuMulticastBindAddr,
+            multicast_handle,
+            0,
+            int(symm_handle.buffer_ptrs[rank]),
+            block_size,
+            0,
+        )
+    finally:
+        _cuda_call(driver.cuMemRelease, multicast_handle)
 
 
 def _assert_exact_result(output: torch.Tensor, stage: str) -> None:
@@ -402,6 +476,7 @@ def _fork_workers(
     restore_fds: tuple[int, int],
     sync_dir: Path,
     store_path: Path,
+    multicast: bool,
 ) -> None:
     if torch.cuda.is_initialized():
         raise RuntimeError("parent initialized CUDA before forking workers")
@@ -412,7 +487,14 @@ def _fork_workers(
         child = os.fork()
         if child == 0:
             try:
-                _worker(rank, raw_fds, restore_fds, sync_dir, store_path)
+                _worker(
+                    rank,
+                    raw_fds,
+                    restore_fds,
+                    sync_dir,
+                    store_path,
+                    multicast,
+                )
             except BaseException:  # noqa: BLE001 -- report child failures to parent
                 traceback.print_exc()
                 os._exit(1)
@@ -456,8 +538,10 @@ def _start_parent(
     store_path: Path,
     raw_fds: tuple[int, int],
     restore_fds: tuple[int, int],
+    multicast: bool,
 ) -> subprocess.Popen[str]:
     environment = os.environ.copy()
+    launch_job_fds = _require_launch_job()
     environment.update(
         {
             "CUDA_VISIBLE_DEVICES": ",".join(gpus),
@@ -469,9 +553,12 @@ def _start_parent(
             "PYTHONFAULTHANDLER": "1",
             "PYTHONUNBUFFERED": "1",
             "TORCH_SYMMEM_IMPLICIT_POOL": "0",
-            "TORCH_SYMM_MEM_DISABLE_MULTICAST": "1",
         }
     )
+    if multicast:
+        environment.pop("TORCH_SYMM_MEM_DISABLE_MULTICAST", None)
+    else:
+        environment["TORCH_SYMM_MEM_DISABLE_MULTICAST"] = "1"
     return subprocess.Popen(
         [
             sys.executable,
@@ -484,14 +571,34 @@ def _start_parent(
             *(str(fd) for fd in restore_fds),
             str(sync_dir),
             str(store_path),
+            "multicast" if multicast else "unicast",
         ],
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        pass_fds=raw_fds + restore_fds,
+        pass_fds=raw_fds + restore_fds + launch_job_fds,
     )
+
+
+def _require_launch_job() -> tuple[int, ...]:
+    job_file = os.environ.get("CUDA_CHECKPOINT_JOB_FILE")
+    if not job_file:
+        raise RuntimeError(
+            "CUDA_CHECKPOINT_JOB_FILE is missing; run this test through "
+            "cuda-checkpoint --launch-job"
+        )
+    if not Path(job_file).is_file():
+        raise RuntimeError(
+            f"CUDA checkpoint launch-job file is unavailable: {job_file}"
+        )
+    match = re.fullmatch(r"/proc/self/fd/([0-9]+)", job_file)
+    if match is None:
+        return ()
+    descriptor = int(match.group(1))
+    os.fstat(descriptor)
+    return (descriptor,)
 
 
 def _wait_for_child_pids(
@@ -658,6 +765,17 @@ def _native_checkpoint_with_timeout(
 
 
 def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> None:
+    _run_cucheckpoint_test(tmp_path, multicast=False)
+
+
+def test_cucheckpoint_preserves_multicast_symmetric_memory_cuda_graph(
+    tmp_path: Path,
+) -> None:
+    _run_cucheckpoint_test(tmp_path, multicast=True)
+
+
+def _run_cucheckpoint_test(tmp_path: Path, multicast: bool) -> None:
+    _require_launch_job()
     interposer, coordinator = _build_native_tools(tmp_path)
     gpus = _visible_gpus()
     control_dir = tmp_path / "control"
@@ -670,7 +788,7 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
 
     parent: subprocess.Popen[str] | None = None
     child_pids: tuple[int, int] = ()
-    output = ("", "")
+    output: tuple[str | None, str | None] = ("", "")
     output_collected = False
     failure: Exception | None = None
     external_allocations: list[_ExternalAllocation] = []
@@ -686,6 +804,7 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
             store_path,
             tuple(allocation.fd for allocation in external_allocations),
             tuple(receiver.fileno() for _, receiver in restore_channels),
+            multicast,
         )
         for _, receiver in restore_channels:
             receiver.close()
@@ -756,20 +875,24 @@ def test_cucheckpoint_preserves_symmetric_memory_cuda_graph(tmp_path: Path) -> N
             f"parent PID/return code: {parent_pid}/{parent_returncode}\n"
             f"forked child PIDs: {child_pids}\n"
             f"control sockets: {sockets}\n"
-            f"parent and worker stdout:\n{output[0]}\n"
-            f"parent and worker stderr:\n{output[1]}"
+            f"parent and worker stdout:\n{output[0] or ''}\n"
+            f"parent and worker stderr:\n{output[1] or ''}"
         ) from failure
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 8 or sys.argv[1] != "--parent":
+    if len(sys.argv) != 9 or sys.argv[1] != "--parent":
         raise SystemExit(
             "usage: test_cucheckpoint.py --parent RAW_FD_0 RAW_FD_1 "
-            "RESTORE_FD_0 RESTORE_FD_1 SYNC_DIR STORE_PATH"
+            "RESTORE_FD_0 RESTORE_FD_1 SYNC_DIR STORE_PATH "
+            "(unicast|multicast)"
         )
+    if sys.argv[8] not in {"unicast", "multicast"}:
+        raise SystemExit("worker mode must be unicast or multicast")
     _fork_workers(
         (int(sys.argv[2]), int(sys.argv[3])),
         (int(sys.argv[4]), int(sys.argv[5])),
         Path(sys.argv[6]),
         Path(sys.argv[7]),
+        sys.argv[8] == "multicast",
     )
