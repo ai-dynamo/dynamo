@@ -141,6 +141,7 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD with the requested Grove worker suffix state")
 			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
@@ -148,11 +149,13 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 				dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
 			}
 
+			t.Log("Render the Grove deployment")
 			rendered, err := groveRenderDeployment(dgd, nil)
 			require.NoError(t, err)
 			worker := rendered.GetComponentByName("worker")
 			require.NotNil(t, worker)
 
+			t.Log("Verify the rendered suffix and source DGD immutability")
 			if tt.hashSuffixEnabled {
 				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)

@@ -143,6 +143,8 @@ func defaultGroveWorkerHashSuffix(
 
 	// Ignore a user-supplied marker before considering durable operator-owned state.
 	delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixEnabled)
+
+	// Decode the persisted DGD before comparing its worker configuration with the request.
 	oldDGD, err := decodeOldDGD(req)
 	if err != nil {
 		return err
@@ -157,6 +159,7 @@ func defaultGroveWorkerHashSuffix(
 		return nil
 	}
 
+	// Compare the canonical worker configurations only while migrating an unmarked legacy DGD.
 	oldWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(oldDGD)
 	if err != nil {
 		return fmt.Errorf("failed to compute previous Grove worker hash suffix: %w", err)

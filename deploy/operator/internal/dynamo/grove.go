@@ -162,6 +162,20 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 		return false, "", "", nil, err
 	}
 	acceptedPCSRevisionHash := getAcceptedPCSRevisionHash(pcs)
+	workerHash := ""
+	// Resolve the desired worker identity once per readiness pass for all suffixed workers.
+	if dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] == commonconsts.KubeLabelValueTrue {
+		for i := range dgd.Spec.Components {
+			if !IsWorkerComponent(string(dgd.Spec.Components[i].ComponentType)) {
+				continue
+			}
+			workerHash, err = ComputeDGDWorkersSpecHash(dgd)
+			if err != nil {
+				return false, "", "", nil, fmt.Errorf("compute Grove worker hash suffix: %w", err)
+			}
+			break
+		}
+	}
 
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
@@ -179,6 +193,7 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 			dgd:                     dgd,
 			component:               component,
 			acceptedPCSRevisionHash: acceptedPCSRevisionHash,
+			workerHash:              workerHash,
 		}
 		if usesPCSG {
 			ok, reason, componentStatus, componentReason, checkErr = CheckPCSGReady(ctx, reader, resourceName, dgd.Namespace, logger, runtimeNamespaceContext)
@@ -273,6 +288,7 @@ type groveRuntimeNamespaceContext struct {
 	dgd                     *v1beta1.DynamoGraphDeployment
 	component               *v1beta1.DynamoComponentDeploymentSharedSpec
 	acceptedPCSRevisionHash *string
+	workerHash              string
 }
 
 func (c *groveRuntimeNamespaceContext) setRuntimeNamespace(
@@ -283,10 +299,12 @@ func (c *groveRuntimeNamespaceContext) setRuntimeNamespace(
 		return nil
 	}
 
-	runtimeNamespace, err := GetGroveRuntimeNamespace(
+	// Publish the namespace selected by the component's accepted revision state.
+	runtimeNamespace, err := getGroveRuntimeNamespace(
 		c.dgd,
 		c.component,
 		revisionState.hasCompletedAcceptedPCSRevision(c.acceptedPCSRevisionHash),
+		c.workerHash,
 	)
 	if err != nil {
 		return fmt.Errorf("get Grove runtime namespace: %w", err)

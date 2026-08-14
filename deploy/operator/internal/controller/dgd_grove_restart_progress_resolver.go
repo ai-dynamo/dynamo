@@ -89,6 +89,7 @@ func (r *groveRestartProgressResolver) Resolve(
 				resourceName,
 				dgd.Namespace,
 				logger,
+				nil,
 			)
 		} else {
 			isReady, reason, _, _, _ = dynamo.CheckPodCliqueReady(
@@ -97,6 +98,7 @@ func (r *groveRestartProgressResolver) Resolve(
 				resourceName,
 				dgd.Namespace,
 				logger,
+				nil,
 			)
 		}
 		if !isReady {

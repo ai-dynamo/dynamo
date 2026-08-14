@@ -228,6 +228,7 @@ func TestGetGroveRuntimeNamespace(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build the DGD and component for the requested Grove cutover state")
 			componentType := tt.componentType
 			if componentType == "" {
 				componentType = string(commonconsts.ComponentTypeWorker)
@@ -247,18 +248,20 @@ func TestGetGroveRuntimeNamespace(t *testing.T) {
 			}
 			component := &dgd.Spec.Components[0]
 
+			t.Log("Record the active runtime namespace when the case has one")
 			if tt.activeNamespace != "" {
 				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
 					component.ComponentName: {RuntimeNamespace: tt.activeNamespace},
 				}
 			}
 
-			t.Log("Select the Grove runtime namespace from the modeled cutover state.")
+			t.Log("Select the Grove runtime namespace from the modeled cutover state")
 			got, err := GetGroveRuntimeNamespace(dgd, component, tt.completed)
 			if err != nil {
 				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 			}
 
+			t.Log("Verify the selected runtime namespace")
 			if got != tt.wantNamespace {
 				t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, tt.wantNamespace)
 			}

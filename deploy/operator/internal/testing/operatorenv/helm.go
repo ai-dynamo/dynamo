@@ -14,6 +14,7 @@ import (
 )
 
 func addMutatingBypassUsers(configurations []*admissionregistrationv1.MutatingWebhookConfiguration, usernames []string) {
+	// Apply every supplied bypass identity to each mutating webhook.
 	for _, configuration := range configurations {
 		for i := range configuration.Webhooks {
 			for j, username := range usernames {
@@ -28,6 +29,7 @@ func addMutatingBypassUsers(configurations []*admissionregistrationv1.MutatingWe
 }
 
 func addValidationBypassUsers(configurations []*admissionregistrationv1.ValidatingWebhookConfiguration, usernames []string) {
+	// Apply every supplied bypass identity to each validating webhook.
 	for _, configuration := range configurations {
 		for i := range configuration.Webhooks {
 			for j, username := range usernames {

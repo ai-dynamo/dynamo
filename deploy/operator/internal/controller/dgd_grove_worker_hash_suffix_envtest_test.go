@@ -37,15 +37,20 @@ const (
 
 func TestGroveWorkerHashSuffixDefaultedForNewDGD(t *testing.T) {
 	ctx := context.Background()
+	t.Log("Start an operator environment with Grove admission enabled")
 	env := newGroveWorkerHashSuffixTestEnv(t)
 	startGroveWorkerHashSuffixTestController(t, env)
 
+	t.Log("Create a new Grove DGD without a pre-existing PodCliqueSet")
 	dgd := newGroveWorkerHashSuffixTestDGD(env.Namespace(), "new-without-pcs")
 	require.NoError(t, env.Client().Create(ctx, dgd))
 
+	t.Log("Verify admission enabled the worker hash suffix")
 	createdDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, env.Client().Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: env.Namespace()}, createdDGD))
 	require.Equal(t, createdDGD.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled], "true")
+
+	t.Log("Wait for the rendered Grove workers to carry the canonical suffix")
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(createdDGD)
 	require.NoError(t, err)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, createdDGD, wantHash)
@@ -53,28 +58,34 @@ func TestGroveWorkerHashSuffixDefaultedForNewDGD(t *testing.T) {
 
 func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	ctx := context.Background()
+	t.Log("Start an operator environment and seed a legacy Grove DGD")
 	env := newGroveWorkerHashSuffixTestEnv(t)
 	dgd := newGroveWorkerHashSuffixTestDGD(env.Namespace(), "existing-without-suffix")
 	createLegacyGroveWorkerHashSuffixTestDGD(t, ctx, env, dgd)
 
+	t.Log("Start reconciliation and verify the legacy workers remain unsuffixed")
 	startGroveWorkerHashSuffixTestController(t, env)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
 
+	t.Log("Read the admitted legacy DGD and verify its migration marker is absent")
 	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	require.Empty(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
 
+	t.Log("Apply a frontend-only update")
 	frontend := current.GetComponentByName("frontend")
 	frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
 	require.NoError(t, env.Client().Update(ctx, current))
 
+	t.Log("Verify the frontend update does not enable or render a worker suffix")
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	require.Empty(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
 	waitForGroveFrontendEnv(t, ctx, env, current, "FRONTEND_CONFIG_REVISION", "2")
 	checkGroveWorkerHashSuffixes(t, ctx, env, current, "")
 
+	t.Log("Apply a worker update and verify it starts the suffix migration")
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	prefill := current.GetComponentByName("prefill")
 	prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
@@ -82,6 +93,7 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	require.Equal(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled], "true")
 
+	t.Log("Wait for the updated Grove workers to carry the canonical suffix")
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
 	require.NoError(t, err)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, current, wantHash)

@@ -310,22 +310,38 @@ func GetGroveRuntimeNamespace(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	componentCompletedAcceptedPCSRevision bool,
 ) (string, error) {
+	return getGroveRuntimeNamespace(dgd, component, componentCompletedAcceptedPCSRevision, "")
+}
+
+func getGroveRuntimeNamespace(
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	componentCompletedAcceptedPCSRevision bool,
+	workerHash string,
+) (string, error) {
+	// A missing graph or component has no namespace to publish.
 	if dgd == nil || component == nil {
 		return "", nil
 	}
 
+	// Non-workers and unmarked workers remain in the component's base namespace.
 	namespace := dgd.GetDynamoNamespaceForComponent(component)
 	if !IsWorkerComponent(string(component.ComponentType)) ||
 		dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != commonconsts.KubeLabelValueTrue {
 		return namespace, nil
 	}
 
-	workerHash, err := ComputeDGDWorkersSpecHash(dgd)
-	if err != nil {
-		return "", fmt.Errorf("compute Grove worker hash suffix: %w", err)
+	// Direct callers resolve the canonical hash; readiness passes it once for all workers.
+	if workerHash == "" {
+		var err error
+		workerHash, err = ComputeDGDWorkersSpecHash(dgd)
+		if err != nil {
+			return "", fmt.Errorf("compute Grove worker hash suffix: %w", err)
+		}
 	}
 	desiredNamespace := ComponentRuntimeNamespace(namespace, string(component.ComponentType), workerHash)
 
+	// Keep routing on the previously active worker namespace until this child cuts over.
 	if !componentCompletedAcceptedPCSRevision {
 		if previousNamespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace; previousNamespace != "" {
 			return previousNamespace, nil

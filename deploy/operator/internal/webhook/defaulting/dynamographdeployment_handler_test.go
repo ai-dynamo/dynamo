@@ -260,6 +260,7 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD with the requested replica defaults")
 			defaulter := NewDGDDefaulter("0.9.0")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -268,10 +269,12 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				},
 			}
 
+			t.Log("Run defaulting for the requested admission operation")
 			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 
+			t.Log("Verify the replica defaults for each component")
 			for name, want := range tt.wantReplicas {
 				component := dgd.GetComponentByName(name)
 				if component == nil {
