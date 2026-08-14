@@ -1036,13 +1036,13 @@ def vllm_processor_module(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generator_preserves_zero_top_logprobs_and_stream_interval(
+async def test_generator_preserves_zero_top_logprobs(
     vllm_processor_module,
     monkeypatch,
     caplog,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = {"stream_interval": object()}
+        model_fields = frozenset()
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -1056,7 +1056,6 @@ async def test_generator_preserves_zero_top_logprobs_and_stream_interval(
                     top_logprobs=0,
                     cache_salt=None,
                     mm_processor_kwargs=None,
-                    stream_interval=7,
                 ),
                 tool_parser=None,
                 chat_template_kwargs={},
@@ -1072,7 +1071,6 @@ async def test_generator_preserves_zero_top_logprobs_and_stream_interval(
 
     def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
         assert sampling_params.logprobs == 0
-        assert sampling_params.stream_interval == 7
         raise ProjectionObserved
 
     input_processor = SimpleNamespace(

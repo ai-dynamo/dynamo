@@ -536,7 +536,6 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
-        validate::validate_stream_interval(self.common.stream_interval)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
