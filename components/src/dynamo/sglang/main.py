@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 import uvloop
@@ -35,6 +36,45 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+async def _resume_snapshot_engine(snapshot_controller, runtime) -> object | None:
+    """Resume a restored engine, electing one active failover engine if needed."""
+    pause_controller = snapshot_controller.pause_controller
+    lock_path = os.environ.get("FAILOVER_LOCK_PATH")
+    if not lock_path:
+        await pause_controller.resume()
+        pause_controller.mark_resumed()
+        return None
+
+    if not pause_controller.is_paused:
+        raise RuntimeError("failover engine must be paused before election")
+
+    # A restored standby is healthy as a process, but it must not resume GPU
+    # memory or register with discovery until it owns the failover lock.
+    runtime.set_health_status(True)
+    logger.info("[Shadow] Engine sleeping, startup probe now passing, waiting for lock")
+
+    from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+    engine_id = os.environ.get("ENGINE_ID", "0")
+    lock = FlockFailoverLock(lock_path)
+    await lock.acquire(engine_id=f"engine-{engine_id}")
+    logger.info("[Shadow] Lock acquired, waking SGLang engine")
+    try:
+        await pause_controller.resume()
+        pause_controller.mark_resumed()
+    except BaseException:
+        # resume() may have partially restored GPU state. Keep the lock until
+        # process exit rather than allowing two engines to become active.
+        logger.critical(
+            "[Shadow] Engine wake failed after lock acquisition; "
+            "terminating process while retaining the lock"
+        )
+        os._exit(1)
+
+    logger.info("[Shadow] Engine awake, registering with discovery")
+    return lock
+
+
 async def worker(argv: list[str] | None = None):
     if argv is None:
         argv = sys.argv[1:]
@@ -62,8 +102,6 @@ async def worker(argv: list[str] | None = None):
             dynamo_args,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
-        await snapshot_controller.pause_controller.resume()
-        snapshot_controller.pause_controller.mark_resumed()
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
@@ -72,6 +110,11 @@ async def worker(argv: list[str] | None = None):
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
     )
+
+    # Keep the flock object alive for the serving process lifetime. Linux
+    # releases it when this process exits, including SIGKILL/container failure.
+    if snapshot_controller is not None:
+        _failover_lock = await _resume_snapshot_engine(snapshot_controller, runtime)
 
     run_deferred_handlers = install_graceful_shutdown(
         loop, runtime, shutdown_endpoints, shutdown_event
