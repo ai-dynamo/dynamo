@@ -15,7 +15,6 @@ from dynamo.workflow.dispatcher import StageDispatcher
 from dynamo.workflow.plan import ExecutionPlan
 from dynamo.workflow.runtime import (
     StageRunner,
-    TensorCarrier,
     WorkflowAttempt,
     WorkflowExecutionError,
     _validate_value,
@@ -37,7 +36,6 @@ class WorkflowOrchestrator:
         *,
         runtime: Any = None,
         inline_runners: Mapping[str, StageRunner] = MappingProxyType({}),
-        tensor_carrier: TensorCarrier | None = None,
     ) -> "WorkflowOrchestrator":
         """Bind initialized resources to an immutable execution plan."""
 
@@ -45,7 +43,6 @@ class WorkflowOrchestrator:
             plan,
             runtime=runtime,
             inline_runners=inline_runners,
-            tensor_carrier=tensor_carrier,
         )
         return cls(plan, dispatcher)
 

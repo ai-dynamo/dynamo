@@ -196,7 +196,7 @@ class _Lease:
 
 
 class NixlLeaseRegistry:
-    """Keep producer memory registered until read completion or bounded expiry."""
+    """Keep producer memory registered until every read is confirmed complete."""
 
     def __init__(self, timeout_s: float = DEFAULT_NIXL_LEASE_TIMEOUT_S) -> None:
         if (
@@ -239,48 +239,69 @@ class NixlLeaseRegistry:
     async def _wait_and_release(
         self, lease_ids: tuple[str, ...], operations: tuple[Any, ...]
     ) -> None:
+        async def wait_for_all() -> None:
+            results = await asyncio.gather(
+                *(operation.wait_for_completion() for operation in operations),
+                return_exceptions=True,
+            )
+            failures = [
+                result for result in results if isinstance(result, BaseException)
+            ]
+            if failures:
+                raise WorkflowExecutionError(
+                    f"NIXL workflow leases {lease_ids!r} have uncertain read state"
+                ) from failures[0]
+
+        completion = asyncio.create_task(
+            wait_for_all(),
+            name=f"workflow-nixl-completion:{lease_ids[0]}",
+        )
         try:
-            await asyncio.wait_for(
-                asyncio.gather(
-                    *(operation.wait_for_completion() for operation in operations)
-                ),
-                timeout=self._timeout_s,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "NIXL workflow leases %s were not all read within %.1fs; releasing",
-                lease_ids,
-                self._timeout_s,
-            )
+            done, _ = await asyncio.wait({completion}, timeout=self._timeout_s)
+            if not done:
+                logger.warning(
+                    "NIXL workflow leases %s were not all read within %.1fs; "
+                    "retaining producer memory until late completion or process exit",
+                    lease_ids,
+                    self._timeout_s,
+                )
+            await asyncio.shield(completion)
         except asyncio.CancelledError:
+            logger.warning(
+                "NIXL workflow lease monitor for %s was cancelled; retaining "
+                "producer memory because read completion is uncertain",
+                lease_ids,
+            )
             raise
         except Exception:
             logger.warning(
-                "NIXL workflow leases %s failed before completion",
+                "NIXL workflow leases %s entered quarantine because read completion "
+                "is uncertain; retaining producer memory until process exit",
                 lease_ids,
                 exc_info=True,
             )
-        finally:
-            for lease_id in lease_ids:
-                self._leases.pop(lease_id, None)
-            for lease_id, operation in zip(lease_ids, operations):
-                try:
-                    operation.__exit__(None, None, None)
-                except Exception:
-                    logger.warning(
-                        "failed to release NIXL workflow lease %s",
-                        lease_id,
-                        exc_info=True,
-                    )
+            return
+
+        for lease_id in lease_ids:
+            self._leases.pop(lease_id, None)
+        for lease_id, operation in zip(lease_ids, operations):
+            try:
+                operation.__exit__(None, None, None)
+            except Exception:
+                logger.warning(
+                    "failed to release completed NIXL workflow lease %s",
+                    lease_id,
+                    exc_info=True,
+                )
 
     async def close(self) -> None:
-        tasks = list(
-            {id(lease.task): lease.task for lease in self._leases.values()}.values()
-        )
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._leases:
+            logger.warning(
+                "closing NIXL workflow registry with %d active leases; retaining "
+                "producer memory until late completion or process exit",
+                len(self._leases),
+            )
+        await asyncio.sleep(0)
 
 
 def _model_dump(value: Any) -> dict[str, Any]:
