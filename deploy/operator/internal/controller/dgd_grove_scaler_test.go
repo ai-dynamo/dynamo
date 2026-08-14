@@ -72,7 +72,7 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 		Build()
 
 	err := newGroveScaler(kubeClient).Reconcile(
-		context.Background(),
+		t.Context(),
 		dgd,
 		map[string]*checkpoint.CheckpointInfo{
 			"gated": {
@@ -83,9 +83,9 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(frontend), frontend))
-	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(worker), worker))
-	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(gated), gated))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(frontend), frontend))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(worker), worker))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(gated), gated))
 	assert.Equal(t, int32(2), frontend.Spec.Replicas)
 	assert.Equal(t, int32(3), worker.Spec.Replicas)
 	assert.Equal(t, int32(0), gated.Spec.Replicas)
@@ -172,7 +172,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 			WithRESTMapper(groveScaleRESTMapper()).
 			Build()
-		require.NoError(t, newGroveScaler(kubeClient).Reconcile(context.Background(), dgd, nil))
+		require.NoError(t, newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, nil))
 	})
 
 	t.Run("other errors are propagated", func(t *testing.T) {
@@ -185,7 +185,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 				},
 			}).
 			Build()
-		err := newGroveScaler(kubeClient).Reconcile(context.Background(), dgd, nil)
+		err := newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, nil)
 		require.ErrorContains(t, err, "scale read failed")
 	})
 }
