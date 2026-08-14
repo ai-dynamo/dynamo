@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Best-effort aggregated TensorRT-LLM deployment for Gemma 4 31B NVFP4 on
+# 1x GB200 per worker. Mirrors ../agg-b200-agentic/deploy.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gemma4-31b-agg-gb200-agentic-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_batch_size: 24
+    max_num_tokens: 12288
+    max_seq_len: 262144
+    enable_chunked_prefill: true
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.93
+      host_cache_size: 137438953472  # 128 GiB host-memory KV offload
+      avg_seq_len: 24576
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 24
+    multimodal_config:
+      encoder_cache_max_bytes: 0
+    speculative_config:
+      decoding_type: MTP
+      max_draft_len: 3
+      mtp_eagle_one_model: true
+      speculative_model: google/gemma-4-31B-it-assistant
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gemma4-31b-agg-gb200-agentic
+  labels:
+    app.kubernetes.io/name: gemma4-31b-agg-gb200-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: trtllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      # Image tag is not pure X.Y.Z semver; the DGD CRD validator requires
+      # an explicit runtime version.
+      runtimeVersionOverride: "1.4.0"
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: nvcr-docker-config
+          containers:
+            - name: main
+              # aarch64 build: TensorRT-LLM 1.3.0rc25 + PR NVIDIA/TensorRT-LLM#17264
+              # (one-model MTP KV cache accounting fix) on Dynamo runtime 1.4.0.
+              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-arm64:rc25-pr17264-mtp
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - kv
+                - --http-port
+                - "8000"
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+              resources: {}
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 60
+                failureThreshold: 60
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: agg
+      type: worker
+      replicas: 8
+      sharedMemorySize: 40Gi
+      # See Frontend.runtimeVersionOverride.
+      runtimeVersionOverride: "1.4.0"
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: nvcr-docker-config
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-GB200
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values:
+                          - arm64
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              # aarch64 build: TensorRT-LLM 1.3.0rc25 + PR NVIDIA/TensorRT-LLM#17264
+              # (one-model MTP KV cache accounting fix) on Dynamo runtime 1.4.0.
+              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-arm64:rc25-pr17264-mtp
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.trtllm
+                - --model-path
+                - nvidia/Gemma-4-31B-IT-NVFP4
+                - --served-model-name
+                - nvidia/Gemma-4-31B-IT-NVFP4
+                - --tensor-parallel-size
+                - "1"
+                - --max-batch-size
+                - "24"
+                - --max-num-tokens
+                - "12288"
+                - --max-seq-len
+                - "262144"
+                - --extra-engine-args
+                - /config/agg.yaml
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: TRTLLM_ENABLE_PDL
+                  value: "1"
+                # Benchmark-only synthetic acceptance length for max_draft_len=3.
+                # - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
+                #   value: "2.88"
+              resources:
+                requests:
+                  # FIXME: should be doing 2Ti / 8 (num workers) = 256Gi? Or should be leaving some
+                  # headroom scheduling wise by requesting slightly below it?
+                  memory: 256Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 20
+                failureThreshold: 120
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: trtllm-config
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+            - name: trtllm-config
+              configMap:
+                name: gemma4-31b-agg-gb200-agentic-config
