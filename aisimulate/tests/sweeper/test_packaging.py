@@ -146,9 +146,9 @@ def test_aisimulate_builds_and_installs_planner_and_framework_runtime_wheels():
             "--from=wheel_builder /opt/dynamo/dist/*.whl "
             "/opt/dynamo/wheelhouse/" in runtime_text
         ), f"{runtime_template.name} does not copy the wheel-builder output"
-        assert "/opt/dynamo/wheelhouse/aisimulate*.whl" in runtime_text, (
-            f"{runtime_template.name} does not install the AISimulate wheel"
-        )
+        assert (
+            "/opt/dynamo/wheelhouse/aisimulate*.whl" in runtime_text
+        ), f"{runtime_template.name} does not install the AISimulate wheel"
     assert "aisimulate-*" not in release_workflow
 
 
