@@ -16,13 +16,14 @@ import (
 const defaultGeneratedCheckpointIDPrefix = "manual-snapshot"
 
 type checkpointOptions struct {
-	ManifestPath       string
-	Namespace          string
-	KubeContext        string
-	CheckpointID       string
-	Container          string
-	CudaCheckpointWrap bool
-	Timeout            time.Duration
+	ManifestPath           string
+	Namespace              string
+	KubeContext            string
+	CheckpointID           string
+	Container              string
+	CudaCheckpointWrap     bool
+	EnableCUDAVMMInterpose bool
+	Timeout                time.Duration
 }
 
 type result struct {
@@ -76,13 +77,14 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		},
 		Spec: *pod.Spec.DeepCopy(),
 	}, snapshotprotocol.CheckpointJobOptions{
-		Namespace:       namespace,
-		TargetContainer: containers[0],
-		CheckpointID:    checkpointID,
-		ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
-		SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
-		Name:            checkpointJobName,
-		WrapLaunchJob:   opts.CudaCheckpointWrap,
+		Namespace:              namespace,
+		TargetContainer:        containers[0],
+		CheckpointID:           checkpointID,
+		ArtifactVersion:        snapshotprotocol.DefaultCheckpointArtifactVersion,
+		SeccompProfile:         snapshotprotocol.DefaultSeccompLocalhostProfile,
+		Name:                   checkpointJobName,
+		WrapLaunchJob:          opts.CudaCheckpointWrap,
+		EnableCUDAVMMInterpose: opts.EnableCUDAVMMInterpose,
 	})
 	if err != nil {
 		return nil, err
