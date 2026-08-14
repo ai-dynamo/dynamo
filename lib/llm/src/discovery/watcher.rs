@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -452,8 +453,10 @@ where
             .await?;
 
         // Use per-worker-set router config if the worker provided one in its MDC,
-        // otherwise fall back to the frontend-level global config.
-        let router_config = card.router_config.as_ref().unwrap_or(&self.router_config);
+        // otherwise fall back to the frontend-level global config. Policy selections
+        // are frontend-only, so preserve them when the MDC supplies the base config.
+        let router_config =
+            effective_router_config(card.router_config.as_ref(), &self.router_config);
 
         let component = self
             .drt
@@ -1268,6 +1271,26 @@ fn materialization_fingerprint(
     Ok(blake3::hash(&bytes).to_string())
 }
 
+fn effective_router_config<'a>(
+    worker_config: Option<&'a RouterConfig>,
+    frontend_config: &'a RouterConfig,
+) -> Cow<'a, RouterConfig> {
+    let Some(worker_config) = worker_config else {
+        return Cow::Borrowed(frontend_config);
+    };
+
+    let mut effective = worker_config.clone();
+    effective.kv_router_config.router_prefill_policy = frontend_config
+        .kv_router_config
+        .router_prefill_policy
+        .clone();
+    effective.kv_router_config.router_decode_policy = frontend_config
+        .kv_router_config
+        .router_decode_policy
+        .clone();
+    Cow::Owned(effective)
+}
+
 fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<String> {
     let mut value = serde_json::json!({
         "display_name": &card.display_name,
@@ -1729,6 +1752,34 @@ mod tests {
             materialization_fingerprint(&legacy_wire, &RouterConfig::default()).unwrap(),
             materialization_fingerprint(&current_wire, &RouterConfig::default()).unwrap()
         );
+    }
+
+    #[test]
+    fn worker_router_config_preserves_frontend_policy_selections() {
+        let mut frontend = RouterConfig::default();
+        frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
+        frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
+
+        let mut worker = RouterConfig::default();
+        worker.kv_router_config.router_temperature = 0.75;
+        worker.kv_router_config.router_policy_config = Some("worker-policy.yaml".to_string());
+
+        let effective = effective_router_config(Some(&worker), &frontend);
+        assert_eq!(effective.kv_router_config.router_temperature, 0.75);
+        assert_eq!(
+            effective.kv_router_config.router_policy_config.as_deref(),
+            Some("worker-policy.yaml")
+        );
+        assert_eq!(
+            effective.kv_router_config.router_prefill_policy.as_deref(),
+            Some("frontend-prefill")
+        );
+        assert_eq!(
+            effective.kv_router_config.router_decode_policy.as_deref(),
+            Some("frontend-decode")
+        );
+        assert!(worker.kv_router_config.router_prefill_policy.is_none());
+        assert!(worker.kv_router_config.router_decode_policy.is_none());
     }
 
     #[tokio::test]
