@@ -121,9 +121,7 @@ def test_every_replica_that_serves_produces_language(attached_endpoint):
             f"degenerate -- {reasons[0]}"
             for worker, reasons in broken.items()
         )
-        + f"\nhealthy workers: "
-        + ", ".join(
-            str(worker) for worker in seen if worker not in broken
-        )
+        + "\nhealthy workers: "
+        + ", ".join(str(worker) for worker in seen if worker not in broken)
         + f"\n({len(seen)} distinct worker(s) observed across {PROBE_COUNT} requests)"
     )
