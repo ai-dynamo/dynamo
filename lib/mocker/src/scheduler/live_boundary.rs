@@ -19,7 +19,8 @@ use crate::scheduler::vllm::MockerMetrics;
 use crate::scheduler::{
     AdmissionEvent, EnginePassResult, RouterEventVisibility, SchedulerCancellationEnvelope,
     SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult,
-    SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender, handoff_channel_capacity,
+    SchedulerEventSendError, SchedulerEventSender, SchedulerHandle, SchedulerLifecycleEvent,
+    handoff_channel_capacity,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -62,7 +63,8 @@ pub(crate) trait LiveBoundaryCore {
         None
     }
 
-    fn execute_live_pass(&mut self, scheduler_start: &Instant) -> LivePassExecution;
+    fn execute_live_pass(&mut self, scheduler_start: &Instant)
+    -> anyhow::Result<LivePassExecution>;
 
     fn output_delivery_failed(&mut self, _signals: Vec<OutputSignal>) {}
 
@@ -135,13 +137,15 @@ impl SchedulerHandle for LiveSchedulerState {
 pub(crate) fn spawn_live_scheduler<C>(
     args: MockEngineArgs,
     dp_rank: u32,
-    output_tx: Option<SchedulerOutputSender>,
+    event_tx: Option<SchedulerEventSender>,
     kv_event_publishers: KvEventPublishers,
     cancellation_token: Option<CancellationToken>,
-    admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
     fpm_publisher: FpmPublisher,
     make_core: impl FnOnce(MockEngineArgs, u32, KvEventPublishers) -> C + Send + 'static,
-) -> LiveSchedulerState
+) -> (
+    LiveSchedulerState,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)
 where
     C: LiveBoundaryCore + Send + 'static,
 {
@@ -156,15 +160,14 @@ where
     let actor_cancel_token = cancel_token.clone();
     let cancel_guard = Arc::new(LiveCancelGuard(cancel_token));
 
-    tokio::spawn(async move {
+    let actor_handle = tokio::spawn(async move {
         let (deferred_kv_events, buffering_publishers) = capture_deferred_kv_publish_sink(
             !kv_event_publishers.is_empty(),
             kv_event_publishers.raw_enabled(),
         );
         let mut core = make_core(args, dp_rank, buffering_publishers);
         let publisher = LiveEffectsPublisher::new(
-            output_tx,
-            admission_tx,
+            event_tx,
             lifecycle_tx,
             metrics_tx,
             kv_event_publishers,
@@ -180,17 +183,20 @@ where
             publisher,
             actor_cancel_token,
         )
-        .await;
+        .await
     });
 
-    LiveSchedulerState {
-        request_tx,
-        command_tx,
-        cancellation_tx,
-        lifecycle_rx: Arc::new(Mutex::new(Some(lifecycle_rx))),
-        metrics_rx,
-        _cancel_guard: cancel_guard,
-    }
+    (
+        LiveSchedulerState {
+            request_tx,
+            command_tx,
+            cancellation_tx,
+            lifecycle_rx: Arc::new(Mutex::new(Some(lifecycle_rx))),
+            metrics_rx,
+            _cancel_guard: cancel_guard,
+        },
+        actor_handle,
+    )
 }
 
 async fn run_live_scheduler<C: LiveBoundaryCore>(
@@ -200,7 +206,7 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
     mut cancellation_rx: mpsc::Receiver<SchedulerCancellationEnvelope>,
     publisher: LiveEffectsPublisher,
     cancel_token: CancellationToken,
-) {
+) -> anyhow::Result<()> {
     let scheduler_start = Instant::now();
     let mut deferred_commands = VecDeque::new();
 
@@ -226,11 +232,11 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
 
         let iteration_start = Instant::now();
         let metrics_before = core.live_metrics();
-        let execution = core.execute_live_pass(&scheduler_start);
+        let execution = core.execute_live_pass(&scheduler_start)?;
         let mut pending = publisher.capture_pass(execution.pass);
         let zero_progress =
             execution.duration.is_zero() && !pending.made_progress_since(&metrics_before);
-        publisher.publish_pass_start(&mut pending);
+        publisher.publish_pass_start(&mut pending).await?;
         if execution.duration > Duration::ZERO {
             let deadline = iteration_start + execution.duration;
             if !wait_for_live_pass_boundary(
@@ -249,7 +255,7 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
                 break;
             }
         }
-        publisher.publish_pass(core, pending).await;
+        publisher.publish_pass(core, pending).await?;
         let control_progress = apply_live_post_pass_controls(
             core,
             &mut command_rx,
@@ -278,14 +284,14 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
             tokio::task::coop::consume_budget().await;
         }
     }
+    Ok(())
 }
 
 /// Owns every effect that becomes externally visible at a live scheduler
 /// boundary. Pass effects are captured before modeled sleep so an admissible
 /// mid-pass command cannot publish or consume state derived from that pass.
 pub(crate) struct LiveEffectsPublisher {
-    output_tx: Option<SchedulerOutputSender>,
-    admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+    event_tx: Option<SchedulerEventSender>,
     lifecycle_tx: mpsc::Sender<SchedulerLifecycleEvent>,
     metrics_tx: watch::Sender<MockerMetrics>,
     kv_event_publishers: KvEventPublishers,
@@ -333,8 +339,7 @@ impl PendingLivePass {
 impl LiveEffectsPublisher {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        output_tx: Option<SchedulerOutputSender>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        event_tx: Option<SchedulerEventSender>,
         lifecycle_tx: mpsc::Sender<SchedulerLifecycleEvent>,
         metrics_tx: watch::Sender<MockerMetrics>,
         kv_event_publishers: KvEventPublishers,
@@ -342,8 +347,7 @@ impl LiveEffectsPublisher {
         captured_kv_events: DeferredKvPublishBuffer,
     ) -> Self {
         Self {
-            output_tx,
-            admission_tx,
+            event_tx,
             lifecycle_tx,
             metrics_tx,
             kv_event_publishers,
@@ -374,13 +378,17 @@ impl LiveEffectsPublisher {
 
     /// Publish effects whose scheduler contract makes them visible before the
     /// modeled GPU pass runs. Outputs and lifecycle effects remain at pass end.
-    pub(crate) fn publish_pass_start(&self, pending: &mut PendingLivePass) {
-        self.publish_admissions(&pending.pass.admissions);
+    pub(crate) async fn publish_pass_start(
+        &self,
+        pending: &mut PendingLivePass,
+    ) -> anyhow::Result<()> {
+        self.publish_admissions(&pending.pass.admissions).await?;
         pending.admissions_published = true;
         if pending.pass.router_event_visibility == RouterEventVisibility::PassStart {
             self.publish_router_effects(std::mem::take(&mut pending.kv_events), None);
             pending.pass_start_kv_published = true;
         }
+        Ok(())
     }
 
     /// Publishes a completed pass as one ordered transaction:
@@ -389,9 +397,9 @@ impl LiveEffectsPublisher {
         &self,
         core: &mut C,
         mut pending: PendingLivePass,
-    ) {
+    ) -> anyhow::Result<()> {
         if !pending.admissions_published {
-            self.publish_admissions(&pending.pass.admissions);
+            self.publish_admissions(&pending.pass.admissions).await?;
         }
 
         // Mid-pass command effects remain part of this pass transaction and
@@ -425,7 +433,7 @@ impl LiveEffectsPublisher {
             );
         }
         self.publish_outputs(core, pending.pass.output_signals)
-            .await;
+            .await?;
         // Live completion/accept accounting is carried by the admission and
         // output channels; the scalar replay counters have no separate live
         // consumer, but are committed at this same boundary.
@@ -435,8 +443,8 @@ impl LiveEffectsPublisher {
         self.publish_router_effects(self.captured_kv_events.drain(), None);
         self.publish_lifecycle(pending.pass.lifecycle_events).await;
         let metrics = core.pass_boundary_metrics(pending.pass.mocker_metrics);
-        self.record(PublishedEffect::Metrics);
-        let _ = self.metrics_tx.send(metrics);
+        self.publish_metrics(metrics);
+        Ok(())
     }
 
     pub(crate) async fn apply_command<C: LiveBoundaryCore>(
@@ -466,6 +474,26 @@ impl LiveEffectsPublisher {
         .await
     }
 
+    fn publish_live_metrics<C: LiveBoundaryCore>(&self, core: &C) {
+        self.publish_metrics(core.live_metrics());
+    }
+
+    fn publish_metrics(&self, mut metrics: MockerMetrics) {
+        self.record(PublishedEffect::Metrics);
+        self.metrics_tx.send_modify(|current| {
+            // NOTE: This is a semantic latch, not optional smoothing. SGLang's cache fields are
+            // per-prefill observations, while `watch` retains only the latest value. DO NOT let a
+            // decode or idle snapshot with no prefill tokens erase a meaningful observation before
+            // consumers can read it. A real miss has a nonzero total and must replace the latch.
+            // This latch is specific to SGLang's aggregate cache observation; do not generalize it.
+            if metrics.sglang_cache_total_tokens == 0 {
+                metrics.sglang_cache_hit_tokens = current.sglang_cache_hit_tokens;
+                metrics.sglang_cache_total_tokens = current.sglang_cache_total_tokens;
+            }
+            *current = metrics;
+        });
+    }
+
     async fn apply_command_inner<C: LiveBoundaryCore>(
         &self,
         core: &mut C,
@@ -491,8 +519,7 @@ impl LiveEffectsPublisher {
                 let _ = reply.send(Ok(effects));
                 if allow_destination_admission {
                     self.publish_lifecycle(lifecycle_events).await;
-                    self.record(PublishedEffect::Metrics);
-                    let _ = self.metrics_tx.send(core.live_metrics());
+                    self.publish_live_metrics(core);
                 }
                 Some(command_result)
             }
@@ -514,8 +541,7 @@ impl LiveEffectsPublisher {
         let made_progress = !lifecycle_events.is_empty() || !kv_events.is_empty();
         self.publish_router_effects(kv_events, None);
         self.publish_lifecycle(lifecycle_events).await;
-        self.record(PublishedEffect::Metrics);
-        let _ = self.metrics_tx.send(core.live_metrics());
+        self.publish_live_metrics(core);
         made_progress
     }
 
@@ -541,21 +567,23 @@ impl LiveEffectsPublisher {
         let made_progress = !kv_events.is_empty() || !effects.lifecycle_events.is_empty();
         self.publish_router_effects(kv_events, None);
         self.publish_lifecycle(effects.lifecycle_events).await;
-        self.record(PublishedEffect::Metrics);
-        let _ = self.metrics_tx.send(core.live_metrics());
+        self.publish_live_metrics(core);
         made_progress
     }
 
-    fn publish_admissions(&self, admissions: &[AdmissionEvent]) {
-        let Some(tx) = self.admission_tx.as_ref() else {
-            return;
+    async fn publish_admissions(&self, admissions: &[AdmissionEvent]) -> anyhow::Result<()> {
+        let Some(tx) = self.event_tx.as_ref() else {
+            return Ok(());
         };
         if !admissions.is_empty() {
             self.record(PublishedEffect::Admissions);
         }
-        for admission in admissions {
-            let _ = tx.send(admission.clone());
+        if let Err(SchedulerEventSendError::OrderedLaneClosed) =
+            tx.send_admissions(admissions).await
+        {
+            anyhow::bail!("live Mocker ordered event lane closed while publishing admissions");
         }
+        Ok(())
     }
 
     fn publish_router_effects(
@@ -573,17 +601,28 @@ impl LiveEffectsPublisher {
         }
     }
 
-    async fn publish_outputs<C: LiveBoundaryCore>(&self, core: &mut C, signals: Vec<OutputSignal>) {
-        let Some(tx) = self.output_tx.as_ref() else {
-            return;
+    async fn publish_outputs<C: LiveBoundaryCore>(
+        &self,
+        core: &mut C,
+        signals: Vec<OutputSignal>,
+    ) -> anyhow::Result<()> {
+        let Some(tx) = self.event_tx.as_ref() else {
+            return Ok(());
         };
         if signals.is_empty() {
-            return;
+            return Ok(());
         }
         self.record(PublishedEffect::Outputs);
-        if let Err(signals) = tx.send(signals).await {
-            core.output_delivery_failed(signals);
+        match tx.send_outputs(signals).await {
+            Ok(()) => {}
+            Err(SchedulerEventSendError::OutputClosed(signals)) => {
+                core.output_delivery_failed(signals);
+            }
+            Err(SchedulerEventSendError::OrderedLaneClosed) => {
+                anyhow::bail!("live Mocker ordered event lane closed while publishing outputs");
+            }
         }
+        Ok(())
     }
 
     async fn publish_lifecycle(&self, events: Vec<SchedulerLifecycleEvent>) {
@@ -737,6 +776,13 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
                     .await;
                 if discard_pending_output || outcome != Some(SchedulerCommandResult::Noop) {
                     pending.suppress_request_outputs(request_id);
+                }
+                if outcome == Some(SchedulerCommandResult::Applied) && core.live_is_empty() {
+                    // Cancellation updates occupancy immediately, but the
+                    // modeled pass may still own another request's output or
+                    // other pass-end effects. Publish current metrics without
+                    // ending that pass before its deadline.
+                    publisher.publish_live_metrics(core);
                 }
             }
             _ = &mut internal_deadline, if internal_deadline_ms.is_some() => {

@@ -1,9 +1,17 @@
 # SGLang sidecar
 
+> [!WARNING]
+> **Experimental.** These deployment examples and the standalone sidecar image
+> are experimental and not yet packaged for distribution (the launcher module
+> ships inside `ai-dynamo-runtime`). The manifests, flags, and behavior may change
+> without notice.
+
 `dynamo-sglang-sidecar` connects Dynamo's unified worker lifecycle to an
 out-of-process SGLang engine through SGLang's native gRPC service. It is a
 standalone Rust executable and is also compiled into `ai-dynamo-runtime` for
 the importable `dynamo.sglang.sidecar` launcher.
+
+## Run
 
 Build and run it directly from the Dynamo workspace:
 
@@ -13,8 +21,18 @@ cargo build --release -p dynamo-sglang-sidecar
     --sglang-endpoint http://127.0.0.1:30001
 ```
 
-Distribution and container packaging for the standalone executable are
-intentionally deferred to a follow-up change.
+There is no published image yet; the "Deploy on Kubernetes" section below builds
+a minimal one from `Dockerfile`. Official packaging is deferred to a follow-up.
+
+Use `SGLANG_GRPC_ENDPOINT` instead of `--sglang-endpoint` when the endpoint is provided through the environment.
+
+The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
+
+SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
+
+The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
+
+Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a five-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
 ## SGLang-managed module contract
 
@@ -31,3 +49,80 @@ The entry point configures Dynamo logging when `main()` runs, then calls the
 private `dynamo._core.backend._run_sglang_sidecar(argv)` binding. The binding
 prepends the executable name expected by clap, releases the GIL, and runs the
 same unified worker lifecycle as the standalone executable.
+
+## Deploy on Kubernetes (quick start)
+
+`deploy/agg.yaml` runs an aggregated deployment (a frontend plus one worker pod
+that colocates the sidecar with an SGLang engine). `deploy/disagg.yaml` runs
+disaggregated prefill/decode with NIXL KV transfer.
+
+There is no published sidecar image yet, so you build and push your own from
+`Dockerfile` — the same pattern as the TensorRT-LLM and vLLM sidecars.
+
+> [!NOTE]
+> The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
+> server (`--grpc-port`) landed there, and Dynamo's `sglang-runtime` pins an
+> older SGLang without it. `deploy/agg.yaml` uses `lmsysorg/sglang:v0.5.16`.
+
+### Prerequisites
+
+- A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
+  gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
+  for `disagg.yaml`). The engine runs as a native sidecar (`initContainers` with
+  `restartPolicy: Always`), which requires that version.
+- `kubectl` set to that cluster, and a namespace to deploy into.
+- A Hugging Face token for the model.
+- A container registry you can push to and the cluster can pull from.
+
+### 1. Build and push the sidecar image
+
+Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
+(GB200/Grace):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f lib/sidecar/sglang/Dockerfile \
+  -t <your-registry>/dynamo-sglang-sidecar:1.3.0 --push .
+```
+
+### 2. Point the manifest at your image
+
+In `deploy/agg.yaml`, set the `main` worker image to the one you just pushed.
+If your registry is private, add `imagePullSecrets` to the worker pod spec.
+
+### 3. Create the Hugging Face token secret
+
+```bash
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN" -n <namespace>
+```
+
+### 4. Deploy
+
+```bash
+kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
+```
+
+Wait for the worker pod to reach `2/2 Running`:
+
+```bash
+kubectl get pods -n <namespace> -w
+```
+
+### 5. Send a request
+
+```bash
+kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000 &
+
+curl -s localhost:8000/v1/models | jq .
+
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}' | jq .
+```
+
+### Disaggregated
+
+`deploy/disagg.yaml` runs prefill and decode as separate worker pods that hand
+off KV cache over a bootstrap server + NIXL. It needs multiple GPUs and an RDMA
+fabric, and both worker pods must reach `2/2 Running`.

@@ -17,6 +17,7 @@ import requests
 from tests.gpu_memory_service.common.gms import GMSServer
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DefaultPort
 from tests.utils.engine_process import EngineProcess
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -285,11 +286,13 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             "--enable-sleep-mode",
             "--max-num-seqs",
             "1",
-            "--gpu-memory-utilization",
-            "0.8",
             "--kv-events-config",
             kv_events_cfg,
         ]
+        command.extend(
+            build_gpu_mem_args("build_vllm_gpu_mem_args")
+            or ["--gpu-memory-utilization", "0.8"]
+        )
         extra_config = self.model_loader_extra_config()
         if extra_config is not None:
             command.extend(

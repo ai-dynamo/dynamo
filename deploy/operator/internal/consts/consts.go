@@ -56,6 +56,7 @@ const (
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
+	KubeAnnotationGPUPowerLimit                   = "dynamo.nvidia.com/gpu-power-limit"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
@@ -183,6 +184,13 @@ const (
 
 	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
 	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
+
+	// VLLMDPMasterIPEnvVar is the env var that tells vLLM which IP hosts the data-parallel master.
+	VLLMDPMasterIPEnvVar = "VLLM_DP_MASTER_IP"
+
+	// PodIPEnvVar carries the pod's own IP from the downward API, for launch
+	// commands that must name an address rather than let a library guess one.
+	PodIPEnvVar = "POD_IP"
 
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics

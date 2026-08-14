@@ -123,6 +123,28 @@ RUN python3 -m compliance.policy.validate \
         --policy /opt/compliance/policy/licenses.toml \
         --input /legal/osrb-deps.csv
 
+# Media-codec allowlist gate: scans THIS stage's filesystem (==
+# the shipped image tree, since licenses is FROM pre_runtime) and fails the build
+# if a media-codec library/binary (a third-party libav*, libx264/265, or a stray
+# or imageio-bundled ffmpeg) ships outside our in-tree allowlist or a reasoned
+# exception. Feeds the generated delta SBOM in too, for an ffmpeg-version floor.
+# Files, not just the SBOM, because statically-bundled codec .so's don't appear
+# as components.
+#
+# CUDA only for now. The XPU image is not currently published on NGC, so it does
+# not yet require the codecs to be removed. It would also fail this gate today:
+# the purge the gate depends on sits in the `device == "cuda"` block of
+# vllm_runtime.Dockerfile, so the XPU image still carries its base image's media
+# stack. Enable both together if that changes.
+{% if device == "cuda" %}
+RUN python3 -m compliance.scan_codecs \
+        --root / \
+        --policy /opt/compliance/policy/codec_policy.yaml \
+        --sbom /legal/osrb.cdx.json \
+        --image {{ framework }}-{{ target }} \
+        --fail-on-findings -v
+{% endif %}
+
 
 #######################################
 ####### Compliance: artifact ##########

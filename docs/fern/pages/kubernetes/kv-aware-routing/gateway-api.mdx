@@ -1,0 +1,286 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Using GAIE with Dynamo
+sidebar-title: Using GAIE with Dynamo
+subtitle: Add a Dynamo Endpoint Picker Plugin and HTTPRoute to an existing DynamoGraphDeployment.
+---
+
+This how-to places a Kubernetes Gateway in front of an existing `DynamoGraphDeployment` (DGD). The
+Gateway API Inference Extension (GAIE) calls the Dynamo Endpoint Picker Plugin (EPP), and the Gateway
+forwards each request to the worker selected by the EPP.
+
+Use this topology when Gateway API should own traffic entry, policy, and gateway-level observability.
+For direct-to-Frontend routing, use [the Dynamo Frontend](dynamo-frontend.md).
+
+## Before You Begin
+
+You need:
+
+- A working DGD whose workers can serve requests.
+- The Dynamo operator installed.
+- Gateway API, GAIE, and a compatible Gateway implementation installed. See
+  [Install Gateway API Inference Extension](../installation/gateway-api-routing.mdx).
+- A `Gateway` named `inference-gateway` in the DGD namespace.
+
+This page modifies an existing DGD named `qwen` that serves `Qwen/Qwen3-0.6B`. Keep your existing
+model credentials, storage, worker images, and backend settings when adapting the example.
+
+<Steps toc={true} tocDepth={2}>
+
+<Step title="Set the deployment variables">
+
+Set the namespace, resource names, model, and local filenames used throughout the procedure:
+
+```bash
+export NAMESPACE=my-model
+export DYNAMO_VERSION=1.3.0
+export DGD_NAME=qwen
+export DGD_MANIFEST=qwen-gateway.yaml
+export ROUTE_NAME=qwen
+export ROUTE_MANIFEST=qwen-gateway-route.yaml
+export MODEL_NAME=Qwen/Qwen3-0.6B
+```
+
+Copy your working DGD manifest to `$DGD_MANIFEST`, then make the changes in the next three steps.
+
+</Step>
+
+<Step title="Add the EPP component">
+
+Add one component with `type: epp` to `qwen-gateway.yaml`. The EPP configuration below selects
+aggregated or decode workers and scores them with the Dynamo decode scorer.
+
+```yaml
+spec:
+  components:
+  - name: Epp
+    type: epp
+    replicas: 1
+    eppConfig:
+      config:
+        plugins:
+        - type: disagg-profile-handler
+        - name: decode-filter
+          type: label-filter
+          parameters:
+            label: nvidia.com/dynamo-component-type
+            validValues: [decode]
+            allowsNoLabel: true
+        - name: dyn-decode
+          type: dyn-decode-scorer
+        - name: picker
+          type: max-score-picker
+        schedulingProfiles:
+        - name: decode
+          plugins:
+          - pluginRef: decode-filter
+            weight: 1
+          - pluginRef: dyn-decode
+            weight: 1
+          - pluginRef: picker
+            weight: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          - name: DYN_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          - name: DYN_KV_CACHE_BLOCK_SIZE
+            value: "16"
+```
+
+If your deployment uses another Dynamo version, model, secret name, or backend block size, update
+those values in the manifest. Keep the platform, EPP, Frontend sidecars, and workers on the same
+Dynamo release line. The EPP block size must match the backend block size.
+
+For a disaggregated graph, add separate prefill and decode filters, scorers, and scheduling profiles.
+Start from the repository's
+[disaggregated GAIE example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gaie/disagg.yaml)
+instead of extending the aggregated profile by hand.
+
+</Step>
+
+<Step title="Put worker sidecars in direct mode">
+
+The EPP selects the worker before the request reaches its pod. In each routable worker component, add
+a Frontend sidecar and run it in direct mode so it forwards the request without making another worker
+selection.
+
+```yaml
+spec:
+  components:
+  - name: VllmDecodeWorker
+    type: decode
+    frontendSidecar: sidecar-frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          # Keep the existing worker configuration.
+        - name: sidecar-frontend
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+```
+
+Keep the existing worker container in the component. If your worker uses another runtime image or
+credential source, apply the equivalent values to the sidecar.
+
+</Step>
+
+<Step title="Publish KV cache events">
+
+To route from actual cache contents, enable prefix caching and KV event publication in each routable
+worker. For the vLLM worker in `qwen-gateway.yaml`, include settings equivalent to:
+
+```yaml
+args:
+- >-
+  python3 -m dynamo.vllm
+  --model $MODEL_PATH
+  --enable-prefix-caching
+  --block-size 16
+  --kv-events-config '{"enable_kv_cache_events":true}'
+```
+
+The operator-managed EPP receives these events through the Dynamo event plane. Do not configure a
+direct EPP-to-vLLM ZMQ subscription for this topology.
+
+</Step>
+
+<Step title="Apply the updated DGD">
+
+Apply `qwen-gateway.yaml`, wait for the DGD, and inspect the generated `qwen-pool`
+`InferencePool`:
+
+```bash
+kubectl apply -n "$NAMESPACE" -f "$DGD_MANIFEST"
+
+kubectl wait -n "$NAMESPACE" \
+  dynamographdeployment/$DGD_NAME \
+  --for=condition=Ready \
+  --timeout=1800s
+
+kubectl get inferencepool "${DGD_NAME}-pool" -n "$NAMESPACE"
+```
+
+The operator also creates the EPP Deployment and Service.
+
+</Step>
+
+<Step title="Create the HTTPRoute">
+
+Create `qwen-gateway-route.yaml`. The route matches the model header and points to the generated
+`qwen-pool` resource:
+
+```bash
+cat > "$ROUTE_MANIFEST" <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${ROUTE_NAME}
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  - matches:
+    - headers:
+      - name: X-Gateway-Model-Name
+        type: Exact
+        value: ${MODEL_NAME}
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${DGD_NAME}-pool
+      port: 8000
+    timeouts:
+      request: 300s
+EOF
+
+kubectl apply -n "$NAMESPACE" -f "$ROUTE_MANIFEST"
+kubectl get httproute "$ROUTE_NAME" -n "$NAMESPACE"
+```
+
+</Step>
+
+<Step title="Verify the request path">
+
+Port-forward the Service created for the Gateway implementation:
+
+```bash
+export GATEWAY_SERVICE=$(kubectl get service -n "$NAMESPACE" \
+  -l gateway.networking.k8s.io/gateway-name=inference-gateway \
+  -o jsonpath='{.items[0].metadata.name}')
+
+kubectl port-forward -n "$NAMESPACE" "service/$GATEWAY_SERVICE" 8000:80
+```
+
+In another terminal, restore the variables and send a request through the Gateway:
+
+```bash
+export NAMESPACE=my-model
+export MODEL_NAME=Qwen/Qwen3-0.6B
+
+curl --max-time 180 -sS http://localhost:8000/v1/chat/completions \
+  -H "X-Gateway-Model-Name: $MODEL_NAME" \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Explain KV-aware routing."}],
+    "max_tokens": 64
+  }' | jq .
+```
+
+Confirm that the EPP handled endpoint selection:
+
+```bash
+kubectl logs -n "$NAMESPACE" \
+  -l nvidia.com/dynamo-component-type=epp \
+  --tail=200
+```
+
+</Step>
+
+</Steps>
+
+## Troubleshoot the Route
+
+If the request does not reach a worker, set the resource variables and inspect the request path in
+order:
+
+```bash
+export NAMESPACE=my-model
+export DGD_NAME=qwen
+export ROUTE_NAME=qwen
+
+kubectl describe gateway inference-gateway -n "$NAMESPACE"
+kubectl describe httproute "$ROUTE_NAME" -n "$NAMESPACE"
+kubectl describe inferencepool "${DGD_NAME}-pool" -n "$NAMESPACE"
+kubectl get pods -n "$NAMESPACE" -l nvidia.com/dynamo-component-type=epp
+```
+
+- If the DGD is rejected because the `InferencePool` API is unavailable, install GAIE before applying
+  a DGD with an EPP component.
+- If the Gateway returns HTTP 500 in an Istio-injected namespace, verify that the Gateway proxy does
+  not have an `istio-proxy` sidecar. See
+  [agentgateway and Istio injection](../../reference/components/gateway-api-routing.mdx#agentgateway-and-istio-injection).
+- If routing ignores expected prefix overlap, verify that workers publish KV events and that
+  `DYN_KV_CACHE_BLOCK_SIZE` matches the backend block size.
+
+For resource fields, runtime settings, request headers, and service-mesh behavior, see the
+[Gateway API Routing Reference](../../reference/components/gateway-api-routing.mdx).

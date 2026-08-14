@@ -120,10 +120,7 @@ pub(super) fn get_new_batch_prefill(
                 .extend_allocation(alloc_tokens, &mut lease)
                 .then_some(req.materialized_tokens)
         } else {
-            kv_manager.allocate_for_request(alloc_tokens).map(|alloc| {
-                lease = alloc.lease;
-                alloc.prefix_len
-            })
+            kv_manager.allocate_for_request_lease(alloc_tokens, &mut lease)
         };
 
         let Some(prefix_len) = prefix_len else {

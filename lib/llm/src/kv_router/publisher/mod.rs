@@ -29,13 +29,12 @@ mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
+mod state_agent;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
-#[cfg(test)]
-use batching::BatchingState;
 #[cfg(test)]
 use dedup::EventDedupFilter;
 #[cfg(test)]
@@ -46,6 +45,10 @@ pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheUpdate,
 };
 use sinks::EventPlanePublisher;
+pub use state_agent::{
+    KvStateAgent, KvStateAgentConfig, KvStateAgentRawMode, KvStateAgentSlotConfig,
+    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+};
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 
@@ -171,6 +174,11 @@ impl KvEventSource {
 }
 
 /// A publisher of KV events.
+///
+/// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
+/// publisher ID. Restarting the engine publisher independently while this value survives is not
+/// supported. Future independent restart support must either emit an ordered rank-scoped
+/// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,

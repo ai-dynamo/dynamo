@@ -26,7 +26,12 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
-from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
+from dynamo.sglang.capacity import (
+    kv_event_block_size,
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    publishes_kv_events,
+)
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -218,6 +223,8 @@ class DynamoSglangPublisher:
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
+                # These token counts are per DCP rank; the physical page size
+                # therefore converts them to widened logical-block counts.
                 active_decode_blocks, total_blocks = kv_metrics_block_values(
                     kv_metrics, self.server_args.page_size
                 )
@@ -296,7 +303,14 @@ class DynamoSglangPublisher:
             List of KvEventPublisher instances if KV event publishing is enabled,
             empty list otherwise.
         """
-        if self.dynamo_args.use_kv_events:
+        if self.dynamo_args.use_kv_events and not publishes_kv_events(self.server_args):
+            logging.info(
+                "Non-leader node (node_rank=%s) shares the leader's single KV "
+                "rank slice; skipping KV event publishing so the router sees "
+                "exactly one source per (worker_id, dp_rank).",
+                getattr(self.server_args, "node_rank", 0) or 0,
+            )
+        elif self.dynamo_args.use_kv_events:
             kv_events = json.loads(self.server_args.kv_events_config)
             base_ep = kv_events.get("endpoint")
             if not base_ep:
@@ -334,7 +348,7 @@ class DynamoSglangPublisher:
                 publisher = KvEventPublisher(
                     endpoint=self.generate_endpoint,
                     worker_id=self.kv_worker_id,
-                    kv_block_size=self.server_args.page_size,
+                    kv_block_size=kv_event_block_size(self.server_args),
                     zmq_endpoint=zmq_ep,
                     zmq_topic="",
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
@@ -565,7 +579,9 @@ async def handle_non_leader_node(
     )
 
     try:
-        if publisher.dynamo_args.use_kv_events:
+        if publisher.dynamo_args.use_kv_events and publishes_kv_events(
+            publisher.server_args
+        ):
             kv_worker_id = await _resolve_multinode_leader_worker_id(
                 publisher.generate_endpoint,
                 publisher.server_args,

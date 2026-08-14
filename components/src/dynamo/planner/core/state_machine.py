@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
 from dynamo.planner.core.budget import (
     proportional_clamp_pair,
     proportional_clamp_single,
@@ -386,7 +386,14 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     # Budget
     # ------------------------------------------------------------------
 
-    def _apply_single_budget(self, desired: int, component: str) -> int:
+    def _min_endpoint_for(self, component: Literal["prefill", "decode"]) -> int:
+        """Return the effective floor for a planner component."""
+
+        return resolve_min_endpoint(self._config, component)
+
+    def _apply_single_budget(
+        self, desired: int, component: Literal["prefill", "decode"]
+    ) -> int:
         caps = (
             self._capabilities.prefill
             if component == "prefill"
@@ -395,7 +402,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         gpu = caps.num_gpu if caps else None
         if gpu is None:
             return desired
-        return self._budget_clamp(max(desired, self._config.min_endpoint), gpu)
+        min_endpoint = self._min_endpoint_for(component)
+        return self._budget_clamp(max(desired, min_endpoint), gpu, min_endpoint)
 
     def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
         """Apply the GPU budget band (ceiling and optional floor) to
@@ -416,7 +424,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             d_gpu,
             self._config.min_gpu_budget,
             self._config.max_gpu_budget,
-            self._config.min_endpoint,
+            self._min_endpoint_for("prefill"),
+            self._min_endpoint_for("decode"),
         )
         if (new_p, new_d) != (num_p, num_d):
             old_total = num_p * p_gpu + num_d * d_gpu
@@ -429,7 +438,7 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             )
         return new_p, new_d
 
-    def _budget_clamp(self, desired: int, engine_gpu: int) -> int:
+    def _budget_clamp(self, desired: int, engine_gpu: int, min_endpoint: int) -> int:
         """Apply the GPU budget band to a single component's desired replica
         count (agg, prefill-only, or decode-only mode)."""
         new_replicas = proportional_clamp_single(
@@ -437,7 +446,7 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             engine_gpu,
             self._config.min_gpu_budget,
             self._config.max_gpu_budget,
-            self._config.min_endpoint,
+            min_endpoint,
         )
         if new_replicas != desired:
             logger.warning(

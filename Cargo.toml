@@ -12,6 +12,12 @@ members = [
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
+    "lib/router-plugins/catalog",
+    "examples/router/custom-policy-example/simple-filter-score-pick",
+    "examples/router/custom-policy-example/catalog",
+    "examples/router/custom-policy-example/disagg-filter-score-pick",
+    "examples/router/custom-policy-example/epp",
+    "examples/router/custom-policy-example/simple-stacked-score-pick",
     "lib/memory",
     "lib/kvbm-common",
     "lib/kvbm-config",
@@ -27,6 +33,7 @@ members = [
     "lib/sidecar/vllm",
     "lib/mocker/servers/vllm",
     "lib/sidecar/sglang",
+    "lib/mocker/servers/sglang",
     "lib/sidecar/trtllm",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
@@ -49,8 +56,8 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-runtime = { path = "lib/runtime", version = "1.4.0" }
 dynamo-llm = { path = "lib/llm", version = "1.4.0" }
 dynamo-rl = { path = "lib/rl", version = "1.4.0" }
-dynamo-tokenizers = { version = "=1.5.3" }
-dynamo-renderer = { version = "=3.0.0" }
+dynamo-tokenizers = { version = "=1.8.0" }
+dynamo-renderer = { version = "=5.0.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.4.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.4.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.4.0" }
@@ -58,12 +65,13 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.4.0" }
 dynamo-memory = { path = "lib/memory", version = "1.4.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.4.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.4.0" }
-dynamo-protocols = { version = "=4.0.0" }
-dynamo-parsers = { version = "5.1.3" }
+dynamo-protocols = { version = "=5.3.1" }
+dynamo-parsers = { version = "7.0.1" }
+
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "0.1.19" }
+dynamo-parsers-v2 = { version = "0.1.23" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.4.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.4.0" }
 fastokens = { version = "0.2.0" }
@@ -82,7 +90,6 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.4.0" }
 velo = { version = "0.1.0" }
 
 # External dependencies
-aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core" }
 anyhow = { version = "1" }
 lru = { version = "0.16" }
 async-nats = { version = "0.49.1", features = ["service"] }
@@ -106,11 +113,12 @@ either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.17.0", features = ["tls"] }
 futures = { version = "0.3" }
 futures-util = { version = "0.3.32" }
+fs4 = { version = "0.13.1" }
 hf-hub = { version = "0.4.2", default-features = false }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.3.0" }
-modelexpress-common = { version = "0.3.0" }
+modelexpress-client = { version = "0.5.0" }
+modelexpress-common = { version = "0.5.0" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }

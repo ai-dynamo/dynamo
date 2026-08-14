@@ -34,7 +34,15 @@ class BasePlannerDefaults:
     # See dynamo.planner.core.budget.proportional_clamp_pair for the
     # tolerance band semantics.
     min_gpu_budget = -1
-    min_endpoint = 1  # applies to both decode and prefill
+    # Minimum endpoints for agg, both roles in disagg, or the active role in
+    # single-component mode when its role-specific value is unset. A
+    # role-specific value overrides it for that role.
+    min_endpoint = 1
+    prefill_min_endpoint = None
+    decode_min_endpoint = None
+    # Localhost-only runtime configuration API (0 disables). It is
+    # unauthenticated by design and trusts processes in the pod namespace.
+    control_api_port = 9086
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
     # Port for exposing planner's own metrics (0 means disabled)
@@ -101,6 +109,23 @@ class SLAPlannerDefaults(BasePlannerDefaults):
 
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False
+
+    # Power-aware scaling (disabled by default for backward compat).
+    #
+    # Per-GPU caps are DGD-owned: authored on each worker component's
+    # ``podTemplate.metadata.annotations`` (``dynamo.nvidia.com/gpu-power-limit``),
+    # stamped onto Pods by the operator, and enforced by the Power Agent. The
+    # planner only reads them. It does NOT own or write per-GPU caps, so no
+    # per-GPU / safe-default / sweep-interval fields live here — the planner
+    # config carries only the deployment-wide budget. Power inputs are
+    # process-static: DGD admission protects the per-component tuple, and a
+    # total-budget change requires a Planner restart.
+    #
+    # ``total_gpu_power_limit`` is required when ``enable_power_awareness=True``
+    # (validator enforces). Default None — not a placeholder integer — so the
+    # type itself signals "operator must set".
+    enable_power_awareness: bool = False
+    total_gpu_power_limit: Optional[int] = None
 
 
 class SubComponentType(str, Enum):

@@ -54,6 +54,48 @@ logger = logging.getLogger(__name__)
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
+# The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
+# most distros) under high concurrency (see the accept() loop in
+# lib/runtime/src/pipeline/network/tcp/server.rs), causing accept() to fail with
+# EMFILE. At startup we raise the soft limit toward FRONTEND_FD_LIMIT_TARGET,
+# overridable per-deployment via DYN_FRONTEND_FD_LIMIT_TARGET. A non-positive or
+# non-integer value disables the raise, so operators can opt out.
+FRONTEND_FD_LIMIT_ENV = "DYN_FRONTEND_FD_LIMIT_TARGET"
+FRONTEND_FD_LIMIT_TARGET = 8192
+
+
+def _raise_fd_limit(target: Optional[int] = None) -> None:
+    """Best-effort: raise the process's soft RLIMIT_NOFILE toward `target`
+    (default: the DYN_FRONTEND_FD_LIMIT_TARGET env var, else FRONTEND_FD_LIMIT_TARGET),
+    bounded by the hard limit. A target <= 0 (or a non-integer env value) disables
+    it; also a no-op if already sufficient, if the Unix-only `resource` module is
+    unavailable (e.g. Windows), or if the raise is denied."""
+    if target is None:
+        raw = os.getenv(FRONTEND_FD_LIMIT_ENV, str(FRONTEND_FD_LIMIT_TARGET))
+        try:
+            target = int(raw)
+        except ValueError:
+            target = 0
+    if target <= 0:
+        return
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY:
+            return  # already unlimited; a finite target would only reduce it
+        new_soft = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if new_soft > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            logger.info(
+                f"Raised RLIMIT_NOFILE soft limit {soft} -> {new_soft} (hard={hard})"
+            )
+    except Exception:
+        # Best-effort hardening; ignore failures (Windows lacks `resource`, or
+        # setrlimit may be denied in a restricted environment).
+        # logger.debug("Could not raise RLIMIT_NOFILE; continuing")
+        pass
+
 
 def setup_engine_factory(
     config: FrontendConfig,
@@ -368,7 +410,9 @@ async def async_main():
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+        "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
+        "tokenizer_fallback": config.tokenizer_fallback,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
@@ -381,6 +425,12 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tcp_tls_cert_path:
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
+    if config.tcp_tls_key_path:
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
@@ -441,6 +491,7 @@ async def graceful_shutdown(runtime: DistributedRuntime) -> None:
 
 def main() -> None:
     """Entry point for the Dynamo frontend CLI."""
+    _raise_fd_limit()
     uvloop.run(async_main())
 
 

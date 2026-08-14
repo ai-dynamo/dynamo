@@ -13,9 +13,16 @@ mod worker_query_transport;
 pub(crate) use subscriber::{
     KvEventSubscriptionHandle, RecoverySupervisor, start_subscriber, start_target_subscriber,
 };
-pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget, SourceEpoch};
+pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 pub(crate) use worker_query::DEFAULT_RECOVERY_ATTEMPT_TIMEOUT;
 pub(crate) use worker_query::TargetFaultDisposition;
+#[cfg(test)]
+pub(crate) use worker_query::WorkerQueryClient;
 #[cfg(feature = "ckf-diagnostics")]
 pub(crate) use worker_query::WorkerQueryHealthSnapshot;
-pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;
+pub(crate) use worker_query_endpoint::{
+    start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
+};
+pub(crate) use worker_query_transport::RuntimeWorkerQueryTransport;
+#[cfg(test)]
+pub(crate) use worker_query_transport::WorkerQueryTransport;

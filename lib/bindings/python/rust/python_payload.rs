@@ -279,4 +279,45 @@ mod tests {
             "{bidirectional}"
         );
     }
+
+    /// The Python `Client` router path carries requests/responses through the
+    /// request-plane codec as a dynamic value. It uses `rmpv::Value` (not
+    /// `serde_json::Value`) so that a `bytes` field survives the (default)
+    /// msgpack codec as a `Binary` marker instead of erroring — which is what
+    /// lets workers emit raw bytes instead of base64. This pins that property
+    /// at the wire level; the full Python `Client` round-trip is covered by
+    /// `tests/test_request_plane_python_payload.py` against the built extension.
+    #[test]
+    fn rmpv_value_carries_bytes_through_msgpack_request_plane() {
+        use super::{Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec};
+        let payload = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("img".into()),
+                rmpv::Value::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            ),
+            (rmpv::Value::String("n".into()), rmpv::Value::from(7i64)),
+        ]);
+        let wrapper = NetworkStreamWrapper {
+            data: Some(Annotated::from_data(payload)),
+            complete_final: false,
+        };
+        let wire = RequestPlanePayloadCodec::Msgpack
+            .encode(&wrapper)
+            .expect("encode");
+        let back: NetworkStreamWrapper<Annotated<rmpv::Value>> = RequestPlanePayloadCodec::Msgpack
+            .decode(&wire)
+            .expect("bytes field must not error on decode");
+        let data = back.data.expect("data").data.expect("annotated data");
+        let img = data
+            .as_map()
+            .expect("map")
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("img"))
+            .map(|(_, v)| v)
+            .expect("img field");
+        assert!(
+            matches!(img, rmpv::Value::Binary(b) if b == &[0xDE, 0xAD, 0xBE, 0xEF]),
+            "msgpack must preserve bytes as Binary, got {img:?}"
+        );
+    }
 }

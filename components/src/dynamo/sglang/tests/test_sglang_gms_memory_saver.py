@@ -6,6 +6,8 @@ from __future__ import annotations
 import subprocess
 import sys
 from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -25,6 +27,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.gpu_0,
+    pytest.mark.profiled_vram_gib(0),
     pytest.mark.sglang,
     pytest.mark.core,
 ]
@@ -164,6 +167,123 @@ def test_region_requires_rw_allocator(build_impl, tag):
     with pytest.raises(RuntimeError, match=rf"requires '{tag}' to be RW"):
         with impl.region(tag, enable_cpu_backup=False):
             pass
+
+
+def test_write_publication_follows_outermost_region_and_switches_weights_ro(
+    build_impl, monkeypatch
+):
+    impl, weights, _, _ = build_impl()
+    model = torch.nn.Module()
+    impl.preloaded_weights_bytes = 456
+    finalized_models = []
+    events = []
+
+    @contextmanager
+    def traced_pool(tag, device):
+        events.append(f"pool_enter:{tag}")
+        try:
+            yield
+        finally:
+            events.append(f"pool_exit:{tag}")
+
+    def finalize(allocator, pending_model):
+        events.append("finalize")
+        finalized_models.append(pending_model)
+        allocator.granted_lock_type = GrantedLockType.RO
+        return SimpleNamespace(committed_bytes=123)
+
+    monkeypatch.setattr(gms_memory_saver, "gms_use_mem_pool", traced_pool)
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    with impl.region("weights", enable_cpu_backup=False):
+        with impl.region("kv_cache", enable_cpu_backup=False):
+            impl.finalize_write_mode(model)
+            events.append("defer")
+
+    assert events == [
+        "pool_enter:weights",
+        "pool_enter:kv_cache",
+        "defer",
+        "pool_exit:kv_cache",
+        "pool_exit:weights",
+        "finalize",
+    ]
+    assert finalized_models == [model]
+    assert weights.granted_lock_type == GrantedLockType.RO
+    assert impl.imported_weights_bytes == 123
+    assert impl.preloaded_weights_bytes == 0
+
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(torch.nn.Module())
+
+    assert events[-1] == "finalize"
+    assert finalized_models == [model]
+
+
+@pytest.mark.parametrize("failure_source", ["body", "pool_exit"])
+def test_nested_region_failure_discards_pending_publication(
+    build_impl, monkeypatch, failure_source
+):
+    impl, weights, _, _ = build_impl()
+    stale_model = torch.nn.Module()
+    fresh_model = torch.nn.Module()
+    finalize = Mock(return_value=SimpleNamespace(committed_bytes=1))
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    @contextmanager
+    def maybe_failing_pool(tag, device):
+        yield
+        if failure_source == "pool_exit" and tag == "kv_cache":
+            raise ValueError("pool exit failed")
+
+    monkeypatch.setattr(gms_memory_saver, "gms_use_mem_pool", maybe_failing_pool)
+
+    failure_message = failure_source.replace("_", " ")
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(stale_model)
+        with pytest.raises(ValueError, match=f"{failure_message} failed"):
+            with impl.region("kv_cache", enable_cpu_backup=False):
+                if failure_source == "body":
+                    raise ValueError("body failed")
+
+    finalize.assert_not_called()
+
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(fresh_model)
+    finalize.assert_called_once_with(weights, fresh_model)
+
+
+def test_failed_finalization_is_cleared_and_not_retried(build_impl, monkeypatch):
+    impl, weights, _, _ = build_impl()
+    model = torch.nn.Module()
+    finalize = Mock(side_effect=ValueError("finalization failed"))
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    with pytest.raises(ValueError, match="finalization failed"):
+        with impl.region("weights", enable_cpu_backup=False):
+            impl.finalize_write_mode(model)
+
+    with impl.region("weights", enable_cpu_backup=False):
+        pass
+    finalize.assert_called_once_with(weights, model)
+
+
+def test_invalid_or_duplicate_publication_preserves_first_model(
+    build_impl, monkeypatch
+):
+    impl, weights, _, _ = build_impl()
+    first_model = torch.nn.Module()
+    finalize = Mock(return_value=SimpleNamespace(committed_bytes=1))
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(first_model)
+        with pytest.raises(TypeError, match="must not be None"):
+            impl.finalize_write_mode(None)
+        with pytest.raises(RuntimeError, match="publication is already pending"):
+            impl.finalize_write_mode(torch.nn.Module())
+
+    finalize.assert_called_once_with(weights, first_model)
 
 
 @pytest.mark.timeout(30)

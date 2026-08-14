@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -93,6 +94,13 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
+	if dgdrRuntimeVersionOverrideRequired(spec) {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("runtimeVersionOverride"),
+			"is required when spec.image has no parseable semantic-version tag",
+		))
+	}
+
 	return allErrs
 }
 
@@ -110,7 +118,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 }
 
 // validateDynamoGraphDeploymentRequestSpecUpdate validates a spec update.
-// newSpec, oldSpec, and fldPath must not be nil; oldPhase comes from the owning old resource status.
+// newSpec, oldSpec, and fldPath must not be nil; oldPhase comes from the owning old resource.
 func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequestSpecUpdate(
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
@@ -141,7 +149,22 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
-	if isImmutableDGDRPhase(oldPhase) && !apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+	// Revalidate legacy image compatibility when autoApply creates a DGD.
+	autoApplyActivated := oldSpec.AutoApply != nil && !*oldSpec.AutoApply &&
+		(newSpec.AutoApply == nil || *newSpec.AutoApply)
+	if dgdrRuntimeVersionOverrideRequired(newSpec) &&
+		(newSpec.Image != oldSpec.Image ||
+			newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride ||
+			autoApplyActivated) {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("runtimeVersionOverride"),
+			"is required when spec.image has no parseable semantic-version tag",
+		))
+	}
+
+	if isImmutableDGDRPhase(oldPhase) &&
+		!apiequality.Semantic.DeepEqual(newSpec, oldSpec) &&
+		!isDGDRDeferredRuntimeVersionUpdate(newSpec, oldSpec, oldPhase) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
 			fmt.Sprintf("updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", oldPhase),
@@ -149,4 +172,37 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	}
 
 	return allErrs
+}
+
+func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec) bool {
+	if spec.Image == "" || spec.RuntimeVersionOverride != "" {
+		return false
+	}
+	_, err := runtimeversion.ParseImageVersion(spec.Image)
+	return err != nil
+}
+
+// isDGDRDeferredRuntimeVersionUpdate permits choosing the runtime version before deferred DGD creation.
+func isDGDRDeferredRuntimeVersionUpdate(
+	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	oldPhase nvidiacomv1beta1.DGDRPhase,
+) bool {
+	if oldSpec.AutoApply == nil || *oldSpec.AutoApply ||
+		(oldPhase != nvidiacomv1beta1.DGDRPhaseProfiling &&
+			oldPhase != nvidiacomv1beta1.DGDRPhaseReady) {
+		return false
+	}
+
+	// autoApply may only be activated once the generated snapshot is Ready.
+	autoApplyActivated := newSpec.AutoApply == nil || *newSpec.AutoApply
+	if autoApplyActivated && oldPhase != nvidiacomv1beta1.DGDRPhaseReady {
+		return false
+	}
+
+	// Require every other field to remain unchanged.
+	newWithoutDeferredFields := newSpec.DeepCopy()
+	newWithoutDeferredFields.AutoApply = oldSpec.AutoApply
+	newWithoutDeferredFields.RuntimeVersionOverride = oldSpec.RuntimeVersionOverride
+	return apiequality.Semantic.DeepEqual(newWithoutDeferredFields, oldSpec)
 }

@@ -29,13 +29,19 @@ use crate::protocols::{
     common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
+use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
 use dynamo_runtime::error::ErrorType as DynamoErrorType;
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
-    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    // Both overload flavors are client-visible rejections (HTTP 529). They differ
+    // only in whether migration may retry elsewhere.
+    const REJECTION: &[DynamoErrorType] = &[
+        DynamoErrorType::ResourceExhausted,
+        DynamoErrorType::WorkerOverloaded,
+    ];
     const NON_REJECTION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
@@ -457,6 +463,12 @@ pub enum Endpoint {
 
     /// OAI Embeddings
     Embeddings,
+
+    /// Classification (sequence classification / cross-encoder pooling)
+    Classify,
+
+    /// Pooling (raw pooler output)
+    Pooling,
 
     /// OAI Images
     Images,
@@ -1498,6 +1510,8 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
+            Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
             Endpoint::Audios => write!(f, "audios"),
@@ -1515,6 +1529,8 @@ impl Endpoint {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
+            Endpoint::Classify => "classify",
+            Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
             Endpoint::Audios => "audios",
@@ -2115,6 +2131,7 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
+    reasoning_field: ReasoningField,
 ) -> Result<Option<Event>, axum::Error> {
     let mut annotated = annotated.0;
 
@@ -2142,6 +2159,10 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
         annotated.data = None;
     }
 
+    // Route reasoning at the SSE boundary. Internal representation stays
+    // `reasoning_content`.
+    let annotated =
+        annotated.map_data(|response| Ok(RoutedReasoning::new(response, reasoning_field)));
     annotated_to_sse_event(annotated)
 }
 
@@ -2380,6 +2401,73 @@ mod tests {
                 "Bucket values should be in increasing order after deduplication"
             );
         }
+    }
+
+    /// A chunk whose delta renders as nothing is still an accounting event: the
+    /// engine generated those tokens. The chat SSE loop drops such chunks before
+    /// forwarding them (multi-byte token assembly, and the Nemotron
+    /// force_nonempty_content deferral, both produce them), so it observes their
+    /// metrics explicitly before discarding. This pins the helper it calls: an
+    /// empty delta carrying `llm_metrics` must still count.
+    #[test]
+    fn test_empty_delta_with_metrics_is_still_counted() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        };
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "test-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+        let mut guard = None;
+
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: model.to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: Some(LLMMetricAnnotation {
+                input_tokens: 10,
+                output_tokens: 4,
+                chunk_tokens: 4,
+                ..Default::default()
+            }),
+        };
+        let annotated = crate::types::Annotated::from_data(data);
+
+        process_chat_response_and_observe_metrics(&annotated, &mut collector, &mut guard);
+
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model])
+                .get(),
+            4,
+            "tokens on a non-renderable chunk must still be counted"
+        );
     }
 
     #[test]
@@ -3116,6 +3204,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         );
 
         assert!(
@@ -3669,6 +3758,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
     }
 
