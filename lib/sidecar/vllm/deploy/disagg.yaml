@@ -59,7 +59,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: vllm-engine
-          image: vllm/vllm-openai:v0.26.0
+          image: vllm/vllm-openai:v0.27.1
           restartPolicy: Always
           # RDMA/NIXL needs pinned memory + privileged caps. runAsUser: 0 is only
           # required for the rdma/ib path; drop it if your fabric doesn't need it.
@@ -155,7 +155,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: vllm-engine
-          image: vllm/vllm-openai:v0.26.0
+          image: vllm/vllm-openai:v0.27.1
           restartPolicy: Always
           securityContext:
             runAsUser: 0
