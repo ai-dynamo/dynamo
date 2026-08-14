@@ -28,7 +28,7 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
 <ParamField path="dynamo_namespace" type="string">
   `[Shared]` The Dynamo runtime namespace — the logical scope shared by every component (router / prefill / decode / encode) in one deployment. **Not** the Kubernetes namespace. Example: `dynamo_cloud_vllm_v1_disagg_router_071de157`.
 
-  On worker and router metrics this is the emitting component's own namespace, injected from its position in the hierarchy. On the frontend request metrics listed under [Frontend metrics that carry a namespace](#frontend-metrics-that-carry-a-namespace) it is instead the namespace of the worker set **selected to serve that request** — a frontend discovering one model in several namespaces load-balances across them per request. The two meanings coincide for the frontend's per-namespace routers, so `sum by (dynamo_namespace)` aggregates across both sets consistently.
+  On worker and router metrics this is the emitting component's own namespace, injected from its position in the hierarchy. On the frontend request metrics listed under [Frontend metrics and the namespace label](#frontend-metrics-and-the-namespace-label) it is instead the namespace of the worker set **selected to serve that request** — a frontend discovering one model in several namespaces load-balances across them per request. The two meanings coincide for the frontend's per-namespace routers, so `sum by (dynamo_namespace)` aggregates across both sets consistently.
 </ParamField>
 
 ### Frontend metrics and the namespace label
@@ -38,7 +38,7 @@ A frontend can serve one model name from several namespaces at once, so some `dy
 **Namespace-aware** — recorded after a worker set has been selected, so the serving deployment is known:
 
 - Per-response families, labeled by the namespace that served the request: `output_tokens_total`, `time_to_first_token_seconds`, `inter_token_latency_seconds`, `input_sequence_tokens`, `output_sequence_tokens`, `cached_tokens`, `images_per_request`, `videos_per_request`, `audio_per_request`, `image_tokens_per_request`.
-- Per-deployment configuration gauges, which also carry `worker_type` because a disaggregated deployment's prefill and decode cards advertise different limits: `model_context_length`, `model_kv_cache_block_size`, `model_migration_limit`, `model_total_kv_blocks`, `model_max_num_seqs`, `model_max_num_batched_tokens`.
+- Per-deployment gauges, which also carry `worker_type` because a disaggregated deployment's prefill and decode cards advertise different limits. Capacity: `model_total_kv_blocks`, `model_max_num_seqs`, `model_max_num_batched_tokens`. Configuration facts: `model_context_length`, `model_kv_cache_block_size`, `model_migration_limit`. See the aggregation note below — the two kinds do not combine the same way.
 - Router scheduler queue metrics, labeled by the namespace whose scheduler owns the queue: `router_queue_pending_requests`, `router_queue_pending_isl_tokens`, `router_queue_pending_cached_tokens`, `router_queue_backpressure_total`.
 
 **Namespace-free**, in three categories:
@@ -52,7 +52,12 @@ A frontend can serve one model name from several namespaces at once, so some `dy
 </Warning>
 
 <Note>
-Configuration gauges are per-deployment facts, so they are not additive: aggregate them with `max by (model)`, not `sum`. Counters and additive gauges aggregate with `sum by (model)`; histograms with `histogram_quantile(..., sum by (model, le) (rate(..._bucket[5m])))`.
+The per-deployment gauges do not all aggregate the same way, because they are not all the same kind of value:
+
+- **Capacity** — `model_total_kv_blocks`, `model_max_num_seqs`, `model_max_num_batched_tokens`. Each deployment contributes its own share, so `sum by (model)` recovers the fleet total.
+- **Configuration facts** — `model_context_length`, `model_kv_cache_block_size`, `model_migration_limit`. Every deployment reports the same kind of value rather than a share of one, so summing is meaningless; use `max by (model)`, and expect disagreement between series to mean the deployments really are configured differently.
+
+Counters and additive gauges elsewhere aggregate with `sum by (model)`; histograms with `histogram_quantile(..., sum by (model, le) (rate(..._bucket[5m])))`.
 </Note>
 
 ## Registration-time labels
