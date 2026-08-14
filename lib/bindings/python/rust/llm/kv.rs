@@ -1638,6 +1638,17 @@ fn infer_metric_worker_type(
     }
 }
 
+/// Keep the advertised role for existing router metadata, but give policy factories a concrete
+/// role even when a legacy model card omitted `worker_type`.
+fn advertised_and_policy_worker_roles(
+    card: &llm_rs::model_card::ModelDeploymentCard,
+) -> (
+    Option<llm_rs::worker_type::WorkerType>,
+    llm_rs::worker_type::WorkerType,
+) {
+    (card.worker_type, card.effective_worker_type())
+}
+
 #[cfg(test)]
 mod metric_worker_type_tests {
     use super::*;
@@ -1656,6 +1667,19 @@ mod metric_worker_type_tests {
             infer_metric_worker_type("prod", "decode-workers", "generate", true),
             llm_rs::discovery::WORKER_TYPE_DECODE
         );
+    }
+
+    #[test]
+    fn preserves_unknown_advertised_role_for_legacy_cards() {
+        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("legacy");
+        let (advertised, policy) = advertised_and_policy_worker_roles(&card);
+        assert_eq!(advertised, None);
+        assert_eq!(policy, llm_rs::worker_type::WorkerType::Aggregated);
+
+        card.model_type = llm_rs::model_type::ModelType::Prefill;
+        let (advertised, policy) = advertised_and_policy_worker_roles(&card);
+        assert_eq!(advertised, None);
+        assert_eq!(policy, llm_rs::worker_type::WorkerType::Prefill);
     }
 }
 
@@ -1691,7 +1715,7 @@ async fn create_kv_router_from_endpoint(
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let needs_policy_role = worker_selection_policy_factory.is_some();
-    let (model_name, policy_model_name, enable_eagle, worker_role) = {
+    let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
@@ -1733,11 +1757,13 @@ async fn create_kv_router_from_endpoint(
         match maybe_card {
             Some(card) => {
                 let model_name = needs_model_name.then(|| card.display_name.clone());
+                let (worker_role, policy_worker_role) = advertised_and_policy_worker_roles(&card);
                 (
                     model_name,
                     Some(card.display_name.clone()),
                     card.runtime_config.enable_eagle,
-                    Some(card.effective_worker_type()),
+                    worker_role,
+                    Some(policy_worker_role),
                 )
             }
             None => {
@@ -1752,12 +1778,12 @@ async fn create_kv_router_from_endpoint(
                     endpoint = %endpoint_id.name,
                     "No model card found in discovery; defaulting to non-Eagle routing semantics"
                 );
-                (None, None, false, None)
+                (None, None, false, None, None)
             }
         }
     };
     #[cfg(not(feature = "custom-policy"))]
-    let _ = policy_model_name;
+    let _ = (policy_model_name, policy_worker_role);
 
     #[cfg(not(feature = "custom-policy"))]
     let kv_router = model_manager
@@ -1780,12 +1806,12 @@ async fn create_kv_router_from_endpoint(
         let selector = worker_selection_policy_factory.map_or_else(
             || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
             |factory| {
-                let worker_role = worker_role.expect(
+                let policy_worker_role = policy_worker_role.expect(
                     "a configured worker-selection policy waits for a typed model card above",
                 );
                 factory(
                     &effective_config,
-                    worker_role,
+                    policy_worker_role,
                     dynamo_kv_router::RoutingPartitionRef::new(
                         policy_model_name.as_deref().unwrap_or_default(),
                         dynamo_kv_router::DEFAULT_ROUTING_GROUP,
