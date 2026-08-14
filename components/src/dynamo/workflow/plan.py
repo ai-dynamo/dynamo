@@ -66,7 +66,44 @@ class RemoteBinding:
             )
 
 
+@dataclass(frozen=True)
+class GenerateEndpointBinding(RemoteBinding):
+    """Bind a contracted stage to Dynamo's stock token Generate endpoint."""
+
+    tensor_carrier: Optional[str] = NIXL_CARRIER
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.tensor_carrier != NIXL_CARRIER:
+            raise WorkflowValidationError(
+                "Generate endpoint bindings require the NIXL tensor carrier"
+            )
+
+
 Binding = Union[InlineBinding, RemoteBinding]
+
+
+def validate_binding_contract(binding: Binding, contract: StageContract) -> None:
+    """Validate protocol-specific stage ports against one physical binding."""
+
+    if not isinstance(binding, GenerateEndpointBinding):
+        return
+    expected_inputs = {
+        "request": "json",
+        "encoder_features": "tensor",
+        "encoder_metadata": "json",
+    }
+    actual_inputs = {name: spec.type for name, spec in contract.inputs.items()}
+    if actual_inputs != expected_inputs:
+        raise WorkflowValidationError(
+            "Generate endpoint stage inputs must be request:json, "
+            "encoder_features:tensor, and encoder_metadata:json"
+        )
+    actual_outputs = {name: spec.type for name, spec in contract.outputs.items()}
+    if actual_outputs != {"chunk": "json"}:
+        raise WorkflowValidationError(
+            "Generate endpoint stage output must be chunk:json"
+        )
 
 
 def select_edge_carrier(
@@ -154,6 +191,9 @@ class ExecutionPlan:
                 f"missing={sorted(expected_stages - actual_stages)}, "
                 f"extra={sorted(actual_stages - expected_stages)}"
             )
+
+        for stage_id, contract in self.stage_contracts.items():
+            validate_binding_contract(bindings[stage_id], contract)
 
         stages_by_id = {stage.id: stage for stage in self.workflow.stages}
         edges = tuple(self.edges)

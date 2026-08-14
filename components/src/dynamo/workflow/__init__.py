@@ -14,7 +14,13 @@ from dynamo.workflow.nixl import (
     NixlTensorRef,
 )
 from dynamo.workflow.orchestrator import WorkflowOrchestrator
-from dynamo.workflow.plan import EdgePlan, ExecutionPlan, InlineBinding, RemoteBinding
+from dynamo.workflow.plan import (
+    EdgePlan,
+    ExecutionPlan,
+    GenerateEndpointBinding,
+    InlineBinding,
+    RemoteBinding,
+)
 from dynamo.workflow.remote import RemoteStageClient, RemoteStageServer
 from dynamo.workflow.runtime import (
     StageContext,
@@ -51,6 +57,7 @@ __all__ = [
     "WorkflowTokenEngine",
     "WorkflowValidationError",
     "ExecutionPlan",
+    "GenerateEndpointBinding",
     "InlineBinding",
     "NixlLeaseRegistry",
     "NixlTensorCarrier",
