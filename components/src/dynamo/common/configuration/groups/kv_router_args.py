@@ -46,6 +46,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_ttl_secs",
     "router_queue_threshold",
     "router_policy_config",
+    "router_prefill_policy",
+    "router_decode_policy",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
@@ -129,6 +131,8 @@ class KvRouterConfigBase(ConfigBase):
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
     router_policy_config: Optional[str] = None
+    router_prefill_policy: Optional[str] = None
+    router_decode_policy: Optional[str] = None
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
@@ -421,6 +425,32 @@ class KvRouterArgGroup(ArgGroup):
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."
+            ),
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--router-prefill-policy",
+            env_var="DYN_ROUTER_PREFILL_POLICY",
+            default=None,
+            help=(
+                "KV Router: Process-local named worker-selection instance for "
+                "disaggregated prefill workers in this router process. "
+                "Overrides worker_selection.prefill from --router-policy-config. "
+                "Use 'default' for Dynamo's built-in worker selector."
+            ),
+            arg_type=str,
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-policy",
+            env_var="DYN_ROUTER_DECODE_POLICY",
+            default=None,
+            help=(
+                "KV Router: Process-local named worker-selection instance for decode "
+                "workers in this router process. "
+                "Overrides worker_selection.decode from --router-policy-config. "
+                "Use 'default' for Dynamo's built-in worker selector."
             ),
             arg_type=str,
         )
