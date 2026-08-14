@@ -8,7 +8,7 @@ aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@614b9c8c872
 
 aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@614b9c8c8725332533616786e2eb049df48935f0#subdirectory=aic-core
 aiofiles<=25.1.0
-aiohttp>=3.9.0,<4.0
+aiohttp>=3.14.3,<4.0  # see overrides.planner.txt: aiperf pins aiohttp~=3.13.3
 filterpy==1.4.5
 # gRPC + protobuf are runtime deps for the plugin-orchestrator transport.
 # Pin in sync with requirements.common.txt.

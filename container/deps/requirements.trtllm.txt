@@ -1,19 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Third-party Python dependencies for the trtllm runtime image. Installed
-# with --no-deps so upstream nvcr.io/nvidia/tensorrt-llm/release's solve
-# stays intact. Sorted alphabetically per pre-commit requirements-txt-fixer.
+# Third-party Python dependencies for the trtllm runtime image. Installed with
+# --no-deps, so pip does not re-resolve upstream
+# nvcr.io/nvidia/tensorrt-llm/release's dependency graph. That does not leave
+# the base image untouched: any package named here is installed over the copy
+# it bundles, which is exactly what the version floors below are for.
+# Sorted alphabetically per pre-commit requirements-txt-fixer.
 
 # Force a source install of imageio-ffmpeg. The PyPI wheel bundles a prebuilt,
 # GPL-encumbered ffmpeg binary that has CVE exposure; we point imageio at the
 # in-tree LGPL ffmpeg CLI via IMAGEIO_FFMPEG_EXE instead.
 --no-binary imageio-ffmpeg
+aiohttp>=3.14.3
+# The upstream tensorrt-llm/release image bundles gitpython and jupyterlab at
+# older releases than PyPI currently publishes; floor them so the --no-deps
+# install refreshes the bundled copies in place.
+gitpython>=3.1.58
 
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
 # Upstream tensorrt-llm/release does not ship them.
 imageio>=2.37.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
+jupyterlab>=4.5.10
 # Required by ai_dynamo_runtime + gpu_memory_service. Upstream tensorrt-llm/release
 # does not ship them; vllm/vllm-openai does (which is why DYN-2204's vllm path
 # does not need this).
