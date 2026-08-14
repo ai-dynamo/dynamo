@@ -58,7 +58,7 @@ pub struct SessionAffinityPushRouter {
 impl SessionAffinityPushRouter {
     fn policy_for(
         mode: dynamo_runtime::pipeline::RouterMode,
-    ) -> Option<(SimpleWorkerScorer, SimpleWorkerPicker)> {
+    ) -> Result<Option<(SimpleWorkerScorer, SimpleWorkerPicker)>, Error> {
         use dynamo_runtime::pipeline::RouterMode;
 
         let policy = match mode {
@@ -67,13 +67,13 @@ impl SessionAffinityPushRouter {
             RouterMode::PowerOfTwoChoices => SimpleRoutingPolicy::PowerOfTwoChoices,
             RouterMode::LeastLoaded => SimpleRoutingPolicy::LeastLoaded,
             RouterMode::DeviceAwareWeighted => SimpleRoutingPolicy::DeviceAwareWeighted,
-            RouterMode::Direct => return None,
-            RouterMode::KV => panic!("KV routing must use KvPushRouter"),
+            RouterMode::Direct => return Ok(None),
+            RouterMode::KV => anyhow::bail!("KV routing must use KvPushRouter"),
         };
-        Some((
+        Ok(Some((
             SimpleWorkerScorer::new(policy),
             SimpleWorkerPicker::new(policy),
-        ))
+        )))
     }
 
     pub fn new(
@@ -82,23 +82,23 @@ impl SessionAffinityPushRouter {
         direct: bool,
     ) -> Result<Self, Error> {
         let affinity = ttl.map(AffinityCoordinator::new).transpose()?;
-        Ok(Self::new_with_coordinator(inner, affinity, direct))
+        Self::new_with_coordinator(inner, affinity, direct)
     }
 
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, LlmResponse>,
         affinity: Option<AffinityCoordinator>,
         direct: bool,
-    ) -> Self {
-        let policy = Self::policy_for(inner.router_mode());
-        Self {
+    ) -> Result<Self, Error> {
+        let policy = Self::policy_for(inner.router_mode())?;
+        Ok(Self {
             inner,
             policy,
             custom_policy: None,
             affinity,
             direct,
             lora: None,
-        }
+        })
     }
 
     pub(crate) fn new_with_coordinator_and_lora(
@@ -108,10 +108,11 @@ impl SessionAffinityPushRouter {
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
         custom_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
         lora_custom_policy: Option<Arc<CacheUnawareWorkerSelectionPolicy>>,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         let mode = inner.router_mode();
-        let policy = Self::policy_for(mode);
-        Self {
+        let policy = Self::policy_for(mode)?;
+        let lora_policy = Self::policy_for(mode)?;
+        Ok(Self {
             inner,
             policy,
             custom_policy,
@@ -120,10 +121,10 @@ impl SessionAffinityPushRouter {
             lora: lora.map(|(filter, load_estimator)| LoraConstraint {
                 filter,
                 load_estimator,
-                policy: Self::policy_for(mode),
+                policy: lora_policy,
                 custom_policy: lora_custom_policy,
             }),
-        }
+        })
     }
 
     fn lora_candidates(
@@ -557,6 +558,35 @@ mod tests {
             .expect("test router must enable affinity")
     }
 
+    #[tokio::test]
+    async fn constructor_rejects_kv_mode_without_panicking() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("simple_router_rejects_kv".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let inner = PushRouter::from_client(endpoint.client().await.unwrap(), RouterMode::KV)
+            .await
+            .unwrap();
+
+        let error = SessionAffinityPushRouter::new(inner, None, false)
+            .err()
+            .expect("KV mode must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("KV routing must use KvPushRouter")
+        );
+
+        runtime.shutdown();
+    }
+
     #[test]
     fn direct_fallback_clears_stale_dp_rank() {
         let tracker = Arc::new(RequestTracker::new());
@@ -848,7 +878,8 @@ mod tests {
             None,
             Some(Arc::new(policy)),
             None,
-        );
+        )
+        .unwrap();
         let request = Context::new(request(None, false));
 
         let committed = router
@@ -910,7 +941,8 @@ mod tests {
             Some((filter, estimator.clone())),
             None,
             None,
-        );
+        )
+        .unwrap();
         let mut content = request(None, false);
         content.routing_mut().lora_name = Some("adapter".to_string());
         let request = Context::new(content);
@@ -995,7 +1027,8 @@ mod tests {
             Some((filter, estimator)),
             None,
             None,
-        );
+        )
+        .unwrap();
         let base_request = Context::new(request(None, false));
         let mut lora_content = request(None, false);
         lora_content.routing_mut().lora_name = Some("adapter".to_string());

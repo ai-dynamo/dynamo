@@ -207,7 +207,7 @@ where
                 lora,
                 simple_policy,
                 lora_simple_policy,
-            ))
+            )?)
         }
     };
 

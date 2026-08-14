@@ -292,7 +292,7 @@ where
                     push_router,
                     affinity,
                     context.router_mode.is_direct_routing(),
-                ),
+                )?,
             ))
         };
 

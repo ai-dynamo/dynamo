@@ -73,6 +73,14 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
+fn device_aware_non_cpu_to_cpu_ratio() -> usize {
+    std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(8)
+}
+
 /// RAII handle for one in-flight unit of work charged against
 /// [`RoutingOccupancyState`]. The counter is incremented at construction; the
 /// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
@@ -245,6 +253,10 @@ where
     /// Cached response inactivity timeout. Read once at construction from
     /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
     response_timeout: Option<std::time::Duration>,
+
+    /// Cached device-aware routing weight. Environment configuration is immutable after router
+    /// construction, so request paths do not need to read and parse it repeatedly.
+    device_aware_non_cpu_to_cpu_ratio: usize,
 
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
@@ -683,6 +695,7 @@ where
             random_picker,
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
+            device_aware_non_cpu_to_cpu_ratio: device_aware_non_cpu_to_cpu_ratio(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -757,6 +770,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            device_aware_non_cpu_to_cpu_ratio: device_aware_non_cpu_to_cpu_ratio(),
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
@@ -816,6 +830,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            device_aware_non_cpu_to_cpu_ratio: device_aware_non_cpu_to_cpu_ratio(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -1301,12 +1316,6 @@ where
                 (instance.instance_id, device)
             })
             .collect::<HashMap<_, _>>();
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value >= 1)
-            .unwrap_or(8);
-
         let (request_cache_keys, cache_matched_candidates) =
             if let (Some(indexer), Some(extractor)) = (
                 self.multimodal_cache_indexer.as_ref(),
@@ -1346,7 +1355,7 @@ where
             candidates,
             context: RouteContext {
                 required_cache_hits: request_cache_key_count,
-                non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                non_cpu_to_cpu_ratio: self.device_aware_non_cpu_to_cpu_ratio,
             },
             embedding_cache_hit,
             request_cache_keys: request_cache_keys.len(),
@@ -1465,11 +1474,6 @@ where
                     .iter()
                     .map(|instance| (instance.instance_id, instance.device_type.clone()))
                     .collect();
-                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .filter(|value| *value >= 1)
-                    .unwrap_or(8);
                 let candidates = instance_ids
                     .iter()
                     .map(|worker_id| RouteCandidate {
@@ -1491,7 +1495,7 @@ where
                         CandidateView::DeviceAware(&candidates),
                         RouteContext {
                             required_cache_hits: 0,
-                            non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                            non_cpu_to_cpu_ratio: self.device_aware_non_cpu_to_cpu_ratio,
                         },
                     )
                     .map(|decision| decision.target.worker_id)
@@ -1552,11 +1556,7 @@ where
                 &rows,
                 RoutePolicyContext {
                     required_cache_hits: 0,
-                    non_cpu_to_cpu_ratio: std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                        .ok()
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .filter(|value| *value >= 1)
-                        .unwrap_or(8),
+                    non_cpu_to_cpu_ratio: self.device_aware_non_cpu_to_cpu_ratio,
                 },
             )
         } else {
