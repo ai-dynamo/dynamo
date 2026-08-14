@@ -16,7 +16,7 @@ import argparse
 import logging
 import math
 import os
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Protocol, Sequence
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -366,13 +366,33 @@ def register_worker_router_help(parser: argparse.ArgumentParser) -> None:
             group._group_actions.append(action)
 
 
-def build_router_config(config: WorkerRouterConfig) -> Optional["RouterConfig"]:
+class RouterConfigSource(Protocol):
+    """Anything carrying `RouterConfigBase` and `KvRouterConfigBase` fields.
+
+    Both `WorkerRouterConfig` and the frontend's own config qualify, and neither
+    subclasses the other, so this states the requirement structurally.
+    """
+
+    def router_kwargs(self) -> dict:
+        ...
+
+    def kv_router_kwargs(self) -> dict:
+        ...
+
+
+def build_router_config(
+    config: Optional[RouterConfigSource],
+) -> Optional["RouterConfig"]:
     """Build the ``RouterConfig`` a worker set advertises in its model card.
 
     ``None`` means no mode was requested, leaving ``router_config`` off the card
-    so the worker inherits the frontend's configuration. The frontend passes its
-    own config here too; it always has a mode, so it never gets ``None``.
+    so the worker inherits the frontend's configuration. A ``None`` config means
+    the same thing, so a backend can pass its optional advertisement directly.
+    The frontend passes its own config here too; it always has a mode, so it
+    never gets ``None`` back.
     """
+    if config is None:
+        return None
     router_mode = getattr(config, "router_mode", None)
     if router_mode is None:
         return None
