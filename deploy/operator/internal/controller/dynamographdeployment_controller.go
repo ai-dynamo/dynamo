@@ -73,7 +73,7 @@ type DynamoGraphDeploymentReconciler struct {
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
 	Recorder              events.EventRecorder
-	DockerSecretRetriever dockerSecretRetriever
+	DockerSecretRetriever DockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager

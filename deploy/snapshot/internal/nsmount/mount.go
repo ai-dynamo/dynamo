@@ -47,6 +47,11 @@ type mountRef interface {
 
 	// TargetPath returns the dst path as seen inside the target namespace.
 	TargetPath() string
+
+	// NsFd returns the pinned /proc/<pid>/ns/mnt file descriptor opened at
+	// Mount time. The fd remains valid until Unmount is called. Test mocks
+	// may return nil.
+	NsFd() *os.File
 }
 
 // mounter mounts src at dst inside the mount namespace identified by pid.
@@ -88,6 +93,7 @@ type execMountRef struct {
 }
 
 func (h *execMountRef) TargetPath() string { return h.dst }
+func (h *execMountRef) NsFd() *os.File     { return h.nsFd }
 
 func (h *execMountRef) Unmount(_ context.Context) error {
 	h.once.Do(func() {
