@@ -56,8 +56,11 @@ WORKDIR /workspace
 
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
-# for shells, not K8s python3 launches), swap upstream's single-binary etcd
-# for dynamo_base's directory, and symlink system libstdc++ to a stable
+# for shells, not K8s python3 launches), swap upstream's standalone etcd
+# tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
+# carries a single copy of each tool, drop the unused wandb developer tooling
+# the DLFW base carries (upstream removes it on main, Dockerfile.multi), and
+# symlink system libstdc++ to a stable
 # path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
 # NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
 # older copy.
@@ -80,6 +83,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
     rm -f /usr/local/bin/etcd && \
+    /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
+    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ] && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
@@ -359,6 +365,9 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
 RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
+    /usr/local/bin/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb-* \
     /usr/local/lib/python3.12/dist-packages/cv2 \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
@@ -380,7 +389,8 @@ RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
     /usr/local/lib/python3.12/dist-packages/attrs-* && \
-    ! /usr/bin/python3 -c "import cv2" 2>/dev/null
+    ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
 
 # Post-overlay guard for the DALI whiteout above. This is the only stage where
