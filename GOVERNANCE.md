@@ -53,7 +53,7 @@ These apply to every fork contribution, the first pull request included.
 
 ### Trusted Contributor
 
-A Contributor who has demonstrated sustained, quality contributions. The volume and tenure bar below is a floor. Meeting it makes a contributor eligible; a sponsoring Maintainer weighs the remaining criteria and nominates, and a second Maintainer or a Core Maintainer approves.
+A Contributor who has demonstrated sustained, quality contributions. The volume and tenure bar below is a floor. Meeting it makes a contributor eligible; a sponsoring Maintainer weighs the remaining criteria and nominates, and a Core Maintainer approves.
 
 **Eligibility**
 
@@ -104,17 +104,17 @@ A Maintainer who has demonstrated project-wide judgment and cross-area expertise
 **Privileges**
 
 - Review and approve pull requests in any area.
-- Vote on Maintainer promotions, removals, and governance amendments.
+- Vote on Maintainer promotions, removals, DEP approval, and governance amendments.
 - Propose a Maintainer to the Project Leaders for Core Maintainer appointment.
 - Decide by majority what ships in a release.
 
 ### Nominations and Promotions
 
 - **Contributor:** Automatic on the first merged pull request. No nomination required.
-- **Trusted Contributor:** Nominated by a Maintainer. Requires approval from a second Maintainer or a Core Maintainer.
+- **Trusted Contributor:** Nominated by a Maintainer. Requires approval from at least one Core Maintainer.
 - **Maintainer:** Nominated by a Core Maintainer. Two-thirds supermajority vote of Core Maintainers.
 - **Core Maintainer:** Eligibility is earned against the Core Maintainer criteria above: a sustained record of merges and reviews, substantive contributions or reviews across two or more areas, and demonstrated project-wide judgment. Appointed by both Project Leaders.
-- Where a threshold names a vote of Core Maintainers, the Project Leaders vote with them and count toward the total. Candidates do not vote on their own promotion, and supermajority thresholds are computed against the set of active voters other than the candidate. The same exclusion applies to removal votes - the subject is excluded from the count.
+- Candidates do not vote on their own promotion. Supermajority thresholds are computed against the set of active Core Maintainers other than the candidate. The same exclusion applies to removal votes - the subject is excluded from the count.
 - Roles on the contributor ladder belong to the individual. An employer holds no claim on them. Every rung is earned against the criteria above and is never granted by affiliation, and a contributor's standing does not change when their employer does.
 
 **Area Bootstrap.** A new area, or one built largely by an outside organization, has no one who can meet a volume-and-tenure bar measured against work that did not exist yet. For these, Core Maintainers may appoint initial Maintainers ahead of the floor by the same two-thirds supermajority vote, recording publicly which part of the floor was not met and why the area warrants it. The quality criteria are never waived, and the standard floor applies to every appointment in that area afterward.
@@ -133,19 +133,19 @@ A Maintainer, Core Maintainer, or Project Leader inactive for six months may be 
 
 ## Project Leadership
 
-A **Project Leader** sets engineering direction for the project from outside the contributor ladder. Project Leadership is the group of them.
+A Project Leader holds accountability for the project outside the contributor ladder. Project Leadership is the group of them.
 
 **Appointment**
 
-- The organization providing the project's engineering staffing appoints the Project Leaders. A Project Leader serves with no fixed term and may step down at any time. Removal for cause follows the Removal section, and inactivity triggers the standard six-month emeritus transition.
+- NVIDIA, as the project's primary sponsor, appoints the Project Leaders. A Project Leader serves with no fixed term and may step down at any time. Inactivity triggers the standard six-month emeritus transition.
 
 **Eligibility**
 
-- **Engineering Leadership.** A Project Leader directs the project's engineering work and answers for the staffing behind it. A Project Leader who moves out of that position, including by changing employer, leaves the role.
+- **Engineering Leadership.** A Project Leader is accountable for the project's engineering direction and for the staffing behind it. A Project Leader who moves out of that position, including by changing employer, leaves the role.
 
 **Privileges**
 
-- A Project Leader reviews and approves pull requests in any area, and votes alongside the Core Maintainers on every decision that requires their vote.
+- A Project Leader reviews and approves pull requests in any area. Project Leaders do not vote on the decisions this document puts to a vote; they resolve those a vote fails to settle.
 - Project Leaders appoint Core Maintainers, and may remove one for any of the causes listed under Removal when both agree.
 - The Project Leaders make the final determination when a two-thirds vote of Core Maintainers fails to resolve a matter. Both must agree, and if they do not, the change does not proceed.
 
@@ -192,7 +192,7 @@ Disagreement escalates in defined steps. An objection that remains unresolved af
 
 - **Within an Area.** The area's Maintainers decide. If they cannot agree, the matter escalates to Core Maintainers.
 - **Across Areas.** Core Maintainers decide, with input from affected Maintainers.
-- **Project-Wide Architecture.** Requires a Dynamo Enhancement Proposal, approved by the Maintainers of every area it touches.
+- **Project-Wide Architecture.** Requires a Dynamo Enhancement Proposal, reviewed by the Maintainers of every area it touches and approved by a two-thirds vote of Core Maintainers.
 - **Release Packaging.** Core Maintainers decide what ships in a release.
 
 A DEP is required when a change affects multiple areas, introduces or modifies a public API, alters communication plane architecture, or affects backend integration contracts. The [Enhancement Proposals guide](https://docs.nvidia.com/dynamo/dev/contributing/enhancement-proposals) carries the template, the states a proposal moves through, and where proposals live.
@@ -203,11 +203,11 @@ Every vote this document requires runs as follows.
 
 **Calling a vote.** Any Core Maintainer or Project Leader calls a vote by opening a public issue labeled `governance:vote` stating the question, the threshold it must meet, and the close date. Nominations and removals name the person, and amendments link the pull request. For a DEP, the Sponsor calls the vote once review has concluded, and the tracking issue records the outcome.
 
-**Private ballots.** Only the electorate votes, meaning Core Maintainers and Project Leaders, and no one sees an individual ballot, the Project Leaders included. Only the aggregate counts are visible. The Project Leaders name the mechanism that provides this and announce it to the electorate, and it may change without amending this document as long as it holds both properties.
+**Private ballots.** Only the Core Maintainers vote, and no one sees an individual ballot, the Project Leaders included. Only the aggregate counts are visible. The Project Leaders name the mechanism that provides this and announce it to the electorate, and it may change without amending this document as long as it holds both properties.
 
 **Five business days**, closing early once the ballots still outstanding cannot change the outcome.
 
-**Threshold.** Every threshold is computed against the eligible voters recorded when the vote opens, never against the ballots returned, so a ballot never cast counts the same as one cast against. No separate quorum applies.
+**Threshold.** Every threshold is computed against the active Core Maintainers recorded when the vote opens, never against the ballots returned, so a ballot never cast counts the same as one cast against. No separate quorum applies.
 
 **Eligibility.** The public issue records the eligible voter count and the commit of [MAINTAINERS.md](MAINTAINERS.md) it comes from, so anyone can check the arithmetic later. A candidate does not vote on their own promotion or removal and is excluded from both the count and the threshold.
 

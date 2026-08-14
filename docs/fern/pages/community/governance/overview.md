@@ -16,17 +16,17 @@ Standing in the project is earned through contribution and belongs to you as an 
 | Role | How you get there | What it lets you do |
 | :---- | :---- | :---- |
 | Contributor | Your first merged pull request | Submit pull requests and request CI |
-| Trusted Contributor | 5+ merged pull requests over 2+ months, plus a sponsoring Maintainer | Automatic CI approval; review and approve in your area; the 100-line Contribution Request trigger is lifted |
+| Trusted Contributor | 5+ merged pull requests over 2+ months, nominated by a Maintainer and approved by a Core Maintainer | Automatic CI approval; review and approve in your area; the 100-line Contribution Request trigger is lifted |
 | Maintainer | 10+ merged pull requests over 6+ months in one area, by two-thirds vote | Merge within your area; nominate Trusted Contributors |
-| Core Maintainer | A cross-area record and project-wide judgment. A Core Maintainer nominates you, and Project Leadership seats you | Merge anywhere, approve promotions, decide architecture |
+| Core Maintainer | A cross-area record and project-wide judgment. A Core Maintainer nominates you, and Project Leadership appoints you | Merge anywhere, approve promotions, decide architecture |
 
 The volume and tenure numbers are a floor, not a trigger. Meeting them makes you eligible, and a sponsoring Maintainer weighs code quality, test coverage, architecture fit, and review conduct to decide. Promotions are posted publicly with the reasoning.
 
-Separate from the ladder is **Project Leadership**, held by the NVIDIA engineering leaders accountable for Dynamo's direction and the staffing behind it. Its members review in any area, vote alongside Core Maintainers, seat Core Maintainers from among those the body nominates, and make the final call only when a two-thirds vote of Core Maintainers fails to settle something. A Project Leader is removable for cause on the same terms as anyone else on the ladder: a two-thirds vote of Core Maintainers, or the agreement of both Project Leaders.
+Separate from the ladder is **Project Leadership**, held by the NVIDIA engineering leaders accountable for Dynamo's direction and the staffing behind it. Its members review in any area and appoint Core Maintainers from among those the body nominates. They do not vote on the decisions that go to a vote; they resolve the ones a vote fails to settle.
 
 This is the one role tied to an employer, and the governance document says so plainly rather than treating it as earned like the rungs above. NVIDIA staffs and funds the project's engineering, and Project Leadership is where that commitment sits.
 
-New areas, and areas built largely by an outside organization, can seat their first Maintainers before anyone could meet a floor measured against work that did not exist yet. That provision is called Area Bootstrap, and when it is used, the part of the floor that was not met is named publicly.
+New areas, and areas built largely by an outside organization, can appoint their first Maintainers before anyone could meet a floor measured against work that did not exist yet. That provision is called Area Bootstrap, and when it is used, the part of the floor that was not met is named publicly.
 
 The current rosters live in [MAINTAINERS.md](https://github.com/ai-dynamo/dynamo/blob/main/MAINTAINERS.md) and [CONTRIBUTORS.md](https://github.com/ai-dynamo/dynamo/blob/main/CONTRIBUTORS.md).
 
@@ -34,7 +34,7 @@ The current rosters live in [MAINTAINERS.md](https://github.com/ai-dynamo/dynamo
 
 The default is lazy consensus. A proposal from the people responsible for an area proceeds unless someone objects within the review window, which is 72 hours unless the proposer sets a longer one, and silence counts as consent. An objection needs a stated reason and an openness to an alternative, not just a veto.
 
-Explicit votes are reserved for the decisions that name them: advancement, removals, Dynamo Enhancement Proposal approval, and amendments to the governance document itself. Core Maintainers and Project Leadership are the electorate for all of them.
+Explicit votes are reserved for the decisions that name them: advancement, removals, Dynamo Enhancement Proposal approval, and amendments to the governance document itself. The Core Maintainers are the electorate for all of them.
 
 Where a decision lands depends on its blast radius. Within one area, that area's Maintainers decide. Across areas, Core Maintainers decide with input from the affected Maintainers. Project-wide architecture requires a Dynamo Enhancement Proposal.
 
