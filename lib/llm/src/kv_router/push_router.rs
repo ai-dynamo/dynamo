@@ -351,7 +351,7 @@ where
                 let first_migration_observation = request
                     .migration_state
                     .as_ref()
-                    .map_or(true, |state| state.claim_router_metrics_observation());
+                    .is_none_or(|state| state.claim_router_metrics_observation());
                 if first_migration_observation {
                     observation.observe(guard.request_metrics(), true);
                 }
