@@ -26,9 +26,6 @@ class GraphScheduler:
         self, inputs: Mapping[str, Any], attempt: WorkflowAttempt
     ) -> dict[str, Any]:
         tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
-        tensor_exports: dict[
-            ValueRef, asyncio.Task[Mapping[str, Mapping[str, Any]]]
-        ] = {}
 
         async def run_stage(stage: StageIR) -> dict[str, Any]:
             stage_inputs = {}
@@ -39,7 +36,6 @@ class GraphScheduler:
                     stage.id,
                     name,
                     value,
-                    tensor_exports,
                 )
             return await self._dispatcher.call(
                 stage.id,
@@ -82,9 +78,5 @@ class GraphScheduler:
             for task in tasks.values():
                 if not task.done():
                     task.cancel()
-            for export_task in tensor_exports.values():
-                if not export_task.done():
-                    export_task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
-            await asyncio.gather(*tensor_exports.values(), return_exceptions=True)
             raise
