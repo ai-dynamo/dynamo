@@ -205,7 +205,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			username: "system:serviceaccount:default:regular-user",
 			wantWebhookErrs: []string{
-				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint: checkpoint failover is only supported for an operator-generated DCD",
+				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint: checkpoint failover is only supported for an operator-generated DCD",
 			},
 		},
 		{

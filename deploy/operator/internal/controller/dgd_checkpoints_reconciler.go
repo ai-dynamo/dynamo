@@ -266,7 +266,19 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		return nil, err
 	}
 	if dynamo.IsIntraPodFailoverEnabled(component) {
-		if err := dynamo.PrepareVLLMAutomaticFailoverSnapshotSource(targetContainer); err != nil {
+		var err error
+		switch backendFramework {
+		case dynamo.BackendFrameworkVLLM:
+			err = dynamo.PrepareVLLMAutomaticFailoverSnapshotSource(targetContainer)
+		case dynamo.BackendFrameworkSGLang:
+			err = dynamo.PrepareSGLangAutomaticFailoverSnapshotSource(targetContainer)
+		default:
+			err = fmt.Errorf(
+				"automatic failover snapshot source does not support backend %q",
+				backendFramework,
+			)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
