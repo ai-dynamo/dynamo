@@ -188,8 +188,6 @@ func TestComponentRuntimeNamespace(t *testing.T) {
 }
 
 func TestGetGroveRuntimeNamespace(t *testing.T) {
-	type namespaceSource string
-
 	tests := []struct {
 		name            string
 		componentType   string

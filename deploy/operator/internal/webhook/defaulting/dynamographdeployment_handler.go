@@ -92,7 +92,7 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	// Drive Grove suffix migration from the immutable provider rather than mutable routing intent.
 	if groveProvider {
-		if err := defaultGroveWorkerHashSuffix(ctx, req, dgd); err != nil {
+		if err := defaultGroveWorkerHashSuffix(req, dgd); err != nil {
 			return err
 		}
 	}
@@ -129,7 +129,6 @@ func defaultComponentFields(
 }
 
 func defaultGroveWorkerHashSuffix(
-	ctx context.Context,
 	req admission.Request,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
