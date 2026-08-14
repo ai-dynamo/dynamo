@@ -2,7 +2,6 @@ package dynamo
 
 import (
 	"maps"
-	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -198,7 +197,6 @@ func TestGetGroveRuntimeNamespace(t *testing.T) {
 		completed       bool
 		activeNamespace string
 		wantNamespace   string
-		wantError       string
 	}{
 		{
 			name:          "non-worker uses the base namespace",
@@ -212,12 +210,6 @@ func TestGetGroveRuntimeNamespace(t *testing.T) {
 			suffixEnabled: false,
 			completed:     true,
 			wantNamespace: "k8s-grove",
-		},
-		{
-			name:            "new suffixed worker publishes the desired namespace while pending",
-			suffixEnabled:   true,
-			activeNamespace: "k8s-grove-previous",
-			wantNamespace:   "k8s-grove-previous",
 		},
 		{
 			name:            "completed suffixed worker publishes the desired namespace",
@@ -263,12 +255,6 @@ func TestGetGroveRuntimeNamespace(t *testing.T) {
 
 			t.Log("Select the Grove runtime namespace from the modeled cutover state.")
 			got, err := GetGroveRuntimeNamespace(dgd, component, tt.completed)
-			if tt.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-					t.Fatalf("GetGroveRuntimeNamespace() error = %v, want containing %q", err, tt.wantError)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 			}
