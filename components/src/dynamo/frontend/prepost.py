@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -41,6 +41,13 @@ class _Renderer(Protocol):
     async def render_messages_async(
         self, messages: Any, params: ChatParams
     ) -> tuple[Any, dict[str, Any]]:
+        ...
+
+
+class _EngineBasedStreamingParser(Protocol):
+    engine_based_streaming: bool
+
+    def finish_streaming(self) -> DeltaMessage | None:
         ...
 
 
@@ -657,6 +664,7 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
     ) -> None:
@@ -665,7 +673,7 @@ class StreamingPostProcessor:
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
         self.stream_response = stream_response
-        self.reasoning_is_done = False
+        self.reasoning_is_done = bool(reasoning_ended)
         self._uses_dynamo_json_tool_call_fallback = uses_dynamo_json_tool_call_fallback
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
@@ -682,13 +690,16 @@ class StreamingPostProcessor:
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            if reasoning_parser_class and not thinking_disabled
+            if reasoning_parser_class
+            and not thinking_disabled
+            and reasoning_ended is not True
             else None
         )
         if self.reasoning_parser is not None:
-            self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
-                prompt_token_ids
-            )
+            if reasoning_ended is None:
+                self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
+                    prompt_token_ids
+                )
             if not self.reasoning_is_done:
                 self.reasoning_parser.adjust_initial_state_from_prompt(prompt_token_ids)
         self._fast_plain_text = (
@@ -929,10 +940,9 @@ class StreamingPostProcessor:
 
     @staticmethod
     def _finish_engine_parser(parser: Any) -> DeltaMessage | None:
-        if parser is None or not getattr(parser, "engine_based_streaming", False):
+        if parser is None or not parser.engine_based_streaming:
             return None
-        finish = getattr(parser, "finish_streaming", None)
-        return finish() if finish is not None else None
+        return cast(_EngineBasedStreamingParser, parser).finish_streaming()
 
     def _add_tool_call_from_extracted(self, index: int, tool_call: Any) -> None:
         tool_delta = DeltaToolCall(
@@ -953,6 +963,9 @@ class StreamingPostProcessor:
         if self.tool_parser is None:
             return self._compose_delta_message(saved_reasoning, None)
 
+        # A buffered parse replaces the streaming path; do not flush stale
+        # engine-stream state again when finish_reason is processed.
+        self._tool_parser_streaming_started = False
         extracted = self.tool_parser.extract_tool_calls(text, self.request_for_sampling)
         if extracted.tools_called:
             for i, tool_call in enumerate(extracted.tool_calls):
@@ -1149,7 +1162,7 @@ class StreamingPostProcessor:
             # buffer it for non-streaming extraction rather than feeding it
             # to the streaming tool parser which cannot handle the combined
             # reasoning-end + tool-start in a single chunk.
-            if getattr(self.reasoning_parser, "engine_based_streaming", False):
+            if self.reasoning_parser.engine_based_streaming:
                 reasoning_ended = (
                     self.reasoning_parser.has_engine_confirmed_reasoning_end()
                 )

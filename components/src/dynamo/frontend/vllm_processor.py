@@ -38,7 +38,7 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
@@ -188,6 +188,8 @@ def _build_reasoning_parser_metadata(
         return None, None
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
+    if chat_template_kwargs.get("enable_thinking") is False:
+        return True, parser_kwargs
     if not getattr(request_for_sampling, "include_reasoning", True):
         return True, parser_kwargs
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
@@ -480,9 +482,9 @@ class VllmProcessor:
                     yield item
         except VLLMClientError as exc:
             # vLLM 0.27 replaced many request-side ValueError/TypeError raises
-            # with this hierarchy. Preserve Dynamo's client-error boundary so
-            # invalid sampling, rendering, and multimodal inputs remain HTTP 400.
-            raise InvalidArgument(str(exc)) from exc
+            # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
+            # Dynamo's HTTP boundary.
+            raise vllm_client_error_to_http_error(exc) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
@@ -686,14 +688,23 @@ class VllmProcessor:
                 ] = request_for_sampling.mm_processor_kwargs
 
             def new_post_processor() -> StreamingPostProcessor:
+                # vLLM tool parsers keep mutable streaming state. Give every
+                # n>1 choice its own parser instead of reusing the parser that
+                # adjusted the shared request during preprocessing.
+                choice_tool_parser = (
+                    self.tool_parser_class(self.tokenizer, request_for_sampling.tools)
+                    if tool_parser is not None and self.tool_parser_class is not None
+                    else None
+                )
                 return StreamingPostProcessor(
                     tokenizer=self.tokenizer,
                     request_for_sampling=request_for_sampling,
                     sampling_params=sampling_params,
                     prompt_token_ids=tokens,
-                    tool_parser=tool_parser,
+                    tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
+                    reasoning_ended=reasoning_ended,
                     stream_response=bool(request.get("stream", False)),
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
@@ -928,6 +939,11 @@ class VllmProcessor:
 
                 yield envelope
             _nvtx.end_range(rng_stream)
+        except VLLMClientError:
+            # Preserve request-side 400/404/422 errors for generator(), which
+            # translates them at Dynamo's HTTP boundary. The generic handler
+            # below is reserved for genuine internal failures.
+            raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))

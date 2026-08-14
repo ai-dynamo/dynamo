@@ -1074,6 +1074,21 @@ RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
 
+async def _translate_vllm_client_errors(
+    generator: AsyncIterator[ResponseT],
+) -> AsyncIterator[ResponseT]:
+    """Keep request-side vLLM errors client-visible on worker endpoints."""
+    from vllm.exceptions import VLLMClientError
+
+    from .errors import vllm_client_error_to_http_error
+
+    try:
+        async for chunk in generator:
+            yield chunk
+    except VLLMClientError as exc:
+        raise vllm_client_error_to_http_error(exc) from exc
+
+
 def _as_exact_int(value: object) -> Optional[int]:
     """Return ``value`` as an int only if it represents an exact integer.
 
@@ -3170,7 +3185,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in generator:
+            async for chunk in _translate_vllm_client_errors(generator):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
@@ -3635,7 +3650,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
-            async for chunk in self._generate_token_mode(request, context, request_id):
+            generator = self._generate_token_mode(request, context, request_id)
+            async for chunk in _translate_vllm_client_errors(generator):
                 yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
