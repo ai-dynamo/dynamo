@@ -458,11 +458,7 @@ mod tests {
             .unwrap();
 
         let dumped = lower.dump_events().await.unwrap();
-        assert!(
-            dumped
-                .iter()
-                .all(|event| event.state_source == Some(owner))
-        );
+        assert!(dumped.iter().all(|event| event.state_source == Some(owner)));
 
         let replacement = WorkerWithDpRank::new(29, 3);
         let projection = ResidencyProjection::new([(owner, replacement)]).unwrap();
