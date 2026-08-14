@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Shared aiperf benchmark pod template for all 3 configs (vllm-serve,
@@ -131,6 +131,8 @@ spec:
           value: "1800"
         - name: MODEL_READY_TIMEOUT_SECONDS
           value: "900"
+        - name: KEEP_INPUTS_JSON
+          value: "${KEEP_INPUTS_JSON}"
       resources:
         requests:
           cpu: "8"

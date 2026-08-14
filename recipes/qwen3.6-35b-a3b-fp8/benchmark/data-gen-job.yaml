@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Generate 30u_8t_5w_8000word_base64.jsonl into /perf-cache/datasets/.
@@ -75,7 +75,7 @@ spec:
               git -C "$GEN_SRC" checkout -q FETCH_HEAD
               cd "$GEN_SRC/benchmarks/multimodal/jsonl"
               echo "[gen] using dynamo @ $(git -C $GEN_SRC rev-parse --short HEAD)"
-              python3 main.py --help >/dev/null
+              python3 main.py --help
               OUTPUT_DIR="/perf-cache/datasets"
               IMAGE_DIR="/perf-cache/images/2400x1080"
               mkdir -p "${OUTPUT_DIR}" "${IMAGE_DIR}"

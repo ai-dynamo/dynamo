@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -34,6 +34,10 @@ export HW=gb200   # or h100
 Each config's `profile_export_aiperf.json` is retrieved into the matching
 sub-directory; throughput / TTFT / ITL numbers can be read directly from
 that file.
+
+Set `KEEP_INPUTS_JSON=1` on either driver command to retain and retrieve
+AIPerf's request-level `inputs.json` for debugging. The file is omitted by
+default because multimodal runs can make it several gigabytes.
 
 Or step-by-step for a single config:
 
@@ -89,8 +93,8 @@ than using the baked tree.
 ## Results
 
 Per-config `profile_export_aiperf.json` holds the headline metrics (RPS, TTFT
-percentiles, ITL). Published H100-vs-GB200 numbers and takeaways live in
-[`docs/benchmarks/embedding_cache.md`](../../../docs/benchmarks/embedding_cache.md).
+percentiles, ITL). Published H100-vs-GB200 numbers and takeaways live in the
+[embedding-cache benchmark](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/recipes/feature-benchmarks/embedding-cache.md).
 
 ## Cleanup
 

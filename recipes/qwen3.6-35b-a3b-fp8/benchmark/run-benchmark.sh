@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Unified driver for the Qwen3.6-35B-A3B-FP8 3-way benchmark.
@@ -22,6 +22,8 @@ NAMESPACE=""
 STEP="all"
 HW="h100"
 CONFIG=""
+KEEP_INPUTS_JSON="${KEEP_INPUTS_JSON:-0}"
+export KEEP_INPUTS_JSON
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,11 +104,11 @@ echo "[hw]     $HW → image=$VLLM_IMAGE node=$HW_NODE_SELECTOR"
 echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME bench-pod=$BENCH_POD"
 
 K="kubectl -n $NAMESPACE"
-# Limit envsubst to our own template vars so embedded ${MODEL_NAME} /
-# ${KEEP_INPUTS_JSON:-} shell vars inside perf.yaml's inline bash stay
-# literal. $BENCH_* drive the shared perf.yaml; $VLLM_IMAGE / $HW_*
-# drive deploy.yaml + perf.yaml.
-TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL'
+# Limit envsubst to our own template vars so unrelated shell variables inside
+# perf.yaml's inline bash stay literal. $BENCH_* drive the shared perf.yaml;
+# $VLLM_IMAGE / $HW_* drive deploy.yaml + perf.yaml; $KEEP_INPUTS_JSON
+# controls whether the benchmark pod and retrieval retain request payloads.
+TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL $KEEP_INPUTS_JSON'
 APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 
 # ---------------- config-agnostic prep ----------------
@@ -174,8 +176,19 @@ bench() {
   $K delete pod "$BENCH_POD" --ignore-not-found
   APPLY_TPL "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
-  echo "[bench] streaming logs — Ctrl-C to detach (the run continues in pod)"
-  $K logs -f "$BENCH_POD" || true
+  echo "[bench] streaming logs until the benchmark completes"
+  local completed=false
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if [[ "$line" == *"Run complete. Artifacts in"* ]]; then
+      completed=true
+      break
+    fi
+  done < <($K logs -f "$BENCH_POD")
+  if [[ "$completed" != "true" ]]; then
+    echo "[bench] benchmark pod stopped before reporting completion" >&2
+    return 1
+  fi
 }
 
 retrieve() {
@@ -183,9 +196,13 @@ retrieve() {
   # workspace layout differs from the default.
   local base="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
   local dest="$base/$(date +%m-%d)/qwen36-fp8-${HW}/${CONFIG}"
+  local tar_args=(-C /perf-cache artifacts)
+  if [[ "$KEEP_INPUTS_JSON" != "1" ]]; then
+    tar_args=(--exclude='inputs.json' "${tar_args[@]}")
+  fi
   mkdir -p "$dest"
   $K exec "$BENCH_POD" -- \
-      tar c --exclude='inputs.json' -C /perf-cache artifacts \
+      tar c "${tar_args[@]}" \
     | tar x -C "$dest"
   echo "[retrieve] landed at $dest"
   find "$dest" -name 'profile_export_aiperf.json' -print
@@ -214,6 +231,7 @@ all() {
   deploy
   bench
   retrieve
+  clean
 }
 
 case "$STEP" in

@@ -21,23 +21,23 @@ traffic: 'Sliding-window multimodal: 30 users x 8 turns (240 reqs), window 5, 24
 arms:
 - role: winner
   name: dynamo-fd-ec
-  deploy: recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml
-  perf: recipes/qwen3.6-35b/perf.yaml
+  deploy: recipes/qwen3.6-35b-a3b-fp8/deploy/dynamo-fd-ec.yaml
+  perf: recipes/qwen3.6-35b-a3b-fp8/benchmark/perf.yaml
 - role: treatment
   name: dynamo-fd
-  deploy: recipes/qwen3.6-35b/deploy/dynamo-fd.yaml
-  perf: recipes/qwen3.6-35b/perf.yaml
+  deploy: recipes/qwen3.6-35b-a3b-fp8/deploy/dynamo-fd.yaml
+  perf: recipes/qwen3.6-35b-a3b-fp8/benchmark/perf.yaml
 - role: baseline
   name: vllm-serve
-  deploy: recipes/qwen3.6-35b/deploy/vllm-serve.yaml
-  perf: recipes/qwen3.6-35b/perf.yaml
+  deploy: recipes/qwen3.6-35b-a3b-fp8/deploy/vllm-serve.yaml
+  perf: recipes/qwen3.6-35b-a3b-fp8/benchmark/perf.yaml
 results:
   available: true
-  summary: Full H100 + GB200 RPS/ITL/TTFT tables from docs/benchmarks/embedding_cache.md, reproduced on-page
+  summary: Full H100 + GB200 RPS/ITL/TTFT tables from the embedding-cache source study, reproduced on-page
 related_recipes: []
 maintainer: null
 gaps:
-- deploy YAMLs are envsubst templates, not directly kubectl-applicable; reproduce via run-benchmark.sh
+- deploy YAMLs are envsubst templates, not directly kubectl-applicable; reproduce via benchmark/run-benchmark.sh
 - maintainer unknown
 promotion_candidate:
   deferred_recipe_id: qwen3-6-35b

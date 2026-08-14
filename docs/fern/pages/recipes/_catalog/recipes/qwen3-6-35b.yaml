@@ -29,10 +29,10 @@ targets:
     traffic: 240 requests (30 users x 8 turns, window 5), 2400x1080 base64 images, 8K text tokens, max_tokens 1024, concurrency
       30
   deploy:
-    asset: recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml
+    asset: recipes/qwen3.6-35b-a3b-fp8/deploy/dynamo-fd-ec.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/qwen3.6-35b/perf.yaml
+    asset: recipes/qwen3.6-35b-a3b-fp8/benchmark/perf.yaml
   expected_performance:
     available: true
     summary: 'vs vanilla vllm serve: H100 +29.8% RPS / -87.4% TTFT p50; GB200 +31.5% RPS / -45.9% TTFT p50; ITL roughly
@@ -42,8 +42,7 @@ related_benchmarks:
 maintainer: null
 gaps:
 - maintainer unknown
-- results live in legacy docs/benchmarks/embedding_cache.md, not in recipe README
-- deploy/perf YAMLs are envsubst templates; no direct kubectl-apply path (routes via run-benchmark.sh)
-- duplicate legacy page docs/benchmarks/embedding_cache.md overlaps qwen3-6-35b-feature-stack.mdx
-deferred_reason: 'R1 scope decision (2026-06-11): no kubectl-apply path — deploys only via run-benchmark.sh + envsubst templates;
+- results live in the feature benchmark page, not in the recipe README
+- deploy/perf YAMLs are envsubst templates; no direct kubectl-apply path (routes via benchmark/run-benchmark.sh)
+deferred_reason: 'R1 scope decision (2026-06-11): no kubectl-apply path — deploys only via benchmark/run-benchmark.sh + envsubst templates;
   benchmark-first packaging (see ai-dynamo/dynamo#10626). Re-add in R2 after source refactor.'
