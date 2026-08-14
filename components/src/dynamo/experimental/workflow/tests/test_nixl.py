@@ -17,7 +17,6 @@ from dynamo.experimental.workflow import (
     Workflow,
     WorkflowOrchestrator,
     WorkflowExecutionError,
-    WorkflowValidationError,
     compile_workflow,
 )
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
@@ -110,6 +109,14 @@ async def _wait_for_no_leases(carrier):
     raise AssertionError("NIXL lease did not complete")
 
 
+async def _wait_for_registry_empty(registry: NixlLeaseRegistry) -> None:
+    for _ in range(20):
+        if registry.active_count == 0:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("NIXL registry did not release completed reads")
+
+
 async def test_tensor_carrier_round_trip_keeps_per_transfer_lease() -> None:
     connector = _Connector()
     carrier = NixlTensorCarrier(
@@ -167,7 +174,7 @@ async def test_one_logical_tensor_can_have_independent_consumer_leases() -> None
     assert connector.readables["transfer-1"].released
 
 
-async def test_lease_registry_releases_unread_operation_after_timeout() -> None:
+async def test_lease_registry_retains_unread_operation_after_timeout() -> None:
     registry = NixlLeaseRegistry(timeout_s=0.01)
     operation = _Readable("never-read", _Descriptor(torch.ones(1)))
 
@@ -175,7 +182,27 @@ async def test_lease_registry_releases_unread_operation_after_timeout() -> None:
     assert registry.active_count == 1
     await asyncio.sleep(0.02)
 
-    assert registry.active_count == 0
+    assert registry.active_count == 1
+    assert not operation.released
+
+    operation.completed.set()
+    await _wait_for_registry_empty(registry)
+
+    assert operation.released
+
+
+async def test_lease_registry_close_does_not_release_uncertain_read() -> None:
+    registry = NixlLeaseRegistry(timeout_s=1.0)
+    operation = _Readable("active-read", _Descriptor(torch.ones(1)))
+
+    registry.track("lease-1", operation, torch.ones(1024))
+    await registry.close()
+
+    assert registry.active_count == 1
+    assert not operation.released
+
+    operation.completed.set()
+    await _wait_for_registry_empty(registry)
     assert operation.released
 
 

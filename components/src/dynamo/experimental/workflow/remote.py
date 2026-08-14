@@ -10,6 +10,7 @@ import uuid
 from types import MappingProxyType
 from typing import Any, AsyncIterator, Awaitable, Mapping, Optional, Protocol, TypeVar
 
+from dynamo.experimental.workflow.nixl import NixlTensorFanout, NixlTensorRef
 from dynamo.experimental.workflow.plan import INLINE_VALUE_TYPES
 from dynamo.experimental.workflow.runtime import (
     StageContext,
@@ -516,8 +517,6 @@ class RemoteStageServer:
                     raise WorkflowExecutionError(
                         f"remote tensor output {name!r} has no consumer transfers"
                     )
-                from dynamo.experimental.workflow.nixl import NixlTensorFanout, NixlTensorRef
-
                 transfers = {}
                 references = await self._tensor_carrier.export_tensor_fanout(
                     outputs[name], transfer_ids
