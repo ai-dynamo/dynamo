@@ -302,6 +302,23 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>
 
+<ParamField path="--router-prefill-policy" type="string" default="null">
+  Worker-selection instance for disaggregated prefill workers in the current router process. This
+  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
+  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+
+  Environment variable: `DYN_ROUTER_PREFILL_POLICY`
+</ParamField>
+
+<ParamField path="--router-decode-policy" type="string" default="null">
+  Worker-selection instance for decode workers in the current router process. This option
+  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
+  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
+  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+
+  Environment variable: `DYN_ROUTER_DECODE_POLICY`
+</ParamField>
+
 ## AIC prefill load model
 
 These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
@@ -504,6 +521,19 @@ See the [Frontend Guide](../../developer-guide/knowledge-base/modular-components
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
 
   Environment variable: `DYN_TOKENIZER`
+</ParamField>
+
+<ParamField path="--tokenizer-fallback / --no-tokenizer-fallback" type="boolean" default="true">
+  Fall back to HuggingFace when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Use
+  `--no-tokenizer-fallback` to fail model initialization instead. In dynamic mode, discovery retries
+  the load while the frontend continues running.
+
+  <Warning>
+    Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
+    Set `--no-tokenizer-fallback` to adopt the future behavior now.
+  </Warning>
+
+  Environment variable: `DYN_TOKENIZER_FALLBACK`
 </ParamField>
 
 ## Experimental

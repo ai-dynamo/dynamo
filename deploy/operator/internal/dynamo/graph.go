@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -1403,18 +1404,23 @@ func ParseBackendFramework(framework string) (BackendFramework, error) {
 	}
 }
 
+// ContainerGPUCount lazily resolves the main container's scalar or DRA-backed
+// GPU count. The same resolver can be shared across all roles of a component.
+type ContainerGPUCount func() (int64, error)
+
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
-	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
 	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount) error {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+	return nil
 }
 
 func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
@@ -1543,6 +1549,7 @@ func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
 // Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
 // Deployment-specific environment merging should be handled by the caller
+// containerGPUs lazily resolves the main container's scalar or DRA-backed GPU count.
 //
 //nolint:gocyclo
 func GenerateBasePodSpec(
@@ -1558,6 +1565,7 @@ func GenerateBasePodSpec(
 	serviceName string,
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
+	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
@@ -1596,7 +1604,9 @@ func GenerateBasePodSpec(
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
+		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+	}
 	applyCheckpointProbeCadence(&container, component, checkpointInfo)
 
 	// get base podspec from component
@@ -1970,11 +1980,12 @@ func GeneratePodSpecForComponent(
 	serviceName string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
+	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	return generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		role, numberOfNodes, operatorConfig, multinodeDeploymentType,
-		serviceName, checkpointInfo, deployerOverride, nil,
+		serviceName, checkpointInfo, deployerOverride, nil, containerGPUs,
 	)
 }
 
@@ -1991,6 +2002,7 @@ func generatePodSpecForComponent(
 	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
+	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	if component == nil {
 		return nil, fmt.Errorf("component is nil")
@@ -2004,11 +2016,40 @@ func generatePodSpecForComponent(
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride, containerGPUs)
 	if err != nil {
 		return nil, err
 	}
 	return podSpec, nil
+}
+
+// ResolveContainerGPUs returns the GPU count requested by the main container,
+// whether expressed as scalar resources or DRA ResourceClaims.
+func ResolveContainerGPUs(
+	ctx context.Context,
+	reader ctrlclient.Reader,
+	namespace string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) (int64, error) {
+	if component == nil {
+		return 0, fmt.Errorf("component is nil")
+	}
+
+	podSpec := &corev1.PodSpec{}
+	if component.PodTemplate != nil {
+		podSpec = &component.PodTemplate.Spec
+	}
+	gpuCount, err := dra.ResolveGPUCount(
+		ctx,
+		reader,
+		namespace,
+		podSpec,
+		GetMainContainerResources(component),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return int64(gpuCount), nil
 }
 
 func applyDGDTemplateDefaults(
@@ -2210,6 +2251,7 @@ type cliqueParams struct {
 	validatedQueueName          string
 	checkpointRestore           *checkpoint.ResolvedPodSpecRestore
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
+	containerGPUs               ContainerGPUCount
 }
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
@@ -2220,7 +2262,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
 		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName, p.checkpointInfo,
-		p.groveClusterTopologyDomains,
+		p.groveClusterTopologyDomains, p.containerGPUs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
@@ -2545,6 +2587,9 @@ func GenerateGrovePodCliqueSet(
 
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
+		containerGPUs := sync.OnceValues(func() (int64, error) {
+			return ResolveContainerGPUs(ctx, reader, dynamoDeployment.Namespace, component)
+		})
 		isInterPodGMS := component.IsInterPodGMSEnabled()
 		isInterPodFailover := component.IsInterPodFailoverEnabled()
 		usesPCSG := component.UsesPCSG()
@@ -2574,6 +2619,7 @@ func GenerateGrovePodCliqueSet(
 				validatedQueueName:          validatedQueueName,
 				checkpointRestore:           checkpointRestore,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
+				containerGPUs:               containerGPUs,
 			})
 			if err != nil {
 				return nil, err
@@ -2688,6 +2734,7 @@ func generatePodSpecForRole(
 	serviceName string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
+	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	isInterPodGMS := component.IsInterPodGMSEnabled()
 
@@ -2697,7 +2744,7 @@ func generatePodSpecForRole(
 			component, backendFramework, secretsRetriever, dynamoDeployment,
 			RoleMain, 1, operatorConfig,
 			commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, nil,
-			groveClusterTopologyDomains,
+			groveClusterTopologyDomains, containerGPUs,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate base podSpec for GMS: %w", err)
@@ -2719,7 +2766,7 @@ func generatePodSpecForRole(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		r.Role, numberOfNodes, operatorConfig,
 		commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, deployer,
-		groveClusterTopologyDomains,
+		groveClusterTopologyDomains, containerGPUs,
 	)
 	if err != nil {
 		return nil, err
@@ -3034,6 +3081,7 @@ func GenerateBasePodSpecForController(
 	role Role,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by caller)
+	containerGPUs ContainerGPUCount,
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
 	// Convert to our interface
@@ -3073,6 +3121,7 @@ func GenerateBasePodSpecForController(
 		componentName,
 		checkpointInfo,
 		nil, // use default deployer
+		containerGPUs,
 	)
 	if err != nil {
 		return nil, err
