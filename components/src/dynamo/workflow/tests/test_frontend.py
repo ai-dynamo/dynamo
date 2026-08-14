@@ -50,7 +50,7 @@ class _Runner:
 
 async def _application(**overrides) -> WorkflowFrontendApplication:
     workflow = Workflow("frontend-workflow")
-    request = workflow.input("request", type="json")
+    request = workflow.input("request", ValueSpec(type="json"))
     stage = workflow.stage("generate", CONTRACT, request=request)
     workflow.output("chunk", stage.chunk)
     executor = await WorkflowExecutor.bind(
@@ -175,7 +175,7 @@ async def test_token_engine_cancels_workflow_when_frontend_context_stops() -> No
                 raise
 
     workflow = Workflow("frontend-cancellation")
-    request = workflow.input("request", type="json")
+    request = workflow.input("request", ValueSpec(type="json"))
     stage = workflow.stage("generate", CONTRACT, request=request)
     workflow.output("chunk", stage.chunk)
     executor = await WorkflowExecutor.bind(
