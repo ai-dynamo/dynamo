@@ -23,6 +23,7 @@ from dynamo._core import KvDcRelay as KvDcRelay
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import KvRouterConfig as KvRouterConfig
+from dynamo._core import KvStateAgentHost as KvStateAgentHost
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher

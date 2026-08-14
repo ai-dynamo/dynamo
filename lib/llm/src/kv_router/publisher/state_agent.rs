@@ -1,15 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opt-in vLLM KV state-agent foundation.
+//! Externalizable vLLM KV state agent.
 //!
 //! One instance owns exactly one stable DP slot, one local recovery index, one
-//! semantic event publisher, and one outbound cursor. Hosting is currently in
-//! the vLLM handler process, but none of the durable identities derive from the
-//! handler's DRT connection ID.
-//!
-//! This is a structural foundation, not restart persistence: the current vLLM
-//! engine monitor terminates the handler and this agent on engine death.
+//! semantic event publisher, and one outbound cursor. A standalone host may
+//! multiplex these per-slot agents on one DRT without coupling their durable
+//! identity to its connection ID.
 //!
 //! Cross-incarnation KVCC continuity is not implemented by this foundation.
 //! CacheOwner routing is advisory: live sequence gaps are reported but do not
@@ -58,18 +55,15 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::{
-        KvEventSource as DiscoveredKvEventSource,
-        kv_state_agent::{
-            KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
-            KvStateAttachmentAdvertisement, KvStateSourceAdvertisement,
-        },
+    discovery::kv_state_agent::{
+        KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
+        KvStateAttachmentAdvertisement, KvStateIngressProtocol, KvStateSourceAdvertisement,
     },
     kv_router::{
-        KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
-        indexer::start_worker_kv_query_endpoint_with_status, metrics::kv_publisher_metrics,
+        WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint_with_status,
+        metrics::kv_publisher_metrics,
     },
-    utils::zmq::{connect_sub_socket, multipart_message},
+    utils::zmq::{SubSocket, connect_sub_socket, multipart_message},
 };
 
 use super::{
@@ -84,17 +78,6 @@ const CONTROL_QUEUE_CAPACITY: usize = 16;
 const MAX_INGRESS_EVENTS: usize = 128;
 const MAX_INGRESS_BLOCKS: usize = 8_192;
 const MAX_ZMQ_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
-
-/// Out-of-band contract for the one vLLM-originated raw stream.
-///
-/// Framework-only mode preserves current vLLM compatibility. CacheOwner
-/// transitions are accepted only on the explicitly versioned mode, so an old
-/// raw listener cannot silently reinterpret them as Worker residency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvStateAgentRawMode {
-    FrameworkV1,
-    ResidencyV2,
-}
 
 /// Resolve an operator-supplied durable slot name once on the control path.
 pub fn resolve_stable_dp_slot_id(explicit_slot: &str) -> Result<StableDpSlotId> {
@@ -112,7 +95,7 @@ pub fn resolve_stable_dp_slot_id(explicit_slot: &str) -> Result<StableDpSlotId> 
 #[derive(Debug, Clone)]
 pub struct KvStateAgentSlotConfig {
     pub cache_owner_id: CacheOwnerId,
-    pub worker: WorkerWithDpRank,
+    pub global_dp_rank: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +103,16 @@ pub struct KvStateAgentVllmSource {
     pub endpoint: String,
     pub topic: String,
     pub image_token_id: Option<u32>,
-    pub raw_mode: KvStateAgentRawMode,
+    pub ingress_protocol: KvStateIngressProtocol,
+}
+
+#[derive(Debug, Clone)]
+pub struct KvStateAgentAttachmentConfig {
+    pub producer_instance: dynamo_runtime::component::Instance,
+    pub intent_incarnation: u64,
+    pub worker: WorkerWithDpRank,
+    pub vllm_source: KvStateAgentVllmSource,
+    pub cache_readable: bool,
 }
 
 #[derive(Clone)]
@@ -129,14 +121,18 @@ pub struct KvStateAgentConfig {
     pub kv_state_endpoint: EndpointId,
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
-    pub vllm_source: Option<KvStateAgentVllmSource>,
+    pub ingress_protocol: KvStateIngressProtocol,
 }
 
 #[derive(Debug, Clone)]
 struct Attachment {
     generation: u64,
+    producer_instance: dynamo_runtime::component::Instance,
+    intent_incarnation: u64,
     worker: WorkerWithDpRank,
     vllm_zmq_endpoint: String,
+    raw_topic: String,
+    ingress_protocol: KvStateIngressProtocol,
     ready: bool,
     cache_readable: bool,
     ready_at_outbound_cursor: u64,
@@ -237,6 +233,7 @@ struct Coordinator<P> {
     identity: KvStateAgentIdentity,
     slot_dp_rank: u32,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
+    withdrawal_tx: mpsc::UnboundedSender<u64>,
     control_rx: mpsc::Receiver<ControlCommand>,
     ingress_rx: mpsc::UnboundedReceiver<IngressBatch>,
     attachment: Option<Attachment>,
@@ -428,6 +425,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             return;
         }
         attachment.ready = false;
+        self.ingress_generation = None;
         tracing::warn!(generation, reason, "Quarantining vLLM KV ingress");
         self.publish_status();
     }
@@ -543,12 +541,15 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         self.worker_domain_failed = true;
         self.cache_owner_domain_failed = true;
         self.quarantine(generation, reason);
+        self.request_attachment_withdrawal(generation);
     }
 
     fn fail_cache_owner(&mut self, generation: u64, reason: &'static str) {
         self.cache_owner_domain_failed = true;
-        tracing::error!(generation, reason, "Quarantining CacheOwner residency");
-        self.publish_status();
+        self.ingress_generation = None;
+        self.quarantine(generation, reason);
+        self.request_attachment_withdrawal(generation);
+        tracing::error!(generation, reason, "CacheOwner residency failed closed");
     }
 
     async fn apply_and_publish_chunk(
@@ -739,9 +740,20 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         match domain {
             ResidencyDomain::Worker => {
                 self.worker_domain_failed = true;
+                self.ingress_generation = None;
                 self.quarantine(generation, reason);
+                self.request_attachment_withdrawal(generation);
             }
             ResidencyDomain::CacheOwner => self.fail_cache_owner(generation, reason),
+        }
+    }
+
+    fn request_attachment_withdrawal(&self, generation: u64) {
+        if self.withdrawal_tx.send(generation).is_err() {
+            tracing::warn!(
+                generation,
+                "KV state-agent attachment withdrawal supervisor is closed"
+            );
         }
     }
 
@@ -764,8 +776,7 @@ pub struct KvStateAgent {
     kv_state_endpoint: EndpointId,
     kv_block_size: u32,
     slot_dp_rank: u32,
-    raw_mode: KvStateAgentRawMode,
-    event_topic: &'static str,
+    ingress_protocol: KvStateIngressProtocol,
     recovery_target: dynamo_runtime::component::Instance,
     identity: KvStateAgentIdentity,
     control_tx: mpsc::Sender<ControlCommand>,
@@ -773,10 +784,10 @@ pub struct KvStateAgent {
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
     coordinator: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    withdrawal_supervisor: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     vllm_listener: Mutex<Option<VllmListener>>,
     recovery_endpoint: Mutex<Option<StartedEndpoint>>,
     lifecycle: Mutex<()>,
-    event_source: Arc<Mutex<Option<DiscoveryInstance>>>,
     persistent_source: Arc<Mutex<Option<DiscoveryInstance>>>,
     attachment_source: Arc<Mutex<Option<DiscoveryInstance>>>,
     attachment: Mutex<Option<Attachment>>,
@@ -796,26 +807,13 @@ impl KvStateAgent {
             WORKER_KV_INDEXER_BUFFER_SIZE,
         ));
 
-        let raw_mode = config
-            .vllm_source
-            .as_ref()
-            .map_or(KvStateAgentRawMode::FrameworkV1, |source| source.raw_mode);
-        let event_topic = match raw_mode {
-            KvStateAgentRawMode::FrameworkV1 => KV_EVENT_SUBJECT,
-            // NOTE: ResidencyV2 is intentionally producer/discovery infrastructure only
-            // in this foundation. Current routers still consume the functional
-            // FrameworkV1 `kv-events` path; no router subscribes to this v2 topic yet.
-            // Enabling ResidencyV2 must not be interpreted as end-to-end CacheOwner
-            // routing support.
-            //
-            // TODO(#13044): activate this topic only with the version-aware source
-            // watch, fenced recovery controller, and aggregate owner projection.
-            KvStateAgentRawMode::ResidencyV2 => KV_STATE_EVENT_TOPIC_V2,
-        };
+        if config.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
+            anyhow::bail!("external state-agent slots require vllm_residency_v1 ingress");
+        }
         let event_publisher = EventPublisher::for_endpoint_id(
             config.endpoint.drt(),
             &config.kv_state_endpoint,
-            event_topic,
+            KV_STATE_EVENT_TOPIC_V2,
         )
         .await
         .context("failed to create state-agent event publisher")?;
@@ -828,15 +826,15 @@ impl KvStateAgent {
         let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
-            cache_owner_ready: raw_mode == KvStateAgentRawMode::ResidencyV2,
+            cache_owner_ready: true,
             outbound_cursor: 0,
         }));
 
         let recovery_endpoint = start_worker_kv_query_endpoint_with_status(
             component.clone(),
             publisher_id,
-            config.slot.worker.worker_id,
-            config.slot.worker.dp_rank,
+            0,
+            config.slot.global_dp_rank,
             local_indexer.clone(),
             Some(status.clone()),
         )
@@ -844,40 +842,23 @@ impl KvStateAgent {
         .context("failed to start state-agent recovery/control endpoint")?;
 
         let recovery_target = recovery_endpoint.instance().clone();
-        let source_ad = DiscoveredKvEventSource {
-            kv_state_endpoint: config.kv_state_endpoint.clone(),
-            worker: config.slot.worker,
-            publisher_id,
-            recovery_target: Some(recovery_target.clone()),
-        };
-        let event_source = match register_advertisement(
-            &component,
-            EventScope::Endpoint {
-                endpoint: config.kv_state_endpoint.clone(),
-            },
-            event_topic,
-            publisher_id,
-            &source_ad,
-        )
-        .await
-        {
-            Ok(instance) => instance,
-            Err(error) => {
-                let _ = recovery_endpoint.shutdown().await;
-                return Err(error).context("failed to advertise state-agent event source");
-            }
-        };
-
         let persistent_ad = KvStateSourceAdvertisement {
             cache_owner_id: identity.cache_owner_id,
+            global_dp_rank: config.slot.global_dp_rank,
+            kv_state_endpoint: config.kv_state_endpoint.clone(),
+            indexer_domain_id: identity.cache_owner_id.pool().indexer_domain(),
+            kv_block_size: config.kv_block_size,
+            ingress_protocol: config.ingress_protocol,
             publisher_id,
             protocol_version: identity.protocol_version,
-            event_topic: event_topic.to_string(),
+            event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: recovery_target.clone(),
         };
         let persistent_source = match register_advertisement(
             &component,
-            component_scope(&component),
+            EventScope::Endpoint {
+                endpoint: config.kv_state_endpoint.clone(),
+            },
             KV_STATE_SOURCE_TOPIC_V2,
             publisher_id,
             &persistent_ad,
@@ -886,11 +867,26 @@ impl KvStateAgent {
         {
             Ok(instance) => instance,
             Err(error) => {
-                let _ = component.drt().discovery().unregister(event_source).await;
                 let _ = recovery_endpoint.shutdown().await;
                 return Err(error).context("failed to advertise persistent state source");
             }
         };
+
+        let persistent_source = Arc::new(Mutex::new(Some(persistent_source)));
+        let attachment_source = Arc::new(Mutex::new(None));
+        let (withdrawal_tx, withdrawal_rx) = mpsc::unbounded_channel();
+        let withdrawal_supervisor =
+            component
+                .drt()
+                .runtime()
+                .secondary()
+                .spawn(run_attachment_withdrawal_supervisor(
+                    component.clone(),
+                    publisher_id,
+                    attachment_source.clone(),
+                    withdrawal_rx,
+                    cancel.child_token(),
+                ));
 
         let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let (ingress_tx, ingress_rx) = mpsc::unbounded_channel();
@@ -900,8 +896,9 @@ impl KvStateAgent {
                 publisher: EventPlanePublisher(event_publisher),
                 local_indexer,
                 identity: identity.clone(),
-                slot_dp_rank: config.slot.worker.dp_rank,
+                slot_dp_rank: config.slot.global_dp_rank,
                 status: status.clone(),
+                withdrawal_tx,
                 control_rx,
                 ingress_rx,
                 attachment: None,
@@ -911,91 +908,18 @@ impl KvStateAgent {
                 source_cursor: SourceCursorState::default(),
                 dedup: EventDedupFilter::new(),
                 worker_domain_failed: false,
-                cache_owner_domain_failed: raw_mode != KvStateAgentRawMode::ResidencyV2,
+                cache_owner_domain_failed: false,
                 source_failed: false,
             }
             .run(coordinator_cancel),
         );
 
-        let framework_endpoint = config
-            .vllm_source
-            .as_ref()
-            .map(|source| source.endpoint.clone())
-            .unwrap_or_else(|| "internal://vllm-ingress".to_string());
-        let attachment = Attachment {
-            generation: 0,
-            worker: config.slot.worker,
-            vllm_zmq_endpoint: framework_endpoint,
-            ready: false,
-            cache_readable: false,
-            ready_at_outbound_cursor: 0,
-        };
-        let attachment = match send_attach(&control_tx, attachment).await {
-            Ok(attachment) => attachment,
-            Err(error) => {
-                cancel.cancel();
-                let _ = coordinator.await;
-                let _ = component
-                    .drt()
-                    .discovery()
-                    .unregister(persistent_source)
-                    .await;
-                let _ = component.drt().discovery().unregister(event_source).await;
-                let _ = recovery_endpoint.shutdown().await;
-                return Err(error).context("failed to establish initial engine attachment");
-            }
-        };
-
-        let attachment_ad = attachment_advertisement(&identity, &recovery_target, &attachment);
-        let attachment_source = match register_advertisement(
-            &component,
-            component_scope(&component),
-            KV_STATE_ATTACHMENT_TOPIC_V2,
-            attachment_discovery_id(publisher_id, attachment.generation),
-            &attachment_ad,
-        )
-        .await
-        {
-            Ok(instance) => instance,
-            Err(error) => {
-                cancel.cancel();
-                let _ = coordinator.await;
-                let _ = component
-                    .drt()
-                    .discovery()
-                    .unregister(persistent_source)
-                    .await;
-                let _ = component.drt().discovery().unregister(event_source).await;
-                let _ = recovery_endpoint.shutdown().await;
-                return Err(error).context("failed to advertise ready engine attachment");
-            }
-        };
-
-        let event_source = Arc::new(Mutex::new(Some(event_source)));
-        let persistent_source = Arc::new(Mutex::new(Some(persistent_source)));
-        let attachment_source = Arc::new(Mutex::new(Some(attachment_source)));
-        let vllm_listener = config.vllm_source.map(|source| {
-            start_vllm_listener(
-                component.clone(),
-                source,
-                config.slot.worker,
-                attachment.generation,
-                config.kv_block_size,
-                ingress_tx.clone(),
-                control_tx.clone(),
-                event_source.clone(),
-                attachment_source.clone(),
-                cancel.child_token(),
-            )
-        });
-
         let agent = Self {
             component,
             kv_state_endpoint: config.kv_state_endpoint,
             kv_block_size: config.kv_block_size,
-            slot_dp_rank: config.slot.worker.dp_rank,
-            raw_mode,
-            event_topic,
+            slot_dp_rank: config.slot.global_dp_rank,
+            ingress_protocol: config.ingress_protocol,
             recovery_target,
             identity,
             control_tx,
@@ -1003,13 +927,13 @@ impl KvStateAgent {
             status,
             cancel,
             coordinator: StdMutex::new(Some(coordinator)),
-            vllm_listener: Mutex::new(vllm_listener),
+            withdrawal_supervisor: StdMutex::new(Some(withdrawal_supervisor)),
+            vllm_listener: Mutex::new(None),
             recovery_endpoint: Mutex::new(Some(recovery_endpoint)),
             lifecycle: Mutex::new(()),
-            event_source,
             persistent_source,
             attachment_source,
-            attachment: Mutex::new(Some(attachment)),
+            attachment: Mutex::new(None),
         };
 
         Ok(agent)
@@ -1024,6 +948,7 @@ impl KvStateAgent {
     }
 
     pub async fn quarantine_vllm(&self, generation: u64, reason: &'static str) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         let (response, received) = oneshot::channel();
         self.control_tx
             .send(ControlCommand::Quarantine {
@@ -1035,32 +960,42 @@ impl KvStateAgent {
             .context("state-agent coordinator is closed")?;
         received
             .await
-            .context("state-agent quarantine acknowledgement was dropped")
+            .context("state-agent quarantine acknowledgement was dropped")?;
+        unregister_required(
+            &self.component,
+            &self.attachment_source,
+            "attachment advertisement",
+        )
+        .await?;
+        if let Some(listener) = self.vllm_listener.lock().await.take() {
+            listener.stop().await;
+        }
+        Ok(())
     }
 
     /// Attach a new engine incarnation after the prior attachment has fully detached.
     ///
-    /// The API accepts a different WorkerId even though the initial in-process
-    /// vLLM host does not yet survive its handler lifecycle.
-    // TODO(#13044): make attach construction cancellation-safe when a host exists
-    // that can survive engine replacement. The current Python host creates one
-    // attachment and terminates with the vLLM handler.
+    /// The API accepts a different WorkerId at the stable slot's global rank.
     pub async fn attach(
         &self,
-        worker: WorkerWithDpRank,
-        vllm_source: KvStateAgentVllmSource,
-        cache_readable: bool,
+        config: KvStateAgentAttachmentConfig,
     ) -> Result<KvStateAttachmentStatus> {
         let _lifecycle = self.lifecycle.lock().await;
+        let KvStateAgentAttachmentConfig {
+            producer_instance,
+            intent_incarnation,
+            worker,
+            vllm_source,
+            cache_readable,
+        } = config;
         if worker.dp_rank != self.slot_dp_rank {
             anyhow::bail!("attachment DP rank does not match the stable state-agent slot");
         }
-        if vllm_source.raw_mode != self.raw_mode {
+        if vllm_source.ingress_protocol != self.ingress_protocol {
             anyhow::bail!("raw KV protocol mode is immutable for one state-agent publisher");
         }
         if self.attachment.lock().await.is_some()
             || self.attachment_source.lock().await.is_some()
-            || self.event_source.lock().await.is_some()
             || self.vllm_listener.lock().await.is_some()
         {
             anyhow::bail!("previous engine attachment has not fully detached");
@@ -1070,8 +1005,12 @@ impl KvStateAgent {
             &self.control_tx,
             Attachment {
                 generation: 0,
+                producer_instance,
+                intent_incarnation,
                 worker,
                 vllm_zmq_endpoint: vllm_source.endpoint.clone(),
+                raw_topic: vllm_source.topic.clone(),
+                ingress_protocol: vllm_source.ingress_protocol,
                 ready: false,
                 cache_readable,
                 ready_at_outbound_cursor: 0,
@@ -1079,27 +1018,24 @@ impl KvStateAgent {
         )
         .await?;
 
-        let event_ad = DiscoveredKvEventSource {
-            kv_state_endpoint: self.kv_state_endpoint.clone(),
+        let listener = match start_vllm_listener(
+            self.component.clone(),
+            vllm_source,
             worker,
-            publisher_id: self.identity.publisher_id,
-            recovery_target: Some(self.recovery_target.clone()),
-        };
-        let event_source = match register_advertisement(
-            &self.component,
-            EventScope::Endpoint {
-                endpoint: self.kv_state_endpoint.clone(),
-            },
-            self.event_topic,
-            self.identity.publisher_id,
-            &event_ad,
+            attachment.generation,
+            self.kv_block_size,
+            self.ingress_tx.clone(),
+            self.control_tx.clone(),
+            self.attachment_source.clone(),
+            self.status.clone(),
+            self.cancel.child_token(),
         )
         .await
         {
-            Ok(source) => source,
+            Ok(listener) => listener,
             Err(error) => {
                 abort_attach(&self.control_tx, attachment.generation).await;
-                return Err(error).context("failed to advertise reattached state-agent source");
+                return Err(error).context("failed to start the attached raw KV listener");
             }
         };
 
@@ -1107,7 +1043,9 @@ impl KvStateAgent {
             attachment_advertisement(&self.identity, &self.recovery_target, &attachment);
         let attachment_source = match register_advertisement(
             &self.component,
-            component_scope(&self.component),
+            EventScope::Endpoint {
+                endpoint: self.kv_state_endpoint.clone(),
+            },
             KV_STATE_ATTACHMENT_TOPIC_V2,
             attachment_discovery_id(self.identity.publisher_id, attachment.generation),
             &attachment_ad,
@@ -1116,32 +1054,32 @@ impl KvStateAgent {
         {
             Ok(source) => source,
             Err(error) => {
-                let _ = self
-                    .component
-                    .drt()
-                    .discovery()
-                    .unregister(event_source)
-                    .await;
+                listener.stop().await;
                 abort_attach(&self.control_tx, attachment.generation).await;
                 return Err(error).context("failed to advertise reattached engine attachment");
             }
         };
 
-        *self.event_source.lock().await = Some(event_source);
+        if !self
+            .status()
+            .attachment
+            .as_ref()
+            .is_some_and(|current| current.ready && current.generation == attachment.generation)
+        {
+            listener.stop().await;
+            let _ = self
+                .component
+                .drt()
+                .discovery()
+                .unregister(attachment_source)
+                .await;
+            abort_attach(&self.control_tx, attachment.generation).await;
+            anyhow::bail!("raw KV listener terminated before attachment advertisement completed");
+        }
+
         *self.attachment_source.lock().await = Some(attachment_source);
         *self.attachment.lock().await = Some(attachment.clone());
-        *self.vllm_listener.lock().await = Some(start_vllm_listener(
-            self.component.clone(),
-            vllm_source,
-            worker,
-            attachment.generation,
-            self.kv_block_size,
-            self.ingress_tx.clone(),
-            self.control_tx.clone(),
-            self.event_source.clone(),
-            self.attachment_source.clone(),
-            self.cancel.child_token(),
-        ));
+        *self.vllm_listener.lock().await = Some(listener);
         Ok(attachment.status())
     }
 
@@ -1159,12 +1097,6 @@ impl KvStateAgent {
             .await
             .context("state-agent detach begin was dropped")??;
 
-        unregister_required(
-            &self.component,
-            &self.event_source,
-            "state-agent event source",
-        )
-        .await?;
         unregister_required(
             &self.component,
             &self.attachment_source,
@@ -1193,6 +1125,34 @@ impl KvStateAgent {
 
     pub async fn shutdown(&self) -> Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
+
+        if let Some(generation) = self
+            .status()
+            .attachment
+            .as_ref()
+            .map(|attachment| attachment.generation)
+        {
+            let (response, received) = oneshot::channel();
+            if self
+                .control_tx
+                .send(ControlCommand::Quarantine {
+                    generation,
+                    reason: "state-agent shutdown",
+                    response,
+                })
+                .await
+                .is_ok()
+            {
+                let _ = received.await;
+            }
+        }
+        // Withdraw readiness before stopping ingress or the coordinator. The
+        // persistent source is removed later, after coordination is quiescent.
+        unregister_if_present(&self.component, &self.attachment_source).await;
+        if let Some(listener) = self.vllm_listener.lock().await.take() {
+            listener.stop().await;
+        }
+
         let (response, received) = oneshot::channel();
         if self
             .control_tx
@@ -1203,17 +1163,17 @@ impl KvStateAgent {
             let _ = received.await;
         }
         self.cancel.cancel();
-        if let Some(listener) = self.vllm_listener.lock().await.take() {
-            listener.stop().await;
-        }
         let coordinator = self.coordinator.lock().unwrap().take();
         if let Some(coordinator) = coordinator {
             let _ = coordinator.await;
         }
+        let withdrawal_supervisor = self.withdrawal_supervisor.lock().unwrap().take();
+        if let Some(withdrawal_supervisor) = withdrawal_supervisor {
+            let _ = withdrawal_supervisor.await;
+        }
 
-        unregister_if_present(&self.component, &self.attachment_source).await;
+        *self.attachment.lock().await = None;
         unregister_if_present(&self.component, &self.persistent_source).await;
-        unregister_if_present(&self.component, &self.event_source).await;
         if let Some(endpoint) = self.recovery_endpoint.lock().await.take() {
             endpoint.shutdown().await?;
         }
@@ -1229,6 +1189,32 @@ impl Drop for KvStateAgent {
         {
             coordinator.abort();
         }
+        if let Ok(mut supervisor) = self.withdrawal_supervisor.lock()
+            && let Some(supervisor) = supervisor.take()
+        {
+            supervisor.abort();
+        }
+    }
+}
+
+async fn run_attachment_withdrawal_supervisor(
+    component: Component,
+    publisher_id: u64,
+    attachment_source: Arc<Mutex<Option<DiscoveryInstance>>>,
+    mut withdrawals: mpsc::UnboundedReceiver<u64>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let generation = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            generation = withdrawals.recv() => generation,
+        };
+        let Some(generation) = generation else {
+            break;
+        };
+        unregister_attachment_generation(&component, &attachment_source, publisher_id, generation)
+            .await;
     }
 }
 
@@ -1272,17 +1258,14 @@ fn attachment_advertisement(
         protocol_version: identity.protocol_version,
         recovery_control_target: recovery_target.clone(),
         attachment_generation: attachment.generation,
+        producer_instance: attachment.producer_instance.clone(),
+        intent_incarnation: attachment.intent_incarnation,
         worker: attachment.worker,
-        vllm_zmq_endpoint: attachment.vllm_zmq_endpoint.clone(),
+        ingress_protocol: attachment.ingress_protocol,
+        raw_zmq_endpoint: attachment.vllm_zmq_endpoint.clone(),
+        raw_topic: attachment.raw_topic.clone(),
         cache_readable: attachment.cache_readable,
         ready_at_outbound_cursor: attachment.ready_at_outbound_cursor,
-    }
-}
-
-fn component_scope(component: &Component) -> EventScope {
-    EventScope::Component {
-        namespace: component.namespace().name(),
-        component: component.name().to_string(),
     }
 }
 
@@ -1329,6 +1312,43 @@ async fn unregister_if_present(
     }
 }
 
+async fn unregister_attachment_generation(
+    component: &Component,
+    instance: &Arc<Mutex<Option<DiscoveryInstance>>>,
+    publisher_id: u64,
+    generation: u64,
+) {
+    let expected_id = attachment_discovery_id(publisher_id, generation);
+    let current = instance.lock().await.clone();
+    let Some(current) = current else {
+        return;
+    };
+    let matches_generation = matches!(
+        &current,
+        DiscoveryInstance::EventSource {
+            publisher_id,
+            topic,
+            ..
+        } if *publisher_id == expected_id && topic == KV_STATE_ATTACHMENT_TOPIC_V2
+    );
+    if !matches_generation {
+        return;
+    }
+    if let Err(error) = component
+        .drt()
+        .discovery()
+        .unregister(current.clone())
+        .await
+    {
+        tracing::warn!(generation, %error, "Failed to withdraw failed KV state attachment");
+        return;
+    }
+    let mut instance = instance.lock().await;
+    if instance.as_ref() == Some(&current) {
+        *instance = None;
+    }
+}
+
 async fn unregister_required(
     component: &Component,
     instance: &Arc<Mutex<Option<DiscoveryInstance>>>,
@@ -1365,7 +1385,7 @@ fn event_block_count(events: &[PlacementEvent]) -> usize {
 fn attachment_discovery_id(publisher_id: u64, generation: u64) -> u64 {
     const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dynamo/kv-state-attachment-record/v1");
+    hasher.update(b"dynamo/kv-state-attachment-record/v2");
     hasher.update(&publisher_id.to_be_bytes());
     hasher.update(&generation.to_be_bytes());
     let digest = hasher.finalize();
@@ -1397,7 +1417,7 @@ impl VllmListener {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_vllm_listener(
+async fn start_vllm_listener(
     component: Component,
     source: KvStateAgentVllmSource,
     worker: WorkerWithDpRank,
@@ -1405,21 +1425,24 @@ fn start_vllm_listener(
     kv_block_size: u32,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
-    event_source: Arc<Mutex<Option<DiscoveryInstance>>>,
     attachment_source: Arc<Mutex<Option<DiscoveryInstance>>>,
+    status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
-) -> VllmListener {
+) -> Result<VllmListener> {
+    let socket = connect_sub_socket(&source.endpoint, Some(&source.topic)).await?;
     let listener_cancel = cancel.child_token();
     let task_cancel = listener_cancel.clone();
     let handle = component.drt().runtime().secondary().spawn(async move {
-        let result = run_vllm_listener(
-            &source,
+        let result = run_vllm_listener(VllmListenerTask {
+            source: &source,
             worker,
             generation,
             kv_block_size,
             ingress_tx,
-            task_cancel.clone(),
-        )
+            socket,
+            status,
+            cancel: task_cancel.clone(),
+        })
         .await;
         if !task_cancel.is_cancelled() {
             if let Err(error) = result {
@@ -1439,34 +1462,53 @@ fn start_vllm_listener(
             if control_tx.send(command).await.is_ok() {
                 let _ = received.await;
             }
-            // New consumers also validate the endpoint status, but exact
-            // withdrawal lets legacy Worker-only routers fail closed without
-            // conflating transport interruption with a CacheOwner clear.
+            // New consumers validate endpoint status too, but exact withdrawal
+            // makes the attachment ineligible immediately without clearing
+            // retained CacheOwner state.
             unregister_if_present(&component, &attachment_source).await;
-            unregister_if_present(&component, &event_source).await;
         }
     });
-    VllmListener {
+    Ok(VllmListener {
         cancel: listener_cancel,
         handle,
-    }
+    })
 }
 
-async fn run_vllm_listener(
-    source: &KvStateAgentVllmSource,
+struct VllmListenerTask<'a> {
+    source: &'a KvStateAgentVllmSource,
     worker: WorkerWithDpRank,
     generation: u64,
     kv_block_size: u32,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
+    socket: SubSocket,
+    status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
-) -> Result<()> {
+}
+
+async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
+    let VllmListenerTask {
+        source,
+        worker,
+        generation,
+        kv_block_size,
+        ingress_tx,
+        mut socket,
+        status,
+        cancel,
+    } = task;
     let mut framework_normalizer =
         ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
     let mut cache_owner_normalizer =
         ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
-    let mut socket = connect_sub_socket(&source.endpoint, Some(&source.topic)).await?;
-
     loop {
+        if !status
+            .load()
+            .attachment
+            .as_ref()
+            .is_some_and(|attachment| attachment.generation == generation && attachment.ready)
+        {
+            return Ok(());
+        }
         let frames = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
@@ -1503,7 +1545,7 @@ async fn run_vllm_listener(
             batch.events,
             worker,
             kv_block_size,
-            source.raw_mode,
+            source.ingress_protocol,
             &mut framework_normalizer,
             &mut cache_owner_normalizer,
         );
@@ -1548,7 +1590,7 @@ fn normalize_raw_batch(
     raw_events: Vec<dynamo_kv_router::zmq_wire::RawKvEvent>,
     worker: WorkerWithDpRank,
     kv_block_size: u32,
-    raw_mode: KvStateAgentRawMode,
+    ingress_protocol: KvStateIngressProtocol,
     framework_normalizer: &mut ZmqEventNormalizer,
     cache_owner_normalizer: &mut ZmqEventNormalizer,
 ) -> NormalizedRawBatch {
@@ -1567,7 +1609,9 @@ fn normalize_raw_batch(
                 continue;
             }
         };
-        if source_kind == KvEventSourceKind::Kvcc && raw_mode != KvStateAgentRawMode::ResidencyV2 {
+        if source_kind == KvEventSourceKind::Kvcc
+            && ingress_protocol != KvStateIngressProtocol::VllmResidencyV1
+        {
             source_fault.get_or_insert("KVCC event on framework-only raw protocol");
             continue;
         }
@@ -1719,6 +1763,31 @@ mod tests {
         )
     }
 
+    fn test_attachment(worker: WorkerWithDpRank, endpoint: &str) -> Attachment {
+        Attachment {
+            generation: 0,
+            producer_instance: dynamo_runtime::component::Instance {
+                component: "producer".to_string(),
+                endpoint: "raw-kv".to_string(),
+                namespace: "test".to_string(),
+                instance_id: worker.worker_id,
+                transport: dynamo_runtime::component::TransportType::Tcp(
+                    "tcp://127.0.0.1:1234".to_string(),
+                ),
+                device_type: None,
+                request_plane_codec: None,
+            },
+            intent_incarnation: worker.worker_id,
+            worker,
+            vllm_zmq_endpoint: endpoint.to_string(),
+            raw_topic: "kv-events-v2".to_string(),
+            ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
+            ready: false,
+            cache_readable: true,
+            ready_at_outbound_cursor: 0,
+        }
+    }
+
     fn store(
         worker: WorkerWithDpRank,
         domain: ResidencyDomain,
@@ -1784,7 +1853,7 @@ mod tests {
             ],
             worker,
             4,
-            KvStateAgentRawMode::ResidencyV2,
+            KvStateIngressProtocol::VllmResidencyV1,
             &mut framework,
             &mut cache_owner,
         );
@@ -1812,7 +1881,7 @@ mod tests {
             ],
             worker,
             4,
-            KvStateAgentRawMode::ResidencyV2,
+            KvStateIngressProtocol::VllmResidencyV1,
             &mut framework,
             &mut cache_owner,
         );
@@ -1838,7 +1907,7 @@ mod tests {
             vec![raw_store(Some("CPU"), Some("future_source"), 108)],
             worker,
             4,
-            KvStateAgentRawMode::ResidencyV2,
+            KvStateIngressProtocol::VllmResidencyV1,
             &mut framework,
             &mut cache_owner,
         );
@@ -1960,6 +2029,7 @@ mod tests {
                 identity: identity.clone(),
                 slot_dp_rank: 3,
                 status: status.clone(),
+                withdrawal_tx: mpsc::unbounded_channel().0,
                 control_rx,
                 ingress_rx,
                 attachment: None,
@@ -1977,14 +2047,7 @@ mod tests {
 
         let first = send_attach(
             &control_tx,
-            Attachment {
-                generation: 0,
-                worker: first_worker,
-                vllm_zmq_endpoint: "tcp://framework-7".to_string(),
-                ready: false,
-                cache_readable: true,
-                ready_at_outbound_cursor: 0,
-            },
+            test_attachment(first_worker, "tcp://framework-7"),
         )
         .await
         .unwrap();
@@ -2022,14 +2085,7 @@ mod tests {
 
         let replacement = send_attach(
             &control_tx,
-            Attachment {
-                generation: 0,
-                worker: replacement_worker,
-                vllm_zmq_endpoint: "tcp://framework-8".to_string(),
-                ready: false,
-                cache_readable: true,
-                ready_at_outbound_cursor: 0,
-            },
+            test_attachment(replacement_worker, "tcp://framework-8"),
         )
         .await
         .unwrap();
@@ -2127,6 +2183,7 @@ mod tests {
             identity,
             slot_dp_rank: 3,
             status,
+            withdrawal_tx: mpsc::unbounded_channel().0,
             control_rx,
             ingress_rx,
             attachment: None,
@@ -2139,14 +2196,7 @@ mod tests {
             cache_owner_domain_failed: false,
             source_failed: false,
         };
-        let mut attachment = Attachment {
-            generation: 0,
-            worker,
-            vllm_zmq_endpoint: "tcp://framework".to_string(),
-            ready: false,
-            cache_readable: true,
-            ready_at_outbound_cursor: 0,
-        };
+        let mut attachment = test_attachment(worker, "tcp://framework");
         coordinator.attach(&mut attachment).await.unwrap();
 
         coordinator.begin_detach(attachment.generation).unwrap();
@@ -2203,14 +2253,7 @@ mod tests {
             1
         );
 
-        let mut replacement = Attachment {
-            generation: 0,
-            worker,
-            vllm_zmq_endpoint: "tcp://framework-2".to_string(),
-            ready: false,
-            cache_readable: true,
-            ready_at_outbound_cursor: 0,
-        };
+        let mut replacement = test_attachment(worker, "tcp://framework-2");
         coordinator.attach(&mut replacement).await.unwrap();
         coordinator
             .handle_ingress(IngressBatch {
@@ -2265,6 +2308,7 @@ mod tests {
             identity,
             slot_dp_rank: 3,
             status: status.clone(),
+            withdrawal_tx: mpsc::unbounded_channel().0,
             control_rx,
             ingress_rx,
             attachment: None,
@@ -2277,14 +2321,7 @@ mod tests {
             cache_owner_domain_failed: false,
             source_failed: false,
         };
-        let mut attachment = Attachment {
-            generation: 0,
-            worker,
-            vllm_zmq_endpoint: "tcp://framework".to_string(),
-            ready: false,
-            cache_readable: true,
-            ready_at_outbound_cursor: 0,
-        };
+        let mut attachment = test_attachment(worker, "tcp://framework");
         coordinator.attach(&mut attachment).await.unwrap();
         let stale_event = store(worker, ResidencyDomain::Worker, None, 99, 9);
         assert!(

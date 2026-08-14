@@ -65,6 +65,13 @@ impl DerefMut for KvSourceMembershipWatch {
 }
 
 impl KvSourceMembershipWatch {
+    pub(crate) fn with_receiver(&self, receiver: watch::Receiver<KvSourceMembershipView>) -> Self {
+        Self {
+            coordinator: self.coordinator.clone(),
+            receiver,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn shares_coordinator_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.coordinator, &other.coordinator)

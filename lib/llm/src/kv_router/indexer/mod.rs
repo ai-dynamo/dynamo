@@ -42,15 +42,11 @@ pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
     RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
-// The version-aware state-agent watcher will use the status transport when it
-// activates residency-v2 consumption (DEP #13044).
-#[allow(unused_imports)]
-pub(crate) use recovery::{
-    RuntimeWorkerQueryTransport, start_subscriber, start_worker_kv_query_endpoint,
-    start_worker_kv_query_endpoint_with_status,
-};
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
+pub(crate) use recovery::{
+    start_subscriber, start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
+};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed

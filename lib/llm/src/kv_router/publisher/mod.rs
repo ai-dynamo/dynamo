@@ -30,11 +30,13 @@ mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
 mod state_agent;
+mod state_agent_host;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
+pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]
 use dedup::EventDedupFilter;
 #[cfg(test)]
@@ -46,8 +48,11 @@ pub use multimodal_embedding_cache::{
 };
 use sinks::EventPlanePublisher;
 pub use state_agent::{
-    KvStateAgent, KvStateAgentConfig, KvStateAgentRawMode, KvStateAgentSlotConfig,
+    KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
     KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+};
+pub use state_agent_host::{
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
 };
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;

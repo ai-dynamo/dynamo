@@ -2823,6 +2823,19 @@ class KvDcRelay:
     async def shutdown(self) -> None:
         ...
 
+class KvStateAgentHost:
+    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def status(self) -> Dict[str, Any]:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
+
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.

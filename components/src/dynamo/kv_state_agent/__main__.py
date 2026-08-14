@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Standalone, multi-slot KV state-agent host."""
+
+import argparse
+import asyncio
+import logging
+import os
+
+import uvloop
+
+from dynamo.llm import KvStateAgentHost
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging()
+logger = logging.getLogger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Dynamo KV state-agent host")
+    parser.add_argument("--max-slots", type=int, default=8)
+    return parser.parse_args()
+
+
+class HostDiagnostics:
+    def __init__(self, host: KvStateAgentHost):
+        self._host = host
+
+    async def health(self, _request):
+        yield await self._host.status()
+
+
+@dynamo_worker()
+async def worker(runtime: DistributedRuntime) -> None:
+    args = parse_args()
+    if args.max_slots <= 0:
+        raise ValueError("--max-slots must be greater than zero")
+
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    host = KvStateAgentHost(
+        runtime.endpoint(f"{namespace}.kv_state_agent.control"),
+        args.max_slots,
+    )
+    await host.start()
+    diagnostics = HostDiagnostics(host)
+    health_task = asyncio.ensure_future(
+        runtime.endpoint(f"{namespace}.kv_state_agent.health").serve_endpoint(
+            diagnostics.health,
+            graceful_shutdown=True,
+            metrics_labels=[("service", "kv_state_agent")],
+            health_check_payload={"text": "health"},
+        )
+    )
+    logger.info("KV state-agent host started with max_slots=%d", args.max_slots)
+    try:
+        await health_task
+    finally:
+        health_task.cancel()
+        await asyncio.gather(health_task, return_exceptions=True)
+        await host.shutdown()
+        logger.info("KV state-agent host stopped")
+
+
+def main() -> None:
+    uvloop.run(worker())
+
+
+if __name__ == "__main__":
+    main()

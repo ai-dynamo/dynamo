@@ -100,6 +100,9 @@ pub enum KvSourceAmbiguity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KvSourceStatus<S = KvEventSource> {
     Missing,
+    /// A recognized versioned source owns this logical rank. Legacy ingress is
+    /// disabled without interpreting the source-mode transition as rank death.
+    Suppressed,
     ActiveRecoverable(S),
     ActiveLiveOnly(S),
     Ambiguous(KvSourceAmbiguity),
@@ -109,7 +112,7 @@ impl<S> KvSourceStatus<S> {
     pub fn active_source(&self) -> Option<&S> {
         match self {
             Self::ActiveRecoverable(source) | Self::ActiveLiveOnly(source) => Some(source),
-            Self::Missing | Self::Ambiguous(_) => None,
+            Self::Missing | Self::Suppressed | Self::Ambiguous(_) => None,
         }
     }
 }

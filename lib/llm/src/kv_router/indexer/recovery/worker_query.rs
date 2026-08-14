@@ -265,6 +265,13 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .clone();
         let mut slot = slot_handle.lock().await;
 
+        if matches!(status, KvSourceStatus::Suppressed) {
+            self.deactivate_locked(key, &mut slot).await;
+            slot.pending_reset = None;
+            slot.rank = RankState::default();
+            return;
+        }
+
         let selected = status.active_source().cloned();
         if let (Some(active), Some(selected)) = (&slot.active, &selected)
             && active.source_id == selected.source_id()
@@ -584,6 +591,18 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         };
         let binding = active.binding;
         let expected = binding.source.worker;
+        if matches!(
+            self.membership_rx.borrow().status(&expected),
+            Some(KvSourceStatus::Suppressed)
+        ) {
+            tracing::debug!(
+                publisher_id,
+                worker_id = expected.worker_id,
+                dp_rank = expected.dp_rank,
+                "Dropping legacy KV events for a rank owned by the state-agent source mode"
+            );
+            return;
+        }
         if let Some(event) = events.iter().find(|event| {
             event.worker_id != expected.worker_id || event.event.dp_rank != expected.dp_rank
         }) {
@@ -2969,6 +2988,7 @@ mod tests {
                 serving.clone(),
                 indexer,
                 membership_watch,
+                64,
                 "test-model".to_string(),
                 None,
                 crate::kv_router::KvEventSourceRequirement::Unknown,
