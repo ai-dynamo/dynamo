@@ -106,8 +106,8 @@ echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME bench-pod=$BENC
 K="kubectl -n $NAMESPACE"
 # Limit envsubst to our own template vars so unrelated shell variables inside
 # perf.yaml's inline bash stay literal. $BENCH_* drive the shared perf.yaml;
-# $VLLM_IMAGE / $HW_* drive deploy.yaml + perf.yaml; $KEEP_INPUTS_JSON
-# controls whether the benchmark pod and retrieval retain request payloads.
+# $VLLM_IMAGE drives deploy templates, $HW_* drive deploy and benchmark
+# templates, and $KEEP_INPUTS_JSON controls request-payload retention.
 TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL $KEEP_INPUTS_JSON'
 APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 

@@ -65,9 +65,9 @@ and `model-cache/` from the recipe root (`../`) and `perf.yaml` /
 `perf.yaml` is shared because the only deltas across the configs (pod name,
 frontend service, run-label) are exported as `${BENCH_POD}` /
 `${BENCH_FRONTEND}` / `${BENCH_RUN_LABEL}` by `run-benchmark.sh` and resolved
-via `envsubst` at apply time. The bench Pod runs the same
-`vllm-runtime:1.3.0` image as the deployment, which bakes `aiperf` — no
-install step needed.
+via `envsubst` at apply time. The bench Pod uses `python:3.11` and installs
+`aiperf==0.10.0`; build tools are included so its `crick` dependency can
+compile on GB200 arm64 nodes.
 
 ## Dataset
 
@@ -79,9 +79,9 @@ install step needed.
   (`window + turns - 1`). Base64-inlined.
 - Each jsonl row carries `session_id=user_<N>`. aiperf's `single_turn`
   dataset type honors session ordering (via
-  [PR 824](https://github.com/ai-dynamo/aiperf/pull/824), now baked into
-  the `1.3.0` image), so the 8 turns of any one user are sent in causal
-  order — letting prefix-cache hits land.
+  [PR 824](https://github.com/ai-dynamo/aiperf/pull/824), included in
+  `aiperf==0.10.0`), so the 8 turns of any one user are sent in causal order
+  — letting prefix-cache hits land.
 - From turn 2 onwards each turn reuses 4-of-5 images from the previous turn's
   window, so repeated images dominate — the shape the embedding cache is
   designed for.
