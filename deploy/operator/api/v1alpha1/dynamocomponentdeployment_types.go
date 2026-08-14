@@ -201,7 +201,7 @@ type MultinodeMode string
 const (
 	// MultinodeModeAutomatic keeps the existing operator-generated multinode launch configuration.
 	MultinodeModeAutomatic MultinodeMode = "Automatic"
-	// MultinodeModeManual uses the user-supplied leader and worker launch configuration.
+	// MultinodeModeManual is experimental and uses the user-supplied leader and worker launch configuration.
 	MultinodeModeManual MultinodeMode = "Manual"
 )
 
@@ -209,10 +209,11 @@ const (
 type MultinodeSpec struct {
 	// Mode selects ownership of engine-specific multinode configuration.
 	// Automatic preserves the existing operator-generated launch configuration.
-	// Manual uses the component pod configuration for the leader and applies
-	// Worker.PodTemplateOverrides to construct the worker template. Manual requires
-	// users to provide all engine-specific topology arguments. For vLLM
-	// multiprocessing, the operator still adds --master-port=29500 to both roles.
+	// Manual is experimental and may change without notice. It uses the component
+	// pod configuration for the leader and applies Worker.PodTemplateOverrides to
+	// construct the worker template. Manual requires users to provide all
+	// engine-specific topology arguments. For vLLM multiprocessing, the operator
+	// still adds --master-port=29500 to both roles.
 	// +optional
 	// +kubebuilder:default=Automatic
 	Mode MultinodeMode `json:"mode,omitempty"`
