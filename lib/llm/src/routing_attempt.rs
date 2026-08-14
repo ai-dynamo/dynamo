@@ -45,6 +45,10 @@ pub(crate) trait AttemptBackend: Send + Sync {
         false
     }
 
+    /// Backend-owned state for one selection.
+    ///
+    /// Advisory attempts must not retain admission state because the advisory path drops them
+    /// without calling [`Self::abort`].
     type Attempt: Send;
 
     fn affinity(&self) -> Option<&AffinityCoordinator>;
@@ -636,6 +640,24 @@ mod tests {
         assert_eq!(
             affinity.query_target(&session_id, None).unwrap(),
             Some(AffinityTarget::new(2, None))
+        );
+    }
+
+    #[tokio::test]
+    async fn query_marked_prefill_uses_committed_admission() {
+        let backend = TestBackend::new(true);
+        let (_metadata, mut response) =
+            select_and_dispatch_prefill(&backend, query_request(), |_, _| Ok("prepared"))
+                .await
+                .unwrap();
+
+        assert_eq!(
+            response.next().await.unwrap().data.unwrap().token_ids,
+            vec![9]
+        );
+        assert_eq!(
+            backend.intents.into_inner().unwrap(),
+            vec![SelectionIntent::Committed]
         );
     }
 }

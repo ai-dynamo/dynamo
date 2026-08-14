@@ -163,7 +163,8 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// from the prefill response and injecting them into the decode request.
 ///
 /// Modes:
-/// - Query-only: `query_instance_id` annotation present → returns worker IDs without execution
+/// - Worker query: `query_instance_id` keeps decode selection advisory, while an enabled prefill
+///   hop still executes its one-token KV handoff with committed scheduler accounting
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
 ///
