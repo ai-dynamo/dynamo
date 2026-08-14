@@ -30,7 +30,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
-    kv_router::WorkerSelectorFactory,
+    kv_router::{PRE_ADMITTED_DECODE_SELECTION_CONTEXT_KEY, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -275,7 +275,7 @@ where
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (mut req, context) = request.into_parts();
+        let (mut req, mut context) = request.into_parts();
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
         let policy_class = context.metadata().get("policy-class").cloned();
@@ -318,8 +318,8 @@ where
                 Ok(Some(decision)) => {
                     tracing::info!(
                         request_id = %request_id,
-                        worker_id = decision.worker.worker_id,
-                        dp_rank = decision.worker.dp_rank,
+                        worker_id = decision.selection.worker.worker_id,
+                        dp_rank = decision.selection.worker.dp_rank,
                         net_new_tokens = decision.net_new_tokens,
                         overlap_tokens = decision.overlap_tokens,
                         "Conditional disagg routing to decode worker"
@@ -333,16 +333,35 @@ where
                     }
 
                     let routing = req.routing_mut();
-                    routing.decode_worker_id = Some(decision.worker.worker_id);
-                    routing.dp_rank = Some(decision.worker.dp_rank);
+                    routing.decode_worker_id = Some(decision.selection.worker.worker_id);
+                    routing.dp_rank = Some(decision.selection.worker.dp_rank);
 
                     req.annotations
                         .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
 
-                    // TODO: This advisory selection does not reserve decode capacity. If the
-                    // exact pinned admission below races and fails, the no-clone fix is a
-                    // scheduler reservation handoff rather than retrying with a mutated request.
-                    let response_stream = next.generate(context.map(|_| req)).await?;
+                    let admitted_worker = decision.selection.worker;
+                    context.insert(
+                        PRE_ADMITTED_DECODE_SELECTION_CONTEXT_KEY,
+                        decision.selection,
+                    );
+                    let response_stream = match next.generate(context.map(|_| req)).await {
+                        Ok(response_stream) => response_stream,
+                        Err(error) => {
+                            if let Some(decode_router) = self.decode_router.as_ref()
+                                && let Err(cleanup_error) = decode_router
+                                    .free_if_worker(&request_id, admitted_worker)
+                                    .await
+                            {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    worker_id = admitted_worker.worker_id,
+                                    error = %cleanup_error,
+                                    "Failed to release conditional-disagg decode admission after dispatch error"
+                                );
+                            }
+                            return Err(error);
+                        }
+                    };
                     let ctx = response_stream.context();
                     let annotation = Annotated::<LLMEngineOutput>::from_annotation(
                         BYPASS_REMOTE_PREFILL_ANNOTATION,

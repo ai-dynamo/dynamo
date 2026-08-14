@@ -21,7 +21,8 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
+        KvRouter, PRE_ADMITTED_DECODE_SELECTION_CONTEXT_KEY, PreAdmittedDecodeSelection,
+        metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
         to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -183,6 +184,28 @@ where
         is_query_only: bool,
         affinity_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
+        if phase == RequestPhase::Decode
+            && let Some(selection) = request
+                .get_optional::<PreAdmittedDecodeSelection>(
+                    PRE_ADMITTED_DECODE_SELECTION_CONTEXT_KEY,
+                )
+                .map_err(anyhow::Error::msg)?
+        {
+            if !pre_admitted_selection_matches(request, affinity_worker, selection.worker) {
+                return Err(anyhow::anyhow!(
+                    "pre-admitted decode selection does not match the request routing constraints"
+                ));
+            }
+            return Ok(WorkerSelection {
+                worker: selection.worker,
+                overlap_amount: selection.overlap_blocks,
+                effective_overlap_blocks: selection.effective_overlap_blocks,
+                cached_tokens: selection.cached_tokens,
+                routing_hashes: selection.routing_hashes.clone(),
+                router_hint: selection.router_hint.clone(),
+            });
+        }
+
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
         let session_context = request
@@ -647,6 +670,20 @@ fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
         .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
 }
 
+fn pre_admitted_selection_matches(
+    request: &PreprocessedRequest,
+    affinity_worker: Option<WorkerWithDpRank>,
+    selected_worker: WorkerWithDpRank,
+) -> bool {
+    let routing = request.routing.as_ref();
+    let pinned_worker =
+        routing.and_then(|routing| routing.decode_worker_id.or(routing.backend_instance_id));
+    let pinned_rank = routing.and_then(|routing| routing.dp_rank);
+    pinned_worker == Some(selected_worker.worker_id)
+        && pinned_rank.is_none_or(|rank| rank == selected_worker.dp_rank)
+        && affinity_worker.is_none_or(|worker| worker == selected_worker)
+}
+
 /// A direct routing wrapper for `RouterMode::Direct`.
 ///
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
@@ -750,6 +787,33 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn pre_admitted_decode_selection_must_match_request_and_affinity() {
+        let selected = WorkerWithDpRank::new(7, 2);
+        let mut request = request();
+        let routing = request.routing_mut();
+        routing.decode_worker_id = Some(selected.worker_id);
+        routing.dp_rank = Some(selected.dp_rank);
+
+        assert!(pre_admitted_selection_matches(&request, None, selected));
+        assert!(pre_admitted_selection_matches(
+            &request,
+            Some(selected),
+            selected
+        ));
+        assert!(!pre_admitted_selection_matches(
+            &request,
+            Some(WorkerWithDpRank::new(8, 0)),
+            selected
+        ));
+
+        request.routing_mut().dp_rank = Some(3);
+        assert!(!pre_admitted_selection_matches(&request, None, selected));
+
+        request.routing_mut().decode_worker_id = Some(8);
+        assert!(!pre_admitted_selection_matches(&request, None, selected));
     }
 
     #[test]

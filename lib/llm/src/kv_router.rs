@@ -202,6 +202,23 @@ pub enum FindBestMatchAdvisoryOutcome {
     },
 }
 
+/// Decode selection already admitted by the conditional-disagg policy.
+///
+/// The prefill router stores this in the request context so the downstream
+/// decode router can dispatch the request without booking it a second time.
+#[derive(Debug, Clone)]
+pub(crate) struct PreAdmittedDecodeSelection {
+    pub worker: WorkerWithDpRank,
+    pub overlap_blocks: u32,
+    pub effective_overlap_blocks: f64,
+    pub cached_tokens: usize,
+    pub routing_hashes: Option<RoutingDecisionHashes>,
+    pub router_hint: Option<RouterHint>,
+}
+
+pub(crate) const PRE_ADMITTED_DECODE_SELECTION_CONTEXT_KEY: &str =
+    "dynamo.pre_admitted_decode_selection";
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FindBestMatchAdmission {
     WithAdmission { track_lifecycle: bool },

@@ -8,7 +8,7 @@ use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::pipeline::{Context, SingleIn};
 
 use super::{InnerPrefillRouter, PrefillRouter};
-use crate::kv_router::to_worker_selection_session_context;
+use crate::kv_router::{PreAdmittedDecodeSelection, to_worker_selection_session_context};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::{
     extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -21,7 +21,7 @@ use crate::session_affinity::AffinityTarget;
 /// Conditional-disagg decision: which decode worker to pin the request to,
 /// plus diagnostic counts for logging.
 pub(super) struct ConditionalDisaggDecodeDecision {
-    pub worker: WorkerWithDpRank,
+    pub selection: PreAdmittedDecodeSelection,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
 }
@@ -180,16 +180,16 @@ where
                 block_mm_infos,
                 req.router_config_override.as_ref(),
                 false,
-                lora_name,
-                cache_namespace,
+                lora_name.clone(),
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 policy_class.clone(),
-                session_context,
+                session_context.clone(),
                 expected_output_tokens,
                 pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
+                allowed_worker_ids.clone(),
+                routing_constraints.clone(),
             )
             .await?;
         let (worker, overlap_blocks, cached_tokens, potential_decode_blocks, decode_load) =
@@ -219,7 +219,7 @@ where
         let mut input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {
             let busy = self
-                .peek_prefill_chosen_worker_busy(req, policy_class, session_affinity)
+                .peek_prefill_chosen_worker_busy(req, policy_class.clone(), session_affinity)
                 .await;
             tracing::debug!(
                 request_id,
@@ -236,13 +236,9 @@ where
             .should_bypass_remote_prefill(input)
             .await;
 
-        // This gate is advisory, not a decode-capacity reservation. Normal
-        // decode routing books scheduler state before returning a routing
-        // decision; conditional-disagg is still deciding whether to enter that
-        // decode path, so booking here would double-count unless we added a
-        // reservation handoff to the downstream decode router. Use the selected
-        // worker's projected decode load, including this request, but allow for
-        // concurrent bypass decisions to race the same threshold.
+        // The policy probe is advisory because the request may still use remote
+        // prefill. Requests that bypass perform a fresh admitted selection below
+        // and hand it to the downstream decode router for dispatch.
         let decode_gate_configured = self.conditional_disagg_decode_busy_threshold.is_some();
         let decode_busy = if policy_says_bypass {
             self.conditional_disagg_decode_busy_threshold
@@ -286,8 +282,56 @@ where
         );
 
         if bypass {
+            let admitted = decode_router
+                .find_best_match_details_with_policy_class(
+                    Some(request_id),
+                    routing_token_ids,
+                    block_mm_infos,
+                    req.router_config_override.as_ref(),
+                    true,
+                    true,
+                    lora_name,
+                    cache_namespace,
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    session_context,
+                    expected_output_tokens,
+                    pinned_worker,
+                    allowed_worker_ids,
+                    routing_constraints,
+                )
+                .await?;
+            let selection = match admitted {
+                crate::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    potential_decode_blocks: _,
+                    routing_hashes,
+                    router_hint,
+                } => PreAdmittedDecodeSelection {
+                    worker,
+                    overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                    router_hint,
+                },
+                crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                    tracing::debug!(
+                        request_id,
+                        ?rejection,
+                        "Conditional disagg decode admission rejected; using remote prefill"
+                    );
+                    return Ok(None);
+                }
+            };
+            let net_new_tokens = prompt_tokens.saturating_sub(selection.cached_tokens);
+            let overlap_tokens = (selection.overlap_blocks as usize) * block_size;
             return Ok(Some(ConditionalDisaggDecodeDecision {
-                worker,
+                selection,
                 overlap_tokens,
                 net_new_tokens,
             }));
