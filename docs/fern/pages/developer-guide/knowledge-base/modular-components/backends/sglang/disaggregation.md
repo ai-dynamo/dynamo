@@ -82,6 +82,38 @@ sequenceDiagram
 7. **Decode phase**: Decode worker generates tokens using the transferred KV cache
 8. **Streaming**: Tokens are streamed back to the client as they're generated
 
+## Conditional Disaggregation
+
+Conditional disaggregation lets the router bypass remote prefill for selected requests. The selected decode worker runs prefill and decode for those requests.
+
+Enable the router policy and the SGLang decode path together:
+
+```bash
+export DYN_ROUTER_CONDITIONAL_DISAGG=1
+python3 -m dynamo.sglang \
+  --disaggregation-mode decode \
+  --disaggregation-decode-enable-conditional-agg \
+  ...
+```
+
+The local example enables both values:
+
+```bash
+./examples/backends/sglang/launch/disagg_router.sh --conditional-disagg
+```
+
+The default `isl_bounding` policy bypasses only cache-hot requests with a small effective input length. To bypass when the selected prefill worker is busy, configure the load policy and bound decode-side KV usage:
+
+```bash
+export DYN_ROUTER_CONDITIONAL_DISAGG_POLICY=prefill_load
+export DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD=0.25
+export DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD=0.50
+```
+
+Tune both fractions for the model and workload. The decode threshold is an advisory gate, not a capacity reservation; concurrent bypass decisions can race, so leave enough decode-side KV headroom for the expected request burst.
+
+The SGLang version must accept the `do_local_prefill` request field. Dynamo returns HTTP 400 when the installed engine lacks this field.
+
 ### Performance Characteristics
 
 - **RDMA transfer**: Zero-copy GPU-to-GPU transfer with minimal CPU involvement

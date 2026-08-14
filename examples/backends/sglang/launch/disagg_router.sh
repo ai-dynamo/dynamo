@@ -13,16 +13,22 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Parse command line arguments
 ENABLE_OTEL=false
+ENABLE_CONDITIONAL_DISAGG=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --enable-otel)
             ENABLE_OTEL=true
             shift
             ;;
+        --conditional-disagg)
+            ENABLE_CONDITIONAL_DISAGG=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --conditional-disagg Let decode workers prefill selected requests locally"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports:"
@@ -44,6 +50,12 @@ if [ "$ENABLE_OTEL" = true ]; then
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
+fi
+
+DECODE_CONDITIONAL_ARGS=()
+if [ "$ENABLE_CONDITIONAL_DISAGG" = true ]; then
+    export DYN_ROUTER_CONDITIONAL_DISAGG=1
+    DECODE_CONDITIONAL_ARGS+=(--disaggregation-decode-enable-conditional-agg)
 fi
 
 MODEL="Qwen/Qwen3-0.6B"
@@ -103,6 +115,7 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
+  "${DECODE_CONDITIONAL_ARGS[@]}" \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
@@ -119,6 +132,7 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
+  "${DECODE_CONDITIONAL_ARGS[@]}" \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
