@@ -148,8 +148,8 @@ impl KvPublisherMetrics {
     ///
     /// Split out of [`Self::from_component`] so registration is reachable from
     /// tests: `from_component` needs a real `Component` (and therefore a live
-    /// `DistributedRuntime`) and memoizes into a process-global `OnceLock`, so
-    /// only the first call in a process runs this code at all.
+    /// `DistributedRuntime`) and memoizes per component, so this runs at most once
+    /// for each `namespace.component` path in a process.
     fn build<H: MetricsHierarchy>(hierarchy: &H) -> Self {
         let metrics = hierarchy.metrics();
         let engines_dropped_events_total = metrics
@@ -243,7 +243,22 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
         .unwrap_or_else(PoisonError::into_inner);
     match entries.len() {
         1 => entries.values().next().cloned(),
-        _ => None,
+        0 => None,
+        n => {
+            // Dropping the sample is the safe choice -- attributing it to an
+            // arbitrary component would be a lie -- but doing so silently makes
+            // the publisher counters look merely idle. Say it once.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    components = n,
+                    "KV publisher metrics are ambiguous: this process registered more \
+                     than one component, so publisher counters cannot be attributed and \
+                     will not be recorded. Expected exactly one component worker-side."
+                );
+            });
+            None
+        }
     }
 }
 

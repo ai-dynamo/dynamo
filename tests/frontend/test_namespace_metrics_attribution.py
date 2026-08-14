@@ -73,6 +73,10 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.model(MODEL),
+    # ~12s locally across four runs. Bounded so a hung frontend, a worker that
+    # never reaches ready, or a stalled stream fails the job instead of holding a
+    # CI slot until the suite-level timeout.
+    pytest.mark.timeout(180),
 ]
 
 

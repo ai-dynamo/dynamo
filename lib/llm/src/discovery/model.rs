@@ -831,8 +831,9 @@ impl Model {
             })
             .collect();
 
-        // Every return path pairs the extracted value with the namespace of the
-        // WorkerSet it came from, so callers never have to re-select to learn it.
+        // Carry the borrowed WorkerSet alongside each candidate and only allocate the
+        // winner's namespace. Building `Selected` per candidate would allocate a String
+        // for every eligible set on the request hot path and discard all but one.
         let selected = |ws: &WorkerSet, value: T| Selected {
             value,
             namespace: ws.namespace().to_string(),
@@ -851,14 +852,14 @@ impl Model {
         // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(Selected<T>, usize)> = snapshot
+        let eligible: Vec<(T, &Arc<WorkerSet>, usize)> = snapshot
             .iter()
             .filter_map(|ws| {
                 let count = ws.worker_count();
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
-                extract(ws).map(|val| (selected(ws, val), count))
+                extract(ws).map(|val| (val, ws, count))
             })
             .collect();
 
@@ -867,15 +868,16 @@ impl Model {
         }
 
         if eligible.len() == 1 {
-            return eligible.into_iter().next().map(|(val, _)| val);
+            let (val, ws, _) = eligible.into_iter().next()?;
+            return Some(selected(ws, val));
         }
 
         // Weighted random selection proportional to worker count
-        let total_weight: usize = eligible.iter().map(|(_, w)| w).sum();
+        let total_weight: usize = eligible.iter().map(|(_, _, w)| w).sum();
         let mut pick = rand::rng().random_range(0..total_weight);
-        for (val, weight) in eligible {
+        for (val, ws, weight) in eligible {
             if pick < weight {
-                return Some(val);
+                return Some(selected(ws, val));
             }
             pick -= weight;
         }

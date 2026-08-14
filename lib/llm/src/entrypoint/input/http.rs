@@ -405,10 +405,14 @@ fn update_model_metrics(
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) {
     match model_type {
-        ModelUpdate::Added { card, namespace } => {
+        ModelUpdate::Added {
+            card,
+            namespace,
+            worker_type,
+        } => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = metrics.update_metrics_from_mdc(&card, &namespace) {
-                tracing::warn!(%err, model_name=card.display_name, %namespace, "update_metrics_from_mdc failed");
+            if let Err(err) = metrics.update_metrics_from_mdc(&card, &namespace, &worker_type) {
+                tracing::warn!(%err, model_name=card.display_name, %namespace, %worker_type, "update_metrics_from_mdc failed");
             }
         }
         ModelUpdate::Removed(card) => {

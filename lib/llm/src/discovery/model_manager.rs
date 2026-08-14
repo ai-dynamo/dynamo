@@ -1020,6 +1020,21 @@ impl ModelManager {
         }
     }
 
+    /// Whether `model` already has a WorkerSet deployed in `namespace`.
+    ///
+    /// Distinct from [`Self::get_committed_model`], which only answers whether the
+    /// model exists anywhere. Callers that maintain per-(model, namespace) state --
+    /// notably the frontend's per-deployment config gauges -- need the narrower
+    /// question, or a model already committed from one namespace suppresses the
+    /// bookkeeping for every later namespace.
+    pub fn model_has_worker_set_in_namespace(&self, model: &str, namespace: &str) -> bool {
+        self.catalog.load().models.get(model).is_some_and(|m| {
+            m.distinct_namespaces_sorted()
+                .iter()
+                .any(|ns| ns == namespace)
+        })
+    }
+
     /// Whether `model` has at least one WorkerSet that can serve an inference
     /// request right now. See [`Model::is_ready_to_serve`].
     pub fn is_model_ready_to_serve(&self, model: &str) -> bool {

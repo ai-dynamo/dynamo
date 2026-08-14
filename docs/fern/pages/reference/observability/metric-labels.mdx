@@ -31,35 +31,29 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
   On worker and router metrics this is the emitting component's own namespace, injected from its position in the hierarchy. On the frontend request metrics listed under [Frontend metrics that carry a namespace](#frontend-metrics-that-carry-a-namespace) it is instead the namespace of the worker set **selected to serve that request** — a frontend discovering one model in several namespaces load-balances across them per request. The two meanings coincide for the frontend's per-namespace routers, so `sum by (dynamo_namespace)` aggregates across both sets consistently.
 </ParamField>
 
-### Frontend metrics that carry a namespace
+### Frontend metrics and the namespace label
 
-A frontend can serve one model name from several namespaces at once. These `dynamo_frontend_*` families carry `dynamo_namespace` so their series stay attributable to a single deployment:
+A frontend can serve one model name from several namespaces at once, so some `dynamo_frontend_*` families carry `dynamo_namespace` and some deliberately do not. The split follows *when* the value is recorded, not the metric's importance.
 
-- Response metrics, labeled by the namespace that served the request: `output_tokens_total`, `time_to_first_token_seconds`, `inter_token_latency_seconds`, `input_sequence_tokens`, `output_sequence_tokens`, `cached_tokens`, `images_per_request`, `videos_per_request`, `audio_per_request`, `image_tokens_per_request`.
-- Per-deployment configuration gauges, labeled by the namespace whose model card supplied the value: `model_context_length`, `model_kv_cache_block_size`, `model_migration_limit`, `model_total_kv_blocks`, `model_max_num_seqs`, `model_max_num_batched_tokens`.
+**Namespace-aware** — recorded after a worker set has been selected, so the serving deployment is known:
+
+- Per-response families, labeled by the namespace that served the request: `output_tokens_total`, `time_to_first_token_seconds`, `inter_token_latency_seconds`, `input_sequence_tokens`, `output_sequence_tokens`, `cached_tokens`, `images_per_request`, `videos_per_request`, `audio_per_request`, `image_tokens_per_request`.
+- Per-deployment configuration gauges, which also carry `worker_type` because a disaggregated deployment's prefill and decode cards advertise different limits: `model_context_length`, `model_kv_cache_block_size`, `model_migration_limit`, `model_total_kv_blocks`, `model_max_num_seqs`, `model_max_num_batched_tokens`.
 - Router scheduler queue metrics, labeled by the namespace whose scheduler owns the queue: `router_queue_pending_requests`, `router_queue_pending_isl_tokens`, `router_queue_pending_cached_tokens`, `router_queue_backpressure_total`.
 
+**Namespace-free**, in three categories:
+
+1. *Recorded before or across worker-set selection.* The request-lifecycle guards are created when the HTTP handler starts, so that failures during model resolution are still counted — at that point no deployment has been chosen. Covers `requests_total`, `requests_started_total`, `request_duration_seconds`, `inflight_requests`, `queued_requests`, `active_requests`, `stage_requests`, `stage_duration_seconds`, and `disconnected_clients`.
+2. *Frontend-internal work that is not per-deployment.* Tokenization, templating, and event-loop health belong to the frontend process itself: `tokenize_seconds`, `template_seconds`, `detokenize_token_count`, `detokenize_total_us`, `tokenizer_latency_ms`, `tokenizer_cache_*`, `event_loop_delay_seconds`, `event_loop_stall_total`.
+3. *Already keyed by worker identity.* The `worker_last_*` gauges carry `worker_id`, `dp_rank`, and `worker_type`, which identify a single worker unambiguously.
+
 <Warning>
-`dynamo_frontend_requests_total`, `dynamo_frontend_request_duration_seconds`, and `dynamo_frontend_inflight_requests` deliberately do **not** carry `dynamo_namespace`. They are recorded from a guard created before a worker set is selected, so that errors raised during model resolution are still counted. In a frontend serving several namespaces they aggregate across all of them.
+`dynamo_router_overhead_*` is a fourth case and a known gap: it is registered on the frontend's own registry with only a `router_id` label, so in a multi-namespace frontend the per-phase routing latencies of every deployment merge into one histogram. A slow namespace is not separable there the way it is on `dynamo_component_router_*`.
 </Warning>
 
 <Note>
 Configuration gauges are per-deployment facts, so they are not additive: aggregate them with `max by (model)`, not `sum`. Counters and additive gauges aggregate with `sum by (model)`; histograms with `histogram_quantile(..., sum by (model, le) (rate(..._bucket[5m])))`.
 </Note>
-
-<ParamField path="dynamo_component" type="string">
-  `[Shared]` Service role of the emitting component. See [Component names](#component-names) for the enumeration of values. Example: `backend`, `prefill`, `router`.
-</ParamField>
-
-<ParamField path="dynamo_endpoint" type="string">
-  `[Shared]` The RPC within that component. See [Endpoint names](#endpoint-names) for the enumeration of values. Example: `generate`, `clear_kv_blocks`, `worker_kv_indexer_query_dp0`.
-</ParamField>
-
-<ParamField path="worker_id" type="string">
-  `[Shared]` Hex-encoded discovery instance ID of the endpoint, providing a stable per-worker identity that does not depend on Kubernetes. Injected only when the endpoint hierarchy has a connection ID. Example: `1a2b3c4d`.
-
-  On the per-worker frontend gauges (`dynamo_frontend_worker_*`) this label carries the worker's etcd lease ID instead. Example: `7890`.
-</ParamField>
 
 ## Registration-time labels
 

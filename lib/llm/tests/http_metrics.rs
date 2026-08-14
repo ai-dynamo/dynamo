@@ -719,7 +719,7 @@ mod integration_tests {
         if let Err(e) = service
             .state()
             .metrics_clone()
-            .update_metrics_from_mdc(&card, "test_ns")
+            .update_metrics_from_mdc(&card, "test_ns", "decode")
         {
             tracing::debug!(
                 model = %card.display_name,

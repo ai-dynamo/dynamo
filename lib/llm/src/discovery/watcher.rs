@@ -198,15 +198,21 @@ fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType)
 
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
-    /// A model became servable in `namespace`. The namespace is carried because
-    /// per-deployment metrics (context length, KV block size, migration limit)
-    /// are keyed by it: one frontend can serve the same model name from several
-    /// namespaces, and without it the later card overwrites the earlier one's
-    /// values. `Removed` needs no namespace — metrics are deliberately retained
-    /// on removal to preserve history.
+    /// A model became servable in `namespace` as `worker_type`. Both are carried
+    /// because the per-deployment metrics (context length, KV block size,
+    /// migration limit, and the runtime-config gauges) are keyed by them.
+    ///
+    /// One frontend can serve the same model name from several namespaces, and
+    /// within one namespace a disaggregated deployment commits a separate group
+    /// per role — `worker_set_key` includes the worker type — so each role emits
+    /// its own `Added`. Keying on model alone, or on model plus namespace, lets
+    /// the later card silently overwrite the earlier one's values. The
+    /// runtime-config gauges in particular are genuinely per-role: prefill and
+    /// decode advertise different batch and sequence limits.
     Added {
         card: ModelDeploymentCard,
         namespace: String,
+        worker_type: String,
     },
     Removed(ModelDeploymentCard),
 }
@@ -1082,14 +1088,23 @@ where
         members: &[DesiredInstance],
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
+        // Keyed by (adapter, namespace): availability dedup is global, but the
+        // per-deployment metrics are not. An adapter already committed from one
+        // namespace must still emit `Added` when it appears in a second, or the
+        // config gauges for (adapter, namespace-B) never exist even though
+        // requests can be served from B.
         let adapter_was_available = adapters
             .iter()
             .map(|adapter| {
                 (
-                    adapter.card.name().to_string(),
-                    self.manager
-                        .get_committed_model(adapter.card.name())
-                        .is_some(),
+                    (
+                        adapter.card.name().to_string(),
+                        adapter.endpoint_id.namespace.clone(),
+                    ),
+                    self.manager.model_has_worker_set_in_namespace(
+                        adapter.card.name(),
+                        &adapter.endpoint_id.namespace,
+                    ),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -1120,18 +1135,31 @@ where
         self.emit_update(ModelUpdate::Added {
             card: prepared.card.clone(),
             namespace: spec.representative.endpoint_id.namespace.clone(),
+            worker_type: effective_worker_type(prepared.card.worker_type, prepared.card.model_type)
+                .as_str()
+                .to_string(),
         });
         let mut adapter_names = HashSet::new();
         for adapter in adapters {
-            if adapter_names.insert(adapter.card.name().to_string())
+            let adapter_key = (
+                adapter.card.name().to_string(),
+                adapter.endpoint_id.namespace.clone(),
+            );
+            if adapter_names.insert(adapter_key.clone())
                 && !adapter_was_available
-                    .get(adapter.card.name())
+                    .get(&adapter_key)
                     .copied()
                     .unwrap_or(false)
             {
                 self.emit_update(ModelUpdate::Added {
                     card: adapter.card.clone(),
                     namespace: adapter.endpoint_id.namespace.clone(),
+                    worker_type: effective_worker_type(
+                        adapter.card.worker_type,
+                        adapter.card.model_type,
+                    )
+                    .as_str()
+                    .to_string(),
                 });
             }
         }
@@ -1197,6 +1225,9 @@ where
                 self.emit_update(ModelUpdate::Added {
                     card: card.clone(),
                     namespace: namespace.clone(),
+                    worker_type: effective_worker_type(card.worker_type, card.model_type)
+                        .as_str()
+                        .to_string(),
                 });
             }
         }

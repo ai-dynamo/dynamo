@@ -547,11 +547,11 @@ pub struct ResponseMetricCollector {
     /// request, so this — not the frontend's own identity — is what attributes a
     /// response to a deployment.
     namespace: String,
-    // Per-model metric handles cached for the request. Most are resolved at construction;
-    // ITL is resolved lazily on its first observation so requests that never produce ITL
-    // do not allocate a local histogram. Caching avoids re-hashing the `model` label on
-    // every chunk or output token. Each handle shares the underlying metric with its vec,
-    // so observations are equivalent.
+    // Per-(model, namespace) metric handles cached for the request. Most are resolved at
+    // construction; ITL is resolved lazily on its first observation so requests that never
+    // produce ITL do not allocate a local histogram. Caching avoids re-hashing the `model`
+    // and `dynamo_namespace` labels on every chunk or output token. Each handle shares the
+    // underlying metric with its vec, so observations are equivalent.
     output_tokens_counter: prometheus::IntCounter,
     time_to_first_token: prometheus::Histogram,
     inter_token_latency: Option<prometheus::local::LocalHistogram>,
@@ -919,7 +919,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_TOTAL_KV_BLOCKS),
                 "Total KV cache blocks available for a worker serving the model",
             ),
-            &["model", labels::NAMESPACE],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -928,7 +928,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_SEQS),
                 "Maximum number of sequences for a worker serving the model",
             ),
-            &["model", labels::NAMESPACE],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -937,7 +937,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_BATCHED_TOKENS),
                 "Maximum number of batched tokens for a worker serving the model",
             ),
-            &["model", labels::NAMESPACE],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -946,7 +946,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_CONTEXT_LENGTH),
                 "Maximum context length in tokens for a worker serving the model",
             ),
-            &["model", labels::NAMESPACE],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -955,7 +955,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_KV_CACHE_BLOCK_SIZE),
                 "KV cache block size in tokens for a worker serving the model",
             ),
-            &["model", labels::NAMESPACE],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -964,7 +964,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_LIMIT),
                 "Maximum number of request migrations allowed for the model",
             ),
-            &["model", labels::NAMESPACE],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -1202,16 +1202,20 @@ impl Metrics {
 
     /// Update runtime configuration metrics for a model in one namespace.
     ///
-    /// `namespace` is required because these are per-deployment facts: the same
-    /// model name served from two namespaces can be configured differently, and
-    /// without the label the second card's values silently overwrite the first's.
+    /// `namespace` and `worker_type` are both required because these are
+    /// per-role, per-deployment facts. The same model name served from two
+    /// namespaces can be configured differently, and within one namespace a
+    /// disaggregated deployment's prefill and decode cards advertise different
+    /// batch and sequence limits. Dropping either label lets the card that
+    /// happens to be committed last silently overwrite the others.
     pub fn update_runtime_config_metrics(
         &self,
         model_name: &str,
         namespace: &str,
+        worker_type: &str,
         runtime_config: &ModelRuntimeConfig,
     ) {
-        let lv: [&str; 2] = [model_name, namespace];
+        let lv: [&str; 3] = [model_name, namespace, worker_type];
         if let Some(total_kv_blocks) = runtime_config.total_kv_blocks {
             self.model_total_kv_blocks
                 .with_label_values(&lv)
@@ -1237,10 +1241,16 @@ impl Metrics {
         &self,
         card: &ModelDeploymentCard,
         namespace: &str,
+        worker_type: &str,
     ) -> anyhow::Result<()> {
-        self.update_runtime_config_metrics(&card.display_name, namespace, &card.runtime_config);
+        self.update_runtime_config_metrics(
+            &card.display_name,
+            namespace,
+            worker_type,
+            &card.runtime_config,
+        );
 
-        let lv: [&str; 2] = [&card.display_name, namespace];
+        let lv: [&str; 3] = [&card.display_name, namespace, worker_type];
         self.model_context_length
             .with_label_values(&lv)
             .set(card.effective_context_length() as i64);
@@ -1256,6 +1266,7 @@ impl Metrics {
         tracing::debug!(
             model = %card.display_name,
             namespace = %namespace,
+            worker_type = %worker_type,
             "Successfully updated MDC metrics"
         );
 
@@ -1610,8 +1621,9 @@ impl std::fmt::Display for ErrorType {
 
 impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String, namespace: String) -> Self {
-        // Resolve the per-model handles once (cheap clones of the vec entries) so the
-        // per-chunk / per-token hot path in `observe_response` does no label hashing.
+        // Resolve the per-(model, namespace) handles once (cheap clones of the vec
+        // entries) so the per-chunk / per-token hot path in `observe_response` does no
+        // label hashing.
         let lv: [&str; 2] = [&model, &namespace];
         let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&lv);
         let time_to_first_token = metrics.time_to_first_token.with_label_values(&lv);
@@ -4077,12 +4089,76 @@ mod tests {
     /// Two namespaces serving the same model name with DIFFERENT deployment
     /// cards must produce two independent gauge series. Before the namespace
     /// label these silently overwrote each other.
+    /// A disaggregated deployment commits one discovery group per role — the
+    /// worker-set key includes the worker type — so prefill and decode each emit
+    /// their own `ModelUpdate::Added` with the *same* model and namespace. Their
+    /// runtime-config values genuinely differ, so without `worker_type` in the
+    /// label set the second card silently overwrites the first.
+    #[test]
+    fn config_gauges_do_not_clobber_across_roles_in_one_namespace() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut prefill = ModelDeploymentCard::default();
+        prefill.display_name = "disagg-model".to_string();
+        prefill.kv_cache_block_size = 16;
+        prefill.runtime_config.max_num_batched_tokens = Some(8192);
+        prefill.runtime_config.max_num_seqs = Some(4);
+
+        let mut decode = prefill.clone();
+        decode.kv_cache_block_size = 64;
+        decode.runtime_config.max_num_batched_tokens = Some(512);
+        decode.runtime_config.max_num_seqs = Some(256);
+
+        metrics
+            .update_metrics_from_mdc(&prefill, "ns-a", "prefill")
+            .unwrap();
+        metrics
+            .update_metrics_from_mdc(&decode, "ns-a", "decode")
+            .unwrap();
+
+        let batched = |role: &str| {
+            metrics
+                .model_max_num_batched_tokens
+                .with_label_values(&["disagg-model", "ns-a", role])
+                .get()
+        };
+        assert_eq!(
+            batched("prefill"),
+            8192,
+            "decode must not overwrite prefill"
+        );
+        assert_eq!(batched("decode"), 512);
+
+        let seqs = |role: &str| {
+            metrics
+                .model_max_num_seqs
+                .with_label_values(&["disagg-model", "ns-a", role])
+                .get()
+        };
+        assert_eq!(seqs("prefill"), 4);
+        assert_eq!(seqs("decode"), 256);
+
+        let block = |role: &str| {
+            metrics
+                .model_kv_cache_block_size
+                .with_label_values(&["disagg-model", "ns-a", role])
+                .get()
+        };
+        assert_eq!(block("prefill"), 16);
+        assert_eq!(block("decode"), 64);
+    }
+
     #[test]
     fn mdc_metrics_do_not_clobber_across_namespaces() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
 
+        // NOTE: ModelDeploymentCard has private fields, so a struct literal with
+        // `..Default::default()` will not compile from this module; default-then-assign
+        // is the only option here.
         let mut card_a = ModelDeploymentCard::default();
         card_a.display_name = "shared-model".to_string();
         card_a.runtime_config.context_length = Some(4096);
@@ -4094,13 +4170,17 @@ mod tests {
         card_b.kv_cache_block_size = 64;
         card_b.migration_limit = 7;
 
-        metrics.update_metrics_from_mdc(&card_a, "ns-a").unwrap();
-        metrics.update_metrics_from_mdc(&card_b, "ns-b").unwrap();
+        metrics
+            .update_metrics_from_mdc(&card_a, "ns-a", "decode")
+            .unwrap();
+        metrics
+            .update_metrics_from_mdc(&card_b, "ns-b", "decode")
+            .unwrap();
 
         let ctx = |ns: &str| {
             metrics
                 .model_context_length
-                .with_label_values(&["shared-model", ns])
+                .with_label_values(&["shared-model", ns, "decode"])
                 .get()
         };
         assert_eq!(ctx("ns-a"), 4096, "ns-a context length must survive ns-b");
@@ -4109,28 +4189,28 @@ mod tests {
         assert_eq!(
             metrics
                 .model_kv_cache_block_size
-                .with_label_values(&["shared-model", "ns-a"])
+                .with_label_values(&["shared-model", "ns-a", "decode"])
                 .get(),
             16
         );
         assert_eq!(
             metrics
                 .model_kv_cache_block_size
-                .with_label_values(&["shared-model", "ns-b"])
+                .with_label_values(&["shared-model", "ns-b", "decode"])
                 .get(),
             64
         );
         assert_eq!(
             metrics
                 .model_migration_limit
-                .with_label_values(&["shared-model", "ns-a"])
+                .with_label_values(&["shared-model", "ns-a", "decode"])
                 .get(),
             1
         );
         assert_eq!(
             metrics
                 .model_migration_limit
-                .with_label_values(&["shared-model", "ns-b"])
+                .with_label_values(&["shared-model", "ns-b", "decode"])
                 .get(),
             7
         );
@@ -4161,20 +4241,20 @@ mod tests {
             max_num_batched_tokens: Some(batched),
             ..Default::default()
         };
-        metrics.update_runtime_config_metrics("m", "ns-a", &cfg(100, 8, 1024));
-        metrics.update_runtime_config_metrics("m", "ns-b", &cfg(250, 16, 2048));
+        metrics.update_runtime_config_metrics("m", "ns-a", "decode", &cfg(100, 8, 1024));
+        metrics.update_runtime_config_metrics("m", "ns-b", "decode", &cfg(250, 16, 2048));
 
         assert_eq!(
             metrics
                 .model_total_kv_blocks
-                .with_label_values(&["m", "ns-a"])
+                .with_label_values(&["m", "ns-a", "decode"])
                 .get(),
             100
         );
         assert_eq!(
             metrics
                 .model_total_kv_blocks
-                .with_label_values(&["m", "ns-b"])
+                .with_label_values(&["m", "ns-b", "decode"])
                 .get(),
             250
         );
@@ -4414,7 +4494,9 @@ mod tests {
 
         let mut card = ModelDeploymentCard::default();
         card.display_name = "join-model".to_string();
-        metrics.update_metrics_from_mdc(&card, "ns-a").unwrap();
+        metrics
+            .update_metrics_from_mdc(&card, "ns-a", "decode")
+            .unwrap();
         let mut c = metrics
             .clone()
             .create_response_collector("join-model", "ns-a");
@@ -4431,10 +4513,31 @@ mod tests {
             names.sort();
             names
         };
+        // The config gauges carry `worker_type` on top of the join key, because a
+        // disaggregated deployment's roles advertise different limits. A join on
+        // (model, dynamo_namespace) therefore still resolves -- with group_left /
+        // group_right for the extra dimension -- so assert the join key is common
+        // to both rather than that the label sets are identical.
+        let join_key = ["dynamo_namespace".to_string(), "model".to_string()];
+        let response_labels = key("dynamo_frontend_output_tokens_total");
+        let config_labels = key("dynamo_frontend_model_context_length");
+        for label in &join_key {
+            assert!(
+                response_labels.contains(label),
+                "response metrics must carry {label}; got {response_labels:?}"
+            );
+            assert!(
+                config_labels.contains(label),
+                "config gauges must carry {label}; got {config_labels:?}"
+            );
+        }
         assert_eq!(
-            key("dynamo_frontend_output_tokens_total"),
-            key("dynamo_frontend_model_context_length"),
-            "response metrics and model-config gauges must share a join key"
+            response_labels, join_key,
+            "response metrics should carry exactly the join key"
+        );
+        assert!(
+            config_labels.contains(&"worker_type".to_string()),
+            "config gauges are per-role and must carry worker_type; got {config_labels:?}"
         );
     }
 
@@ -4452,8 +4555,8 @@ mod tests {
             total_kv_blocks: Some(blocks),
             ..Default::default()
         };
-        metrics.update_runtime_config_metrics("m", "ns-gone", &cfg(100));
-        metrics.update_runtime_config_metrics("m", "ns-live", &cfg(200));
+        metrics.update_runtime_config_metrics("m", "ns-gone", "decode", &cfg(100));
+        metrics.update_runtime_config_metrics("m", "ns-live", "decode", &cfg(200));
 
         // ns-gone is torn down; nothing clears its series.
         let total: i64 = registry
