@@ -74,12 +74,19 @@ mod tests {
         let connection_info = registered.connection_info.clone();
         let downstream =
             Context::with_id_and_metadata((), upstream.id().to_string(), Default::default());
-        let mut receiver =
-            client::TcpClient::create_request_stream(downstream.context(), connection_info, None)
-                .await
-                .unwrap();
+        let mut receiver = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client::TcpClient::create_request_stream(downstream.context(), connection_info, None),
+        )
+        .await
+        .expect("request callback connection timed out")
+        .unwrap();
         let (_, provider) = registered.into_parts();
-        let sender = provider.await.unwrap().unwrap();
+        let sender = tokio::time::timeout(std::time::Duration::from_secs(2), provider)
+            .await
+            .expect("request callback handshake timed out")
+            .unwrap()
+            .unwrap();
         sender
             .send(Bytes::from_static(b"request-frame"))
             .await
@@ -90,5 +97,6 @@ mod tests {
         );
         drop(sender);
         assert!(receiver.rx.recv().await.is_none());
+        assert!(!downstream.context().is_killed());
     }
 }

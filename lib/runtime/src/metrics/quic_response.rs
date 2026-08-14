@@ -3,10 +3,12 @@
 
 //! Low-cardinality metrics for the fixed-lane QUIC response transport.
 
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, Weak};
 
 use parking_lot::Mutex;
-use prometheus::{Histogram, HistogramOpts, HistogramVec, IntCounter, IntGauge, Opts};
+use prometheus::{
+    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
+};
 
 use crate::MetricsRegistry;
 
@@ -128,18 +130,6 @@ pub static FIRST_DATA_AFTER_PROLOGUE_SECONDS: LazyLock<Histogram> = LazyLock::ne
     )
     .unwrap()
 });
-pub static SERVER_DELIVERY_BLOCKED_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
-    Histogram::with_opts(
-        HistogramOpts::new(
-            "dynamo_quic_response_server_delivery_blocked_seconds",
-            "Frontend lane-reader wait after one response mailbox is full",
-        )
-        .buckets(vec![
-            0.000_01, 0.000_1, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0,
-        ]),
-    )
-    .unwrap()
-});
 pub static FIRST_DATA_DELIVERY_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
     Histogram::with_opts(
         HistogramOpts::new(
@@ -152,11 +142,14 @@ pub static FIRST_DATA_DELIVERY_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
     )
     .unwrap()
 });
-pub static SERVER_DELIVERY_BLOCKED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    IntCounter::with_opts(Opts::new(
-        "dynamo_quic_response_server_delivery_blocked_total",
-        "Data frames that found a full frontend response mailbox",
-    ))
+pub static SERVER_MAILBOX_RESETS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "dynamo_quic_response_server_mailbox_resets_total",
+            "Logical responses reset because the frontend response mailbox was unavailable",
+        ),
+        &["reason"],
+    )
     .unwrap()
 });
 
@@ -204,19 +197,40 @@ transport_gauge!(
 
 static CONNECTIONS: LazyLock<Mutex<Vec<quinn::Connection>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
-static REGISTERED: OnceLock<()> = OnceLock::new();
+type PrometheusRegistryLock = std::sync::RwLock<prometheus::Registry>;
+static REGISTERED: LazyLock<Mutex<Vec<Weak<PrometheusRegistryLock>>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub fn track_connection(connection: quinn::Connection) {
     CONNECTIONS_ESTABLISHED.inc();
     CONNECTIONS.lock().push(connection.clone());
     tokio::spawn(async move {
+        let connection_id = connection.stable_id();
         let _ = connection.closed().await;
         CONNECTIONS_CLOSED.inc();
+        CONNECTIONS
+            .lock()
+            .retain(|candidate| candidate.stable_id() != connection_id);
     });
 }
 
+#[cfg(test)]
+pub(crate) fn is_connection_tracked(connection_id: usize) -> bool {
+    CONNECTIONS
+        .lock()
+        .iter()
+        .any(|connection| connection.stable_id() == connection_id)
+}
+
 pub fn ensure_registered(registry: &MetricsRegistry) {
-    REGISTERED.get_or_init(|| {
+    let mut registered = REGISTERED.lock();
+    registered.retain(|candidate| candidate.strong_count() != 0);
+    if !registered.iter().any(|candidate| {
+        candidate
+            .upgrade()
+            .is_some_and(|current| Arc::ptr_eq(&current, &registry.prometheus_registry))
+    }) {
+        registered.push(Arc::downgrade(&registry.prometheus_registry));
         macro_rules! register {
             ($metric:ident) => {
                 registry.add_metric_or_warn(Box::new($metric.clone()), stringify!($metric));
@@ -233,9 +247,8 @@ pub fn ensure_registered(registry: &MetricsRegistry) {
         register!(WRITER_WRITE_SECONDS);
         register!(SETUP_SECONDS);
         register!(FIRST_DATA_AFTER_PROLOGUE_SECONDS);
-        register!(SERVER_DELIVERY_BLOCKED_SECONDS);
         register!(FIRST_DATA_DELIVERY_SECONDS);
-        register!(SERVER_DELIVERY_BLOCKED_TOTAL);
+        register!(SERVER_MAILBOX_RESETS_TOTAL);
         register!(UDP_TX_DATAGRAMS);
         register!(UDP_RX_DATAGRAMS);
         register!(LOST_PACKETS);
@@ -247,7 +260,7 @@ pub fn ensure_registered(registry: &MetricsRegistry) {
             update_transport_stats();
             Ok(())
         }));
-    });
+    }
 }
 
 fn update_transport_stats() {
@@ -282,4 +295,38 @@ fn update_transport_stats() {
 
 fn as_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_metrics_and_callback_once_per_registry() {
+        let first = MetricsRegistry::new();
+        let second = MetricsRegistry::new();
+        ensure_registered(&first);
+        ensure_registered(&first);
+        ensure_registered(&second);
+
+        for registry in [&first, &second] {
+            let names = registry
+                .prometheus_registry
+                .read()
+                .unwrap()
+                .gather()
+                .into_iter()
+                .map(|family| family.name().to_string())
+                .collect::<Vec<_>>();
+            assert!(
+                names
+                    .iter()
+                    .any(|name| name == "dynamo_quic_response_batches_total")
+            );
+            assert_eq!(
+                registry.prometheus_update_callbacks.read().unwrap().len(),
+                1
+            );
+        }
+    }
 }

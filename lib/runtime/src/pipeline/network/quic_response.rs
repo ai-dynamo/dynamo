@@ -20,8 +20,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use arc_swap::ArcSwapOption;
 use bytes::{BufMut, Bytes, BytesMut};
 use crossbeam_queue::SegQueue;
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use prometheus::IntCounter;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -49,8 +51,8 @@ use crate::{
 };
 
 pub const TRANSPORT_NAME: &str = "quic-response";
-const PROTOCOL_VERSION: u8 = 2;
-const ALPN: &[u8] = b"dynamo-response-v1";
+const PROTOCOL_VERSION: u8 = 3;
+const ALPN: &[u8] = b"dynamo-response-v2";
 const DEFAULT_CONNECTIONS: usize = 8;
 const MIN_CONNECTIONS: usize = 1;
 const MAX_CONNECTIONS: usize = 8;
@@ -75,7 +77,10 @@ const RECEIVE_BUFFER_CAPACITY: usize = 256 * 1024;
 // A single frontend UDP socket is limited by the host receive-buffer ceiling.
 // Reuse-port endpoints preserve one advertised address while spreading QUIC
 // connections and receive queues across several sockets.
+#[cfg(target_os = "linux")]
 const SERVER_ENDPOINTS: usize = 8;
+#[cfg(not(target_os = "linux"))]
+const SERVER_ENDPOINTS: usize = 1;
 const MAX_FRAME_PAYLOAD: usize = 32 * 1024 * 1024;
 const RESPONSE_BUFFER_CAPACITY: usize = 64;
 const MAX_RESPONSE_BUFFER_CAPACITY: usize = 65_536;
@@ -215,6 +220,8 @@ enum FrameKind {
     FirstData = 8,
     PriorityEnd = 9,
     Bundle = 10,
+    Register = 11,
+    Registered = 12,
 }
 
 impl TryFrom<u8> for FrameKind {
@@ -232,6 +239,8 @@ impl TryFrom<u8> for FrameKind {
             8 => Ok(Self::FirstData),
             9 => Ok(Self::PriorityEnd),
             10 => Ok(Self::Bundle),
+            11 => Ok(Self::Register),
+            12 => Ok(Self::Registered),
             _ => bail!("unknown QUIC response frame kind {value}"),
         }
     }
@@ -242,7 +251,7 @@ struct Frame {
     kind: FrameKind,
     registration_id: Uuid,
     payload: Bytes,
-    queued_at: Instant,
+    queued_at: Option<Instant>,
     diagnostic_kind: Option<&'static str>,
 }
 
@@ -252,20 +261,14 @@ impl Frame {
             kind,
             registration_id,
             payload,
-            queued_at: Instant::now(),
             diagnostic_kind: match kind {
                 FrameKind::Prologue => Some("prologue"),
                 FrameKind::FirstData => Some("first_data"),
                 _ => None,
             },
+            queued_at: matches!(kind, FrameKind::Prologue | FrameKind::FirstData)
+                .then(Instant::now),
         }
-    }
-
-    fn is_urgent(&self) -> bool {
-        matches!(
-            self.kind,
-            FrameKind::Prologue | FrameKind::Error | FrameKind::FirstData | FrameKind::PriorityEnd
-        )
     }
 
     fn header(&self) -> Bytes {
@@ -291,7 +294,13 @@ where
     }
     let mut payload = BytesMut::zeroed(payload_len);
     recv.read_exact(&mut payload).await?;
-    Ok(Frame::new(kind, registration_id, payload.freeze()))
+    Ok(Frame {
+        kind,
+        registration_id,
+        payload: payload.freeze(),
+        queued_at: None,
+        diagnostic_kind: None,
+    })
 }
 
 struct LaneSender(Arc<LaneQueue>);
@@ -299,9 +308,7 @@ struct LaneSender(Arc<LaneQueue>);
 struct LaneReceiver(Arc<LaneQueue>);
 
 struct LaneQueue {
-    urgent_frames: SegQueue<Frame>,
     frames: SegQueue<Frame>,
-    urgent_slots: Semaphore,
     slots: Semaphore,
     ready: Notify,
     scheduled: AtomicBool,
@@ -320,9 +327,7 @@ enum LaneTrySendError {
 impl LaneQueue {
     fn new(capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            urgent_frames: SegQueue::new(),
             frames: SegQueue::new(),
-            urgent_slots: Semaphore::new(capacity),
             slots: Semaphore::new(capacity),
             ready: Notify::new(),
             scheduled: AtomicBool::new(false),
@@ -341,11 +346,7 @@ impl LaneQueue {
         if self.closed.load(Ordering::Acquire) {
             return Err(frame);
         }
-        if frame.is_urgent() {
-            self.urgent_frames.push(frame);
-        } else {
-            self.frames.push(frame);
-        }
+        self.frames.push(frame);
         permit.forget();
         if !self.scheduled.swap(true, Ordering::AcqRel) {
             #[cfg(test)]
@@ -356,12 +357,7 @@ impl LaneQueue {
     }
 
     fn try_send(&self, frame: Frame) -> std::result::Result<(), LaneTrySendError> {
-        let slots = if frame.is_urgent() {
-            &self.urgent_slots
-        } else {
-            &self.slots
-        };
-        let permit = match slots.try_acquire() {
+        let permit = match self.slots.try_acquire() {
             Ok(permit) => permit,
             Err(tokio::sync::TryAcquireError::Closed) => {
                 return Err(LaneTrySendError::Closed(frame));
@@ -375,12 +371,8 @@ impl LaneQueue {
     }
 
     async fn send(&self, frame: Frame) -> Result<()> {
-        let slots = if frame.is_urgent() {
-            &self.urgent_slots
-        } else {
-            &self.slots
-        };
-        let permit = slots
+        let permit = self
+            .slots
             .acquire()
             .await
             .map_err(|_| anyhow!("QUIC response lane closed"))?;
@@ -390,35 +382,23 @@ impl LaneQueue {
 
     fn drain(&self, batch: &mut Vec<Frame>, limit: usize) -> usize {
         let initial_len = batch.len();
-        let mut urgent_count = 0;
-        while batch.len() - initial_len < limit {
-            let Some(frame) = self.urgent_frames.pop() else {
-                break;
-            };
-            batch.push(frame);
-            urgent_count += 1;
-        }
-        let normal_start = batch.len();
         while batch.len() - initial_len < limit {
             let Some(frame) = self.frames.pop() else {
                 break;
             };
             batch.push(frame);
         }
-        let normal_count = batch.len() - normal_start;
-        if urgent_count != 0 {
-            self.urgent_slots.add_permits(urgent_count);
+        let count = batch.len() - initial_len;
+        if count != 0 {
+            self.slots.add_permits(count);
         }
-        if normal_count != 0 {
-            self.slots.add_permits(normal_count);
-        }
-        urgent_count + normal_count
+        count
     }
 
     async fn recv_many(&self, batch: &mut Vec<Frame>, limit: usize) -> usize {
         loop {
-            let notified = self.ready.notified();
-            tokio::pin!(notified);
+            let mut notified = Box::pin(self.ready.notified());
+            notified.as_mut().enable();
             let count = self.drain(batch, limit);
             if count != 0 {
                 return count;
@@ -430,7 +410,7 @@ impl LaneQueue {
             // it idle after observing an empty queue, then recheck to close the
             // producer/consumer race without a lock.
             self.scheduled.store(false, Ordering::Release);
-            if !self.urgent_frames.is_empty() || !self.frames.is_empty() {
+            if !self.frames.is_empty() {
                 self.scheduled.store(true, Ordering::Release);
                 continue;
             }
@@ -440,28 +420,19 @@ impl LaneQueue {
 
     fn close_sender(&self) {
         self.closed.store(true, Ordering::Release);
-        self.urgent_slots.close();
         self.slots.close();
         self.ready.notify_waiters();
     }
 
     fn close_receiver(&self) {
         self.closed.store(true, Ordering::Release);
-        let mut discarded_urgent = 0;
-        while self.urgent_frames.pop().is_some() {
-            discarded_urgent += 1;
-        }
-        let mut discarded_normal = 0;
+        let mut discarded = 0;
         while self.frames.pop().is_some() {
-            discarded_normal += 1;
+            discarded += 1;
         }
-        if discarded_urgent != 0 {
-            self.urgent_slots.add_permits(discarded_urgent);
+        if discarded != 0 {
+            self.slots.add_permits(discarded);
         }
-        if discarded_normal != 0 {
-            self.slots.add_permits(discarded_normal);
-        }
-        self.urgent_slots.close();
         self.slots.close();
         self.ready.notify_waiters();
     }
@@ -536,10 +507,12 @@ async fn receive_batch(
         return Some(batch_started.elapsed());
     }
     let deadline = Instant::now() + interval;
+    let sleep = sleep_until(deadline);
+    tokio::pin!(sleep);
     while batch.len() < max_batch_frames {
         tokio::select! {
             biased;
-            _ = sleep_until(deadline) => break,
+            _ = &mut sleep => break,
             count = receiver.recv_many(batch, max_batch_frames - batch.len()) => {
                 if count == 0 {
                     break;
@@ -564,6 +537,7 @@ struct ServerIndexes {
     instance_registrations: HashMap<EndpointInstanceId, Vec<Uuid>>,
     removed_instances: HashMap<EndpointInstanceId, Instant>,
     connection_bundles: HashMap<usize, Uuid>,
+    bundle_connections: HashMap<Uuid, HashMap<usize, quinn::Connection>>,
 }
 
 struct ServerState {
@@ -773,14 +747,15 @@ impl QuicResponseServer {
             certificate_sha256,
             state: Arc::new(ServerState::default()),
             response_buffer_capacity: response_config.response_buffer_capacity,
-            shutdown,
+            shutdown: shutdown.child_token(),
         });
         Self::spawn_accept_loop(&server);
         Ok(server)
     }
 
     fn spawn_accept_loop(server: &Arc<Self>) {
-        for endpoint in server.endpoints.iter().cloned() {
+        for endpoint in server.endpoints.iter() {
+            let endpoint = endpoint.clone();
             let state = server.state.clone();
             let response_buffer_capacity = server.response_buffer_capacity;
             let shutdown = server.shutdown.clone();
@@ -844,9 +819,11 @@ impl QuicResponseServer {
         .into();
 
         let state = self.state.clone();
-        RegisteredStream::new(connection_info, pending_rx).with_cleanup(move || {
-            remove_registration(&state, registration_id);
-        })
+        RegisteredStream::new(connection_info, pending_rx)
+            .with_registration_id(registration_id)
+            .with_cleanup(move || {
+                remove_registration(&state, registration_id);
+            })
     }
 
     pub async fn associate_instance(&self, registration_id: Uuid, id: &EndpointInstanceId) -> bool {
@@ -900,6 +877,15 @@ impl QuicResponseServer {
     }
 }
 
+impl Drop for QuicResponseServer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        for endpoint in self.endpoints.iter() {
+            endpoint.close(quinn::VarInt::from_u32(0), b"response server dropped");
+        }
+    }
+}
+
 fn bind_reuseport_udp(address: SocketAddr) -> std::io::Result<UdpSocket> {
     let socket = Socket::new(
         Domain::for_address(address),
@@ -936,6 +922,27 @@ fn remove_registration(state: &ServerState, registration_id: Uuid) {
     remove_registration_data(state, registration_id);
 }
 
+fn fail_registration(state: &ServerState, registration_id: Uuid, reason: &str) {
+    let mut indexes = state.indexes.lock();
+    if let Some(instance) = indexes.registration_instance.remove(&registration_id)
+        && let Some(registrations) = indexes.instance_registrations.get_mut(&instance)
+    {
+        registrations.retain(|candidate| *candidate != registration_id);
+        if registrations.is_empty() {
+            indexes.instance_registrations.remove(&instance);
+        }
+    }
+    drop(indexes);
+
+    let mut registration = state.registration(registration_id).lock();
+    if let Some(pending) = registration.pending.remove(&registration_id) {
+        let _ = pending.connection.send(Err(reason.to_string()));
+    }
+    if let Some(active) = registration.active.remove(&registration_id) {
+        active.monitor_cancel.cancel();
+    }
+}
+
 async fn run_server_connection(
     connection: quinn::Connection,
     state: Arc<ServerState>,
@@ -953,7 +960,7 @@ async fn run_server_connection(
                     let result = run_server_lane(
                         send,
                         recv,
-                        connection_id,
+                        lane_connection.clone(),
                         lane_state.clone(),
                         response_buffer_capacity,
                     )
@@ -979,9 +986,10 @@ async fn run_server_connection(
 
 fn register_server_connection_bundle(
     state: &ServerState,
-    connection_id: usize,
+    connection: quinn::Connection,
     bundle_id: Uuid,
 ) -> Result<()> {
+    let connection_id = connection.stable_id();
     let mut indexes = state.indexes.lock();
     if let Some(existing) = indexes.connection_bundles.get(&connection_id)
         && *existing != bundle_id
@@ -991,11 +999,16 @@ fn register_server_connection_bundle(
         );
     }
     indexes.connection_bundles.insert(connection_id, bundle_id);
+    indexes
+        .bundle_connections
+        .entry(bundle_id)
+        .or_default()
+        .insert(connection_id, connection);
     Ok(())
 }
 
 fn fail_server_connection(state: &ServerState, connection_id: usize) {
-    let bundle_id = {
+    let (bundle_id, connections) = {
         let mut indexes = state.indexes.lock();
         let Some(bundle_id) = indexes.connection_bundles.remove(&connection_id) else {
             return;
@@ -1003,39 +1016,52 @@ fn fail_server_connection(state: &ServerState, connection_id: usize) {
         indexes
             .connection_bundles
             .retain(|_, candidate| *candidate != bundle_id);
-        bundle_id
+        let connections = indexes
+            .bundle_connections
+            .remove(&bundle_id)
+            .unwrap_or_default()
+            .into_values()
+            .collect::<Vec<_>>();
+        (bundle_id, connections)
     };
-    let doomed: Vec<Uuid> = state
+
+    for connection in connections {
+        connection.close(
+            CLOSE_CODE_INVARIANT,
+            b"response connection bundle invariant failure",
+        );
+    }
+
+    let doomed = state
         .registrations
         .iter()
-        .flat_map(|registration| {
-            let registration = registration.lock();
-            registration
+        .flat_map(|shard| {
+            let shard = shard.lock();
+            shard
                 .pending
                 .iter()
                 .filter_map(|(registration_id, pending)| {
                     (pending.bundle_id == Some(bundle_id)).then_some(*registration_id)
                 })
-                .chain(
-                    registration
-                        .active
-                        .iter()
-                        .filter_map(|(registration_id, active)| {
-                            (active.bundle_id == bundle_id).then_some(*registration_id)
-                        }),
-                )
+                .chain(shard.active.iter().filter_map(|(registration_id, active)| {
+                    (active.bundle_id == bundle_id).then_some(*registration_id)
+                }))
                 .collect::<Vec<_>>()
         })
-        .collect();
+        .collect::<Vec<_>>();
     for registration_id in doomed {
-        remove_registration(state, registration_id);
+        fail_registration(
+            state,
+            registration_id,
+            "QUIC response connection bundle failed before stream establishment",
+        );
     }
 }
 
 async fn run_server_lane(
     mut send: quinn::SendStream,
     recv: quinn::RecvStream,
-    connection_id: usize,
+    connection: quinn::Connection,
     state: Arc<ServerState>,
     response_buffer_capacity: usize,
 ) -> Result<()> {
@@ -1045,7 +1071,7 @@ async fn run_server_lane(
         bail!("QUIC response lane did not start with a bundle frame");
     }
     let bundle_id = bundle.registration_id;
-    register_server_connection_bundle(&state, connection_id, bundle_id)?;
+    register_server_connection_bundle(&state, connection, bundle_id)?;
 
     let (control_tx, mut control_rx) = mpsc::channel::<Frame>(RESPONSE_BUFFER_CAPACITY);
     let mut writer = tokio::spawn(async move {
@@ -1094,39 +1120,64 @@ async fn process_server_frame(
     response_buffer_capacity: usize,
 ) -> Result<()> {
     match frame.kind {
+        FrameKind::Register => {
+            if !frame.payload.is_empty() {
+                bail!("QUIC response Register frame carried a payload");
+            }
+            {
+                let mut registration = state.registration(frame.registration_id).lock();
+                let Some(pending) = registration.pending.get_mut(&frame.registration_id) else {
+                    send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
+                    return Ok(());
+                };
+                match pending.bundle_id {
+                    Some(existing) if existing != bundle_id => {
+                        bail!(
+                            "QUIC response registration {} changed bundle id from {} to {}",
+                            frame.registration_id,
+                            existing,
+                            bundle_id
+                        );
+                    }
+                    Some(_) => {}
+                    None => pending.bundle_id = Some(bundle_id),
+                }
+            }
+            // Bundle ownership is visible before the worker is allowed to call
+            // generate(), so a pre-prologue bundle failure can resolve the
+            // pending provider with an error.
+            send_control(control_tx, FrameKind::Registered, frame.registration_id)?;
+        }
         FrameKind::Prologue => {
             if !frame.payload.is_empty() {
                 bail!("QUIC response Prologue frame carried a payload");
             }
-            let Some(pending) = state
-                .registration(frame.registration_id)
-                .lock()
-                .pending
-                .remove(&frame.registration_id)
-            else {
-                send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
-                return Ok(());
-            };
-            if let Some(pending_bundle) = pending.bundle_id
-                && pending_bundle != bundle_id
-            {
-                bail!(
-                    "QUIC response registration {} changed bundle id from {} to {}",
-                    frame.registration_id,
-                    pending_bundle,
-                    bundle_id
-                );
-            }
-            crate::metrics::quic_response::SETUP_SECONDS
-                .observe(pending.registered_at.elapsed().as_secs_f64());
             let (response_tx, response_rx) = mpsc::channel(response_buffer_capacity);
             let monitor_cancel = CancellationToken::new();
             let prologue_received_at = Instant::now();
-            state
-                .registration(frame.registration_id)
-                .lock()
-                .active
-                .insert(
+            let (pending_context, pending_connection) = {
+                let mut registration = state.registration(frame.registration_id).lock();
+                let Some(pending) = registration.pending.remove(&frame.registration_id) else {
+                    send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
+                    return Ok(());
+                };
+                let PendingResponse {
+                    context,
+                    connection,
+                    registered_at,
+                    bundle_id: pending_bundle,
+                    deferred,
+                } = pending;
+                if pending_bundle != Some(bundle_id) {
+                    bail!(
+                        "QUIC response registration {} was not registered to bundle {}",
+                        frame.registration_id,
+                        bundle_id
+                    );
+                }
+                crate::metrics::quic_response::SETUP_SECONDS
+                    .observe(registered_at.elapsed().as_secs_f64());
+                registration.active.insert(
                     frame.registration_id,
                     ActiveResponse {
                         sender: response_tx.clone(),
@@ -1135,21 +1186,22 @@ async fn process_server_frame(
                         prologue_received_at,
                         priority_ready: false,
                         priority_draining: false,
-                        deferred: pending.deferred,
+                        deferred,
                     },
                 );
-            if pending
-                .connection
+                (context, connection)
+            };
+            if pending_connection
                 .send(Ok(StreamReceiver { rx: response_rx }))
                 .is_err()
             {
                 remove_registration(state, frame.registration_id);
-                send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                 return Ok(());
             }
 
             spawn_response_monitor(
-                pending.context,
+                pending_context,
                 response_tx,
                 frame.registration_id,
                 control_tx.clone(),
@@ -1178,7 +1230,7 @@ async fn process_server_frame(
                 let _ = pending.connection.send(Err(error));
                 remove_registration(state, frame.registration_id);
             } else {
-                send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
             }
         }
         FrameKind::FirstData | FrameKind::PriorityEnd => {
@@ -1203,7 +1255,7 @@ async fn process_server_frame(
                 }
             };
             let Some((sender, prologue_received_at)) = active else {
-                send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                 return Ok(());
             };
 
@@ -1211,11 +1263,11 @@ async fn process_server_frame(
                 crate::metrics::quic_response::FIRST_DATA_AFTER_PROLOGUE_SECONDS
                     .observe(prologue_received_at.elapsed().as_secs_f64());
                 let delivery_started = Instant::now();
-                let delivered = deliver_server_payload(&sender, payload).await;
+                let delivery = deliver_server_payload(&sender, payload);
                 crate::metrics::quic_response::FIRST_DATA_DELIVERY_SECONDS
                     .observe(delivery_started.elapsed().as_secs_f64());
-                if !delivered {
-                    send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                if let Delivery::Reset(reason) = delivery {
+                    reset_registration(state, control_tx, frame.registration_id, reason)?;
                     return Ok(());
                 }
             }
@@ -1275,12 +1327,12 @@ async fn process_server_frame(
             match disposition {
                 Disposition::Deferred => {}
                 Disposition::Deliver(sender, payload) => {
-                    if !deliver_server_payload(&sender, payload).await {
-                        send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                    if let Delivery::Reset(reason) = deliver_server_payload(&sender, payload) {
+                        reset_registration(state, control_tx, frame.registration_id, reason)?;
                     }
                 }
                 Disposition::Reset => {
-                    send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                    send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                 }
                 Disposition::Overflow => {
                     tracing::warn!(
@@ -1288,7 +1340,7 @@ async fn process_server_frame(
                         "QUIC response deferred-data bound exceeded"
                     );
                     remove_registration(state, frame.registration_id);
-                    send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                    send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                 }
             }
         }
@@ -1338,31 +1390,46 @@ async fn process_server_frame(
                 0 => {}
                 1 => remove_registration(state, frame.registration_id),
                 2 => {
-                    send_control(control_tx, FrameKind::Reset, frame.registration_id).await?;
+                    send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                 }
                 _ => unreachable!(),
             }
         }
-        FrameKind::Stop | FrameKind::Kill | FrameKind::Reset | FrameKind::Bundle => {
+        FrameKind::Stop
+        | FrameKind::Kill
+        | FrameKind::Reset
+        | FrameKind::Registered
+        | FrameKind::Bundle => {
             bail!("worker sent reverse-only control frame {:?}", frame.kind)
         }
     }
     Ok(())
 }
 
-async fn deliver_server_payload(sender: &mpsc::Sender<Bytes>, payload: Bytes) -> bool {
+enum Delivery {
+    Delivered,
+    Reset(&'static str),
+}
+
+fn deliver_server_payload(sender: &mpsc::Sender<Bytes>, payload: Bytes) -> Delivery {
     match sender.try_send(payload) {
-        Ok(()) => true,
-        Err(mpsc::error::TrySendError::Full(payload)) => {
-            crate::metrics::quic_response::SERVER_DELIVERY_BLOCKED_TOTAL.inc();
-            let blocked_at = Instant::now();
-            let delivered = sender.send(payload).await.is_ok();
-            crate::metrics::quic_response::SERVER_DELIVERY_BLOCKED_SECONDS
-                .observe(blocked_at.elapsed().as_secs_f64());
-            delivered
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Ok(()) => Delivery::Delivered,
+        Err(mpsc::error::TrySendError::Full(_)) => Delivery::Reset("full"),
+        Err(mpsc::error::TrySendError::Closed(_)) => Delivery::Reset("closed"),
     }
+}
+
+fn reset_registration(
+    state: &ServerState,
+    control_tx: &mpsc::Sender<Frame>,
+    registration_id: Uuid,
+    reason: &'static str,
+) -> Result<()> {
+    crate::metrics::quic_response::SERVER_MAILBOX_RESETS_TOTAL
+        .with_label_values(&[reason])
+        .inc();
+    remove_registration(state, registration_id);
+    send_control(control_tx, FrameKind::Reset, registration_id)
 }
 
 async fn drain_deferred_response(
@@ -1394,8 +1461,8 @@ async fn drain_deferred_response(
         }
 
         for payload in deferred {
-            if !deliver_server_payload(sender, payload).await {
-                send_control(control_tx, FrameKind::Reset, registration_id).await?;
+            if let Delivery::Reset(reason) = deliver_server_payload(sender, payload) {
+                reset_registration(state, control_tx, registration_id, reason)?;
                 return Ok(());
             }
         }
@@ -1422,10 +1489,7 @@ fn spawn_response_monitor(
                 _ = &mut stopped, if !stop_sent => FrameKind::Stop,
                 _ = &mut closed => FrameKind::Reset,
             };
-            if send_control(&control_tx, kind, registration_id)
-                .await
-                .is_err()
-            {
+            if send_control(&control_tx, kind, registration_id).is_err() {
                 return;
             }
             if kind == FrameKind::Stop {
@@ -1437,15 +1501,14 @@ fn spawn_response_monitor(
     });
 }
 
-async fn send_control(
+fn send_control(
     control_tx: &mpsc::Sender<Frame>,
     kind: FrameKind,
     registration_id: Uuid,
 ) -> Result<()> {
     control_tx
-        .send(Frame::new(kind, registration_id, Bytes::new()))
-        .await
-        .map_err(|_| anyhow!("QUIC response reverse-control lane closed"))
+        .try_send(Frame::new(kind, registration_id, Bytes::new()))
+        .map_err(|error| anyhow!("QUIC response reverse-control enqueue failed: {error}"))
 }
 
 struct Lane {
@@ -1459,6 +1522,7 @@ struct ResponseLanes {
 }
 
 struct ClientConnectionBundle {
+    _endpoints: Arc<[quinn::Endpoint]>,
     connections: Arc<[quinn::Connection]>,
     lanes: Arc<[ResponseLanes]>,
     contexts: Arc<Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>>,
@@ -1468,10 +1532,6 @@ struct ClientConnectionBundle {
 impl ClientConnectionBundle {
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
-            && self
-                .connections
-                .iter()
-                .all(|connection| connection.close_reason().is_none())
     }
 }
 
@@ -1482,13 +1542,23 @@ struct ConnectionKey {
     certificate_sha256: String,
 }
 
+struct ClientPoolEntry {
+    current: ArcSwapOption<ClientConnectionBundle>,
+    reconnect: tokio::sync::Mutex<()>,
+}
+
+impl ClientPoolEntry {
+    fn new() -> Self {
+        Self {
+            current: ArcSwapOption::empty(),
+            reconnect: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
 pub struct QuicResponseClientPool {
     config: QuicResponseConfig,
-    // Keep one UDP socket per QUIC connection. Tyche's unprivileged UDP
-    // receive buffer is small, so sharing one socket across every connection
-    // can drop ACKs even when the NIC and softnet layers are healthy.
-    endpoints: Mutex<HashMap<ConnectionKey, Vec<quinn::Endpoint>>>,
-    connections: tokio::sync::Mutex<HashMap<ConnectionKey, Arc<ClientConnectionBundle>>>,
+    connections: DashMap<ConnectionKey, Arc<ClientPoolEntry>>,
 }
 
 static PROCESS_CLIENT_POOL: OnceLock<Arc<QuicResponseClientPool>> = OnceLock::new();
@@ -1498,11 +1568,7 @@ pub fn process_client_pool_from_env() -> Result<Arc<QuicResponseClientPool>, Pip
         return Ok(pool.clone());
     }
     let pool = QuicResponseClientPool::from_env()?;
-    let _ = PROCESS_CLIENT_POOL.set(pool);
-    Ok(PROCESS_CLIENT_POOL
-        .get()
-        .expect("QUIC response client pool was just initialized")
-        .clone())
+    Ok(PROCESS_CLIENT_POOL.get_or_init(|| pool).clone())
 }
 
 impl fmt::Debug for QuicResponseClientPool {
@@ -1517,8 +1583,7 @@ impl QuicResponseClientPool {
     pub fn from_env() -> Result<Arc<Self>, PipelineError> {
         Ok(Arc::new(Self {
             config: QuicResponseConfig::from_env()?,
-            endpoints: Mutex::new(HashMap::new()),
-            connections: tokio::sync::Mutex::new(HashMap::new()),
+            connections: DashMap::new(),
         }))
     }
 
@@ -1554,15 +1619,18 @@ impl QuicResponseClientPool {
         let connection = self.connection(key).await?;
         let lane_index = xxh3_64(info.request_id.as_bytes()) as usize % connection.lanes.len();
         let lanes = &connection.lanes[lane_index];
-        connection.contexts.lock().insert(
-            info.registration_id,
-            Arc::new(ClientResponseContext {
-                context,
-                cancellation_counter,
-                cancellation_recorded: AtomicBool::new(false),
-            }),
-        );
-        Ok(QuicResponseSender {
+        let (registered_tx, registered_rx) = oneshot::channel();
+        let response_context = Arc::new(ClientResponseContext {
+            context: context.clone(),
+            cancellation_counter,
+            cancellation_recorded: AtomicBool::new(false),
+            registered: Mutex::new(Some(registered_tx)),
+        });
+        connection
+            .contexts
+            .lock()
+            .insert(info.registration_id, response_context);
+        let sender = QuicResponseSender {
             lane: lanes.ordered.clone(),
             priority_lane: lanes.priority.clone(),
             contexts: connection.contexts.clone(),
@@ -1570,22 +1638,60 @@ impl QuicResponseClientPool {
             prologue_sent: false,
             terminated: false,
             first_data_sent: AtomicBool::new(false),
-        })
+        };
+
+        if let Err(error) = sender
+            .enqueue_on(
+                &sender.priority_lane,
+                Frame::new(FrameKind::Register, info.registration_id, Bytes::new()),
+            )
+            .await
+        {
+            connection.contexts.lock().remove(&info.registration_id);
+            return Err(error);
+        }
+
+        let killed = context.killed();
+        let stopped = context.stopped();
+        tokio::pin!(killed, stopped);
+        let registered = tokio::select! {
+            result = registered_rx => result
+                .map_err(|_| anyhow!("QUIC response registration acknowledgement was dropped"))?,
+            _ = &mut killed => Err("QUIC response registration was killed".to_string()),
+            _ = &mut stopped => Err("QUIC response registration was stopped".to_string()),
+        };
+        if let Err(error) = registered {
+            connection.contexts.lock().remove(&info.registration_id);
+            let _ = sender.priority_lane.sender.try_send(Frame::new(
+                FrameKind::Error,
+                info.registration_id,
+                Bytes::from(error.clone()),
+            ));
+            bail!(error);
+        }
+        Ok(sender)
     }
 
     async fn connection(&self, key: ConnectionKey) -> Result<Arc<ClientConnectionBundle>> {
-        // Holding this mutex through connection creation deliberately serializes
-        // replacement. The path is cold and guarantees exactly one published
-        // connection bundle/lane set for a frontend identity.
-        let mut connections = self.connections.lock().await;
-        if let Some(connection) = connections.get(&key)
+        let entry = self
+            .connections
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(ClientPoolEntry::new()))
+            .clone();
+        if let Some(connection) = entry.current.load_full()
             && connection.is_healthy()
         {
-            return Ok(connection.clone());
+            return Ok(connection);
         }
-        connections.remove(&key);
+
+        let _reconnect = entry.reconnect.lock().await;
+        if let Some(connection) = entry.current.load_full()
+            && connection.is_healthy()
+        {
+            return Ok(connection);
+        }
         let connection = self.connect(&key).await?;
-        connections.insert(key, connection.clone());
+        entry.current.store(Some(connection.clone()));
         Ok(connection)
     }
 
@@ -1600,7 +1706,7 @@ impl QuicResponseClientPool {
         let total_connections = self.config.connections + 1;
         let endpoints = self.client_endpoints(key, total_connections)?;
         let mut connections = Vec::with_capacity(total_connections);
-        for endpoint in endpoints {
+        for endpoint in &endpoints {
             let connection = endpoint
                 .connect_with(client_config.clone(), address, "localhost")?
                 .await
@@ -1646,8 +1752,8 @@ impl QuicResponseClientPool {
                 priority_send,
                 priority_recv,
                 priority_rx,
-                self.config.batch_interval,
-                self.config.max_batch_frames,
+                Duration::ZERO,
+                1,
                 bundle_id,
                 connections.clone(),
                 contexts.clone(),
@@ -1664,6 +1770,7 @@ impl QuicResponseClientPool {
             "QUIC response connection bundle and lanes ready"
         );
         Ok(Arc::new(ClientConnectionBundle {
+            _endpoints: endpoints.into(),
             connections,
             lanes: lanes.into(),
             contexts,
@@ -1673,17 +1780,16 @@ impl QuicResponseClientPool {
 
     fn client_endpoints(&self, key: &ConnectionKey, count: usize) -> Result<Vec<quinn::Endpoint>> {
         let ipv6 = key.address.parse::<SocketAddr>()?.is_ipv6();
-        let mut endpoints = self.endpoints.lock();
-        let entry = endpoints.entry(key.clone()).or_default();
-        while entry.len() < count {
+        let mut endpoints = Vec::with_capacity(count);
+        for _ in 0..count {
             let bind = if ipv6 {
                 SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
             } else {
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
             };
-            entry.push(quinn::Endpoint::client(bind)?);
+            endpoints.push(quinn::Endpoint::client(bind)?);
         }
-        Ok(entry[..count].to_vec())
+        Ok(endpoints)
     }
 }
 
@@ -1747,10 +1853,10 @@ async fn run_client_writer(
         receive_batch(&mut receiver, &mut batch, interval, max_batch_frames).await
     {
         for frame in &batch {
-            if let Some(kind) = frame.diagnostic_kind {
+            if let (Some(kind), Some(queued_at)) = (frame.diagnostic_kind, frame.queued_at) {
                 crate::metrics::quic_response::FIRST_RESPONSE_QUEUE_DWELL_SECONDS
                     .with_label_values(&[kind])
-                    .observe(frame.queued_at.elapsed().as_secs_f64());
+                    .observe(queued_at.elapsed().as_secs_f64());
             }
         }
         chunks.clear();
@@ -1796,14 +1902,23 @@ async fn run_client_control_reader(
         }
         let entry = contexts.lock().get(&frame.registration_id).cloned();
         match frame.kind {
+            FrameKind::Registered => {
+                if let Some(entry) = entry
+                    && let Some(registered) = entry.registered.lock().take()
+                {
+                    let _ = registered.send(Ok(()));
+                }
+            }
             FrameKind::Stop => {
                 if let Some(entry) = entry {
+                    entry.fail_registration("QUIC response registration was stopped");
                     entry.record_cancellation();
                     entry.context.stop();
                 }
             }
             FrameKind::Kill | FrameKind::Reset => {
                 if let Some(entry) = entry {
+                    entry.fail_registration("QUIC response registration was reset");
                     entry.record_cancellation();
                     entry.context.kill();
                 }
@@ -1824,6 +1939,7 @@ fn fail_client_connection_bundle(
     }
     tracing::warn!(%reason, "QUIC response connection bundle invariant failed");
     for (_, entry) in contexts.lock().drain() {
+        entry.fail_registration(reason);
         entry.record_cancellation();
         entry.context.kill();
     }
@@ -1851,9 +1967,16 @@ struct ClientResponseContext {
     context: Arc<dyn AsyncEngineContext>,
     cancellation_counter: Option<IntCounter>,
     cancellation_recorded: AtomicBool,
+    registered: Mutex<Option<oneshot::Sender<std::result::Result<(), String>>>>,
 }
 
 impl ClientResponseContext {
+    fn fail_registration(&self, reason: &str) {
+        if let Some(registered) = self.registered.lock().take() {
+            let _ = registered.send(Err(reason.to_string()));
+        }
+    }
+
     fn record_cancellation(&self) {
         if !self.cancellation_recorded.swap(true, Ordering::AcqRel)
             && let Some(counter) = &self.cancellation_counter
@@ -2079,24 +2202,26 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_fingerprint(encoded: &str) -> Result<[u8; 32]> {
-    if encoded.len() != 64 {
-        bail!("invalid SHA-256 fingerprint length {}", encoded.len());
+    let bytes = encoded.as_bytes();
+    if bytes.len() != 64 || !bytes.is_ascii() {
+        bail!("invalid ASCII SHA-256 fingerprint length {}", bytes.len());
     }
     let mut decoded = [0_u8; 32];
-    for (index, output) in decoded.iter_mut().enumerate() {
-        *output = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
-            .context("invalid SHA-256 fingerprint")?;
+    for (pair, output) in bytes.chunks_exact(2).zip(&mut decoded) {
+        let high = decode_hex_digit(pair[0])?;
+        let low = decode_hex_digit(pair[1])?;
+        *output = (high << 4) | low;
     }
     Ok(decoded)
 }
 
-pub fn registration_id(connection_info: &ConnectionInfo) -> Option<Uuid> {
-    if connection_info.transport != TRANSPORT_NAME {
-        return None;
+fn decode_hex_digit(value: u8) -> Result<u8> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => bail!("invalid SHA-256 fingerprint hex digit"),
     }
-    serde_json::from_str::<QuicResponseConnectionInfo>(&connection_info.info)
-        .ok()
-        .map(|info| info.registration_id)
 }
 
 #[cfg(test)]
@@ -2117,9 +2242,19 @@ mod tests {
                 max_batch_frames: DEFAULT_MAX_BATCH_FRAMES,
                 response_buffer_capacity: RESPONSE_BUFFER_CAPACITY,
             },
-            endpoints: Mutex::new(HashMap::new()),
-            connections: tokio::sync::Mutex::new(HashMap::new()),
+            connections: DashMap::new(),
         }
+    }
+
+    fn only_bundle(pool: &QuicResponseClientPool) -> Arc<ClientConnectionBundle> {
+        assert_eq!(pool.connections.len(), 1);
+        pool.connections
+            .iter()
+            .next()
+            .unwrap()
+            .current
+            .load_full()
+            .unwrap()
     }
 
     fn context_for_lane(lane: usize, lanes: usize) -> PipelineContext<()> {
@@ -2226,25 +2361,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lane_queue_prioritizes_prologue_over_full_data_queue() {
-        let (tx, mut rx) = lane_queue(LANE_QUEUE_CAPACITY);
-        for index in 0..LANE_QUEUE_CAPACITY {
-            tx.try_send(frame(index)).unwrap();
-        }
-        tx.try_send(Frame::new(
-            FrameKind::Prologue,
-            Uuid::new_v4(),
-            Bytes::new(),
-        ))
-        .unwrap();
-
-        let mut batch = Vec::with_capacity(1);
-        assert!(
-            receive_batch(&mut rx, &mut batch, Duration::ZERO, 1)
+    async fn lane_queue_close_has_no_lost_wakeup() {
+        let (tx, mut rx) = lane_queue(1);
+        let waiting = tokio::spawn(async move {
+            let mut batch = Vec::new();
+            rx.recv_many(&mut batch, 1).await
+        });
+        tokio::task::yield_now().await;
+        drop(tx);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), waiting)
                 .await
-                .is_some()
+                .expect("closed queue must wake its receiver")
+                .unwrap(),
+            0
         );
-        assert_eq!(batch[0].kind, FrameKind::Prologue);
     }
 
     #[tokio::test]
@@ -2418,11 +2549,147 @@ mod tests {
         }
 
         assert_eq!(lane_by_request.len(), 1_000);
-        let connections = pool.connections.lock().await;
-        assert_eq!(connections.len(), 1);
-        let bundle = connections.values().next().unwrap();
+        let bundle = only_bundle(&pool);
         assert_eq!(bundle.connections.len(), 9); // Eight bulk and one priority.
         assert_eq!(bundle.lanes.len(), 8);
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn registration_ack_does_not_resolve_response_stream() {
+        let shutdown = CancellationToken::new();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            QuicResponseConfig {
+                connections: 1,
+                lanes: 1,
+                batch_interval: Duration::ZERO,
+                max_batch_frames: 1,
+                response_buffer_capacity: 4,
+            },
+        )
+        .unwrap();
+        let context = PipelineContext::new(());
+        let registered = server.register_response(context.context());
+        let registration_id = registered.registration_id().unwrap();
+        let (_, mut provider) = registered.into_parts();
+        let bundle_id = Uuid::new_v4();
+        let (control_tx, mut control_rx) = mpsc::channel(4);
+
+        process_server_frame(
+            Frame::new(FrameKind::Register, registration_id, Bytes::new()),
+            bundle_id,
+            &server.state,
+            &control_tx,
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(control_rx.recv().await.unwrap().kind, FrameKind::Registered);
+        assert!(matches!(
+            provider.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        process_server_frame(
+            Frame::new(FrameKind::Prologue, registration_id, Bytes::new()),
+            bundle_id,
+            &server.state,
+            &control_tx,
+            4,
+        )
+        .await
+        .unwrap();
+        assert!(provider.await.unwrap().is_ok());
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn prologue_activation_is_atomic_with_concurrent_bulk_data() {
+        let shutdown = CancellationToken::new();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            QuicResponseConfig {
+                connections: 1,
+                lanes: 1,
+                batch_interval: Duration::ZERO,
+                max_batch_frames: 1,
+                response_buffer_capacity: 4,
+            },
+        )
+        .unwrap();
+        let context = PipelineContext::new(());
+        let registered = server.register_response(context.context());
+        let registration_id = registered.registration_id().unwrap();
+        let (_, provider) = registered.into_parts();
+        let bundle_id = Uuid::new_v4();
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+
+        process_server_frame(
+            Frame::new(FrameKind::Register, registration_id, Bytes::new()),
+            bundle_id,
+            &server.state,
+            &control_tx,
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(control_rx.recv().await.unwrap().kind, FrameKind::Registered);
+
+        let (prologue, bulk) = tokio::join!(
+            process_server_frame(
+                Frame::new(FrameKind::Prologue, registration_id, Bytes::new()),
+                bundle_id,
+                &server.state,
+                &control_tx,
+                4,
+            ),
+            process_server_frame(
+                Frame::new(
+                    FrameKind::Data,
+                    registration_id,
+                    Bytes::from_static(b"bulk"),
+                ),
+                bundle_id,
+                &server.state,
+                &control_tx,
+                4,
+            )
+        );
+        prologue.unwrap();
+        bulk.unwrap();
+
+        process_server_frame(
+            Frame::new(
+                FrameKind::FirstData,
+                registration_id,
+                Bytes::from_static(b"first"),
+            ),
+            bundle_id,
+            &server.state,
+            &control_tx,
+            4,
+        )
+        .await
+        .unwrap();
+
+        let mut receiver = provider.await.unwrap().unwrap();
+        assert_eq!(
+            receiver.rx.recv().await.unwrap(),
+            Bytes::from_static(b"first")
+        );
+        assert_eq!(
+            receiver.rx.recv().await.unwrap(),
+            Bytes::from_static(b"bulk")
+        );
         shutdown.cancel();
     }
 
@@ -2490,9 +2757,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), worker_context.killed())
             .await
             .expect("logical reset should kill the matching worker context");
-        let connections = pool.connections.lock().await;
-        assert!(connections.values().next().unwrap().is_healthy());
-        drop(connections);
+        assert!(only_bundle(&pool).is_healthy());
 
         // A sibling response still uses the same healthy connection.
         let sibling = PipelineContext::new(());
@@ -2647,17 +2912,11 @@ mod tests {
             .await
             .unwrap();
         first_sender.send_prologue(None).await.unwrap();
-        let old_connections = {
-            let connections = pool.connections.lock().await;
-            connections
-                .values()
-                .next()
-                .unwrap()
-                .connections
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-        };
+        let old_connections = only_bundle(&pool)
+            .connections
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let old_ids = old_connections
             .iter()
             .map(quinn::Connection::stable_id)
@@ -2667,12 +2926,34 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), first_engine_context.killed())
             .await
             .expect("connection failure should kill every active context");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while old_connections
+                .iter()
+                .any(|connection| connection.close_reason().is_none())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one physical failure must close the complete client bundle");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while old_ids.iter().any(|connection_id| {
+                crate::metrics::quic_response::is_connection_tracked(*connection_id)
+            }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closed connections must leave transport-stat tracking immediately");
 
         let mut registrations = Vec::new();
+        let mut providers = Vec::new();
         for _ in 0..16 {
             let context = PipelineContext::new(());
             let registered = server.register_response(context.context());
-            registrations.push((context, registered.connection_info));
+            let (connection_info, provider) = registered.into_parts();
+            registrations.push((context, connection_info));
+            providers.push(provider);
         }
         let senders =
             futures::future::join_all(registrations.into_iter().map(|(context, info)| {
@@ -2680,10 +2961,12 @@ mod tests {
                 async move { pool.sender(context.context(), info).await }
             }))
             .await;
-        assert!(senders.iter().all(Result::is_ok));
-        let connections = pool.connections.lock().await;
-        assert_eq!(connections.len(), 1);
-        let replacement = connections.values().next().unwrap();
+        let errors = senders
+            .iter()
+            .filter_map(|result| result.as_ref().err().map(ToString::to_string))
+            .collect::<Vec<_>>();
+        assert!(errors.is_empty(), "replacement sender errors: {errors:?}");
+        let replacement = only_bundle(&pool);
         assert_eq!(replacement.connections.len(), 3);
         assert!(
             replacement
@@ -2692,7 +2975,240 @@ mod tests {
                 .all(|connection| !old_ids.contains(&connection.stable_id()))
         );
         assert_eq!(replacement.lanes.len(), 8);
+        drop(providers);
         shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn different_connection_keys_initialize_in_parallel() {
+        let shutdown = CancellationToken::new();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let pool = test_pool(1, 1);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            pool.config,
+        )
+        .unwrap();
+
+        let blocked_key = ConnectionKey {
+            address: "127.0.0.1:1".to_string(),
+            frontend_id: "blocked".to_string(),
+            certificate_sha256: "00".repeat(32),
+        };
+        let blocked_entry = pool
+            .connections
+            .entry(blocked_key)
+            .or_insert_with(|| Arc::new(ClientPoolEntry::new()))
+            .clone();
+        let blocked_reconnect = blocked_entry.reconnect.lock().await;
+
+        let context = PipelineContext::new(());
+        let registered = server.register_response(context.context());
+        let (info, provider) = registered.into_parts();
+        let sender =
+            tokio::time::timeout(Duration::from_secs(1), pool.sender(context.context(), info))
+                .await
+                .expect("one frontend key must not wait for another key's reconnect mutex")
+                .unwrap();
+
+        drop(sender);
+        drop(provider);
+        drop(blocked_reconnect);
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn bundle_failure_before_prologue_resolves_pending_provider() {
+        let shutdown = CancellationToken::new();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let pool = test_pool(1, 1);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            pool.config,
+        )
+        .unwrap();
+        let context = PipelineContext::new(());
+        let registered = server.register_response(context.context());
+        let (info, provider) = registered.into_parts();
+        let _sender = pool.sender(context.context(), info).await.unwrap();
+        let bundle = only_bundle(&pool);
+        bundle.connections[0].close(CLOSE_CODE_INVARIANT, b"test pre-prologue failure");
+
+        let result = tokio::time::timeout(Duration::from_secs(2), provider)
+            .await
+            .expect("pending provider must resolve after bundle failure")
+            .unwrap();
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("pre-prologue bundle failure unexpectedly opened a stream"),
+        };
+        assert!(error.contains("bundle failed"));
+        tokio::time::timeout(Duration::from_secs(2), context.context().killed())
+            .await
+            .expect("bundle failure must kill the worker request context");
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn full_mailbox_resets_only_its_registration() {
+        let state = Arc::new(ServerState::default());
+        let bundle_id = Uuid::new_v4();
+        let full_id = Uuid::new_v4();
+        let sibling_id = Uuid::new_v4();
+        let (full_tx, mut full_rx) = mpsc::channel(1);
+        full_tx.try_send(Bytes::from_static(b"occupied")).unwrap();
+        let (sibling_tx, mut sibling_rx) = mpsc::channel(1);
+        for (registration_id, sender) in [(full_id, full_tx), (sibling_id, sibling_tx)] {
+            state.registration(registration_id).lock().active.insert(
+                registration_id,
+                ActiveResponse {
+                    sender,
+                    monitor_cancel: CancellationToken::new(),
+                    bundle_id,
+                    prologue_received_at: Instant::now(),
+                    priority_ready: true,
+                    priority_draining: false,
+                    deferred: DeferredResponse::default(),
+                },
+            );
+        }
+        let instance = EndpointInstanceId {
+            namespace: "n".to_string(),
+            component: "c".to_string(),
+            endpoint: "e".to_string(),
+            instance_id: 1,
+        };
+        {
+            let mut indexes = state.indexes.lock();
+            indexes
+                .registration_instance
+                .insert(full_id, instance.clone());
+            indexes
+                .instance_registrations
+                .insert(instance.clone(), vec![full_id]);
+        }
+        let (control_tx, mut control_rx) = mpsc::channel(4);
+
+        process_server_frame(
+            Frame::new(FrameKind::Data, full_id, Bytes::from_static(b"reset")),
+            bundle_id,
+            &state,
+            &control_tx,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(control_rx.recv().await.unwrap().kind, FrameKind::Reset);
+        assert!(
+            !state
+                .registration(full_id)
+                .lock()
+                .active
+                .contains_key(&full_id)
+        );
+        assert!(
+            !state
+                .indexes
+                .lock()
+                .registration_instance
+                .contains_key(&full_id)
+        );
+        assert_eq!(
+            full_rx.recv().await.unwrap(),
+            Bytes::from_static(b"occupied")
+        );
+
+        process_server_frame(
+            Frame::new(FrameKind::Data, sibling_id, Bytes::from_static(b"sibling")),
+            bundle_id,
+            &state,
+            &control_tx,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sibling_rx.recv().await.unwrap(),
+            Bytes::from_static(b"sibling")
+        );
+    }
+
+    #[tokio::test]
+    async fn priority_delivery_failures_remove_all_registration_indexes() {
+        for deferred_failure in [false, true] {
+            let state = Arc::new(ServerState::default());
+            let bundle_id = Uuid::new_v4();
+            let registration_id = Uuid::new_v4();
+            let (response_tx, _response_rx) = mpsc::channel(1);
+            let mut deferred = DeferredResponse::default();
+            if deferred_failure {
+                deferred.push(Bytes::from_static(b"bulk")).unwrap();
+            } else {
+                response_tx
+                    .try_send(Bytes::from_static(b"occupied"))
+                    .unwrap();
+            }
+            state.registration(registration_id).lock().active.insert(
+                registration_id,
+                ActiveResponse {
+                    sender: response_tx,
+                    monitor_cancel: CancellationToken::new(),
+                    bundle_id,
+                    prologue_received_at: Instant::now(),
+                    priority_ready: false,
+                    priority_draining: false,
+                    deferred,
+                },
+            );
+            let instance = EndpointInstanceId {
+                namespace: "n".to_string(),
+                component: "c".to_string(),
+                endpoint: "e".to_string(),
+                instance_id: registration_id.as_u128() as u64,
+            };
+            {
+                let mut indexes = state.indexes.lock();
+                indexes
+                    .registration_instance
+                    .insert(registration_id, instance.clone());
+                indexes
+                    .instance_registrations
+                    .insert(instance.clone(), vec![registration_id]);
+            }
+            let (control_tx, mut control_rx) = mpsc::channel(4);
+
+            process_server_frame(
+                Frame::new(
+                    FrameKind::FirstData,
+                    registration_id,
+                    Bytes::from_static(b"first"),
+                ),
+                bundle_id,
+                &state,
+                &control_tx,
+                1,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(control_rx.recv().await.unwrap().kind, FrameKind::Reset);
+            assert!(
+                !state
+                    .registration(registration_id)
+                    .lock()
+                    .active
+                    .contains_key(&registration_id)
+            );
+            let indexes = state.indexes.lock();
+            assert!(!indexes.registration_instance.contains_key(&registration_id));
+            assert!(!indexes.instance_registrations.contains_key(&instance));
+        }
     }
 
     #[tokio::test]
@@ -2773,5 +3289,31 @@ mod tests {
             decode_fingerprint(&encode_hex(&fingerprint)).unwrap(),
             fingerprint
         );
+        assert!(decode_fingerprint(&"é".repeat(32)).is_err());
+    }
+
+    #[tokio::test]
+    async fn server_drop_cancels_accept_loops_and_closes_endpoints() {
+        let shutdown = CancellationToken::new();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let server = QuicResponseServer::new_with_config(
+            address,
+            address,
+            shutdown.clone(),
+            None,
+            QuicResponseConfig {
+                connections: 1,
+                lanes: 1,
+                batch_interval: Duration::ZERO,
+                max_batch_frames: 1,
+                response_buffer_capacity: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(server.endpoints.len(), SERVER_ENDPOINTS);
+        let accept_shutdown = server.shutdown.clone();
+        drop(server);
+        assert!(accept_shutdown.is_cancelled());
+        assert!(!shutdown.is_cancelled());
     }
 }

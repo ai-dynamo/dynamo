@@ -734,6 +734,8 @@ pub mod quic_response {
     pub const DYN_QUIC_RESPONSE_CONNECTIONS: &str = "DYN_QUIC_RESPONSE_CONNECTIONS";
     /// Total response lanes distributed across the connection bundle. Defaults to 8.
     pub const DYN_QUIC_RESPONSE_LANES: &str = "DYN_QUIC_RESPONSE_LANES";
+    /// Bulk-lane batch interval in microseconds. Defaults to 5,000. Registration,
+    /// prologue, first-data, and priority-end frames always flush immediately.
     pub const DYN_QUIC_RESPONSE_BATCH_INTERVAL_US: &str = "DYN_QUIC_RESPONSE_BATCH_INTERVAL_US";
     /// Maximum logical frames submitted by one lane write. Defaults to 512.
     pub const DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES: &str = "DYN_QUIC_RESPONSE_MAX_BATCH_FRAMES";

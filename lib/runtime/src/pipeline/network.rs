@@ -195,6 +195,7 @@ impl Drop for Cleanup {
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
+    registration_id: Option<uuid::Uuid>,
     cleanup: Cleanup,
 }
 
@@ -211,8 +212,18 @@ impl<T> RegisteredStream<T> {
         Self {
             connection_info,
             stream_provider,
+            registration_id: None,
             cleanup: Cleanup(None),
         }
+    }
+
+    pub(crate) fn with_registration_id(mut self, registration_id: uuid::Uuid) -> Self {
+        self.registration_id = Some(registration_id);
+        self
+    }
+
+    pub(crate) fn registration_id(&self) -> Option<uuid::Uuid> {
+        self.registration_id
     }
 
     pub(crate) fn with_cleanup<F>(mut self, cleanup: F) -> Self
@@ -229,6 +240,7 @@ impl<T> RegisteredStream<T> {
         let Self {
             connection_info,
             stream_provider,
+            registration_id: _,
             mut cleanup,
         } = self;
         cleanup.0.take();
@@ -645,6 +657,16 @@ where
             .map_err(|_| anyhow::anyhow!("QUIC response client pool already set"))
     }
 
+    pub(crate) fn quic_response_client_pool(
+        &self,
+    ) -> Result<Arc<quic_response::QuicResponseClientPool>, PipelineError> {
+        if let Some(pool) = self.quic_response_client_pool.get() {
+            return Ok(pool.clone());
+        }
+        let pool = quic_response::process_client_pool_from_env()?;
+        Ok(self.quic_response_client_pool.get_or_init(|| pool).clone())
+    }
+
     pub fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
@@ -664,9 +686,6 @@ where
         crate::metrics::work_handler_pool::ensure_work_handler_pool_metrics_registered(
             endpoint.get_metrics_registry(),
         );
-
-        let response_pool = endpoint.drt().quic_response_client_pool()?;
-        let _ = self.quic_response_client_pool.set(response_pool);
 
         self.metrics
             .set(Arc::new(metrics))

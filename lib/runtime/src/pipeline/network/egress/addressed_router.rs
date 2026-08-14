@@ -505,8 +505,7 @@ impl AddressedPushRouter {
         // Tombstone check: if discovery already removed the worker, fail fast
         // with a migratable error rather than writing to the request plane.
         // Dropping the held registrations on this return runs their cleanup.
-        let response_registration =
-            quic_response::registration_id(&recv_registered.connection_info);
+        let response_registration = recv_registered.registration_id();
         let send_subject = send_registered
             .as_ref()
             .and_then(|r| tcp_subject_of(&r.connection_info));

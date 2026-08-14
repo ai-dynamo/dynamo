@@ -630,9 +630,7 @@ where
         }
 
         tracing::trace!("creating QUIC response sender");
-        let response_pool = self.quic_response_client_pool.get().ok_or_else(|| {
-            PipelineError::Generic("QUIC response client pool was not initialized".to_string())
-        })?;
+        let response_pool = self.quic_response_client_pool()?;
         let mut publisher = response_pool
             .sender_with_cancellation_metric(
                 request.context(),
@@ -816,6 +814,16 @@ mod tests {
             .unwrap(),
             IntCounter::with_opts(Opts::new("cancellation_total", "t")).unwrap(),
         )
+    }
+
+    #[test]
+    fn test_quic_client_pool_initializes_without_add_metrics() {
+        let ingress = TestIngress::new();
+        assert!(ingress.metrics().is_none());
+
+        let first = ingress.quic_response_client_pool().unwrap();
+        let second = ingress.quic_response_client_pool().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     /// Which half of the teardown race a given run exercises.
