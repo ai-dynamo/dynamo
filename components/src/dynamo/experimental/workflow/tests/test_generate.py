@@ -51,7 +51,7 @@ GENERATOR = StageContract(
 
 def _workflow(generator_contract: StageContract = GENERATOR) -> Workflow:
     workflow = Workflow("external-encoder")
-    request = workflow.input("request", type="json")
+    request = workflow.input("request", ValueSpec(type="json"))
     encoder = workflow.stage("encoder", ENCODER, request=request)
     generator = workflow.stage(
         "generator",
