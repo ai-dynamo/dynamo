@@ -93,6 +93,7 @@ hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 ipnet = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
+libc = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
 oneshot = { workspace = true }

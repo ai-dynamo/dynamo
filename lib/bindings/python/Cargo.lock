@@ -2342,6 +2342,7 @@ dependencies = [
  "json-five",
  "k8s-openapi",
  "kube",
+ "libc",
  "llm-multimodal",
  "llm-tokenizer",
  "lru 0.16.4",
@@ -2664,6 +2665,7 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-runtime",
+ "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
  "rand 0.9.4",
@@ -2672,6 +2674,19 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dynamo-sidecar-common"
+version = "1.4.0"
+dependencies = [
+ "clap",
+ "dynamo-backend-common",
+ "futures",
+ "tokio",
+ "tonic 0.13.1",
  "tracing",
  "url",
 ]
