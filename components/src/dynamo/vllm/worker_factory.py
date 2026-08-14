@@ -34,12 +34,12 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .dp_topology import get_dp_range_for_worker
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
-    get_dp_range_for_worker,
 )
 from .health_check import (
     VllmEmbeddingHealthCheckPayload,
@@ -51,7 +51,7 @@ from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
-from .state_agent import StateAgentLifecycle
+from .state_agent import StateAgentLifecycle, state_agent_settings
 
 logger = logging.getLogger(__name__)
 
@@ -611,8 +611,6 @@ class WorkerFactory:
         consolidator_enabled: bool,
         consolidator_port: int | None,
     ) -> Optional[Any]:
-        from .state_agent import state_agent_settings
-
         if state_agent_settings(config) is None:
             return self.setup_kv_event_publisher(
                 config,

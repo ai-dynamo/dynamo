@@ -16,6 +16,7 @@ from dynamo.llm import KvStateAttachmentOwner
 from dynamo.runtime import Endpoint
 
 from .constants import DisaggregationMode
+from .dp_topology import get_dp_range_for_worker
 
 _CACHE_OWNER_PATTERN = re.compile(
     r"^(?P<domain>[0-9a-f]{32}:[0-9a-f]{32})/[0-9a-f]{16}/[0-9a-f]{32}$"
@@ -126,8 +127,6 @@ async def start_attachment_owner(
     vllm_config: "VllmConfig",
     image_token_id: int | None,
 ) -> KvStateAttachmentOwner | None:
-    from .handlers import get_dp_range_for_worker
-
     settings = state_agent_settings(config)
     if settings is None:
         return None

@@ -59,8 +59,9 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .dp_topology import get_dp_range_for_worker
 from .engine_generate import publish_engine_generate_capability
-from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
+from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
