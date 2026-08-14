@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Duration};
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
+    logging::get_distributed_tracing_context,
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
@@ -359,19 +360,36 @@ impl KvPushRouter {
                     .await
             }
         };
-        let dispatch_result = cancel_on_stop(
-            request_context.as_ref(),
-            dispatch.instrument(tracing::info_span!(
+        let route_span = if let Some(trace_context) = get_distributed_tracing_context() {
+            tracing::info_span!(
+                target: "request_span",
                 "kv_router.route_request",
                 request_id = %context_id,
                 worker_id = selection.instance_id,
                 dp_rank = selection.dp_rank,
                 overlap_blocks = selection.overlap_amount,
                 phase = ?phase,
-            )),
-        )
-        .await
-        .and_then(|result| result);
+                trace_id = trace_context.trace_id.as_str(),
+                parent_id = trace_context.span_id.as_str(),
+                trace_flags = trace_context.trace_flags.as_str(),
+                tracestate = trace_context.tracestate.as_deref(),
+                x_request_id = trace_context.x_request_id.as_deref(),
+            )
+        } else {
+            tracing::info_span!(
+                target: "request_span",
+                "kv_router.route_request",
+                request_id = %context_id,
+                worker_id = selection.instance_id,
+                dp_rank = selection.dp_rank,
+                overlap_blocks = selection.overlap_amount,
+                phase = ?phase,
+            )
+        };
+        let dispatch_result =
+            cancel_on_stop(request_context.as_ref(), dispatch.instrument(route_span))
+                .await
+                .and_then(|result| result);
         let response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {
