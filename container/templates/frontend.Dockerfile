@@ -181,6 +181,52 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install .
 
+# The NIXL Python wheel installed above carries libnixl*.so in a private
+# directory that is on no loader path, and it is the raw meson-python wheel --
+# not auditwheel-repaired -- so it bundles no UCX either. Python reaches the
+# libraries through the extension module's RPATH; Rust nixl-sys does not,
+# because it resolves libnixl_capi.so with a plain dlopen(). Without the native
+# install prefix and UCX below, a frontend serving a worker registered with
+# --frontend-decoding fails twice over: first "NIXL is not supported in stub
+# mode", then "No UCX plugin found" once the loader path alone is fixed. In
+# both cases the model is never added and /v1/models stays empty forever, with
+# nothing exiting non-zero.
+#
+# Take UCX from wheel_builder, which built it and then built NIXL against it,
+# and expose the wheel's own libraries through a stable prefix. Pointing at the
+# wheel rather than copying wheel_builder's separate native install keeps one
+# NIXL per process: this image runs Rust and Python in the same interpreter, so
+# a second copy would mean two libnixl instances with independent state.
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+# Selected by CUDA major rather than assuming a single nixl-cu* is installed:
+# the nixl meta package can pull more than one alongside each other, and the
+# wrong one would put a mismatched NIXL on the loader path.
+ARG CUDA_MAJOR
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+RUN install_nixl_from_wheel \
+        --cuda-major "${CUDA_MAJOR}" \
+        --site-packages "$(/opt/dynamo/venv/bin/python -c 'import site; print(site.getsitepackages()[0])')" \
+        --prefix /opt/dynamo/nixl \
+        --skip-headers
+ENV NIXL_PREFIX=/opt/dynamo/nixl \
+    NIXL_LIB_DIR=/opt/dynamo/nixl \
+    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH:-}
+
+# UCX needs these to find RDMA devices; without them it silently drops to TCP.
+USER root
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libibverbs1 \
+        rdma-core \
+        ibverbs-utils \
+        libibumad3 \
+        libnuma1 \
+        librdmacm1 \
+        ibverbs-providers && \
+    rm -rf /var/lib/apt/lists/*
+USER dynamo
+
 # Setup environment for all users
 USER root
 RUN chmod 755 /opt/dynamo/.launch_screen && \
