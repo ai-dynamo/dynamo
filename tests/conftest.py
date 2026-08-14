@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Generator, Optional, Sequence
 
 import pytest
 from filelock import FileLock
@@ -156,6 +156,42 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Show which tests would run vs skip based on --max-vram-gib, then exit.",
     )
     # -------------------------------------------------------------------------
+    # Attach to an already-serving deployment
+    # -------------------------------------------------------------------------
+    # These point deployment-agnostic tests at a frontend somebody else created --
+    # a recipe on Kubernetes, a staging cluster, or a local `python -m
+    # dynamo.frontend`. Nothing here creates or tears down a deployment: attach
+    # is the only mode, so there is no deploy-vs-attach behaviour to gate.
+    parser.addoption(
+        "--endpoint-url",
+        type=str,
+        default=None,
+        help="Base URL of an already-serving Dynamo frontend, e.g. "
+        "http://localhost:8000. Tests marked `endpoint_only` run against it.",
+    )
+    parser.addoption(
+        "--endpoint-model",
+        type=str,
+        default=None,
+        help="Model id to address. Default: the first id from GET /v1/models. "
+        "Prefer the default -- a mismatch here surfaces as a readiness timeout, "
+        "not a clear error.",
+    )
+    parser.addoption(
+        "--endpoint-header",
+        action="append",
+        default=[],
+        help="Extra request header as key=value (repeatable), e.g. for an "
+        "ingress that needs Authorization.",
+    )
+    parser.addoption(
+        "--endpoint-ready-timeout",
+        type=float,
+        default=300.0,
+        help="Seconds to wait for the endpoint to serve one real inference "
+        "request before failing (default: 300).",
+    )
+    # -------------------------------------------------------------------------
     # Model cache options
     # -------------------------------------------------------------------------
     # NOTE: if you add a new option here, also add it to the forwarding list
@@ -237,6 +273,13 @@ def pytest_configure(config: pytest.Config) -> None:
         "deployed (worker count, routing, disaggregation, per-worker metrics, "
         "process/pod logs, scaling, fault injection) rather than only on the "
         "inference response",
+    )
+    config.addinivalue_line(
+        "markers",
+        "endpoint_only: marks tests that need nothing but an already-serving "
+        "frontend URL (the `attached_endpoint` fixture). Run them against a "
+        "deployed recipe with --endpoint-url; they never create or tear down a "
+        "deployment. The positive complement of topology_dependent",
     )
     config.addinivalue_line(
         "markers",
@@ -536,6 +579,78 @@ def _models_dir_env(pytestconfig):
         _restore_models_dir_env(orig)
 
 
+def _parse_endpoint_headers(raw: Sequence[str]) -> dict:
+    """Turn repeated ``--endpoint-header key=value`` into a mapping."""
+    headers = {}
+    for item in raw:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise pytest.UsageError(
+                f"--endpoint-header expects key=value, got {item!r}"
+            )
+        headers[key.strip()] = value.strip()
+    return headers
+
+
+def _resolve_endpoint_model(base_url: str, headers: dict, timeout: float) -> str:
+    """Read the served model id from ``GET /v1/models``.
+
+    Resolving beats asking the caller to supply it: a wrong id is accepted by the
+    frontend and only surfaces as a readiness timeout minutes later, which reads
+    like a broken deployment rather than a typo. A recipe's YAML is not a
+    reliable source either -- it may be multi-document, and what matters is
+    ``--served-model-name``, not ``--model-path``.
+    """
+    import json
+    import urllib.request
+
+    request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read())
+    ids = [entry["id"] for entry in payload.get("data", []) if entry.get("id")]
+    if not ids:
+        raise pytest.UsageError(
+            f"{base_url}/v1/models returned no models; pass --endpoint-model "
+            "explicitly if the frontend is still registering one"
+        )
+    return ids[0]
+
+
+@pytest.fixture(scope="session")
+def attached_endpoint(pytestconfig):
+    """An ``InferenceEndpoint`` for a deployment this test run did not create.
+
+    Attach is the only mode. Nothing here applies, patches, restarts or deletes
+    anything, which is what makes it safe to point at a shared or production
+    deployment. Tests using it must be marked ``endpoint_only``.
+
+    Raises rather than skips when ``--endpoint-url`` is absent: a silently
+    skipping test reports success while proving nothing.
+    """
+    # Imported lazily: this module is collected on the bare Kubernetes deploy
+    # runner, which installs only container/deps/requirements.test.txt and never
+    # the ai-dynamo wheel. tests/utils/inference_endpoint.py is import-safe there.
+    from tests.utils.inference_endpoint import InferenceEndpoint, wait_until_serving
+
+    base_url = pytestconfig.getoption("--endpoint-url")
+    if not base_url:
+        raise pytest.UsageError(
+            "endpoint_only tests need --endpoint-url=<frontend url>, e.g. "
+            "--endpoint-url=http://localhost:8000 after `kubectl port-forward "
+            "svc/<deployment>-frontend 8000:8000`"
+        )
+    base_url = base_url.rstrip("/")
+    headers = _parse_endpoint_headers(pytestconfig.getoption("--endpoint-header"))
+    timeout = pytestconfig.getoption("--endpoint-ready-timeout")
+
+    model = pytestconfig.getoption("--endpoint-model") or _resolve_endpoint_model(
+        base_url, headers, timeout=30.0
+    )
+    endpoint = InferenceEndpoint(base_url=base_url, model=model, headers=headers)
+    wait_until_serving(endpoint, timeout=timeout)
+    return endpoint
+
+
 @pytest.fixture(scope="session")
 def predownload_models(pytestconfig, _models_dir_env):
     """Fixture wrapper around download_models for models used in collected tests.
@@ -666,6 +781,30 @@ def pytest_collection_modifyitems(config, items):
     This function is called to modify the list of tests to run.
     """
     _check_sglang_mm_hashes_present(items)
+
+    # `endpoint_only` tests target a deployment this run did not create. Without
+    # --endpoint-url there is nothing to talk to, so deselect them rather than
+    # let them error in a lane that merely swept them up by lifecycle/hardware
+    # marker. Deselecting a test nobody targeted is not the same as skipping one
+    # that was: when --endpoint-url IS given they run, and the fixture still
+    # raises if the URL is missing for a directly-targeted run.
+    # Deselect (not skip) so they never reach the xdist scheduler, and log the
+    # count -- a silent drop reads as "covered" when it wasn't.
+    if not config.getoption("--endpoint-url", default=None):
+        keep, dropped = [], []
+        for item in items:
+            (dropped if _item_has_marker(item, "endpoint_only") else keep).append(item)
+        if dropped:
+            # NOTE: module-level `logger` in this file is a pytest *fixture*
+            # (see `def logger(request)` below), not a logging.Logger.
+            logging.getLogger(__name__).info(
+                "Deselected %d endpoint_only test(s): no --endpoint-url given. "
+                "Point them at a deployed frontend to run them.",
+                len(dropped),
+            )
+            config.hook.pytest_deselected(items=dropped)
+            items[:] = keep
+
     # Auto-skip tests marked with a framework marker when the framework is not installed
     framework_markers = {
         "trtllm": "tensorrt_llm",
