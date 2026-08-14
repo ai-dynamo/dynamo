@@ -20,6 +20,7 @@ def install_graceful_shutdown(
     endpoints: list[str],
     shutdown_event: asyncio.Event,
     *,
+    drain_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
     signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
 ) -> Callable[[], Awaitable[None]]:
     """
@@ -40,6 +41,10 @@ def install_graceful_shutdown(
     shutdown_started = False
     shutdown_signum: int | None = None
     deferred_handlers_ran = False
+
+    async def _drain() -> None:
+        if drain_callbacks is not None:
+            await asyncio.gather(*(callback() for callback in drain_callbacks))
 
     async def run_deferred_handlers() -> None:
         nonlocal deferred_handlers_ran
@@ -74,6 +79,7 @@ def install_graceful_shutdown(
             endpoints,
             shutdown_event=shutdown_event,
             grace_period_s=None,
+            drain_callback=_drain if drain_callbacks is not None else None,
         )
 
     def _schedule_shutdown(signum: int, frame: Any | None) -> None:

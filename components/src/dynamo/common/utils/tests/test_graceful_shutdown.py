@@ -115,6 +115,47 @@ def test_drain_callback_called_before_shutdown():
     )
 
 
+def test_shutdown_order_unregister_grace_drain_signal_runtime(monkeypatch):
+    """Shutdown sequencing protects both routing and in-flight transfers."""
+    call_order = []
+
+    class RecordingEndpoint:
+        async def unregister_endpoint_instance(self):
+            call_order.append("unregister")
+
+    class RecordingEvent:
+        def set(self):
+            call_order.append("shutdown_event")
+
+    async def record_sleep(_seconds):
+        call_order.append("grace")
+
+    async def drain():
+        call_order.append("drain")
+
+    runtime = MagicMock()
+    runtime.shutdown.side_effect = lambda: call_order.append("runtime_shutdown")
+    monkeypatch.setattr(_gs.asyncio, "sleep", record_sleep)
+
+    asyncio.run(
+        graceful_shutdown_with_discovery(
+            runtime=runtime,
+            endpoints=[RecordingEndpoint()],
+            shutdown_event=RecordingEvent(),
+            grace_period_s=1,
+            drain_callback=drain,
+        )
+    )
+
+    assert call_order == [
+        "unregister",
+        "grace",
+        "drain",
+        "shutdown_event",
+        "runtime_shutdown",
+    ]
+
+
 def test_no_drain_callback_still_shuts_down():
     """Backward compatibility: shutdown still works without drain_callback."""
     mock_runtime = MagicMock()

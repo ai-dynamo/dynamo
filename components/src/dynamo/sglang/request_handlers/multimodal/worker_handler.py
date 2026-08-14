@@ -20,6 +20,7 @@ from dynamo.sglang.protocol import (
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.prefill_drain import PrefillResultDrain
 
 logger = logging.getLogger(__name__)
 
@@ -692,6 +693,7 @@ class MultimodalPrefillWorkerHandler(
 
         # Get bootstrap info using BootstrapManager
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(engine)
+        self._result_drain = PrefillResultDrain()
 
         logger.info(
             f"Multimodal prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
@@ -729,13 +731,19 @@ class MultimodalPrefillWorkerHandler(
                 "bootstrap_room": bootstrap_room,
             }
 
+            # Register all embedding and prefill work before publishing bootstrap.
+            # The tracked task reaches terminal only after the engine result stream,
+            # including the KV transfer status, has ended.
+            task = self._result_drain.create_task(
+                self._process_prefill_generation(
+                    disagg_request, bootstrap_room, context=context
+                )
+            )
+
             _end_bootstrap()
             yield json.dumps(bootstrap_info)
 
-            # Process prefill generation
-            await self._process_prefill_generation(
-                disagg_request, bootstrap_room, context=context
-            )
+            await asyncio.shield(task)
 
         except Exception as e:
             logger.error(f"Error in prefill generation: {e}", exc_info=True)
@@ -773,42 +781,51 @@ class MultimodalPrefillWorkerHandler(
         input_ids = request.request.token_ids
         sampling_params = disagg_request.sampling_params
         tensor_id: int | None = None
+        result_consumption_started = False
 
-        # Process embeddings from encode worker using our embeddings processor
-        with _nvtx.annotate("mm:prefill:load_multimodal", color="cyan"):
-            (
-                image_mm_items,
-                video_data,
-                _,
-                tensor_id,
-            ) = await _build_mm_items(request, self.embeddings_processor)
+        try:
+            # Process embeddings from encode worker using our embeddings processor
+            with _nvtx.annotate("mm:prefill:load_multimodal", color="cyan"):
+                (
+                    image_mm_items,
+                    video_data,
+                    _,
+                    tensor_id,
+                ) = await _build_mm_items(request, self.embeddings_processor)
 
-        trace_header = (
-            context.trace_headers() if context and self.enable_trace else None
-        )
+            trace_header = (
+                context.trace_headers() if context and self.enable_trace else None
+            )
 
-        # Start SGLang prefill generation (like regular SGLang)
-        with _nvtx.annotate("mm:prefill:engine_async_generate", color="blue"):
-            gen_params = {
-                "input_ids": input_ids,
-                "sampling_params": sampling_params,
-                "stream": True,
-                "bootstrap_host": self.bootstrap_host,
-                "bootstrap_port": self.bootstrap_port,
-                "bootstrap_room": bootstrap_room,
-                "external_trace_header": trace_header,
-                "rid": context.trace_id if context else None,
-            }
+            # Start SGLang prefill generation (like regular SGLang)
+            with _nvtx.annotate("mm:prefill:engine_async_generate", color="blue"):
+                gen_params = {
+                    "input_ids": input_ids,
+                    "sampling_params": sampling_params,
+                    "stream": True,
+                    "bootstrap_host": self.bootstrap_host,
+                    "bootstrap_port": self.bootstrap_port,
+                    "bootstrap_room": bootstrap_room,
+                    "external_trace_header": trace_header,
+                    "rid": context.trace_id if context else None,
+                }
 
-            if image_mm_items:
-                gen_params["image_data"] = image_mm_items
-            if video_data:
-                gen_params["video_data"] = video_data
+                if image_mm_items:
+                    gen_params["image_data"] = image_mm_items
+                if video_data:
+                    gen_params["video_data"] = video_data
 
-            results = await self.engine.async_generate(**gen_params)
+                results = await self.engine.async_generate(**gen_params)
 
-        # Consume results without yielding (prefill doesn't return text, just coordinates)
-        asyncio.create_task(self._consume_results(results, tensor_id))
+            # Consume through terminal state (prefill doesn't return text, but the
+            # stream owns the KV transfer lifecycle used by shutdown drain).
+            result_consumption_started = True
+            await self._consume_results(results, tensor_id)
+        finally:
+            # _consume_results owns release once entered. This fallback covers
+            # cancellation or engine failure before result consumption starts.
+            if tensor_id is not None and not result_consumption_started:
+                self.embeddings_processor.release_embeddings(tensor_id)
 
     async def _consume_results(self, results, tensor_id: Optional[int]):
         """Consume prefill results without returning them (like regular SGLang)"""
@@ -823,6 +840,11 @@ class MultimodalPrefillWorkerHandler(
                 self.embeddings_processor.release_embeddings(tensor_id)
 
     def cleanup(self):
+        self._result_drain.cancel()
         super().cleanup()
         self.engine.shutdown()
         logger.info("Multimodal prefill engine shutdown")
+
+    async def drain(self) -> None:
+        """Wait until accepted multimodal prefill transfers reach terminal state."""
+        await self._result_drain.drain()

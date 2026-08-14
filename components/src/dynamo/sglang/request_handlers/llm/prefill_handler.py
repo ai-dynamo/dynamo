@@ -24,6 +24,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.request_handlers.prefill_drain import PrefillResultDrain
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -54,19 +55,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
         super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
-        self._consume_tasks: set[asyncio.Task[Any]] = set()
+        self._result_drain = PrefillResultDrain()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
 
     def cleanup(self) -> None:
         """Shutdown the prefill engine and cleanup resources."""
-        # Cancel all pending consume tasks
-        for task in self._consume_tasks:
-            if not task.done():
-                task.cancel()
-        self._consume_tasks.clear()
-
+        self._result_drain.cancel()
         super().cleanup()
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
@@ -207,6 +203,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 yield res
             return
 
+        # Register the result consumer before publishing bootstrap information.
+        # Once bootstrap is visible to the router, the request has been accepted
+        # and shutdown drain must account for its KV transfer.
+        task = self._result_drain.create_task(self._consume_results(results, context))
+
         # Yield bootstrap_info for PrefillRouter - required for async generator
         # contract and Rust-side expects disaggregated_params in first output.
         yield {
@@ -216,11 +217,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "disaggregated_params": bootstrap_info,
         }
 
-        task = asyncio.create_task(self._consume_results(results, context))
-        self._consume_tasks.add(task)
-        task.add_done_callback(self._consume_tasks.discard)
+        # Shield the result consumer so cancellation of the RPC stream does not
+        # bypass the handler's cancellation monitor or the shutdown drain.
+        await asyncio.shield(task)
 
-        await task
+    async def drain(self) -> None:
+        """Wait until accepted prefill KV transfers reach a terminal state."""
+        await self._result_drain.drain()
 
     async def _consume_results(
         self, results: AsyncIterator[Any], context: Context

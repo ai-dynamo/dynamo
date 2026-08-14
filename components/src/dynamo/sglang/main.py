@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 
 import uvloop
 
@@ -61,6 +62,9 @@ async def worker(argv: list[str] | None = None):
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
+    drain_callbacks: list[Callable[[], Awaitable[None]]] | None = (
+        [] if config.serving_mode == DisaggregationMode.PREFILL else None
+    )
     runtime, loop = create_runtime(
         discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
@@ -68,7 +72,11 @@ async def worker(argv: list[str] | None = None):
     )
 
     run_deferred_handlers = install_graceful_shutdown(
-        loop, runtime, shutdown_endpoints, shutdown_event
+        loop,
+        runtime,
+        shutdown_endpoints,
+        shutdown_event,
+        drain_callbacks=drain_callbacks,
     )
     logger.info(
         "Signal handlers set up for graceful shutdown "
@@ -115,6 +123,7 @@ async def worker(argv: list[str] | None = None):
                 shutdown_event,
                 shutdown_endpoints,
                 run_deferred_handlers,
+                drain_callbacks=drain_callbacks,
             )
     elif config.dynamo_args.diffusion_worker:
         await init_llm_diffusion(
@@ -141,6 +150,7 @@ async def worker(argv: list[str] | None = None):
             shutdown_endpoints,
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
+            drain_callbacks=drain_callbacks,
         )
 
 

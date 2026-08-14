@@ -210,6 +210,7 @@ async def init_multimodal_prefill_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    drain_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
 ) -> None:
     """Initialize multimodal prefill worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -221,6 +222,8 @@ async def init_multimodal_prefill_worker(
     )
 
     handler = MultimodalPrefillWorkerHandler(engine, config, shutdown_event)
+    if drain_callbacks is not None:
+        drain_callbacks.append(handler.drain)
 
     shutdown_endpoints[:] = [generate_endpoint]
 

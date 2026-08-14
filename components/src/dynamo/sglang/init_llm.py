@@ -204,6 +204,7 @@ async def init_prefill(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
+    drain_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -276,6 +277,8 @@ async def init_prefill(
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
+    if drain_callbacks is not None:
+        drain_callbacks.append(handler.drain)
     handler.register_engine_routes(runtime)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
