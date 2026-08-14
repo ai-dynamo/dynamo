@@ -598,6 +598,9 @@ class TestVllmRendererApi:
         assert hasattr(
             ReasoningParser, "has_engine_confirmed_reasoning_end"
         ), "ReasoningParser no longer exposes the engine-confirmed end state"
+        assert hasattr(
+            ReasoningParser, "adjust_initial_state_from_prompt"
+        ), "ReasoningParser no longer exposes prompt-state adjustment"
         assert hasattr(ReasoningParser, "extract_reasoning_streaming"), (
             "ReasoningParser no longer has 'extract_reasoning_streaming'; "
             "update StreamingPostProcessor in "
