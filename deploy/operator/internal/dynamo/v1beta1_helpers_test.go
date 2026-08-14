@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -187,96 +188,172 @@ func TestComponentRuntimeNamespace(t *testing.T) {
 	}
 }
 
-func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
+func TestGetGroveRuntimeNamespace(t *testing.T) {
+	type namespaceSource string
+
+	const (
+		namespaceNone     namespaceSource = ""
+		namespaceBase     namespaceSource = "base"
+		namespacePrevious namespaceSource = "previous"
+		namespaceDesired  namespaceSource = "desired"
+		namespaceActive   namespaceSource = "active"
+	)
+
 	tests := []struct {
-		name         string
-		enableSuffix bool
-		wantSuffix   bool
+		name              string
+		componentType     string
+		suffixEnabled     bool
+		completed         bool
+		activeNamespace   namespaceSource
+		invalidWorkerSpec bool
+		nilDGD            bool
+		nilComponent      bool
+		wantNamespace     namespaceSource
+		wantError         string
 	}{
-		{name: "suffix disabled uses base namespace"},
-		{name: "suffix enabled uses canonical worker hash", enableSuffix: true, wantSuffix: true},
+		{name: "nil DGD", nilDGD: true, wantNamespace: namespaceNone},
+		{name: "nil component", nilComponent: true, wantNamespace: namespaceNone},
+		{
+			name:            "non-worker uses the base namespace",
+			componentType:   string(v1beta1.ComponentTypeFrontend),
+			suffixEnabled:   true,
+			completed:       true,
+			activeNamespace: namespacePrevious,
+			wantNamespace:   namespaceBase,
+		},
+		{
+			name:            "worker without suffix annotation uses the base namespace",
+			suffixEnabled:   false,
+			completed:       true,
+			activeNamespace: namespacePrevious,
+			wantNamespace:   namespaceBase,
+		},
+		{
+			name:              "invalid suffixed worker returns a hash error",
+			suffixEnabled:     true,
+			invalidWorkerSpec: true,
+			wantError:         "compute Grove worker hash suffix",
+		},
+		{
+			name:          "new suffixed worker publishes the desired namespace while pending",
+			suffixEnabled: true,
+			wantNamespace: namespaceDesired,
+		},
+		{
+			name:          "completed suffixed worker publishes the desired namespace",
+			suffixEnabled: true,
+			completed:     true,
+			wantNamespace: namespaceDesired,
+		},
+		{
+			name:            "pending suffixed worker keeps the active base namespace",
+			suffixEnabled:   true,
+			activeNamespace: namespaceBase,
+			wantNamespace:   namespaceActive,
+		},
+		{
+			name:            "pending suffixed worker keeps the active suffixed namespace",
+			suffixEnabled:   true,
+			activeNamespace: namespacePrevious,
+			wantNamespace:   namespaceActive,
+		},
+		{
+			name:            "completed suffixed worker replaces the active namespace",
+			suffixEnabled:   true,
+			completed:       true,
+			activeNamespace: namespacePrevious,
+			wantNamespace:   namespaceDesired,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			componentType := tt.componentType
+			if componentType == "" {
+				componentType = string(commonconsts.ComponentTypeWorker)
+			}
 			annotations := map[string]string(nil)
-			if tt.enableSuffix {
-				annotations = map[string]string{commonconsts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
+			if tt.suffixEnabled {
+				annotations = map[string]string{commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue}
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "grove", Namespace: "k8s", Annotations: annotations},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 						ComponentName: "worker",
-						ComponentType: commonconsts.ComponentTypeWorker,
+						ComponentType: v1beta1.ComponentType(componentType),
 					}},
 				},
 			}
 			component := &dgd.Spec.Components[0]
-			want := dgd.GetDynamoNamespaceForComponent(component)
-			if tt.wantSuffix {
-				hash, err := ComputeDGDWorkersSpecHash(dgd)
+			if tt.invalidWorkerSpec {
+				component.Experimental = &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
+						ExtraClientContainers: []string{"missing"},
+					},
+				}
+			}
+			baseNamespace := dgd.GetDynamoNamespaceForComponent(component)
+			desiredNamespace := ""
+			if !tt.invalidWorkerSpec {
+				workerHash, err := ComputeDGDWorkersSpecHash(dgd)
 				if err != nil {
 					t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
 				}
-				want += "-" + hash
+				desiredNamespace = ComponentRuntimeNamespace(baseNamespace, componentType, workerHash)
 			}
 
-			t.Log("Calculate the namespace after the child completed the accepted PCS revision.")
-			got, err := GetGroveRuntimeNamespace(dgd, component, true)
+			activeNamespace := ""
+			switch tt.activeNamespace {
+			case namespaceNone:
+			case namespaceBase:
+				activeNamespace = baseNamespace
+			case namespacePrevious:
+				activeNamespace = ComponentRuntimeNamespace(baseNamespace, componentType, "oldhash")
+			default:
+				t.Fatalf("unknown active namespace source %q", tt.activeNamespace)
+			}
+			if activeNamespace != "" {
+				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
+					component.ComponentName: {RuntimeNamespace: activeNamespace},
+				}
+			}
+
+			if tt.nilDGD {
+				dgd = nil
+			}
+			if tt.nilComponent {
+				component = nil
+			}
+
+			t.Log("Select the Grove runtime namespace from the modeled cutover state.")
+			got, err := GetGroveRuntimeNamespace(dgd, component, tt.completed)
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("GetGroveRuntimeNamespace() error = %v, want containing %q", err, tt.wantError)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
+			}
+
+			var want string
+			switch tt.wantNamespace {
+			case namespaceNone:
+			case namespaceBase:
+				want = baseNamespace
+			case namespaceDesired:
+				want = desiredNamespace
+			case namespaceActive:
+				want = activeNamespace
+			default:
+				t.Fatalf("unknown expected namespace source %q", tt.wantNamespace)
 			}
 			if got != want {
 				t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, want)
 			}
 		})
-	}
-}
-
-func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilAcceptedPCSRevisionCompletes(t *testing.T) {
-	t.Log("Build a suffixed worker with a namespace from the active generation.")
-	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "grove",
-			Namespace: "k8s",
-			Annotations: map[string]string{
-				commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
-			},
-		},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-				ComponentName: "worker",
-				ComponentType: commonconsts.ComponentTypeWorker,
-			}},
-		},
-	}
-	dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-		"worker": {RuntimeNamespace: "active-worker-namespace"},
-	}
-	component := dgd.GetComponentByName("worker")
-
-	t.Log("Keep the active namespace while the accepted PCS revision is pending.")
-	got, err := GetGroveRuntimeNamespace(dgd, component, false)
-	if err != nil {
-		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
-	}
-	if got != "active-worker-namespace" {
-		t.Fatalf("GetGroveRuntimeNamespace() = %q, want active worker namespace", got)
-	}
-
-	t.Log("Publish the desired namespace after the child completes the accepted PCS revision.")
-	hash, err := ComputeDGDWorkersSpecHash(dgd)
-	if err != nil {
-		t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
-	}
-	want := ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), hash)
-	got, err = GetGroveRuntimeNamespace(dgd, component, true)
-	if err != nil {
-		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
-	}
-	if got != want {
-		t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, want)
 	}
 }
 
