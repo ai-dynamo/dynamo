@@ -10,7 +10,6 @@ from types import MappingProxyType
 from typing import Mapping, Optional, Union
 
 from dynamo.workflow.builder import Workflow
-from dynamo.workflow.definition import WorkflowDefinition, WorkflowHandler
 from dynamo.workflow.ir import WorkflowIR
 from dynamo.workflow.plan import (
     LOCAL_CARRIER,
@@ -54,18 +53,15 @@ class DeploymentSpec:
 
 
 def compile_workflow(
-    workflow: Union[Workflow, WorkflowDefinition],
+    workflow: Union[Workflow, WorkflowIR],
     deployment: Optional[DeploymentSpec] = None,
 ) -> ExecutionPlan:
     """Compile one logical workflow, defaulting every stage to local placement."""
 
-    definition = workflow.build() if isinstance(workflow, Workflow) else workflow
-    if not isinstance(definition, (WorkflowIR, WorkflowHandler)):
-        raise TypeError("workflow must be a Workflow or WorkflowDefinition")
-    if isinstance(definition, WorkflowIR):
-        stage_ids = tuple(stage.id for stage in definition.stages)
-    else:
-        stage_ids = tuple(definition.stages)
+    workflow_ir = workflow.build() if isinstance(workflow, Workflow) else workflow
+    if not isinstance(workflow_ir, WorkflowIR):
+        raise TypeError("workflow must be a Workflow or WorkflowIR")
+    stage_ids = tuple(stage.id for stage in workflow_ir.stages)
     if deployment is None:
         deployment = DeploymentSpec.local(
             **{stage_id: stage_id for stage_id in stage_ids}
@@ -81,17 +77,14 @@ def compile_workflow(
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
 
-    if isinstance(definition, WorkflowIR):
-        edges = tuple(
-            EdgePlan(
-                source=source,
-                target_stage=stage.id,
-                target_port=port,
-                carrier=LOCAL_CARRIER,
-            )
-            for stage in definition.stages
-            for port, source in stage.inputs.items()
+    edges = tuple(
+        EdgePlan(
+            source=source,
+            target_stage=stage.id,
+            target_port=port,
+            carrier=LOCAL_CARRIER,
         )
-    else:
-        edges = ()
-    return ExecutionPlan(definition, deployment.bindings, edges)
+        for stage in workflow_ir.stages
+        for port, source in stage.inputs.items()
+    )
+    return ExecutionPlan(workflow_ir, deployment.bindings, edges)
