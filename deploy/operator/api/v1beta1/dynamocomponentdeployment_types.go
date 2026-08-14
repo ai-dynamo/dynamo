@@ -101,8 +101,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
 	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
 	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-	// example "1.4.0". It does not change the image or rendered Pod, and changing only this field does
-	// not trigger a rollout.
+	// example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -169,11 +169,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
-	// scalingAdapter opts this component into using the
-	// DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
-	// `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
-	// so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-	// the Scale subresource. Omit the field to opt out.
+	// scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.
+	// Setting it (even as an empty object, `scalingAdapter: {}`) creates a DGDSA that owns the
+	// `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the
+	// Scale subresource; omit the field to opt out.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 

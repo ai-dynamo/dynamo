@@ -301,7 +301,7 @@ fn canonicalize_in_place(
 }
 
 fn is_service_generated_object_id(id: &str) -> bool {
-    ["msg_", "resp_", "fc_", "req_"]
+    ["msg_", "resp_", "fc_", "req_", "toolu_"]
         .iter()
         .any(|prefix| id.starts_with(prefix))
 }

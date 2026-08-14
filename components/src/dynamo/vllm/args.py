@@ -229,6 +229,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
     """Return the worker role when trace-based FPM activation is unsupported."""
     if dynamo_config.embedding_worker:
         return "embedding"
+    if dynamo_config.classify_worker:
+        return "classify"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -261,11 +263,23 @@ def update_engine_config_with_dynamo(
 ) -> None:
     """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
-        logger.debug(
-            "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
-            "Defaulting to True (vLLM v1 default behavior)"
-        )
-        engine_config.enable_prefix_caching = True
+        if dynamo_config.embedding_worker or dynamo_config.classify_worker:
+            # Pooling engines never decode, so prefix caching buys nothing —
+            # and force-enabling it crashes models vLLM itself would leave it
+            # off for (e.g. ModernBERT's hybrid local/global attention dies
+            # with "HybridKVCacheCoordinator requires at least two attention
+            # groups"). Match bare `vllm serve`, which does not enable prefix
+            # caching for pooling runners.
+            logger.debug(
+                "Pooling-family worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
+        else:
+            logger.debug(
+                "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
+                "Defaulting to True (vLLM v1 default behavior)"
+            )
+            engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
         logger.debug(

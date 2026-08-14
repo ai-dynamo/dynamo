@@ -76,9 +76,40 @@ use route_lookup::{
     TieredLookupOptions, TieredLookupResult, query_tiered_matches, split_retained_block_hashes,
 };
 
-pub(crate) type WorkerSelectorFactory<Sel> = Arc<
-    dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
->;
+pub(crate) type WorkerSelectorFactory<Sel> =
+    Arc<dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> Sel + Send + Sync>;
+
+pub(crate) fn to_worker_selection_session_context(
+    context: &crate::protocols::common::extensions::AgentContext,
+) -> dynamo_kv_router::SessionContext {
+    use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
+    use dynamo_kv_router::{SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints};
+
+    // Keep this exhaustive so a new wire-level field must be handled here.
+    let AgentContext {
+        session_id,
+        parent_session_id,
+        session_final,
+        compaction: _,
+        kv_hints,
+        input_trigger,
+    } = context;
+    let input_trigger = input_trigger.map(|trigger| match trigger {
+        InputTrigger::UserMessage => WorkerSelectionInputTrigger::UserMessage,
+        InputTrigger::ToolResult => WorkerSelectionInputTrigger::ToolResult,
+        InputTrigger::Other => WorkerSelectionInputTrigger::Other,
+    });
+    SessionContext::new(
+        session_id.clone(),
+        parent_session_id.clone(),
+        *session_final,
+        kv_hints.as_ref().map(|hints| {
+            let KvHints { evict_session } = hints;
+            WorkerSelectionKvHints::new(*evict_session)
+        }),
+        input_trigger,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
@@ -229,21 +260,31 @@ pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
-    // would just bounce the request around. Both remain HTTP 529 to the client.
-    let error_type = match error {
-        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => ErrorType::WorkerOverloaded,
-        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => ErrorType::ResourceExhausted,
+    // would just bounce the request around. A filter rejection is unavailable,
+    // not overload, and becomes HTTP 503.
+    let (error_type, overloaded) = match error {
+        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
+            (ErrorType::WorkerOverloaded, true)
+        }
+        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
+            (ErrorType::ResourceExhausted, true)
+        }
+        scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
 
     let message = error.to_string();
-    let cause = PipelineError::ServiceOverloaded(message.clone());
-    DynamoError::builder()
+    let error = DynamoError::builder()
         .error_type(error_type)
-        .message(message)
-        .cause(cause)
-        .build()
-        .into()
+        .message(message.clone());
+    if overloaded {
+        error
+            .cause(PipelineError::ServiceOverloaded(message))
+            .build()
+            .into()
+    } else {
+        error.build().into()
+    }
 }
 
 fn cancelled_error(context_id: &str) -> anyhow::Error {
@@ -323,6 +364,8 @@ where
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
+    teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
 }
 
 fn resolve_tracking_model_name(
@@ -530,7 +573,26 @@ where
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
+            endpoint_registration: None,
+            teardown_task_guard: None,
         })
+    }
+
+    pub(crate) fn set_endpoint_registration(
+        &mut self,
+        registration: dynamo_runtime::discovery::EndpointRegistrationLease,
+    ) {
+        self.endpoint_registration = Some(registration);
+    }
+
+    pub(crate) fn set_teardown_task_guard(
+        &mut self,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) {
+        if let Some(subscription) = self.kv_event_subscription.as_mut() {
+            subscription.set_task_guard(task_guard.clone());
+        }
+        self.teardown_task_guard = Some(task_guard);
     }
 
     /// Get a reference to the client used by this KvRouter
@@ -769,7 +831,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -788,7 +850,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -819,7 +881,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -838,7 +900,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -868,7 +930,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -1007,7 +1069,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -1655,6 +1717,49 @@ mod tests {
 
     use crate::kv_router::scheduler::KvSchedulerError;
     use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+    #[test]
+    fn all_filtered_workers_map_to_unavailable() {
+        let error = map_scheduler_error(KvSchedulerError::AllEligibleWorkersFiltered);
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("filtered workers should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::Unavailable);
+    }
+
+    #[test]
+    fn worker_selection_receives_complete_session_context() {
+        use crate::protocols::common::extensions::{AgentContext, InputTrigger, KvHints};
+        use dynamo_kv_router::WorkerSelectionInputTrigger;
+
+        let context = AgentContext {
+            session_id: "child-session".into(),
+            parent_session_id: Some("root-session".into()),
+            session_final: Some(true),
+            compaction: None,
+            kv_hints: Some(KvHints {
+                evict_session: true,
+            }),
+            input_trigger: Some(InputTrigger::ToolResult),
+        };
+
+        let selection_context = to_worker_selection_session_context(&context);
+
+        assert_eq!(selection_context.session_id(), "child-session");
+        assert_eq!(selection_context.parent_session_id(), Some("root-session"));
+        assert_eq!(selection_context.session_final(), Some(true));
+        assert!(
+            selection_context
+                .kv_hints()
+                .expect("KV hints")
+                .evict_session()
+        );
+        assert_eq!(
+            selection_context.input_trigger(),
+            Some(WorkerSelectionInputTrigger::ToolResult)
+        );
+    }
 
     #[test]
     fn keyed_tracking_requires_nonempty_model_name() {

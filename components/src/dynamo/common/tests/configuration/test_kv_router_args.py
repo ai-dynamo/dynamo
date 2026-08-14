@@ -320,6 +320,32 @@ def test_policy_config_cli_overrides_environment(
     assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
 
 
+def test_stage_policy_cli_and_environment_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_ROUTER_PREFILL_POLICY", "env-prefill")
+    monkeypatch.setenv("DYN_ROUTER_DECODE_POLICY", "env-decode")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-prefill-policy", "cli-prefill"])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_prefill_policy"] == "cli-prefill"
+    assert kwargs["router_decode_policy"] == "env-decode"
+
+
+def test_stage_policy_help_describes_router_process_pool_roles() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    help_by_dest = {action.dest: action.help for action in parser._actions}
+
+    assert "Process-local" in help_by_dest["router_prefill_policy"]
+    assert "disaggregated prefill workers" in help_by_dest["router_prefill_policy"]
+    assert "Process-local" in help_by_dest["router_decode_policy"]
+    assert "this router process" in help_by_dest["router_decode_policy"]
+
+
 def test_load_aware_clears_predicted_ttl() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

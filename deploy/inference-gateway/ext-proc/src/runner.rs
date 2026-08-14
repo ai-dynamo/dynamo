@@ -140,9 +140,21 @@ pub async fn run() -> Result<()> {
 }
 
 fn reject_unlinked_worker_selection_policy(config: &KvRouterConfig) -> Result<()> {
-    if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+    if let Some(instance) = config
+        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
+    {
         anyhow::bail!(
             "worker-selection instance {instance:?} is configured, but this stock EPP has no linked worker-selection policy catalog; run a custom EPP binary that links the catalog"
+        );
+    }
+    warn_if_epp_ignores_stage_policies(config)?;
+    Ok(())
+}
+
+fn warn_if_epp_ignores_stage_policies(config: &KvRouterConfig) -> Result<()> {
+    if config.has_explicit_stage_worker_selection_policy()? {
+        tracing::warn!(
+            "worker_selection.prefill, worker_selection.decode, worker_selection.encode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are ignored by aggregated EPP selection"
         );
     }
     Ok(())
@@ -158,14 +170,26 @@ pub async fn run_with_selection_service(service: SelectionService) -> Result<()>
     .await
 }
 
-/// Run EPP with policy types statically linked into the image and instances selected from YAML.
+/// Run EPP with linked policy types and the aggregated instance selected from YAML.
+///
+/// Standalone EPP ignores and does not resolve prefill, decode, or encode selections.
 pub async fn run_with_worker_selection_policy_registry(
     registry: WorkerSelectionPolicyRegistry,
 ) -> Result<()> {
     init_tracing();
     let mode = EppMode::from_env()?;
     let kv_router_config = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-    let Some(factory) = registry.resolve(&kv_router_config)? else {
+    warn_if_epp_ignores_stage_policies(&kv_router_config)?;
+    if kv_router_config
+        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
+        .is_none()
+    {
+        return run_inner(mode, StandaloneSelectionService::Default).await;
+    }
+    // TODO: Resolve the stage-specific roles when EPP supports disaggregated worker pools.
+    let Some(factory) = registry
+        .resolve_for_worker_type(&kv_router_config, dynamo_kv_router::WorkerType::Aggregated)?
+    else {
         return run_inner(mode, StandaloneSelectionService::Default).await;
     };
     require_standalone_mode_for_linked_worker_selection_policy(mode)?;
@@ -417,7 +441,7 @@ mod tests {
             policy_file.path(),
             r#"
 worker_selection:
-  default: custom
+  aggregated: custom
   instances:
     - name: custom
       type: acme
@@ -431,5 +455,15 @@ worker_selection:
         };
 
         assert!(reject_unlinked_worker_selection_policy(&config).is_err());
+    }
+
+    #[test]
+    fn stock_epp_ignores_embedded_stage_policy() {
+        let config = KvRouterConfig {
+            router_prefill_policy: Some("embedded-only".to_string()),
+            ..Default::default()
+        };
+
+        assert!(reject_unlinked_worker_selection_policy(&config).is_ok());
     }
 }

@@ -538,7 +538,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -624,7 +624,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed via DGDSA and external autoscalers can scale the service using the Scale subresource. When disabled, replicas can be modified directly.
+ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed by the DGDSA and external autoscalers scale the service via the Scale subresource; when disabled, replicas are set directly. Opt in with `scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because `enabled` defaults to false.
 See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -699,7 +699,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -785,7 +785,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed via DGDSA and external autoscalers can scale the service using the Scale subresource. When disabled, replicas can be modified directly.
+ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed by the DGDSA and external autoscalers scale the service via the Scale subresource; when disabled, replicas are set directly. Opt in with `scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because `enabled` defaults to false.
 See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2180,15 +2180,18 @@ UpdatedServices is the list of services that have completed the rolling update. 
 
 <Accordion id="scalingadapter" title="ScalingAdapter">
 ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-for replica management. When enabled, the DGDSA owns the replicas field and
-external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+(DGDSA) for replica management. When enabled, the DGDSA owns the replicas field so that
+external autoscalers (HPA, KEDA, Planner) can drive scaling via the Scale subresource.
+
+Enable it with `scalingAdapter: {enabled: true}`. Because `enabled` defaults to false, a
+bare `scalingAdapter: {}` is disabled.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="enabled" type="boolean" default="false">
-Enabled indicates whether the ScalingAdapter should be enabled for this service. When true, a DGDSA is created and owns the replicas field. When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and owns the replicas field. When false (the default), no DGDSA is created and replicas are set directly on the DGD -- so a bare `scalingAdapter: \{\}` is disabled; set `enabled: true` to opt in.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2885,7 +2888,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2929,7 +2932,7 @@ See [ModelReference](#v1beta1-modelreference).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-scalingAdapter opts this component into using the DynamoGraphDeploymentScalingAdapter. When set (even as an empty object, `scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the field to opt out.
+scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter. Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource; omit the field to opt out.
 See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2988,7 +2991,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3032,7 +3035,7 @@ See [ModelReference](#v1beta1-modelreference).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-scalingAdapter opts this component into using the DynamoGraphDeploymentScalingAdapter. When set (even as an empty object, `scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the field to opt out.
+scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter. Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource; omit the field to opt out.
 See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4197,11 +4200,11 @@ See [OptimizationType](#optimizationtype).
 </Accordion>
 
 <Accordion id="v1beta1-scalingadapter" title="ScalingAdapter">
-ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
-(DGDSA). When `scalingAdapter` is set on a component (even as an empty
-object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
-field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-the Scale subresource. Omitting the field opts the component out.
+ScalingAdapter opts a component into the DynamoGraphDeploymentScalingAdapter (DGDSA).
+It is a marker struct: setting `scalingAdapter` at all -- even as the empty object
+`scalingAdapter: {}` -- creates the DGDSA, which owns the `replicas` field so that
+external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource.
+Omit the field to opt out.
 
 
 **Kind:** `type`

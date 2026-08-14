@@ -1777,6 +1777,8 @@ class KvRouterConfig:
         prefill_load_scale: float = 1.0,
         decode_active_request_weight: float = 0.0,
         router_policy_config: Optional[str] = None,
+        router_prefill_policy: Optional[str] = None,
+        router_decode_policy: Optional[str] = None,
         router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
         router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
         router_tracking_key_id: Optional[str] = None,
@@ -1820,6 +1822,10 @@ class KvRouterConfig:
             router_policy_config: Startup-only policy-family and cache-bucket queue
                 YAML path. When omitted, router_queue_threshold and
                 router_queue_policy define one synthetic policy class.
+            router_prefill_policy: Process-local override of
+                worker_selection.prefill for disaggregated prefill workers.
+            router_decode_policy: Process-local override of worker_selection.decode
+                for decode workers in this router process.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -2288,6 +2294,17 @@ async def unregister_model(
     Unregister a model from the discovery system.
 
     If lora_name is provided, unregisters a LoRA adapter instead of a base model.
+    """
+    ...
+
+async def update_model_taints(
+    endpoint: Endpoint,
+    taints: Set[str],
+) -> None:
+    """Replace caller-managed taints on this worker's registered model.
+
+    Reserved 'dynamo.topology/' taints are derived from the model's topology
+    metadata and cannot be supplied by callers.
     """
     ...
 
@@ -3112,6 +3129,7 @@ class EntrypointArgs:
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
+        tokenizer_fallback: Optional[bool] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3145,7 +3163,8 @@ class EntrypointArgs:
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
-            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
+            tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
+            tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
         """
         ...
 

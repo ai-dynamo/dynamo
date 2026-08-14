@@ -25,6 +25,7 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    parse_bool,
 )
 
 from . import __version__
@@ -90,6 +91,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
+    tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
 
@@ -585,6 +587,23 @@ class FrontendArgGroup(ArgGroup):
                 "Has no effect on TikToken models."
             ),
             choices=["default", "fastokens", "basetenkenizer"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--tokenizer-fallback",
+            env_var="DYN_TOKENIZER_FALLBACK",
+            default=True,
+            help=(
+                "Automatic fallback to HuggingFace is deprecated and will be "
+                "disabled by default in a future release. The current behavior "
+                "falls back when the selected fastokens or basetenkenizer backend "
+                "cannot load the model tokenizer. Use "
+                "--no-tokenizer-fallback to fail model initialization instead. "
+                "In dynamic mode, discovery retries the load while the frontend "
+                "continues running."
+            ),
+            env_value_type=parse_bool,
         )
 
         add_negatable_bool_argument(

@@ -22,7 +22,9 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type groveProgram struct {
@@ -33,6 +35,7 @@ type groveProgram struct {
 	workloads       *groveWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
 	topology        *dgdGroveTopologyConditionReconciler
+	gate            features.Gate
 }
 
 // newGroveProgram wires the Grove pathway at the DGD composition root.
@@ -62,6 +65,7 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		topology:        newDGDGroveTopologyConditionReconciler(r.Client),
+		gate:            r.RuntimeConfig.Gate,
 	}
 }
 
@@ -73,6 +77,17 @@ func (p *groveProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+
+	// Fail a durable Grove selection when Grove is unavailable rather than falling back.
+	if !p.gate.Enabled(features.Grove) {
+		err := failWorkloadProgram(
+			reasonSelectedWorkloadProviderUnavailable,
+			fmt.Errorf("selected workload provider %q is unavailable because Grove is disabled", workloadProviderGrove),
+		)
+		programResult.Fail(req.DGD.Generation, reasonSelectedWorkloadProviderUnavailable, err)
+		return programResult, reconcile.TerminalError(err)
+	}
+
 	defer func() {
 		if retErr != nil {
 			reason := reasonFailedToReconcileResources
