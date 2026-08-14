@@ -48,10 +48,14 @@ GENERATOR = StageContract(
 
 def _workflow() -> Workflow:
     workflow = Workflow("local-execution")
-    text = workflow.input("text", type="text")
-    encoder = workflow.stage("encoder", _Encoder, text=text)
-    classifier = workflow.stage("classifier", _Classifier, embedding=encoder.embedding)
-    generator = workflow.stage("generator", _Generator, embedding=encoder.embedding)
+    text = workflow.input("text", ValueSpec(type="text"))
+    encoder = workflow.stage("encoder", _Encoder.contract, text=text)
+    classifier = workflow.stage(
+        "classifier", _Classifier.contract, embedding=encoder.embedding
+    )
+    generator = workflow.stage(
+        "generator", _Generator.contract, embedding=encoder.embedding
+    )
     workflow.output("scores", classifier.scores)
     workflow.output("text", generator.text)
     return workflow
@@ -316,7 +320,7 @@ async def test_runtime_rejects_bad_inputs_and_worker_outputs():
 
 async def test_runtime_enforces_json_data_model() -> None:
     workflow = Workflow("json-values")
-    value = workflow.input("value", type="json")
+    value = workflow.input("value", ValueSpec(type="json"))
     workflow.output("value", value)
     plan = await _compile_local(workflow)
 
@@ -348,7 +352,7 @@ async def test_tensor_and_image_constraints_are_checked_without_framework_import
     )
     workflow = Workflow("runtime-types")
     tensor = workflow.input(
-        "tensor", type="tensor", dtype="float32", shape=("dynamic", 4)
+        "tensor", ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
     )
     stage = workflow.stage("convert", tensor_contract, tensor=tensor)
     workflow.output("image", stage.image)
