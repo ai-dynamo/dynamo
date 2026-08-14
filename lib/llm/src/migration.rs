@@ -1019,6 +1019,8 @@ mod tests {
         .await
         .expect("Failed to build RetryManager");
 
+        assert!(retry_manager.request.tracker.is_none());
+
         let mut responses = Vec::new();
         while let Some(response) = retry_manager.next().await {
             responses.push(response);
@@ -1143,6 +1145,8 @@ mod tests {
         )
         .await
         .expect("Failed to build RetryManager");
+
+        assert!(retry_manager.request.tracker.is_none());
 
         let mut responses = Vec::new();
         while let Some(response) = retry_manager.next().await {

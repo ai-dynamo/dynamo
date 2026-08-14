@@ -16,7 +16,7 @@ use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 use crate::{
     kv_router::{
         FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
-        push_router::KvPushRouter,
+        RouterRequestMetricsObservation, push_router::KvPushRouter,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
@@ -33,6 +33,7 @@ pub(super) struct WorkerSelection {
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) router_hint: Option<RouterHint>,
+    pub(super) request_metrics_observation: Option<RouterRequestMetricsObservation>,
 }
 
 #[derive(Clone, Copy)]
@@ -104,8 +105,10 @@ where
                 },
             )
             .await?;
-        let outcome = match outcome {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => outcome,
+        let (outcome, request_metrics_observation) = match outcome {
+            FindBestMatchInnerOutcome::WithAdmission(outcome, observation) => {
+                (outcome, observation)
+            }
             FindBestMatchInnerOutcome::WithoutAdmission(_) => {
                 unreachable!("with-admission routing returned advisory outcome")
             }
@@ -126,6 +129,7 @@ where
                 cached_tokens,
                 routing_hashes,
                 router_hint,
+                request_metrics_observation,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

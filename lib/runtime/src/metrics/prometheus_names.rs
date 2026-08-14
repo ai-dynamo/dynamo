@@ -203,6 +203,15 @@ pub mod frontend_service {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
+    /// Predicted effective KV overlap accumulated across routed input blocks
+    pub const KV_HIT_EFFECTIVE_OVERLAP_BLOCKS_TOTAL: &str = "kv_hit_effective_overlap_blocks_total";
+
+    /// Selected-worker device KV overlap accumulated across routed input blocks
+    pub const KV_HIT_DEVICE_OVERLAP_BLOCKS_TOTAL: &str = "kv_hit_device_overlap_blocks_total";
+
+    /// Input blocks accumulated for predicted KV hit accounting
+    pub const KV_HIT_INPUT_BLOCKS_TOTAL: &str = "kv_hit_input_blocks_total";
+
     /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
 
@@ -211,6 +220,15 @@ pub mod frontend_service {
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
+
+    /// Shared-cache hit blocks accumulated across lookups
+    pub const SHARED_CACHE_HIT_BLOCKS_TOTAL: &str = "shared_cache_hit_blocks_total";
+
+    /// Full input blocks checked in the shared cache
+    pub const SHARED_CACHE_QUERIED_BLOCKS_TOTAL: &str = "shared_cache_queried_blocks_total";
+
+    /// Shared-cache hit blocks beyond selected-worker overlap
+    pub const SHARED_CACHE_BEYOND_BLOCKS_TOTAL: &str = "shared_cache_beyond_blocks_total";
 
     /// Scheduler selections with less overlap than another eligible worker
     pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "non_max_overlap_selections_total";
@@ -643,11 +661,31 @@ pub mod router {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
 
+    /// Predicted effective KV overlap accumulated across routed input blocks
+    pub const KV_HIT_EFFECTIVE_OVERLAP_BLOCKS_TOTAL: &str =
+        "router_kv_hit_effective_overlap_blocks_total";
+
+    /// Selected-worker device KV overlap accumulated across routed input blocks
+    pub const KV_HIT_DEVICE_OVERLAP_BLOCKS_TOTAL: &str =
+        "router_kv_hit_device_overlap_blocks_total";
+
+    /// Input blocks accumulated for predicted KV hit accounting
+    pub const KV_HIT_INPUT_BLOCKS_TOTAL: &str = "router_kv_hit_input_blocks_total";
+
     /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Shared-cache hit blocks accumulated across lookups
+    pub const SHARED_CACHE_HIT_BLOCKS_TOTAL: &str = "router_shared_cache_hit_blocks_total";
+
+    /// Full input blocks checked in the shared cache
+    pub const SHARED_CACHE_QUERIED_BLOCKS_TOTAL: &str = "router_shared_cache_queried_blocks_total";
+
+    /// Shared-cache hit blocks beyond selected-worker overlap
+    pub const SHARED_CACHE_BEYOND_BLOCKS_TOTAL: &str = "router_shared_cache_beyond_blocks_total";
 
     /// Scheduler selections with less overlap than another eligible worker
     pub const NON_MAX_OVERLAP_SELECTIONS_TOTAL: &str = "router_non_max_overlap_selections_total";

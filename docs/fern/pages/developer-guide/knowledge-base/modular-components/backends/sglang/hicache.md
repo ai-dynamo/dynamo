@@ -208,11 +208,19 @@ If `medium` is missing or Host-tier transitions never report `CPU_PINNED`, confi
 
 **Router sees the shared pool.** Shared-cache metrics are exposed on the frontend's Prometheus endpoint:
 
-| Metric                                    | Meaning                                                                  |
-| ----------------------------------------- | ------------------------------------------------------------------------ |
-| `router_shared_cache_hit_rate`            | Fraction of request blocks found in the shared pool (0.0–1.0).           |
-| `router_shared_cache_beyond_blocks`       | Blocks in the shared pool _beyond_ the selected worker's device overlap. |
-| `dynamo_router_shared_cache_errors_total` | Shared-cache query and Mooncake subscriber failures.                     |
+| Metric                                                        | Meaning                                                                                               |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `dynamo_component_router_shared_cache_hit_rate`                | Request-weighted fraction of full input blocks found in the shared pool (0.0–1.0).                    |
+| `dynamo_component_router_shared_cache_hit_blocks_total`        | Cumulative full input blocks found in the shared pool.                                                |
+| `dynamo_component_router_shared_cache_queried_blocks_total`    | Cumulative full input blocks checked in the shared pool.                                              |
+| `dynamo_component_router_shared_cache_beyond_blocks`           | Per-request blocks in the shared pool _beyond_ the selected worker's device overlap.                  |
+| `dynamo_component_router_shared_cache_beyond_blocks_total`     | Cumulative blocks in the shared pool _beyond_ the selected worker's device overlap.                   |
+| `dynamo_router_shared_cache_errors_total`                      | Shared-cache query and Mooncake subscriber failures.                                                  |
+
+These metrics describe an optional external shared-pool lookup. They are separate from
+`dynamo_component_router_kv_hit_rate`, which measures effective overlap on the worker selected by
+the router. For the block-weighted shared-pool hit fraction, divide the rate of
+`shared_cache_hit_blocks_total` by the rate of `shared_cache_queried_blocks_total`.
 
 ```bash
 curl -s localhost:8000/metrics | grep shared_cache

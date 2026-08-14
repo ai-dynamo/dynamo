@@ -209,8 +209,69 @@ pub(super) enum FindBestMatchAdmission {
 }
 
 pub(super) enum FindBestMatchInnerOutcome {
-    WithAdmission(FindBestMatchOutcome),
+    WithAdmission(
+        FindBestMatchOutcome,
+        Option<RouterRequestMetricsObservation>,
+    ),
     WithoutAdmission(FindBestMatchAdvisoryOutcome),
+}
+
+pub(super) struct RouterRequestMetricsObservation {
+    effective_overlap_blocks: f64,
+    device_overlap_blocks: u32,
+    input_blocks: usize,
+    shared_cache: Option<SharedCacheMetricsObservation>,
+}
+
+pub(super) struct SharedCacheMetricsObservation {
+    hit_blocks: u32,
+    queried_blocks: u32,
+    beyond_device_blocks: Option<u32>,
+}
+
+impl RouterRequestMetricsObservation {
+    pub(super) fn observe(&self, metrics: &metrics::RouterRequestMetrics, include_shared: bool) {
+        if self.input_blocks > 0 {
+            metrics
+                .kv_hit_rate
+                .observe(self.effective_overlap_blocks / self.input_blocks as f64);
+            metrics
+                .kv_hit_effective_overlap_blocks_total
+                .inc_by(self.effective_overlap_blocks);
+            metrics
+                .kv_hit_device_overlap_blocks_total
+                .inc_by(self.device_overlap_blocks as u64);
+            metrics
+                .kv_hit_input_blocks_total
+                .inc_by(self.input_blocks as u64);
+        }
+
+        if !include_shared {
+            return;
+        }
+        if let Some(shared_cache) = self.shared_cache.as_ref() {
+            if shared_cache.queried_blocks == 0 {
+                return;
+            }
+            metrics
+                .shared_cache_hit_rate
+                .observe(shared_cache.hit_blocks as f64 / shared_cache.queried_blocks as f64);
+            metrics
+                .shared_cache_hit_blocks_total
+                .inc_by(shared_cache.hit_blocks as u64);
+            metrics
+                .shared_cache_queried_blocks_total
+                .inc_by(shared_cache.queried_blocks as u64);
+            if let Some(beyond_blocks) = shared_cache.beyond_device_blocks {
+                metrics
+                    .shared_cache_beyond_blocks
+                    .observe(beyond_blocks as f64);
+                metrics
+                    .shared_cache_beyond_blocks_total
+                    .inc_by(beyond_blocks as u64);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -841,7 +902,14 @@ where
             )
             .await?
         {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithAdmission(outcome, observation) => {
+                if let Some(observation) = observation
+                    && let Some(metrics) = metrics::RouterRequestMetrics::get()
+                {
+                    observation.observe(&metrics, true);
+                }
+                Ok(outcome)
+            }
             FindBestMatchInnerOutcome::WithoutAdmission(_) => {
                 unreachable!("with-admission routing returned advisory outcome")
             }
@@ -890,7 +958,7 @@ where
             .await?
         {
             FindBestMatchInnerOutcome::WithoutAdmission(outcome) => Ok(outcome),
-            FindBestMatchInnerOutcome::WithAdmission(_) => {
+            FindBestMatchInnerOutcome::WithAdmission(_, _) => {
                 unreachable!("without-admission routing returned admitted outcome")
             }
         }
@@ -1024,7 +1092,6 @@ where
         // Capture shared cache info for metrics before moving into schedule().
         // Clone the hits so we can compute `hits_beyond(overlap_blocks)` after
         // scheduling returns, since `overlap_blocks` isn't known until then.
-        let num_blocks = isl_tokens / self.block_size as usize;
         let sc_hits_for_metrics = shared_cache_hits.clone();
 
         // LoRA-aware candidate narrowing: restrict to this LoRA's allocated/loaded replicas,
@@ -1067,6 +1134,7 @@ where
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithAdmission(
                         FindBestMatchOutcome::QueueRejected { rejection },
+                        None,
                     ));
                 }
                 Err(error) => return Err(map_scheduler_error(error)),
@@ -1111,18 +1179,44 @@ where
             );
         }
 
-        // Observe per-request shared cache metrics.
-        if is_admitted_routing
-            && let Some(hits) = sc_hits_for_metrics
-            && let Some(m) = metrics::RouterRequestMetrics::get()
-        {
-            if num_blocks > 0 {
-                m.shared_cache_hit_rate
-                    .observe(hits.total_hits as f64 / num_blocks as f64);
-            }
-            let beyond = hits.hits_beyond(response.effective_overlap_blocks.round() as u32);
-            m.shared_cache_beyond_blocks.observe(beyond as f64);
-        }
+        let request_metrics_observation = if update_states && is_admitted_routing {
+            let input_blocks = isl_tokens.div_ceil(self.block_size as usize);
+            let tiers = &response.selected_worker_tiers;
+            let selected_device_blocks = tiers
+                .dp_device_blocks
+                .iter()
+                .find_map(|(dp_rank, blocks)| {
+                    (*dp_rank == response.best_worker.dp_rank).then_some(*blocks)
+                })
+                .unwrap_or(0);
+            let has_tier_data =
+                tiers.gpu_blocks > 0 || tiers.host_pinned_blocks > 0 || tiers.disk_blocks > 0;
+            let device_overlap_blocks = if has_tier_data {
+                selected_device_blocks
+            } else {
+                // Legacy or summary-only indexers do not expose per-tier provenance.
+                // Preserve the historical overlap signal, but document that the
+                // device-only metric is an effective-overlap fallback in this case.
+                response.effective_overlap_blocks.round().max(0.0) as u32
+            };
+            let shared_cache = sc_hits_for_metrics.as_ref().and_then(|hits| {
+                let queried_blocks = hits.queried_blocks.filter(|queried| *queried > 0)?;
+                Some(SharedCacheMetricsObservation {
+                    hit_blocks: hits.total_hits,
+                    queried_blocks,
+                    beyond_device_blocks: has_tier_data
+                        .then(|| hits.hits_beyond(selected_device_blocks)),
+                })
+            });
+            Some(RouterRequestMetricsObservation {
+                effective_overlap_blocks: response.effective_overlap_blocks,
+                device_overlap_blocks,
+                input_blocks,
+                shared_cache,
+            })
+        } else {
+            None
+        };
 
         #[cfg(feature = "bench")]
         tracing::info!(
@@ -1136,17 +1230,20 @@ where
         );
 
         match admission {
-            FindBestMatchAdmission::WithAdmission { .. } => Ok(
-                FindBestMatchInnerOutcome::WithAdmission(FindBestMatchOutcome::Routed {
-                    worker: response.best_worker,
-                    overlap_blocks: response.effective_overlap_blocks.round() as u32,
-                    effective_overlap_blocks: response.effective_overlap_blocks,
-                    cached_tokens: response.cached_tokens,
-                    potential_decode_blocks: response.potential_decode_blocks as u64,
-                    routing_hashes,
-                    router_hint,
-                }),
-            ),
+            FindBestMatchAdmission::WithAdmission { .. } => {
+                Ok(FindBestMatchInnerOutcome::WithAdmission(
+                    FindBestMatchOutcome::Routed {
+                        worker: response.best_worker,
+                        overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                        effective_overlap_blocks: response.effective_overlap_blocks,
+                        cached_tokens: response.cached_tokens,
+                        potential_decode_blocks: response.potential_decode_blocks as u64,
+                        routing_hashes,
+                        router_hint,
+                    },
+                    request_metrics_observation,
+                ))
+            }
             FindBestMatchAdmission::WithoutAdmission => Ok(
                 FindBestMatchInnerOutcome::WithoutAdmission(FindBestMatchAdvisoryOutcome::Routed {
                     worker: response.best_worker,

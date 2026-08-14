@@ -280,8 +280,72 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_kv_hit_rate" type="histogram">
-  Predicted KV cache hit rate at routing time (0.0–1.0).
+  Request-weighted predicted effective KV hit fraction at routing time (0.0–1.0). Each request is observed once, including in disaggregated serving.
 </ParamField>
+
+<ParamField path="dynamo_component_router_kv_hit_device_overlap_blocks_total" type="counter">
+  Selected-worker device-tier overlap blocks for requests included in `router_kv_hit_rate`.
+  Falls back to rounded effective overlap when the indexer does not expose per-tier provenance.
+</ParamField>
+
+<ParamField path="dynamo_component_router_kv_hit_effective_overlap_blocks_total" type="counter">
+  Selected-worker effective overlap blocks after applying configured lower-tier weights.
+</ParamField>
+
+<ParamField path="dynamo_component_router_kv_hit_input_blocks_total" type="counter">
+  Input blocks for the same requests.
+</ParamField>
+
+<ParamField path="dynamo_component_router_shared_cache_hit_rate" type="histogram">
+  Request-weighted fraction of full input blocks found by the optional external shared-cache lookup. Separate from selected-worker overlap.
+</ParamField>
+
+<ParamField path="dynamo_component_router_shared_cache_hit_blocks_total" type="counter">
+  Full input blocks found by the external shared-cache lookup.
+</ParamField>
+
+<ParamField path="dynamo_component_router_shared_cache_queried_blocks_total" type="counter">
+  Full input blocks checked by the external shared-cache lookup.
+</ParamField>
+
+<ParamField path="dynamo_component_router_shared_cache_beyond_blocks" type="histogram">
+  Per-request shared-cache blocks beyond the selected worker's device-tier prefix.
+</ParamField>
+
+<ParamField path="dynamo_component_router_shared_cache_beyond_blocks_total" type="counter">
+  Cumulative shared-cache blocks beyond the selected worker's device-tier prefix.
+</ParamField>
+
+`router_kv_hit_rate` and ratios built from the counters answer different questions:
+
+```promql
+# Mean of each request's predicted hit fraction. Short and long prompts have equal weight.
+sum(rate(dynamo_component_router_kv_hit_rate_sum[5m]))
+/
+sum(rate(dynamo_component_router_kv_hit_rate_count[5m]))
+
+# Device/L1 hit fraction weighted by input blocks. With a summary-only indexer, the
+# numerator falls back to rounded effective overlap. Comparable to token-counter ratios.
+sum(rate(dynamo_component_router_kv_hit_device_overlap_blocks_total[5m]))
+/
+sum(rate(dynamo_component_router_kv_hit_input_blocks_total[5m]))
+
+# Effective selected-worker hit fraction, including configured lower-tier weights.
+sum(rate(dynamo_component_router_kv_hit_effective_overlap_blocks_total[5m]))
+/
+sum(rate(dynamo_component_router_kv_hit_input_blocks_total[5m]))
+```
+
+The optional shared-cache lookup is not another selected-worker tier. It represents blocks
+available from an external shared pool, such as SGLang HiCache on Mooncake. Its incremental
+routing value is the shared hit range beyond the selected worker's device prefix. The
+block-weighted shared-pool hit fraction is:
+
+```promql
+sum(rate(dynamo_component_router_shared_cache_hit_blocks_total[5m]))
+/
+sum(rate(dynamo_component_router_shared_cache_queried_blocks_total[5m]))
+```
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
   Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
