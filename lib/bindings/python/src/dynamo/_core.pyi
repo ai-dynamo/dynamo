@@ -3111,6 +3111,7 @@ class EntrypointArgs:
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
+        tokenizer_fallback: Optional[bool] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3144,7 +3145,8 @@ class EntrypointArgs:
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
-            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
+            tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
+            tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
         """
         ...
 
