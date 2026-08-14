@@ -12,7 +12,6 @@ from dynamo.workflow import (
     ValueRef,
     ValueSpec,
     Workflow,
-    WorkflowBuilder,
     WorkflowIR,
     WorkflowValidationError,
 )
@@ -55,9 +54,9 @@ def _workflow() -> WorkflowIR:
         contract = encoder_contract
 
     workflow = Workflow("vision-response")
-    image = workflow.input("image", type="image", mode="RGB")
-    prompt = workflow.input("prompt", type="text")
-    encoder = workflow.stage("encoder", EncoderWorker, image=image)
+    image = workflow.input("image", ValueSpec(type="image", mode="RGB"))
+    prompt = workflow.input("prompt", ValueSpec(type="text"))
+    encoder = workflow.stage("encoder", EncoderWorker.contract, image=image)
     classifier = workflow.stage(
         "classifier",
         classifier_contract,
@@ -87,9 +86,36 @@ def test_builds_fanout_workflow_from_declared_output_attributes():
     assert encoder_ref == ValueRef.for_stage_output("encoder", "embedding")
 
 
+def test_stage_requires_contract_and_accepts_mapping_expansion() -> None:
+    contract = StageContract(
+        id="hyphenated-input",
+        inputs={"input-value": ValueSpec(type="text")},
+        outputs={"text": ValueSpec(type="text")},
+    )
+
+    class ContractProvider:
+        contract = StageContract(
+            id="provider",
+            outputs={"text": ValueSpec(type="text")},
+        )
+
+    workflow = Workflow("explicit-contract")
+    value = workflow.input("value", ValueSpec(type="text"))
+    stage = workflow.stage(
+        "producer",
+        contract,
+        **{"input-value": value},
+    )
+    workflow.output("text", stage.text)
+
+    assert workflow.build().stages[0].inputs == {"input-value": value}
+    with pytest.raises(WorkflowValidationError, match="must use StageContract"):
+        workflow.stage("implicit", ContractProvider, **{"input-value": value})
+
+
 def test_ir_keeps_complete_contracts_inline() -> None:
     workflow = Workflow("echo-flow")
-    value = workflow.input("text", type="text")
+    value = workflow.input("text", ValueSpec(type="text"))
     echo = workflow.stage(
         "echo",
         StageContract(
@@ -126,14 +152,14 @@ def test_output_method_handles_attribute_collisions_and_invalid_names():
             "text": ValueSpec(type="text"),
         },
     )
-    workflow = WorkflowBuilder("fallback")
-    seed = workflow.add_input("seed", ValueSpec(type="text"))
+    workflow = Workflow("fallback")
+    seed = workflow.input("seed", ValueSpec(type="text"))
     passthrough = StageContract(
         id="passthrough",
         inputs={"seed": ValueSpec(type="text")},
         outputs=contract.outputs,
     )
-    producer = workflow.add_stage("producer", passthrough, inputs={"seed": seed})
+    producer = workflow.stage("producer", passthrough, seed=seed)
 
     assert producer.text == producer.output("text")
     assert producer.output("output").output_name == "output"
@@ -180,17 +206,17 @@ def test_rejects_incompatible_edge_and_foreign_reference():
         inputs={"value": ValueSpec(type="tensor", dtype="float32", shape=(4,))},
         outputs={"text": ValueSpec(type="text")},
     )
-    workflow = WorkflowBuilder("incompatible")
-    value = workflow.add_input(
+    workflow = Workflow("incompatible")
+    value = workflow.input(
         "value", ValueSpec(type="tensor", dtype="float16", shape=(4,))
     )
-    other = WorkflowBuilder("other")
-    foreign = other.add_input("value", ValueSpec(type="tensor"))
+    other = Workflow("other")
+    foreign = other.input("value", ValueSpec(type="tensor"))
 
     with pytest.raises(WorkflowValidationError, match="incompatible"):
-        workflow.add_stage("consumer", consumer, inputs={"value": value})
+        workflow.stage("consumer", consumer, value=value)
     with pytest.raises(WorkflowValidationError, match="different workflow"):
-        workflow.add_stage("consumer", consumer, inputs={"value": foreign})
+        workflow.stage("consumer", consumer, value=foreign)
 
 
 def test_rejects_missing_inputs_and_conflicting_contract_ids():
@@ -204,14 +230,14 @@ def test_rejects_missing_inputs_and_conflicting_contract_ids():
         inputs={"value": ValueSpec(type="text")},
         outputs={"json": ValueSpec(type="json")},
     )
-    workflow = WorkflowBuilder("contracts")
-    value = workflow.add_input("value", ValueSpec(type="text"))
-    first_stage = workflow.add_stage("first", first, inputs={"value": value})
+    workflow = Workflow("contracts")
+    value = workflow.input("value", ValueSpec(type="text"))
+    first_stage = workflow.stage("first", first, value=value)
 
     with pytest.raises(WorkflowValidationError, match="missing"):
-        workflow.add_stage("missing", first, inputs={})
+        workflow.stage("missing", first)
     with pytest.raises(WorkflowValidationError, match="conflicting schemas"):
-        workflow.add_stage("second", conflicting, inputs={"value": first_stage.text})
+        workflow.stage("second", conflicting, value=first_stage.text)
 
 
 def test_ir_rejects_conflicting_inline_contracts() -> None:
