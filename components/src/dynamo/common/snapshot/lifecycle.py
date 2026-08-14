@@ -68,9 +68,10 @@ class SnapshotConfig:
 
         if event == "restore":
             logger.info("Restore sentinel detected")
-            logger.info("Resuming model after restore")
-            await pause_controller.resume()
-            pause_controller.mark_resumed()
+            # Restore-time env is only available after CRIU resumes this process.
+            # Return paused so the backend can refresh that env before deciding
+            # whether to resume normally or wait for failover leadership.
+            logger.info("Returning restored model application-paused")
             # The checkpoint is complete; post-restore model registration may
             # need normal Hugging Face cache/download behavior.
             os.environ.pop("HF_HUB_OFFLINE", None)
