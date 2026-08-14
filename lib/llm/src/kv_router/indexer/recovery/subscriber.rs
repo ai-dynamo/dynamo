@@ -446,12 +446,12 @@ pub async fn start_subscriber(
     let client = WorkerQueryClient::spawn(
         endpoint.component().clone(),
         IndexerRecoveryTarget::new(indexer),
-        membership_watch.clone(),
+        membership_watch.fork_receiver(),
         cancel.child_token(),
     )
     .await?;
     let health_completion = source_health::spawn(
-        membership_watch.clone(),
+        membership_watch.fork_receiver(),
         model.clone(),
         worker_role,
         source_requirement,

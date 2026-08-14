@@ -47,6 +47,7 @@ use crate::{
 use super::RuntimeWorkerQueryTransport;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 struct OwnerRuntime {
@@ -242,6 +243,9 @@ async fn run_state_agent_router(
             Input::Source(None) | Input::Attachment(None) => {
                 tracing::error!(%endpoint, "KV state discovery watch ended; keeping recognized ranks fail-closed");
                 indexer.set_residency_projection(ResidencyProjection::default());
+                // Keep the recognized sender alive so the derived legacy view
+                // continues forwarding membership for unrecognized ranks.
+                cancel.cancelled().await;
                 break;
             }
             Input::Events(Some(Ok((envelope, events)))) => {
@@ -255,6 +259,9 @@ async fn run_state_agent_router(
             Input::Events(None) => {
                 tracing::error!(%endpoint, "V2 KV state event stream ended");
                 indexer.set_residency_projection(ResidencyProjection::default());
+                // V2 stays fail-closed, but unrelated legacy ranks must keep
+                // receiving membership updates until the router shuts down.
+                cancel.cancelled().await;
                 break;
             }
         }
@@ -334,21 +341,11 @@ async fn start_state_agent_consumers(
     Ok((attachments, events, transport))
 }
 
-trait Advertisement: serde::de::DeserializeOwned + Clone + PartialEq {
-    fn owner(&self) -> CacheOwnerId;
-}
+trait Advertisement: serde::de::DeserializeOwned + Clone + PartialEq {}
 
-impl Advertisement for KvStateSourceAdvertisement {
-    fn owner(&self) -> CacheOwnerId {
-        self.cache_owner_id
-    }
-}
+impl Advertisement for KvStateSourceAdvertisement {}
 
-impl Advertisement for KvStateAttachmentAdvertisement {
-    fn owner(&self) -> CacheOwnerId {
-        self.cache_owner_id
-    }
-}
+impl Advertisement for KvStateAttachmentAdvertisement {}
 
 fn update_advertisements<T: Advertisement>(
     event: Result<DiscoveryEvent>,
@@ -371,7 +368,6 @@ fn update_advertisements<T: Advertisement>(
                 return Ok(false);
             }
             let value: T = serde_json::from_value(metadata)?;
-            let _ = value.owner();
             if values
                 .get(&publisher_id)
                 .is_some_and(|previous| previous != &value)
@@ -432,7 +428,12 @@ async fn reconcile_state_sources(
     }
     let mut attachment_by_owner: HashMap<CacheOwnerId, Vec<&KvStateAttachmentAdvertisement>> =
         HashMap::new();
-    for attachment in attachments.values() {
+    for (discovery_id, attachment) in attachments {
+        if attachment.publisher_id != *discovery_id
+            || attachment.protocol_version != KvStateProtocolVersion::V2
+        {
+            continue;
+        }
         attachment_by_owner
             .entry(attachment.cache_owner_id)
             .or_default()
@@ -641,7 +642,7 @@ async fn reconcile_state_sources(
                     source.recovery_control_target.clone(),
                     expected.clone(),
                     expected_generation,
-                    CONTROL_TIMEOUT,
+                    RECOVERY_TIMEOUT,
                 )
                 .await;
             let response = match response {

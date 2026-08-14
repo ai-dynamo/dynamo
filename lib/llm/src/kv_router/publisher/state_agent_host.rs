@@ -397,11 +397,13 @@ fn reconcile_intent_event(
     validate_intent(&intent, host_instance, publisher_id)?;
     let owner = intent.cache_owner_id;
     let owner_intents = intents.entry(owner).or_default();
-    if let Some(previous) = owner_intents.insert(publisher_id, intent.clone())
-        && previous != intent
+    if owner_intents
+        .get(&publisher_id)
+        .is_some_and(|previous| previous != &intent)
     {
         anyhow::bail!("intent incarnation changed its immutable descriptor");
     }
+    owner_intents.insert(publisher_id, intent);
     intent_owners.insert(publisher_id, owner);
     Ok(Some(owner))
 }
@@ -497,6 +499,9 @@ async fn reconcile_owner(
         {
             Ok(agent) => Arc::new(agent),
             Err(error) => {
+                // Keep the failed reservation until this exact intent disappears.
+                // It remains capacity-accounted and avoids implicit construction
+                // retries under an unchanged lease-owned request.
                 return Err(error).context("failed to construct stable state-agent slot");
             }
         };
@@ -539,14 +544,14 @@ async fn reconcile_owner(
 }
 
 async fn detach_slot(slot: &mut HostedSlot) -> Result<()> {
+    slot.intent_incarnation = None;
+    slot.lifecycle = SlotLifecycle::Failed;
     let Some(agent) = slot.agent.as_ref() else {
-        slot.lifecycle = SlotLifecycle::Failed;
         return Ok(());
     };
     if let Some(attachment) = agent.status().attachment.as_ref() {
         agent.detach(attachment.generation).await?;
     }
-    slot.intent_incarnation = None;
     slot.lifecycle = SlotLifecycle::Detached;
     Ok(())
 }
@@ -574,7 +579,7 @@ fn publish_host_status(
             .filter(|slot| slot.lifecycle == SlotLifecycle::Failed)
             .count(),
         capacity_rejected_total,
-        error: None,
+        error: (!healthy).then(|| "KV state-agent host supervisor is not running".to_string()),
     };
     metrics.publish(&status);
     destination.store(Arc::new(status));
@@ -739,5 +744,40 @@ mod tests {
             intents[&second.cache_owner_id][&202].worker,
             WorkerWithDpRank::new(leader_worker_id, 7)
         );
+    }
+
+    #[test]
+    fn changed_intent_incarnation_does_not_replace_the_accepted_descriptor() {
+        let host = instance("kv_state_agent", 1);
+        let accepted = intent(
+            &host,
+            instance("vllm", 11),
+            owner(4),
+            WorkerWithDpRank::new(17, 4),
+            101,
+        );
+        let mut changed = accepted.clone();
+        changed.raw_topic = "changed-topic".to_string();
+        let mut intents = HashMap::new();
+        let mut intent_owners = HashMap::new();
+
+        reconcile_intent_event(
+            Ok(added(&host, 101, &accepted)),
+            &host,
+            &mut intents,
+            &mut intent_owners,
+        )
+        .unwrap();
+        assert!(
+            reconcile_intent_event(
+                Ok(added(&host, 101, &changed)),
+                &host,
+                &mut intents,
+                &mut intent_owners,
+            )
+            .is_err()
+        );
+        assert_eq!(intents[&accepted.cache_owner_id][&101], accepted);
+        assert_eq!(intent_owners[&101], accepted.cache_owner_id);
     }
 }

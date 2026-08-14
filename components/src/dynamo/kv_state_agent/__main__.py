@@ -29,7 +29,12 @@ class HostDiagnostics:
         self._host = host
 
     async def health(self, _request):
-        yield await self._host.status()
+        status = await self._host.status()
+        if not status.get("healthy", False):
+            raise RuntimeError(
+                status.get("error", "KV state-agent host supervisor is not running")
+            )
+        yield status
 
 
 @dynamo_worker()

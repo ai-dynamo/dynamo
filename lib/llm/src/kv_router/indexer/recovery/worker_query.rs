@@ -266,8 +266,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         let mut slot = slot_handle.lock().await;
 
         if matches!(status, KvSourceStatus::Suppressed) {
-            self.deactivate_locked(key, &mut slot).await;
-            slot.pending_reset = None;
+            let deactivated = self.deactivate_locked(key, &mut slot).await;
+            let reset_source = slot.pending_reset.take().or(deactivated);
+            if let Some(source_id) = reset_source
+                && let Err(error) = self.reset_rank_or_fence(key, &source_id, &mut slot).await
+            {
+                tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear legacy KV state while suppressing its source; reset remains pending");
+                return;
+            }
             slot.rank = RankState::default();
             return;
         }
@@ -1510,6 +1516,45 @@ mod tests {
             .sync_membership_with_ready_sources(&HashSet::from([ready_source(&source)]))
             .await;
         assert!(client.publisher_bindings.contains_key(&source.publisher_id));
+    }
+
+    #[tokio::test]
+    async fn suppressing_an_active_legacy_source_resets_its_rank() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let source = source_for(&kv_endpoint, worker, 100, None);
+        let initial = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
+        );
+        let (_tx, rx) = watch::channel(initial.clone());
+        let target = RecordingTarget::default();
+        let client = WorkerQueryClient::new_target_for_test(
+            target.clone(),
+            rx,
+            Arc::new(MockTransport::default()),
+        );
+        client.reconcile_view(initial).await;
+        client
+            .handle_live_batch(100, vec![store_for(worker, 1)])
+            .await;
+        target.calls.lock().await.clear();
+
+        client
+            .reconcile_view(membership_view(
+                &serving,
+                &kv_endpoint,
+                [(worker, KvSourceStatus::Suppressed)],
+            ))
+            .await;
+
+        assert_eq!(
+            target.calls.lock().await.as_slice(),
+            &[TargetCall::Reset(100, RecoveryResetReason::Lifecycle)]
+        );
+        assert!(!client.publisher_bindings.contains_key(&100));
     }
 
     #[tokio::test]
@@ -2988,7 +3033,7 @@ mod tests {
                 serving.clone(),
                 indexer,
                 membership_watch,
-                64,
+                4,
                 "test-model".to_string(),
                 None,
                 crate::kv_router::KvEventSourceRequirement::Unknown,
