@@ -283,6 +283,49 @@ pub(crate) fn worker_selection_policy_factory(
     }
 }
 
+#[cfg(feature = "select-service")]
+pub(crate) fn warn_if_standalone_ignores_stage_policies(
+    config: &KvRouterConfig,
+) -> anyhow::Result<()> {
+    if config.has_explicit_stage_worker_selection_policy()? {
+        tracing::warn!(
+            "prefill, decode, and encode worker-selection policies are ignored by aggregated standalone selection hosts"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "select-service")]
+/// Resolve only the aggregated policy used by standalone selection hosts.
+pub(crate) fn standalone_worker_selection_policy_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    warn_if_standalone_ignores_stage_policies(config)?;
+
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| {
+                registry.resolve_for_worker_type(config, dynamo_kv_router::WorkerType::Aggregated)
+            })
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_worker_selection_policy_instance_for(
+            dynamo_kv_router::WorkerType::Aggregated,
+        )? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(feature = "custom-policy")]
 fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut registry = WorkerSelectionPolicyRegistry::default();
@@ -370,7 +413,7 @@ fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()>
     py.allow_threads(move || {
         llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
             argv,
-            worker_selection_policy_factory,
+            standalone_worker_selection_policy_factory,
         )
     })
     .map_err(standalone_to_pyerr)
