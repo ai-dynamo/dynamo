@@ -27,10 +27,6 @@ Key characteristics of the decode routing stage in disaggregated mode:
 - **Disables KV reuse assumption** (`assume_kv_reuse=false`) unless the backend can truly deduplicate transferred blocks.
 - **Disables prefill-token tracking** (`track_prefill_tokens=false`) so decode-side load reflects decode work rather than already-completed prompt work.
 
-<Note>
-The Rust router contains an experimental conditional bypass path for programmatic or embedded configurations. It can keep a cache-hot request on a selected decode worker instead of performing remote prefill. The standard `dynamo.frontend` and standalone Python router CLIs do not expose that configuration, so ordinary CLI deployments follow the prefill-handoff-decode flow documented below.
-</Note>
-
 ## Setup Example
 
 When both workers are registered, requests are automatically routed.
