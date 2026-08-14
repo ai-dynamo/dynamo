@@ -983,10 +983,20 @@ func TestGenerateDeploymentScopesTopologySpreadToWorkerGeneration(t *testing.T) 
 		commonconsts.KubeLabelDynamoWorkerHash,
 	)
 	require.Empty(t, deployment.Spec.Template.Spec.TopologySpreadConstraints[2].LabelSelector.MatchLabels)
+
+	t.Log("Persist the scoped Deployment and verify a later render preserves the same pod template")
+	require.NoError(t, reconciler.Create(t.Context(), deployment))
+	rerendered, toDelete, err := reconciler.generateDeployment(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t, deployment.Spec.Template, rerendered.Spec.Template)
 }
 
 func TestRenderMultinodeTopologySpreadConstraintsUsesFinalRoleLabels(t *testing.T) {
 	t.Log("Create a legacy-compatible decode worker with role-specific topology selectors")
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "decode-db6b6891",
@@ -1036,18 +1046,23 @@ func TestRenderMultinodeTopologySpreadConstraintsUsesFinalRoleLabels(t *testing.
 			},
 		},
 	}
-	renderer := newDCDWorkloadRenderer(
-		fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
-		&configv1alpha1.OperatorConfiguration{},
-		&controller_common.RuntimeConfig{},
-		&mockDockerSecretRetriever{GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 			return nil, nil
 		}},
-	)
+	}
 
-	t.Log("Render the final leader and worker templates")
-	leaderTemplate, workerTemplate, err := renderer.renderMultinodePodTemplateSpecs(t.Context(), dcd)
+	t.Log("Render the new LeaderWorkerSet generation")
+	lws, toDelete, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	})
 	require.NoError(t, err)
+	require.False(t, toDelete)
+	leaderTemplate := lws.Spec.LeaderWorkerTemplate.LeaderTemplate
+	workerTemplate := &lws.Spec.LeaderWorkerTemplate.WorkerTemplate
 
 	t.Log("Verify each role scopes only the selector that matches its final labels")
 	require.Equal(t, commonconsts.ComponentTypeDecode, leaderTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType])
@@ -1068,6 +1083,15 @@ func TestRenderMultinodeTopologySpreadConstraintsUsesFinalRoleLabels(t *testing.
 		workerTemplate.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels,
 		commonconsts.KubeLabelDynamoWorkerHash,
 	)
+
+	t.Log("Persist the scoped LeaderWorkerSet and verify a later render preserves both templates")
+	require.NoError(t, reconciler.Create(t.Context(), lws))
+	rerendered, toDelete, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t, lws.Spec.LeaderWorkerTemplate, rerendered.Spec.LeaderWorkerTemplate)
 }
 
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWithoutWorkerHash(t *testing.T) {

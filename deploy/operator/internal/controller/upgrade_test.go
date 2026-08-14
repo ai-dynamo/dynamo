@@ -98,6 +98,16 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 						SubComponentType: commonconsts.ComponentTypeDecode,
 						DynamoNamespace:  &dynamoNamespace,
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							PodSpec: &corev1.PodSpec{
+								TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+									MaxSkew:           1,
+									TopologyKey:       corev1.LabelHostname,
+									WhenUnsatisfiable: corev1.DoNotSchedule,
+									LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+										commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+									}},
+								}},
+							},
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
 								Image:   "test-image:latest",
@@ -137,6 +147,13 @@ spec:
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: qwen-decode-db6b6891
     spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            nvidia.com/dynamo-component-type: worker
       volumes:
       - name: shared-memory
         emptyDir:
@@ -293,6 +310,16 @@ spec:
 						SubComponentType: commonconsts.ComponentTypeDecode,
 						DynamoNamespace:  &dynamoNamespace,
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							PodSpec: &corev1.PodSpec{
+								TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+									MaxSkew:           1,
+									TopologyKey:       corev1.LabelHostname,
+									WhenUnsatisfiable: corev1.DoNotSchedule,
+									LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+										commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+									}},
+								}},
+							},
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
 								Image:   "test-image:latest",
@@ -332,6 +359,13 @@ spec:
           nvidia.com/metrics-enabled: "true"
           role: leader
       spec:
+        topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              nvidia.com/dynamo-component-type: worker
         volumes:
         - name: shared-memory
           emptyDir:
@@ -439,6 +473,13 @@ spec:
           nvidia.com/metrics-enabled: "true"
           role: worker
       spec:
+        topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              nvidia.com/dynamo-component-type: worker
         volumes:
         - name: shared-memory
           emptyDir:

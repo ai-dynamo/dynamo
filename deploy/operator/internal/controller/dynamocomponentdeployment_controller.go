@@ -554,6 +554,22 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
 
+	// Scope new worker generations while preserving an existing workload's upgrade-compatible template.
+	existing := &leaderworkersetv1.LeaderWorkerSet{}
+	getErr := r.Get(ctx, client.ObjectKey{Name: kubeName, Namespace: kubeNs}, existing)
+	switch {
+	case k8serrors.IsNotFound(getErr):
+		scopeWorkerTopologySpreadConstraints(leaderPodTemplateSpec)
+		scopeWorkerTopologySpreadConstraints(workerPodTemplateSpec)
+	case getErr != nil:
+		return nil, false, errors.Wrap(getErr, "get existing LeaderWorkerSet before topology spread rendering")
+	case existing.Spec.LeaderWorkerTemplate.LeaderTemplate != nil &&
+		workerTopologySpreadConstraintsWereScoped(existing.Spec.LeaderWorkerTemplate.LeaderTemplate, leaderPodTemplateSpec) &&
+		workerTopologySpreadConstraintsWereScoped(&existing.Spec.LeaderWorkerTemplate.WorkerTemplate, workerPodTemplateSpec):
+		scopeWorkerTopologySpreadConstraints(leaderPodTemplateSpec)
+		scopeWorkerTopologySpreadConstraints(workerPodTemplateSpec)
+	}
+
 	if labels == nil {
 		labels = make(map[string]string)
 	}
@@ -822,6 +838,19 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	podTemplateSpec, err := renderer.generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, dynamo.RoleMain, containerGPUs)
 	if err != nil {
 		return
+	}
+
+	// Scope new worker generations while preserving an existing workload's upgrade-compatible template.
+	existing := &appsv1.Deployment{}
+	getErr := r.Get(ctx, client.ObjectKey{Name: kubeName, Namespace: kubeNs}, existing)
+	switch {
+	case k8serrors.IsNotFound(getErr):
+		scopeWorkerTopologySpreadConstraints(podTemplateSpec)
+	case getErr != nil:
+		err = errors.Wrap(getErr, "get existing Deployment before topology spread rendering")
+		return
+	case workerTopologySpreadConstraintsWereScoped(&existing.Spec.Template, podTemplateSpec):
+		scopeWorkerTopologySpreadConstraints(podTemplateSpec)
 	}
 
 	maxSurge, maxUnavailable := getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations)

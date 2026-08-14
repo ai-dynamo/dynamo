@@ -35,6 +35,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8slabels "k8s.io/apimachinery/pkg/labels"
@@ -131,7 +132,6 @@ func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
 	leaderPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
-	scopeWorkerTopologySpreadConstraints(leaderPodTemplateSpec)
 
 	if err := checkMainContainer(&leaderPodTemplateSpec.Spec); err != nil {
 		return nil, errors.Wrap(err, "generateLeaderPodTemplateSpec: failed to check main container")
@@ -154,7 +154,6 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
 	workerPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleWorker)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
-	scopeWorkerTopologySpreadConstraints(workerPodTemplateSpec)
 
 	if err := checkMainContainer(&workerPodTemplateSpec.Spec); err != nil {
 		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
@@ -300,21 +299,17 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		}
 	}
 
-	podTemplate := &corev1.PodTemplateSpec{
+	return &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      podLabels,
 			Annotations: podAnnotations,
 		},
 		Spec: *podSpec,
-	}
-
-	// Finalize standalone templates here; multinode roles add their final labels in their role-specific renderers.
-	if role == dynamo.RoleMain {
-		scopeWorkerTopologySpreadConstraints(podTemplate)
-	}
-	return podTemplate, nil
+	}, nil
 }
 
+// scopeWorkerTopologySpreadConstraints mutates eligible constraints to select the template's exact worker generation.
+// podTemplate must be non-nil and carry its finalized workload labels.
 func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
 	podLabels := podTemplate.Labels
 	workerHash := podLabels[commonconsts.KubeLabelDynamoWorkerHash]
@@ -349,6 +344,18 @@ func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
 		}
 		constraint.LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
+}
+
+// workerTopologySpreadConstraintsWereScoped reports whether existing retains the scoped form of desired.
+// Both templates must be non-nil and carry their finalized workload labels.
+func workerTopologySpreadConstraintsWereScoped(existing, desired *corev1.PodTemplateSpec) bool {
+	scopedDesired := desired.DeepCopy()
+	scopeWorkerTopologySpreadConstraints(scopedDesired)
+
+	return equality.Semantic.DeepEqual(
+		existing.Spec.TopologySpreadConstraints,
+		scopedDesired.Spec.TopologySpreadConstraints,
+	)
 }
 
 func labelSelectorReferencesKey(selector *metav1.LabelSelector, key string) bool {
