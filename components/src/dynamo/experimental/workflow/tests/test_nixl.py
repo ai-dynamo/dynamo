@@ -241,7 +241,7 @@ GENERATOR = StageContract(
 
 def _tensor_workflow() -> Workflow:
     workflow = Workflow("nixl-fanout")
-    request = workflow.input("request", type="json")
+    request = workflow.input("request", ValueSpec(type="json"))
     encoder = workflow.stage("encoder", ENCODER, request=request)
     classifier = workflow.stage("classifier", CLASSIFIER, embedding=encoder.embedding)
     generator = workflow.stage("generator", GENERATOR, embedding=encoder.embedding)
