@@ -258,6 +258,13 @@ enum LifecycleState {
     Stopped,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineRouteLifecycle {
+    Starting,
+    Running,
+    ShuttingDown,
+}
+
 /// The engine a [`Worker`] drives, tagged by request modality. Both variants
 /// share the lifecycle (driven via the forwarders below); they differ only in
 /// the serve-loop adapter: `Llm` → token pipeline ([`EngineAdapter`]), `Raw` →
@@ -336,6 +343,17 @@ impl EngineKind {
         }
     }
 
+    fn validate_engine_control(
+        &self,
+        control: &str,
+        body: &serde_json::Value,
+    ) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.validate_engine_control(control, body),
+            EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.supported_updates().await,
@@ -386,6 +404,12 @@ pub struct Worker {
     engine: EngineKind,
     config: WorkerConfig,
     state: LifecycleState,
+    /// Serializes administrative engine routes and prevents them from running
+    /// before the serving endpoint is registered or after shutdown begins.
+    engine_route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
+    /// Cancels an in-flight administrative RPC before shutdown waits for the
+    /// lifecycle mutex, so a hung engine callback cannot block shutdown.
+    engine_route_shutdown: CancellationToken,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
@@ -412,6 +436,10 @@ impl Worker {
             engine,
             config,
             state: LifecycleState::Init,
+            engine_route_lifecycle: Arc::new(tokio::sync::Mutex::new(
+                EngineRouteLifecycle::Starting,
+            )),
+            engine_route_shutdown: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
         }
@@ -715,17 +743,15 @@ impl Worker {
 
         let registry = endpoint.drt().engine_routes();
         let control_count = controls.len();
-        // Serialize discovery-mutating controls so a concurrent resume cannot
-        // re-register the endpoint between a pause control's unregister and
-        // its engine-state mutation (and vice versa).
-        let control_lock = Arc::new(tokio::sync::Mutex::new(()));
         for control_name in controls {
             let callback = engine_control_callback(control_name.clone(), self.engine.clone());
             let callback = wrap_engine_control_callback(
                 control_name.clone(),
                 callback,
+                self.engine.clone(),
                 endpoint.clone(),
-                control_lock.clone(),
+                self.engine_route_lifecycle.clone(),
+                self.engine_route_shutdown.clone(),
             );
             // Namespace control routes under `/engine/control/<name>` so they
             // share the `/engine/{*path}` route without colliding with updates.
@@ -740,7 +766,8 @@ impl Worker {
     /// Updates are a sibling surface to controls for operations that mutate
     /// engine-managed assets. They register under
     /// `/engine/update/<name>` and, unlike controls, never toggle discovery
-    /// registration — so no quiesce/resume policy wrapper or serialization lock.
+    /// registration. They still share the administrative lifecycle gate so
+    /// startup and shutdown cannot race an engine mutation.
     async fn register_engine_updates(
         &self,
         endpoint: &dynamo_runtime::component::Endpoint,
@@ -762,12 +789,29 @@ impl Worker {
             ));
         }
         for update_name in updates {
-            let callback = engine_update_callback(update_name.clone(), self.engine.clone());
+            let callback = engine_update_callback(
+                update_name.clone(),
+                self.engine.clone(),
+                self.engine_route_lifecycle.clone(),
+                self.engine_route_shutdown.clone(),
+            );
             // Namespace update routes under `/engine/update/<name>`.
             registry.register(&format!("update/{update_name}"), callback);
         }
         tracing::info!(update_count, "registered engine management updates");
         Ok(())
+    }
+
+    async fn activate_engine_routes(&self) {
+        let mut lifecycle = self.engine_route_lifecycle.lock().await;
+        debug_assert_eq!(*lifecycle, EngineRouteLifecycle::Starting);
+        *lifecycle = EngineRouteLifecycle::Running;
+    }
+
+    async fn begin_engine_route_shutdown(&self) {
+        self.engine_route_shutdown.cancel();
+        let mut lifecycle = self.engine_route_lifecycle.lock().await;
+        *lifecycle = EngineRouteLifecycle::ShuttingDown;
     }
 
     /// Register the Dynamo-owned model taint update on the runtime system server.
@@ -777,7 +821,11 @@ impl Worker {
     fn register_model_taint_update_route(&self, endpoint: &dynamo_runtime::component::Endpoint) {
         endpoint.drt().engine_routes().register(
             MODEL_TAINT_UPDATE_ROUTE,
-            model_taint_update_callback(endpoint.clone()),
+            model_taint_update_callback(
+                endpoint.clone(),
+                self.engine_route_lifecycle.clone(),
+                self.engine_route_shutdown.clone(),
+            ),
         );
     }
 
@@ -865,7 +913,6 @@ impl Worker {
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
-
         let mut local_model =
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
@@ -1002,10 +1049,48 @@ impl Worker {
                 )
             })?;
         }
-        let serve_fut = builder.start();
+        let start_fut = builder.start_with_registration();
+        tokio::pin!(start_fut);
+        let primary_endpoint = tokio::select! {
+            biased;
+            result = &mut start_fut => match result {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    self.begin_engine_route_shutdown().await;
+                    self.orchestrator_steps(&endpoint).await;
+                    return Err(err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("serve: {error}"),
+                    ));
+                }
+            },
+            _ = shutdown.cancelled() => {
+                self.begin_engine_route_shutdown().await;
+                self.orchestrator_steps(&endpoint).await;
+                return Ok(());
+            }
+        };
+
+        // A signal can arrive while primary registration is in flight. Keep
+        // routes closed and tear the endpoint back down rather than briefly
+        // accepting administrative calls during shutdown.
+        if shutdown.is_cancelled() {
+            self.begin_engine_route_shutdown().await;
+            if let Err(error) = primary_endpoint.shutdown().await {
+                tracing::warn!(%error, "primary endpoint shutdown failed");
+            }
+            self.orchestrator_steps(&endpoint).await;
+            return Ok(());
+        }
+
+        // Administrative routes are registered above, but remain gated until
+        // the exact primary discovery instance is callable.
+        self.activate_engine_routes().await;
+
+        let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
 
-        tokio::select! {
+        let serve_result = tokio::select! {
             biased;
             result = &mut serve_fut => {
                 match result {
@@ -1016,23 +1101,30 @@ impl Worker {
                         tracing::info!(
                             "Endpoint completed gracefully; running shutdown orchestration"
                         );
+                        Ok(())
                     }
                     // Serve errored; cleanup_once in run() is the safety net.
                     Err(e) => {
-                        return Err(err(
+                        Err(err(
                             ErrorType::Backend(BackendError::Unknown),
                             format!("serve: {e}"),
-                        ));
+                        ))
                     }
                 }
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
+                Ok(())
             }
-        }
+        };
+
+        // This waits for any in-flight control/update callback holding the
+        // shared lifecycle mutex. Once set, known system URLs reject new work,
+        // and no resume callback can re-register after the final unregister.
+        self.begin_engine_route_shutdown().await;
 
         self.orchestrator_steps(&endpoint).await;
-        Ok(())
+        serve_result
     }
 
     /// Engine-facing shutdown sequence: grace period sleep → drain loop on
@@ -1307,8 +1399,12 @@ fn engine_control_policy(control: &str) -> EngineControlPolicy {
         // Pause controls make the engine unsafe for new requests, so remove
         // the endpoint before they mutate engine state. Resume controls make
         // the engine serving-safe again, so advertise it only after success.
-        "sleep" | "release_memory_occupation" => EngineControlPolicy::UnregisterBefore,
-        "wake_up" | "resume_memory_occupation" => EngineControlPolicy::RegisterAfter,
+        "pause_generation" | "sleep" | "release_memory_occupation" => {
+            EngineControlPolicy::UnregisterBefore
+        }
+        "resume_generation" | "wake_up" | "resume_memory_occupation" => {
+            EngineControlPolicy::RegisterAfter
+        }
         _ => EngineControlPolicy::Direct,
     }
 }
@@ -1324,8 +1420,39 @@ fn control_response_is_error(value: &serde_json::Value) -> bool {
             .is_some_and(|success| !success)
 }
 
+fn control_response_allows_registration(value: &serde_json::Value) -> bool {
+    !control_response_is_error(value)
+        && !value
+            .get("is_sleeping")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn control_error_response(message: impl Into<String>) -> serde_json::Value {
     serde_json::json!({"status": "error", "message": message.into()})
+}
+
+fn engine_route_lifecycle_error(lifecycle: EngineRouteLifecycle) -> serde_json::Value {
+    let state = match lifecycle {
+        EngineRouteLifecycle::Starting => "starting",
+        EngineRouteLifecycle::Running => "running",
+        EngineRouteLifecycle::ShuttingDown => "shutting down",
+    };
+    control_error_response(format!(
+        "engine administrative routes are unavailable while the worker is {state}"
+    ))
+}
+
+fn engine_route_unavailable_response(
+    lifecycle: EngineRouteLifecycle,
+    shutdown: &CancellationToken,
+) -> Option<serde_json::Value> {
+    let lifecycle = if shutdown.is_cancelled() {
+        EngineRouteLifecycle::ShuttingDown
+    } else {
+        lifecycle
+    };
+    (lifecycle != EngineRouteLifecycle::Running).then(|| engine_route_lifecycle_error(lifecycle))
 }
 
 fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
@@ -1373,12 +1500,26 @@ fn parse_model_taint_update_request(body: serde_json::Value) -> anyhow::Result<H
 
 fn model_taint_update_callback(
     endpoint: dynamo_runtime::component::Endpoint,
+    route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
+    route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
         let endpoint = endpoint.clone();
+        let route_lifecycle = route_lifecycle.clone();
+        let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
             let taints = parse_model_taint_update_request(body)?;
-            update_model_taints(&endpoint, taints.clone()).await?;
+            let lifecycle = route_lifecycle.lock().await;
+            if let Some(response) = engine_route_unavailable_response(*lifecycle, &route_shutdown) {
+                return Ok(response);
+            }
+            tokio::select! {
+                biased;
+                _ = route_shutdown.cancelled() => {
+                    return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                }
+                result = update_model_taints(&endpoint, taints.clone()) => result?,
+            }
 
             let mut response_taints: Vec<_> = taints.into_iter().collect();
             response_taints.sort();
@@ -1403,18 +1544,34 @@ fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRo
     })
 }
 
-fn engine_update_callback(update_name: String, engine: EngineKind) -> EngineRouteCallback {
+fn engine_update_callback(
+    update_name: String,
+    engine: EngineKind,
+    route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
+    route_shutdown: CancellationToken,
+) -> EngineRouteCallback {
     Arc::new(move |body| {
         let engine = engine.clone();
         let update_name = update_name.clone();
+        let route_lifecycle = route_lifecycle.clone();
+        let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
             if let Some(response) = update_request_body_error(&body) {
                 return Ok(response);
             }
-            engine
-                .engine_update(update_name, body)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
+            let lifecycle = route_lifecycle.lock().await;
+            if let Some(response) = engine_route_unavailable_response(*lifecycle, &route_shutdown) {
+                return Ok(response);
+            }
+            tokio::select! {
+                biased;
+                _ = route_shutdown.cancelled() => {
+                    Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown))
+                }
+                result = engine.engine_update(update_name, body) => {
+                    result.map_err(|e| anyhow::anyhow!(e.to_string()))
+                }
+            }
         })
     })
 }
@@ -1422,34 +1579,67 @@ fn engine_update_callback(update_name: String, engine: EngineKind) -> EngineRout
 fn wrap_engine_control_callback(
     control_name: String,
     callback: EngineRouteCallback,
+    engine: EngineKind,
     endpoint: dynamo_runtime::component::Endpoint,
-    control_lock: Arc<tokio::sync::Mutex<()>>,
+    route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
+    route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
     Arc::new(move |body| {
         let callback = callback.clone();
+        let engine = engine.clone();
         let endpoint = endpoint.clone();
         let control_name = control_name.clone();
-        let control_lock = control_lock.clone();
+        let route_lifecycle = route_lifecycle.clone();
+        let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
+            if let Some(response) = control_request_body_error(&body) {
+                return Ok(response);
+            }
+            if let Err(error) = engine.validate_engine_control(&control_name, &body) {
+                return Ok(control_error_response(error.to_string()));
+            }
+
+            // Keep this guard across engine mutation and discovery changes.
+            // Shutdown acquires the same mutex before its final unregister, so
+            // an in-flight resume cannot publish a stale worker afterward.
+            let lifecycle = route_lifecycle.lock().await;
+            if let Some(response) = engine_route_unavailable_response(*lifecycle, &route_shutdown) {
+                return Ok(response);
+            }
+
             match policy {
-                EngineControlPolicy::Direct => callback(body).await,
-                EngineControlPolicy::UnregisterBefore => {
-                    if let Some(response) = control_request_body_error(&body) {
-                        return Ok(response);
+                EngineControlPolicy::Direct => {
+                    tokio::select! {
+                        biased;
+                        _ = route_shutdown.cancelled() => {
+                            Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown))
+                        }
+                        result = callback(body) => result,
                     }
-
-                    // Hold across unregister + callback so a concurrent resume
-                    // cannot re-register between them.
-                    let _guard = control_lock.lock().await;
-
-                    if let Err(e) = endpoint.unregister_endpoint_instance().await {
+                }
+                EngineControlPolicy::UnregisterBefore => {
+                    let unregister_result = tokio::select! {
+                        biased;
+                        _ = route_shutdown.cancelled() => {
+                            return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                        }
+                        result = endpoint.unregister_endpoint_instance() => result,
+                    };
+                    if let Err(e) = unregister_result {
                         return Ok(control_error_response(format!(
                             "failed to unregister endpoint before /engine/control/{control_name}: {e}"
                         )));
                     }
 
-                    match callback(body).await {
+                    let callback_result = tokio::select! {
+                        biased;
+                        _ = route_shutdown.cancelled() => {
+                            return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                        }
+                        result = callback(body) => result,
+                    };
+                    match callback_result {
                         Ok(response) => {
                             if control_response_is_error(&response) {
                                 tracing::warn!(
@@ -1470,14 +1660,30 @@ fn wrap_engine_control_callback(
                     }
                 }
                 EngineControlPolicy::RegisterAfter => {
-                    // Hold across callback + register so a concurrent pause
-                    // cannot unregister between them.
-                    let _guard = control_lock.lock().await;
-
-                    let response = callback(body).await?;
-                    if !control_response_is_error(&response)
-                        && let Err(e) = endpoint.register_endpoint_instance().await
-                    {
+                    let response = tokio::select! {
+                        biased;
+                        _ = route_shutdown.cancelled() => {
+                            return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                        }
+                        result = callback(body) => result?,
+                    };
+                    if !control_response_allows_registration(&response) {
+                        if !control_response_is_error(&response) {
+                            tracing::info!(
+                                control = %control_name,
+                                "engine control completed but the engine is not serving-ready; leaving endpoint unregistered"
+                            );
+                        }
+                        return Ok(response);
+                    }
+                    let register_result = tokio::select! {
+                        biased;
+                        _ = route_shutdown.cancelled() => {
+                            return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                        }
+                        result = endpoint.register_endpoint_instance() => result,
+                    };
+                    if let Err(e) = register_result {
                         // The engine is serving-safe but absent from discovery. The
                         // operation is idempotent: retrying /engine/control/{control_name}
                         // re-registers without repeating the wake/resume work (the
@@ -1939,11 +2145,19 @@ mod tests {
             EngineControlPolicy::UnregisterBefore
         );
         assert_eq!(
+            engine_control_policy("pause_generation"),
+            EngineControlPolicy::UnregisterBefore
+        );
+        assert_eq!(
             engine_control_policy("release_memory_occupation"),
             EngineControlPolicy::UnregisterBefore
         );
         assert_eq!(
             engine_control_policy("wake_up"),
+            EngineControlPolicy::RegisterAfter
+        );
+        assert_eq!(
+            engine_control_policy("resume_generation"),
             EngineControlPolicy::RegisterAfter
         );
         assert_eq!(
@@ -3034,9 +3248,9 @@ mod tests {
     }
 }
 
-// Integration tests for the `on_endpoint_ready` handoff. These need a real
-// `DistributedRuntime`/`Endpoint` (NATS-backed), so they live behind the
-// `integration` feature:
+// Integration tests for endpoint handoff and discovery lifecycle policy. These
+// need a real `DistributedRuntime`/`Endpoint` (NATS-backed), so they live behind
+// the `integration` feature:
 //   cargo test -p dynamo-backend-common --features integration on_endpoint_ready
 #[cfg(all(test, feature = "integration"))]
 mod handoff_integration_tests {
@@ -3047,6 +3261,7 @@ mod handoff_integration_tests {
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use futures::stream::BoxStream;
     use std::sync::Mutex as StdMutex;
+    use tokio::sync::Notify;
 
     /// Build a real serving `Endpoint` from a test DRT, mirroring how
     /// `run_inner` resolves namespace → component → endpoint.
@@ -3059,10 +3274,24 @@ mod handoff_integration_tests {
             .endpoint("generate")
     }
 
-    /// Mock engine that records the order of `on_endpoint_ready`,
-    /// `supported_controls`, and `supported_updates` calls, lets a test force
-    /// `on_endpoint_ready` to fail, and advertises configurable control/update
-    /// sets.
+    /// Build an endpoint with in-memory discovery and the local TCP request
+    /// plane so lifecycle tests do not require an external NATS server.
+    async fn test_local_endpoint() -> dynamo_runtime::component::Endpoint {
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let config = dynamo_runtime::distributed::DistributedConfig::process_local();
+        let drt = dynamo_runtime::DistributedRuntime::new(runtime, config)
+            .await
+            .unwrap();
+        drt.namespace("lifecycle_ns")
+            .unwrap()
+            .component("lifecycle_comp")
+            .unwrap()
+            .endpoint("generate")
+    }
+
+    /// Mock engine that records endpoint/control lifecycle calls, lets a test
+    /// force `on_endpoint_ready` to fail, and advertises configurable
+    /// control/update sets.
     struct HandoffMockEngine {
         log: Arc<StdMutex<Vec<&'static str>>>,
         endpoint_ready_should_fail: bool,
@@ -3116,9 +3345,59 @@ mod handoff_integration_tests {
             Ok(self.controls.clone())
         }
 
+        fn validate_engine_control(
+            &self,
+            control: &str,
+            body: &serde_json::Value,
+        ) -> Result<(), DynamoError> {
+            self.log.lock().unwrap().push("validate_engine_control");
+            if control == "pause_generation"
+                && body.get("mode").and_then(serde_json::Value::as_str) == Some("malformed")
+            {
+                return Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "pause_generation mode must be abort, wait, or keep",
+                ));
+            }
+            Ok(())
+        }
+
+        async fn engine_control(
+            &self,
+            control: String,
+            body: serde_json::Value,
+        ) -> Result<serde_json::Value, DynamoError> {
+            self.log.lock().unwrap().push("engine_control");
+            self.validate_engine_control(&control, &body)?;
+            if control == "wake_up"
+                && body
+                    .get("tags")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tags| !tags.is_empty())
+            {
+                Ok(serde_json::json!({
+                    "status": "partially_awake",
+                    "is_sleeping": true,
+                }))
+            } else if control == "wake_up" {
+                Ok(serde_json::json!({"status": "awake"}))
+            } else {
+                Ok(serde_json::json!({"status": "paused"}))
+            }
+        }
+
         async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
             self.log.lock().unwrap().push("supported_updates");
             Ok(self.updates.clone())
+        }
+
+        async fn engine_update(
+            &self,
+            _update: String,
+            _body: serde_json::Value,
+        ) -> Result<serde_json::Value, DynamoError> {
+            self.log.lock().unwrap().push("engine_update");
+            Ok(serde_json::json!({"status": "updated"}))
         }
 
         async fn on_endpoint_ready(
@@ -3242,6 +3521,187 @@ mod handoff_integration_tests {
         );
     }
 
+    /// Regression: malformed pause fields could unregister a serving worker
+    /// before validation, removing healthy capacity; this test catches it at
+    /// the engine-route/discovery boundary.
+    #[tokio::test]
+    async fn malformed_pause_does_not_execute_or_unregister_worker() {
+        let endpoint = test_local_endpoint().await;
+        endpoint.register_endpoint_instance().await.unwrap();
+        let (engine, log) =
+            HandoffMockEngine::new(false, vec!["pause_generation".to_string()], Vec::new());
+        let worker = Worker::new(engine, WorkerConfig::default());
+        worker
+            .register_engine_controls(&endpoint)
+            .await
+            .expect("control registration should succeed");
+
+        let callback = endpoint
+            .drt()
+            .engine_routes()
+            .get("control/pause_generation")
+            .unwrap();
+        let response = callback(serde_json::json!({"mode": "malformed"}))
+            .await
+            .unwrap();
+
+        assert!(control_response_is_error(&response));
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["supported_controls", "validate_engine_control"],
+            "malformed input must be rejected before engine execution"
+        );
+        let endpoint_id = endpoint.id();
+        let instances = endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::Endpoint {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1, "worker must remain in discovery");
+    }
+
+    /// Regression: known system URLs could reach an unstarted engine during
+    /// startup or mutate it after shutdown began; this test catches both at the
+    /// registered engine-route boundary.
+    #[tokio::test]
+    async fn administrative_routes_reject_outside_the_serving_lifecycle() {
+        let endpoint = test_local_endpoint().await;
+        let (engine, log) = HandoffMockEngine::new(
+            false,
+            vec!["start_profile".to_string()],
+            vec!["load_lora".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+        worker.register_engine_controls(&endpoint).await.unwrap();
+        worker.register_engine_updates(&endpoint).await.unwrap();
+        let routes = endpoint.drt().engine_routes();
+        let control = routes.get("control/start_profile").unwrap();
+        let update = routes.get("update/load_lora").unwrap();
+
+        for expected_state in ["starting", "shutting down"] {
+            for callback in [&control, &update] {
+                let response = callback(serde_json::json!({})).await.unwrap();
+                assert!(control_response_is_error(&response));
+                assert!(
+                    response["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(expected_state)),
+                    "unexpected lifecycle response: {response}"
+                );
+            }
+            if expected_state == "starting" {
+                worker.begin_engine_route_shutdown().await;
+            }
+        }
+
+        let recorded = log.lock().unwrap();
+        assert!(!recorded.contains(&"engine_control"));
+        assert!(!recorded.contains(&"engine_update"));
+    }
+
+    /// Regression: a tags-only wake could re-advertise a worker whose KV cache
+    /// or scheduler remained asleep, sending generation traffic to an unusable
+    /// engine; this test catches it at the discovery boundary.
+    #[tokio::test]
+    async fn partial_wake_does_not_register_the_serving_endpoint() {
+        let endpoint = test_local_endpoint().await;
+        let (engine, _) = HandoffMockEngine::new(false, vec!["wake_up".to_string()], Vec::new());
+        let worker = Worker::new(engine, WorkerConfig::default());
+        worker.register_engine_controls(&endpoint).await.unwrap();
+        worker.activate_engine_routes().await;
+
+        let callback = endpoint
+            .drt()
+            .engine_routes()
+            .get("control/wake_up")
+            .unwrap();
+        let response = callback(serde_json::json!({"tags": ["weights"]}))
+            .await
+            .unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"status": "partially_awake", "is_sleeping": true})
+        );
+
+        let endpoint_id = endpoint.id();
+        let instances = endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::Endpoint {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+            })
+            .await
+            .unwrap();
+        assert!(
+            instances.is_empty(),
+            "partially awake worker must stay hidden"
+        );
+    }
+
+    /// Regression: shutdown could unregister an endpoint while an in-flight
+    /// resume later re-registered it, leaving a stale routable worker. The
+    /// callback must be cancelled and release the lifecycle guard promptly.
+    #[tokio::test]
+    async fn shutdown_cancels_inflight_resume_before_final_unregister() {
+        let endpoint = test_local_endpoint().await;
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker = Worker::new(Arc::new(DefaultsEngine), WorkerConfig::default());
+        worker.activate_engine_routes().await;
+
+        let entered = Arc::new(Notify::new());
+        let callback: EngineRouteCallback = Arc::new({
+            let entered = entered.clone();
+            move |_| {
+                let entered = entered.clone();
+                Box::pin(async move {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                    unreachable!("pending callback must be cancelled by shutdown")
+                })
+            }
+        });
+        let callback = wrap_engine_control_callback(
+            "resume_generation".to_string(),
+            callback,
+            EngineKind::Llm(Arc::new(DefaultsEngine)),
+            endpoint.clone(),
+            worker.engine_route_lifecycle.clone(),
+            worker.engine_route_shutdown.clone(),
+        );
+        let request = tokio::spawn(async move { callback(serde_json::json!({})).await.unwrap() });
+        entered.notified().await;
+
+        tokio::time::timeout(Duration::from_secs(1), worker.begin_engine_route_shutdown())
+            .await
+            .expect("shutdown must cancel the in-flight control");
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        let response = request.await.unwrap();
+        assert!(control_response_is_error(&response));
+
+        let endpoint_id = endpoint.id();
+        let instances = endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::Endpoint {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+            })
+            .await
+            .unwrap();
+        assert!(
+            instances.is_empty(),
+            "shutdown must leave no stale endpoint"
+        );
+    }
+
     #[tokio::test]
     async fn engine_update_cannot_replace_model_taint_route() {
         let endpoint = test_endpoint().await;
@@ -3292,6 +3752,7 @@ mod handoff_integration_tests {
 
         let worker = Worker::new(Arc::new(DefaultsEngine), WorkerConfig::default());
         worker.register_model_taint_update_route(&endpoint);
+        worker.activate_engine_routes().await;
         let callback = endpoint
             .drt()
             .engine_routes()
