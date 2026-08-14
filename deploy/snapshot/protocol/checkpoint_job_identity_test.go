@@ -25,7 +25,7 @@ func TestCudaCheckpointLaunchJobWrapperPersistsJobFile(t *testing.T) {
 
 	_, args := wrapWithCudaCheckpointLaunchJob(
 		[]string{"/bin/sh", "-c"},
-		[]string{`printf '%s' "$CUDA_CHECKPOINT_JOB_FILE" > "$1"`, "workload", observedEnvironment},
+		[]string{`printf '%s\n%s' "$CUDA_CHECKPOINT_JOB_FILE" "$SPT_NOENV" > "$1"`, "workload", observedEnvironment},
 	)
 	args[5] = stableJobFile
 	cmd := exec.Command(args[1], args[2:]...)
@@ -52,8 +52,15 @@ func TestCudaCheckpointLaunchJobWrapperPersistsJobFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(observed) != stableJobFile {
-		t.Fatalf("workload observed %q, want %q", observed, stableJobFile)
+	observedJobFile, observedSPTNoEnv, ok := strings.Cut(string(observed), "\n")
+	if !ok {
+		t.Fatalf("workload observed malformed environment %q", observed)
+	}
+	if got := observedJobFile; got != stableJobFile {
+		t.Fatalf("workload observed CUDA_CHECKPOINT_JOB_FILE=%q, want %q", got, stableJobFile)
+	}
+	if got := observedSPTNoEnv; got != "1" {
+		t.Fatalf("workload observed SPT_NOENV=%q, want %q", got, "1")
 	}
 }
 
