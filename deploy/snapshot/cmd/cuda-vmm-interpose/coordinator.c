@@ -39,7 +39,6 @@ struct multicast {
   uint64_t handle_types;
   uint64_t flags;
   uint32_t num_devices;
-  uint32_t participants;
   uint32_t creators;
   uint32_t devices;
   uint32_t bindings;
@@ -309,7 +308,6 @@ validate_topology(struct participant* participants, size_t participant_count, st
           reason = "inconsistent multicast properties";
           goto failed;
         }
-        multicast->participants++;
         if ((record->flags & SNAPSHOT_VMM_CREATOR) != 0) {
           if (strcmp(participant->id, multicast->creator) != 0) {
             reason = "invalid multicast creator";
@@ -406,11 +404,6 @@ validate_topology(struct participant* participants, size_t participant_count, st
   {
     struct multicast* multicast;
     for (multicast = multicasts; multicast != NULL; multicast = multicast->next) {
-      if (multicast->participants != participant_count) {
-        reason = "incomplete multicast participant group";
-        value = multicast->participants;
-        goto failed;
-      }
       if (multicast->creators != 1) {
         reason = "multicast group must have exactly one creator";
         value = multicast->creators;
