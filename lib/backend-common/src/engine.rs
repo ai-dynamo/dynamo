@@ -347,6 +347,11 @@ pub trait LLMEngine: Send + Sync + 'static {
     }
 
     /// Handle one semantic engine-control request.
+    ///
+    /// Wake/resume controls whose Backend SDK policy re-registers the serving
+    /// endpoint must return `is_sleeping: true` whenever the engine is not yet
+    /// serving-ready (for example, after a partial wake). A non-error response
+    /// without that field is treated as ready and allows endpoint registration.
     async fn engine_control(
         &self,
         control: String,

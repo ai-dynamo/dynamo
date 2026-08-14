@@ -404,11 +404,17 @@ pub struct Worker {
     engine: EngineKind,
     config: WorkerConfig,
     state: LifecycleState,
-    /// Serializes administrative engine routes and prevents them from running
-    /// before the serving endpoint is registered or after shutdown begins.
-    engine_route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
-    /// Cancels an in-flight administrative RPC before shutdown waits for the
-    /// lifecycle mutex, so a hung engine callback cannot block shutdown.
+    /// Gates administrative engine routes so they cannot run before the serving
+    /// endpoint is registered or after shutdown begins. Concurrent read guards
+    /// let independent routes run in parallel while shutdown waits for accepted
+    /// Rust route futures to exit.
+    engine_route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
+    /// Serializes controls that mutate discovery registration and shutdown's
+    /// final transition, preventing a resume from re-registering a stale worker.
+    engine_route_mutation: Arc<tokio::sync::Mutex<()>>,
+    /// Signals in-flight Rust administrative route futures to stop. Engine
+    /// adapters that detach work (such as a separately scheduled language
+    /// runtime task) remain responsible for cancelling that work themselves.
     engine_route_shutdown: CancellationToken,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
@@ -436,9 +442,10 @@ impl Worker {
             engine,
             config,
             state: LifecycleState::Init,
-            engine_route_lifecycle: Arc::new(tokio::sync::Mutex::new(
+            engine_route_lifecycle: Arc::new(tokio::sync::RwLock::new(
                 EngineRouteLifecycle::Starting,
             )),
+            engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
@@ -751,6 +758,7 @@ impl Worker {
                 self.engine.clone(),
                 endpoint.clone(),
                 self.engine_route_lifecycle.clone(),
+                self.engine_route_mutation.clone(),
                 self.engine_route_shutdown.clone(),
             );
             // Namespace control routes under `/engine/control/<name>` so they
@@ -803,14 +811,15 @@ impl Worker {
     }
 
     async fn activate_engine_routes(&self) {
-        let mut lifecycle = self.engine_route_lifecycle.lock().await;
+        let mut lifecycle = self.engine_route_lifecycle.write().await;
         debug_assert_eq!(*lifecycle, EngineRouteLifecycle::Starting);
         *lifecycle = EngineRouteLifecycle::Running;
     }
 
     async fn begin_engine_route_shutdown(&self) {
         self.engine_route_shutdown.cancel();
-        let mut lifecycle = self.engine_route_lifecycle.lock().await;
+        let _mutation = self.engine_route_mutation.lock().await;
+        let mut lifecycle = self.engine_route_lifecycle.write().await;
         *lifecycle = EngineRouteLifecycle::ShuttingDown;
     }
 
@@ -1118,9 +1127,9 @@ impl Worker {
             }
         };
 
-        // This waits for any in-flight control/update callback holding the
-        // shared lifecycle mutex. Once set, known system URLs reject new work,
-        // and no resume callback can re-register after the final unregister.
+        // Cancel accepted Rust route futures, wait for their shared lifecycle
+        // guards and any discovery-mutation critical section, then close the
+        // routes. No resume callback can re-register after the final unregister.
         self.begin_engine_route_shutdown().await;
 
         self.orchestrator_steps(&endpoint).await;
@@ -1455,6 +1464,24 @@ fn engine_route_unavailable_response(
     (lifecycle != EngineRouteLifecycle::Running).then(|| engine_route_lifecycle_error(lifecycle))
 }
 
+async fn acquire_engine_route_guard(
+    route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
+    route_shutdown: &CancellationToken,
+) -> Result<tokio::sync::OwnedRwLockReadGuard<EngineRouteLifecycle>, serde_json::Value> {
+    let lifecycle = tokio::select! {
+        biased;
+        _ = route_shutdown.cancelled() => {
+            return Err(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+        }
+        lifecycle = route_lifecycle.read_owned() => lifecycle,
+    };
+    if let Some(response) = engine_route_unavailable_response(*lifecycle, route_shutdown) {
+        Err(response)
+    } else {
+        Ok(lifecycle)
+    }
+}
+
 fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
     if body.is_object() {
         None
@@ -1500,7 +1527,7 @@ fn parse_model_taint_update_request(body: serde_json::Value) -> anyhow::Result<H
 
 fn model_taint_update_callback(
     endpoint: dynamo_runtime::component::Endpoint,
-    route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
+    route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
     route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
@@ -1509,10 +1536,11 @@ fn model_taint_update_callback(
         let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
             let taints = parse_model_taint_update_request(body)?;
-            let lifecycle = route_lifecycle.lock().await;
-            if let Some(response) = engine_route_unavailable_response(*lifecycle, &route_shutdown) {
-                return Ok(response);
-            }
+            let _lifecycle =
+                match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
+                    Ok(lifecycle) => lifecycle,
+                    Err(response) => return Ok(response),
+                };
             tokio::select! {
                 biased;
                 _ = route_shutdown.cancelled() => {
@@ -1547,7 +1575,7 @@ fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRo
 fn engine_update_callback(
     update_name: String,
     engine: EngineKind,
-    route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
+    route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
     route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
@@ -1559,10 +1587,11 @@ fn engine_update_callback(
             if let Some(response) = update_request_body_error(&body) {
                 return Ok(response);
             }
-            let lifecycle = route_lifecycle.lock().await;
-            if let Some(response) = engine_route_unavailable_response(*lifecycle, &route_shutdown) {
-                return Ok(response);
-            }
+            let _lifecycle =
+                match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
+                    Ok(lifecycle) => lifecycle,
+                    Err(response) => return Ok(response),
+                };
             tokio::select! {
                 biased;
                 _ = route_shutdown.cancelled() => {
@@ -1581,7 +1610,8 @@ fn wrap_engine_control_callback(
     callback: EngineRouteCallback,
     engine: EngineKind,
     endpoint: dynamo_runtime::component::Endpoint,
-    route_lifecycle: Arc<tokio::sync::Mutex<EngineRouteLifecycle>>,
+    route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
+    route_mutation: Arc<tokio::sync::Mutex<()>>,
     route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
@@ -1591,6 +1621,7 @@ fn wrap_engine_control_callback(
         let endpoint = endpoint.clone();
         let control_name = control_name.clone();
         let route_lifecycle = route_lifecycle.clone();
+        let route_mutation = route_mutation.clone();
         let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
             if let Some(response) = control_request_body_error(&body) {
@@ -1600,16 +1631,13 @@ fn wrap_engine_control_callback(
                 return Ok(control_error_response(error.to_string()));
             }
 
-            // Keep this guard across engine mutation and discovery changes.
-            // Shutdown acquires the same mutex before its final unregister, so
-            // an in-flight resume cannot publish a stale worker afterward.
-            let lifecycle = route_lifecycle.lock().await;
-            if let Some(response) = engine_route_unavailable_response(*lifecycle, &route_shutdown) {
-                return Ok(response);
-            }
-
             match policy {
                 EngineControlPolicy::Direct => {
+                    let _lifecycle =
+                        match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
+                            Ok(lifecycle) => lifecycle,
+                            Err(response) => return Ok(response),
+                        };
                     tokio::select! {
                         biased;
                         _ = route_shutdown.cancelled() => {
@@ -1619,6 +1647,18 @@ fn wrap_engine_control_callback(
                     }
                 }
                 EngineControlPolicy::UnregisterBefore => {
+                    let _mutation = tokio::select! {
+                        biased;
+                        _ = route_shutdown.cancelled() => {
+                            return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                        }
+                        mutation = route_mutation.lock() => mutation,
+                    };
+                    let _lifecycle =
+                        match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
+                            Ok(lifecycle) => lifecycle,
+                            Err(response) => return Ok(response),
+                        };
                     let unregister_result = tokio::select! {
                         biased;
                         _ = route_shutdown.cancelled() => {
@@ -1660,6 +1700,18 @@ fn wrap_engine_control_callback(
                     }
                 }
                 EngineControlPolicy::RegisterAfter => {
+                    let _mutation = tokio::select! {
+                        biased;
+                        _ = route_shutdown.cancelled() => {
+                            return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                        }
+                        mutation = route_mutation.lock() => mutation,
+                    };
+                    let _lifecycle =
+                        match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
+                            Ok(lifecycle) => lifecycle,
+                            Err(response) => return Ok(response),
+                        };
                     let response = tokio::select! {
                         biased;
                         _ = route_shutdown.cancelled() => {
@@ -3248,16 +3300,17 @@ mod tests {
     }
 }
 
-// Integration tests for endpoint handoff and discovery lifecycle policy. These
-// need a real `DistributedRuntime`/`Endpoint` (NATS-backed), so they live behind
-// the `integration` feature:
-//   cargo test -p dynamo-backend-common --features integration on_endpoint_ready
-#[cfg(all(test, feature = "integration"))]
-mod handoff_integration_tests {
+// Endpoint handoff and administrative-route lifecycle tests. Process-local
+// lifecycle tests run by default; only NATS-backed cases require `integration`.
+#[cfg(test)]
+mod handoff_and_lifecycle_tests {
     use super::*;
     use crate::engine::PreprocessedRequest;
     use async_trait::async_trait;
-    use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
+    use dynamo_runtime::discovery::DiscoveryQuery;
+    #[cfg(feature = "integration")]
+    use dynamo_runtime::discovery::{DiscoveryInstance, DiscoverySpec};
+    #[cfg(feature = "integration")]
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use futures::stream::BoxStream;
     use std::sync::Mutex as StdMutex;
@@ -3265,6 +3318,7 @@ mod handoff_integration_tests {
 
     /// Build a real serving `Endpoint` from a test DRT, mirroring how
     /// `run_inner` resolves namespace → component → endpoint.
+    #[cfg(feature = "integration")]
     async fn test_endpoint() -> dynamo_runtime::component::Endpoint {
         let drt = create_test_drt_async().await;
         drt.namespace("handoff_ns")
@@ -3444,6 +3498,7 @@ mod handoff_integration_tests {
 
     /// The trait default `on_endpoint_ready` is a no-op that succeeds against a
     /// real `Endpoint`.
+    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn default_on_endpoint_ready_is_noop() {
         let endpoint = test_endpoint().await;
@@ -3461,6 +3516,7 @@ mod handoff_integration_tests {
     /// advertised control lands under `control/<name>` and the advertised update
     /// under `update/<name>` in the DRT's engine-route registry, so
     /// `/engine/control/<name>` and `/engine/update/<name>` become routable.
+    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn handoff_precedes_registration_and_populates_namespaced_registry() {
         let endpoint = test_endpoint().await;
@@ -3672,6 +3728,7 @@ mod handoff_integration_tests {
             EngineKind::Llm(Arc::new(DefaultsEngine)),
             endpoint.clone(),
             worker.engine_route_lifecycle.clone(),
+            worker.engine_route_mutation.clone(),
             worker.engine_route_shutdown.clone(),
         );
         let request = tokio::spawn(async move { callback(serde_json::json!({})).await.unwrap() });
@@ -3701,6 +3758,66 @@ mod handoff_integration_tests {
         );
     }
 
+    /// Regression: independent administrative calls could queue behind a slow
+    /// discovery-mutating control when all routes shared one exclusive mutex,
+    /// causing unbounded operator-visible latency; this test catches it at the
+    /// registered route-callback boundary.
+    #[tokio::test]
+    async fn direct_control_does_not_wait_for_discovery_mutation() {
+        let endpoint = test_local_endpoint().await;
+        let worker = Worker::new(Arc::new(DefaultsEngine), WorkerConfig::default());
+        worker.activate_engine_routes().await;
+
+        let entered = Arc::new(Notify::new());
+        let resume_callback: EngineRouteCallback = Arc::new({
+            let entered = entered.clone();
+            move |_| {
+                let entered = entered.clone();
+                Box::pin(async move {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                    unreachable!("pending callback must be cancelled by shutdown")
+                })
+            }
+        });
+        let resume_callback = wrap_engine_control_callback(
+            "resume_generation".to_string(),
+            resume_callback,
+            EngineKind::Llm(Arc::new(DefaultsEngine)),
+            endpoint.clone(),
+            worker.engine_route_lifecycle.clone(),
+            worker.engine_route_mutation.clone(),
+            worker.engine_route_shutdown.clone(),
+        );
+        let resume_request =
+            tokio::spawn(async move { resume_callback(serde_json::json!({})).await.unwrap() });
+        entered.notified().await;
+
+        let direct_callback: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"status": "profiled"})) }));
+        let direct_callback = wrap_engine_control_callback(
+            "start_profile".to_string(),
+            direct_callback,
+            EngineKind::Llm(Arc::new(DefaultsEngine)),
+            endpoint,
+            worker.engine_route_lifecycle.clone(),
+            worker.engine_route_mutation.clone(),
+            worker.engine_route_shutdown.clone(),
+        );
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            direct_callback(serde_json::json!({})),
+        )
+        .await
+        .expect("direct control must not wait for discovery mutation")
+        .unwrap();
+        assert_eq!(response, serde_json::json!({"status": "profiled"}));
+
+        worker.begin_engine_route_shutdown().await;
+        assert!(control_response_is_error(&resume_request.await.unwrap()));
+    }
+
+    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn engine_update_cannot_replace_model_taint_route() {
         let endpoint = test_endpoint().await;
@@ -3726,6 +3843,7 @@ mod handoff_integration_tests {
         assert!(routes.get(MODEL_TAINT_UPDATE_ROUTE).is_none());
     }
 
+    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn model_taint_update_route_updates_registered_base_model() {
         let endpoint = test_endpoint().await;
@@ -3791,6 +3909,7 @@ mod handoff_integration_tests {
     /// `serve_with_orchestrator` propagates the error before
     /// `register_engine_controls`/`register_engine_updates` run, so nothing is
     /// registered.
+    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn failed_handoff_is_fatal_and_skips_registration() {
         let endpoint = test_endpoint().await;
