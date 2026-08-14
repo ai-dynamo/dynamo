@@ -11,6 +11,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from dynamo.experimental.workflow.bindings import Binding, InlineBinding, RemoteBinding
 from dynamo.experimental.workflow.ir import WorkflowIR
+from dynamo.experimental.workflow.remote import RemoteStageClient
 from dynamo.experimental.workflow.runtime import StageContext, WorkflowExecutionError
 from dynamo.experimental.workflow.types import (
     StageContract,
@@ -108,8 +109,6 @@ class StageDispatcher:
         runtime: Any = None,
     ) -> "StageDispatcher":
         """Resolve remote endpoints and bind all physical stage targets."""
-
-        from dynamo.experimental.workflow.remote import RemoteStageClient
 
         endpoint_ids = {
             binding.endpoint_id
