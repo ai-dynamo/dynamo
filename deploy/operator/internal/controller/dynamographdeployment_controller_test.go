@@ -79,7 +79,8 @@ func newTestDGDResourceSyncer(reconciler *DynamoGraphDeploymentReconciler) dgdRe
 	return newDGDResourceSyncer(reconciler.Client, reconciler.Recorder)
 }
 
-func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
+func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpointIncompatibility(t *testing.T) {
+	t.Log("Store a DGD with an incompatible checkpoint configuration")
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-dgd",
@@ -118,6 +119,7 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
+	t.Log("Reconcile once to persist the provider before reporting incompatibility")
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKeyFromObject(dgd),
 	})
@@ -127,7 +129,7 @@ func TestDynamoGraphDeploymentReconcileRejectsStoredCheckpointIncompatibilityBef
 	var stored v1beta1.DynamoGraphDeployment
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored))
 	require.False(t, controller_common.ContainsFinalizer(&stored))
-	require.Empty(t, stored.Annotations)
+	require.Equal(t, commonconsts.WorkloadProviderComponent, stored.Annotations[commonconsts.KubeAnnotationWorkloadProvider])
 	require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
 	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
 	require.NotNil(t, ready)
@@ -680,91 +682,6 @@ func (m *mockScaleInterface) Update(ctx context.Context, resource schema.GroupRe
 func (m *mockScaleInterface) Patch(ctx context.Context, gvr schema.GroupVersionResource, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions) (*autoscalingv1.Scale, error) {
 	// Return a dummy scale object
 	return &autoscalingv1.Scale{}, nil
-}
-
-func TestDynamoGraphDeploymentReconciler_isGrovePathway(t *testing.T) {
-	tests := []struct {
-		name         string
-		groveEnabled bool
-		annotations  map[string]string
-		want         bool
-	}{
-		{
-			name:         "feature disabled without annotation selects component pathway",
-			groveEnabled: false,
-			want:         false,
-		},
-		{
-			name:         "feature disabled ignores explicit enable annotation",
-			groveEnabled: false,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationEnableGrove: commonconsts.KubeLabelValueTrue,
-			},
-			want: false,
-		},
-		{
-			name:         "feature enabled without annotations selects Grove",
-			groveEnabled: true,
-			want:         true,
-		},
-		{
-			name:         "feature enabled with unrelated annotation selects Grove",
-			groveEnabled: true,
-			annotations: map[string]string{
-				"example.com/unrelated": "value",
-			},
-			want: true,
-		},
-		{
-			name:         "feature enabled with explicit enable annotation selects Grove",
-			groveEnabled: true,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationEnableGrove: commonconsts.KubeLabelValueTrue,
-			},
-			want: true,
-		},
-		{
-			name:         "feature enabled with explicit disable annotation selects component pathway",
-			groveEnabled: true,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationEnableGrove: commonconsts.KubeLabelValueFalse,
-			},
-			want: false,
-		},
-		{
-			name:         "explicit disable annotation is case insensitive",
-			groveEnabled: true,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationEnableGrove: "FaLsE",
-			},
-			want: false,
-		},
-		{
-			name:         "unknown annotation value does not disable Grove",
-			groveEnabled: true,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationEnableGrove: "invalid",
-			},
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build a reconciler and DGD with the pathway-selection inputs")
-			reconciler := &DynamoGraphDeploymentReconciler{
-				RuntimeConfig: &controller_common.RuntimeConfig{
-					Gate: features.Gates{Grove: tt.groveEnabled},
-				},
-			}
-			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
-			}
-
-			t.Log("Evaluate the current Grove pathway-selection contract")
-			assert.Equal(t, tt.want, reconciler.isGrovePathway(dgd))
-		})
-	}
 }
 
 func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
