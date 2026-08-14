@@ -457,9 +457,20 @@ def test_should_prefetch_model_for_default_load_format():
 @pytest.mark.parametrize(
     ("structured_outputs_config", "expected_excludes_reasoning"),
     [
-        (None, True),
-        (SimpleNamespace(enable_in_reasoning=False), True),
-        (SimpleNamespace(enable_in_reasoning=True), False),
+        (None, False),
+        (SimpleNamespace(enable_in_reasoning=False), False),
+        (
+            SimpleNamespace(enable_in_reasoning=False, reasoning_parser=None),
+            False,
+        ),
+        (
+            SimpleNamespace(enable_in_reasoning=False, reasoning_parser="qwen3"),
+            True,
+        ),
+        (
+            SimpleNamespace(enable_in_reasoning=True, reasoning_parser="qwen3"),
+            False,
+        ),
     ],
 )
 def test_vllm_publishes_structural_tag_reasoning_policy(

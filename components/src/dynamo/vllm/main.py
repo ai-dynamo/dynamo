@@ -96,18 +96,23 @@ def publish_vllm_structural_tag_reasoning_policy(
 ) -> None:
     """Tell the frontend whether the vLLM tool tag must exclude reasoning.
 
-    When vLLM delays its tool grammar until reasoning ends, the frontend tag
-    must not model that reasoning block again. When the grammar is enabled in
-    reasoning, keep the frontend's compatibility behavior so its response
+    vLLM delays its tool grammar only when reasoning constraints are disabled
+    *and* its engine-side reasoning parser can detect the end of reasoning. In
+    that case, the frontend tag must not model the reasoning block again.
+
+    Otherwise, keep the frontend's compatibility behavior so its response
     parser can close the prompt-injected reasoning block before parsing tools.
     """
     structured_outputs_config = getattr(vllm_config, "structured_outputs_config", None)
     enable_in_reasoning = bool(
         getattr(structured_outputs_config, "enable_in_reasoning", False)
     )
+    has_reasoning_parser = bool(
+        getattr(structured_outputs_config, "reasoning_parser", None)
+    )
     runtime_config.set_engine_specific(
         TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-        json.dumps(not enable_in_reasoning),
+        json.dumps(has_reasoning_parser and not enable_in_reasoning),
     )
 
 

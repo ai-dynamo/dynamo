@@ -15,6 +15,7 @@ fn is_kimi_k3_parser(parser_name: Option<&str>) -> bool {
     parser_name.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
 }
 
+// Unlike K3, the parser registry exposes only the canonical `kimi_k2` spelling.
 fn is_kimi_k2_parser(parser_name: Option<&str>) -> bool {
     parser_name == Some("kimi_k2")
 }
