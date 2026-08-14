@@ -1045,16 +1045,14 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 // the engine only starts once its data-parallel ranks (the followers) have joined, so
 // gating the address on readiness would deadlock.
 //
-// The selector matches every pod carrying the component labels, so the Service only
-// resolves to exactly the Ray head while the component renders as one pod. The caller
-// is responsible for that: it emits this Service only for a single-replica, single-node
-// elastic-EP component.
+// The selector matches every pod carrying the component labels, so this resolves to
+// exactly the Ray head only while the component renders as one pod; the caller is
+// responsible for emitting it only then.
 //
-// The Phase 4 follower does not widen it: the follower is synthesized as its own
-// "<leader>-flw" component (see synthesizeElasticEPFollowerDCD), so it carries a
-// different KubeLabelDynamoComponent value and this selector never matches it. Keep the
-// follower's component identity distinct from the leader's, or this Service starts
-// resolving to followers and `ray start --address=<svc>:6379` will flap between them.
+// The follower does not widen it: it is synthesized as its own "<leader>-flw" component
+// (see synthesizeElasticEPFollowerDCD), so it carries a different component label and
+// this selector never matches it. Keep those identities distinct, or this Service starts
+// resolving to followers and `ray start --address=<svc>:6379` flaps between them.
 func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
 	// Copy the caller's metadata so the Service carries the component's labels and
 	// annotations without aliasing the caller's maps.
