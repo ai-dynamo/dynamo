@@ -75,6 +75,9 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
+    "tool_call_structural_tag_excludes_reasoning"
+)
 MX_LOAD_FORMATS = {"modelexpress", "mx"}
 
 
@@ -86,6 +89,26 @@ def should_prefetch_model(config: Config) -> bool:
     if os.path.exists(config.model):
         return False
     return not uses_modelexpress_load_format(config)
+
+
+def publish_vllm_structural_tag_reasoning_policy(
+    runtime_config, vllm_config: VllmConfig
+) -> None:
+    """Tell the frontend whether the vLLM tool tag must exclude reasoning.
+
+    When vLLM delays its tool grammar until reasoning ends, the frontend tag
+    must not model that reasoning block again. When the grammar is enabled in
+    reasoning, keep the frontend's compatibility behavior so its response
+    parser can close the prompt-injected reasoning block before parsing tools.
+    """
+    structured_outputs_config = getattr(vllm_config, "structured_outputs_config", None)
+    enable_in_reasoning = bool(
+        getattr(structured_outputs_config, "enable_in_reasoning", False)
+    )
+    runtime_config.set_engine_specific(
+        TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        json.dumps(not enable_in_reasoning),
+    )
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -684,6 +707,7 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
     apply_data_parallel_runtime_config(runtime_config, dp_range)
     enable_router_hint_support(

@@ -650,6 +650,41 @@ async fn apply_jail_with_parser_and_choice(
     drive_moved_jail(jail, chunks).collect().await
 }
 
+/// Run the production jail mapping for a model-native structural-tag payload.
+async fn apply_structural_tag_jail_with_parser_and_choice(
+    payload: &str,
+    parser: &str,
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
+    use futures::StreamExt;
+
+    let chunks = vec![make_text_chunk(payload, false), make_text_chunk("", true)];
+    let input = futures::stream::iter(chunks.into_iter().map(|nv| JailAnnotated {
+        data: Some(nv.inner),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }));
+
+    dynamo_parsers::tool_calling::jail::apply_tool_calling_jail(
+        Some(parser.to_string()),
+        tool_choice,
+        None,
+        true,
+        input,
+    )
+    .filter_map(|a| async move {
+        a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+            inner,
+            nvext: None,
+            llm_metrics: None,
+        })
+    })
+    .collect()
+    .await
+}
+
 /// Collect every emitted tool call across all chunks in the response stream.
 fn collect_tool_calls(
     responses: &[dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse],
@@ -714,33 +749,30 @@ async fn test_kimi_k2_tool_choice_auto() {
     assert_eq!(calls[0].1, r#"{"location":"Paris"}"#);
 }
 
-/// `TOOLCALLING.11` — Kimi K2 + tool_choice=required. Today this combination puts
-/// the jail in `Immediate{ ArrayOfTools }` mode which expects a raw JSON
-/// array of tools rather than the kimi envelope. Pin whatever the
-/// integration layer actually produces today so a future fix is intentional.
-///
-/// TODO(TOOLCALLING.11) — required + parser path is ill-defined: the immediate jail
-/// expects raw JSON while the parser expects its own envelope. cross-parser parametrisation work-item
-/// work-item #1 should reconcile these paths so `tool_choice=required` works
-/// uniformly across all top-7 parsers. Flip this assertion once reconciled.
+/// `TOOLCALLING.11` — Kimi K2 + tool_choice=required uses Kimi's native
+/// structural-tag envelope, so the response must stay on the marker parser
+/// instead of the legacy raw JSON-array immediate path.
 #[tokio::test]
-async fn test_kimi_k2_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
+async fn test_kimi_k2_tool_choice_required_parses_native_structural_tag() {
+    let responses = apply_structural_tag_jail_with_parser_and_choice(
         KIMI_K2_GET_WEATHER,
         "kimi_k2",
         Some(ChatCompletionToolChoiceOption::Required),
     )
     .await;
     let calls = collect_tool_calls(&responses);
-    // Pin: today the immediate-required path can't read kimi envelope, so
-    // either zero calls or the parser path overrides. Either is buggy
-    // relative to the OpenAI semantics. Just assert the run completed.
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call until the \
-         immediate-vs-parser conflict is resolved; got {:?}",
-        calls
+    assert_eq!(
+        calls.len(),
+        1,
+        "required Kimi call must be parsed; got {calls:?}"
     );
+    assert_eq!(calls[0].0, "get_weather");
+    assert_eq!(calls[0].1, r#"{"location":"Paris"}"#);
+    assert!(responses.iter().any(|response| {
+        response.inner.choices.first().is_some_and(|choice| {
+            choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        })
+    }));
 }
 
 /// `TOOLCALLING.11` — Kimi K2 + tool_choice=named with the **correct** tool name.
