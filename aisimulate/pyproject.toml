@@ -29,8 +29,8 @@ classifiers = [
 ]
 dependencies = [
     "ai-dynamo>=1.3.0,<2.0.0",
-    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@614b9c8c8725332533616786e2eb049df48935f0",
-    "aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@614b9c8c8725332533616786e2eb049df48935f0#subdirectory=aic-core",
+    "aiconfigurator==0.11.0",
+    "aiconfigurator-core==0.11.0",
     "chex==0.1.87",
     "filterpy==1.4.5",
     "flax==0.10.0",
@@ -61,9 +61,6 @@ test = [
 [project.urls]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 Documentation = "https://github.com/ai-dynamo/dynamo/tree/main/docs/fern/components/aisimulate"
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisimulate"]
