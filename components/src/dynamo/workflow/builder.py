@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import keyword
-from typing import Mapping, Optional, Protocol, Tuple, Union, cast, runtime_checkable
+from typing import cast
 
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.types import (
@@ -19,13 +19,6 @@ from dynamo.workflow.types import (
 )
 
 _RESERVED_OUTPUT_ATTRIBUTES = frozenset({"output", "output_names"})
-
-
-@runtime_checkable
-class StageDefinition(Protocol):
-    """Anything that carries a reusable stage contract, including a worker."""
-
-    contract: StageContract
 
 
 class StageHandle:
@@ -70,8 +63,8 @@ class StageHandle:
         )
 
 
-class WorkflowBuilder:
-    """Build a validated static workflow using declared stage contracts."""
+class Workflow:
+    """Author a validated static workflow using declared stage contracts."""
 
     def __init__(self, name: str) -> None:
         validate_name(name, "workflow name")
@@ -82,7 +75,7 @@ class WorkflowBuilder:
         self._contracts: dict[str, StageContract] = {}
         self._outputs: dict[str, ValueRef] = {}
 
-    def add_input(self, name: str, spec: ValueSpec) -> ValueRef:
+    def input(self, name: str, spec: ValueSpec, /) -> ValueRef:
         """Declare and reference a workflow input."""
 
         validate_name(name, "workflow input")
@@ -93,35 +86,12 @@ class WorkflowBuilder:
         self._inputs[name] = spec
         return ValueRef.for_input(name, self._owner)
 
-    def input(
-        self,
-        name: str,
-        *,
-        type: str,
-        dtype: Optional[str] = None,
-        shape: Optional[Tuple[Union[int, str], ...]] = None,
-        mode: Optional[str] = None,
-        class_id: Optional[str] = None,
-    ) -> ValueRef:
-        """Declare an input without constructing ``ValueSpec`` explicitly."""
-
-        return self.add_input(
-            name,
-            ValueSpec(
-                type=type,
-                dtype=dtype,
-                shape=shape,
-                mode=mode,
-                class_id=class_id,
-            ),
-        )
-
-    def add_stage(
+    def stage(
         self,
         stage_id: str,
         contract: StageContract,
-        *,
-        inputs: Mapping[str, ValueRef],
+        /,
+        **inputs: ValueRef,
     ) -> StageHandle:
         """Add a stage whose named inputs exactly match its contract."""
 
@@ -157,25 +127,7 @@ class WorkflowBuilder:
         )
         return StageHandle(stage_id, contract, self._owner)
 
-    def stage(
-        self,
-        stage_id: str,
-        stage: Union[StageContract, StageDefinition],
-        **inputs: ValueRef,
-    ) -> StageHandle:
-        """Add a contracted worker or contract using keyword input ports."""
-
-        if isinstance(stage, StageContract):
-            contract = stage
-        elif isinstance(stage, StageDefinition):
-            contract = stage.contract
-        else:
-            raise WorkflowValidationError(
-                "stage must be a StageContract or carry a StageContract"
-            )
-        return self.add_stage(stage_id, contract, inputs=inputs)
-
-    def add_output(self, name: str, reference: ValueRef) -> None:
+    def output(self, name: str, reference: ValueRef, /) -> None:
         """Expose a workflow input or stage output as a workflow output."""
 
         validate_name(name, "workflow output")
@@ -183,11 +135,6 @@ class WorkflowBuilder:
             raise WorkflowValidationError(f"duplicate workflow output {name!r}")
         self._resolve_owned_reference(reference)
         self._outputs[name] = reference
-
-    def output(self, name: str, reference: ValueRef) -> None:
-        """Expose a workflow result."""
-
-        self.add_output(name, reference)
 
     def build(self) -> WorkflowIR:
         """Return canonical, fully validated workflow IR."""
@@ -202,7 +149,7 @@ class WorkflowBuilder:
     def _resolve_owned_reference(self, reference: ValueRef) -> ValueSpec:
         if not isinstance(reference, ValueRef) or reference._owner is not self._owner:
             raise WorkflowValidationError(
-                "value reference belongs to a different workflow builder"
+                "value reference belongs to a different workflow"
             )
         if reference.input_name is not None:
             if reference.input_name not in self._inputs:
@@ -220,7 +167,3 @@ class WorkflowBuilder:
                 f"unknown output {output_name!r} on stage {stage_id!r}"
             )
         return stage.contract.outputs[output_name]
-
-
-class Workflow(WorkflowBuilder):
-    """The user-facing workflow authoring surface."""
