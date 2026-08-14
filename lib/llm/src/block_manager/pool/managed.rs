@@ -32,7 +32,7 @@
 //! 2.  Sequences request blocks via [`BlockPool::allocate_blocks`], which attempts to acquire them
 //!     from the [`InactiveBlockPool`]. This returns [`MutableBlock`]s.
 //! 3.  Once a [`MutableBlock`] is filled and ready, it's registered using `BlockPool::register_block`.
-//!     This process checks the both the [`ActiveBlockPool`] and the [`InactiveBlockPool`] for existing blocks
+//!     This process checks both the [`ActiveBlockPool`] and the [`InactiveBlockPool`] for existing blocks
 //!     with the same content hash. It returns an [`ImmutableBlock`] representing the canonical block
 //!     (either the one provided or an existing one).
 //! 4.  Sequences can also try to reuse blocks directly using `BlockPool::match_sequence_hash`, which

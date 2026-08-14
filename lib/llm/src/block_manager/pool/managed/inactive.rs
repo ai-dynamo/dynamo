@@ -352,7 +352,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     ///
     /// # Returns
     ///
-    /// An `Option<Block<T, M>>` containing a free block if available, otherwise `None`.
+    /// An `Option<Block<S, L, M>>` containing a free block if available, otherwise `None`.
     ///
     /// # Panics
     ///
@@ -515,7 +515,9 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         Ok(())
     }
 
-    /// Returns the `PoolStatus` of the pool.
+    /// Returns `(inactive_blocks, empty_blocks)`: the number of blocks in the
+    /// priority set (previously-registered, reusable blocks) and the number of
+    /// blocks in the uninitialized set (never-registered, empty blocks), respectively.
     pub fn status(&self) -> (usize, usize) {
         let inactive_blocks = self.priority_set.len();
         let empty_blocks = self.uninitialized_set.len();

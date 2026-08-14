@@ -51,7 +51,7 @@
 //!
 //! All transfer requests are triggered by the leader based on the details in the `SchedulerOutput`.
 //!
-//! `SchedulerOutput` is transform
+//! `SchedulerOutput` is transformed into a [`LeaderTransferRequest`].
 
 use super::scheduler::{DISCONNECTED_WARNING, SchedulingDecision};
 use super::*;

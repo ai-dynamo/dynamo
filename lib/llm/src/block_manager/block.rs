@@ -89,7 +89,6 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     fn on_returned(&mut self, tick: u64);
 
     /// Resets the metadata to the default value
-    /// If called, the `BlockMetadata::is_reset()` should return true
     fn reset_metadata(&mut self);
 
     /// The offload priority of the block. Higher priority blocks are offloaded first.
