@@ -50,6 +50,19 @@ pub enum EventTransportKind {
     Zmq,
 }
 
+impl std::fmt::Display for EventTransportKind {
+    /// Renders the canonical wire/config spelling — the same values
+    /// `DYN_EVENT_PLANE` accepts and `#[serde(rename_all = "snake_case")]`
+    /// produces — so logs and diagnostics stay greppable against the value an
+    /// operator actually configured. Mirrors `RequestPlaneMode`'s `Display`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nats => write!(f, "nats"),
+            Self::Zmq => write!(f, "zmq"),
+        }
+    }
+}
+
 impl EventTransportKind {
     /// Parse from environment variable `DYN_EVENT_PLANE`.
     ///

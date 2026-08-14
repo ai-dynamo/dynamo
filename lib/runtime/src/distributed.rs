@@ -742,7 +742,7 @@ impl DistributedConfig {
         tracing::info!(
             discovery_backend = %backend_str,
             request_plane = %request_plane,
-            event_plane = ?event_transport_kind,
+            event_plane = %event_transport_kind,
             nats_enabled,
             "dynamo runtime configuration"
         );
@@ -925,6 +925,11 @@ mod effective_config_tests {
                 ));
                 assert_eq!(cfg.request_plane, RequestPlaneMode::Tcp);
                 assert_eq!(cfg.event_transport_kind, EventTransportKind::Zmq);
+                // The startup line logs this via Display, so pin the rendered
+                // text too: it must match the value DYN_EVENT_PLANE accepts,
+                // not the derived Debug name.
+                assert_eq!(cfg.event_transport_kind.to_string(), "zmq");
+                assert_eq!(cfg.request_plane.to_string(), "tcp");
                 // ZMQ event plane + TCP request plane + no NATS_SERVER => no NATS client.
                 assert!(cfg.nats_config.is_none());
             },
@@ -958,6 +963,7 @@ mod effective_config_tests {
             || {
                 let cfg = DistributedConfig::from_settings();
                 assert_eq!(cfg.event_transport_kind, EventTransportKind::Nats);
+                assert_eq!(cfg.event_transport_kind.to_string(), "nats");
                 assert!(cfg.nats_config.is_some());
             },
         );
