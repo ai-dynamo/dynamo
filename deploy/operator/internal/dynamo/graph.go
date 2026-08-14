@@ -1008,15 +1008,13 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 // DNS-1035 label.
 const maxServiceNameLength = 63
 
-// ElasticEPLeaderServiceName returns the stable headless-Service name a single-pod
-// elastic-EP leader is reachable at (its component service name plus a "-ray" suffix).
+// ElasticEPLeaderServiceName returns the name a single-pod elastic-EP leader is
+// reachable at: its component service name plus a "-ray" suffix.
 //
-// A DGD/component pair that already sits near the limit would be pushed past it by the
-// four extra characters, and the API server would reject the Service and fail the whole
-// stable-resources reconcile with a permanent error. Truncate instead, the same way
-// PCSNameForDGD keeps Grove names in range: a deterministic hash suffix keeps the name
-// unique and stable across reconciles, which matters because the follower derives this
-// address independently rather than reading it back from the Service.
+// That suffix can push a long name past the DNS-1035 limit, which the API server
+// rejects, failing the whole stable-resources reconcile. Truncate with a hash suffix
+// instead, as PCSNameForDGD does. The hash must be deterministic because the follower
+// derives this name independently rather than reading it back from the Service.
 func ElasticEPLeaderServiceName(componentServiceName string) string {
 	name := NormalizeKubeResourceName(componentServiceName + "-ray")
 	if len(name) <= maxServiceNameLength {
@@ -1030,24 +1028,21 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 }
 
 // GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
-// elastic-EP leader a stable address its followers can join.
+// elastic-EP leader a stable address its followers join with
+// `ray start --address=<service>:6379` (see injectElasticEPRayLaunchFlags).
 //
-// Elastic EP runs the leader as a Ray head (see injectElasticEPRayLaunchFlags); a
-// separately-scheduled follower reaches it with `ray start --address=<service>:6379`.
-// A normal ClusterIP Service cannot carry Ray's multi-port head<->worker traffic, so
-// this is headless (clusterIP: None). PublishNotReadyAddresses is true because the
-// follower must connect to the Ray head *before* the leader's engine reports Ready --
-// the engine only starts once its data-parallel ranks (the followers) have joined, so
-// gating the address on readiness would deadlock.
+// Two spec choices are deliberate:
 //
-// The selector matches every pod carrying the component labels, so this resolves to
-// exactly the Ray head only while the component renders as one pod; the caller is
-// responsible for emitting it only then.
+//   - clusterIP: None, because a load-balanced ClusterIP cannot carry Ray's multi-port
+//     head<->worker traffic.
+//   - PublishNotReadyAddresses, because the leader's engine only starts once its
+//     data-parallel ranks join, so gating the address on readiness would deadlock.
 //
-// The follower does not widen it: it is synthesized as its own "<leader>-flw" component
-// (see synthesizeElasticEPFollowerDCD), so it carries a different component label and
-// this selector never matches it. Keep those identities distinct, or this Service starts
-// resolving to followers and `ray start --address=<svc>:6379` flaps between them.
+// The selector matches every pod carrying the component labels, so the caller must emit
+// this only while the component renders as one pod. The follower does not widen it: it is
+// its own "<leader>-flw" component (synthesizeElasticEPFollowerDCD), so the selector never
+// matches it. Keep those identities distinct, or this Service resolves to followers and
+// the Ray join flaps between them.
 func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
 	// Copy the caller's metadata so the Service carries the component's labels and
 	// annotations without aliasing the caller's maps.
