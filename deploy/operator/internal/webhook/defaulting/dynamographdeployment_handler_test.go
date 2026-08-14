@@ -535,93 +535,72 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 }
 
 func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
+	type updateKind string
+
+	const (
+		frontendOnlyUpdate updateKind = "frontend-only"
+		workerUpdate       updateKind = "worker"
+	)
+
 	tests := []struct {
-		name         string
-		op           admissionv1.Operation
-		groveEnabled bool
-		old          func() *nvidiacomv1beta1.DynamoGraphDeployment
-		mutate       func(*nvidiacomv1beta1.DynamoGraphDeployment)
-		wantSuffix   bool
-		wantProvider string
+		name               string
+		op                 admissionv1.Operation
+		groveEnabled       bool
+		provider           string
+		previousSuffix     bool
+		userSuppliedSuffix bool
+		update             updateKind
+		disableGroveIntent bool
+		wantSuffix         bool
+		wantProvider       string
 	}{
 		{
-			name:         "CREATE sets the suffix for a newly selected Grove provider",
-			op:           admissionv1.Create,
-			groveEnabled: true,
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Annotations = map[string]string{
-					consts.AnnotationGroveWorkerHashSuffixEnabled: consts.KubeLabelValueTrue,
-				}
-			},
-			wantSuffix:   true,
-			wantProvider: consts.WorkloadProviderGrove,
+			name:               "CREATE sets the suffix for a newly selected Grove provider",
+			op:                 admissionv1.Create,
+			groveEnabled:       true,
+			userSuppliedSuffix: true,
+			wantSuffix:         true,
+			wantProvider:       consts.WorkloadProviderGrove,
 		},
 		{
 			name:         "UPDATE preserves an unsuffixed Grove namespace for a frontend-only change",
 			op:           admissionv1.Update,
 			groveEnabled: true,
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				return groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-			},
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				frontend := dgd.GetComponentByName("frontend")
-				frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
-					corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
-			},
+			provider:     consts.WorkloadProviderGrove,
+			update:       frontendOnlyUpdate,
 			wantProvider: consts.WorkloadProviderGrove,
 		},
 		{
-			name:         "UPDATE uses the selected Grove provider when the feature gate and routing intent change",
-			op:           admissionv1.Update,
-			groveEnabled: false,
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				return groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-			},
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Annotations[consts.KubeAnnotationEnableGrove] = consts.KubeLabelValueFalse
-				prefill := dgd.GetComponentByName("prefill")
-				prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
-			},
-			wantSuffix:   true,
-			wantProvider: consts.WorkloadProviderGrove,
+			name:               "UPDATE uses the selected Grove provider when the feature gate and routing intent change",
+			op:                 admissionv1.Update,
+			provider:           consts.WorkloadProviderGrove,
+			update:             workerUpdate,
+			disableGroveIntent: true,
+			wantSuffix:         true,
+			wantProvider:       consts.WorkloadProviderGrove,
 		},
 		{
 			name:         "UPDATE normalizes old defaultable worker fields before comparing",
 			op:           admissionv1.Update,
-			groveEnabled: false,
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				return groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-			},
+			provider:     consts.WorkloadProviderGrove,
 			wantProvider: consts.WorkloadProviderGrove,
 		},
 		{
-			name:         "UPDATE preserves a suffix enabled by an earlier Grove admission",
-			op:           admissionv1.Update,
-			groveEnabled: false,
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				dgd := groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-				dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
-				return dgd
-			},
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				delete(dgd.Annotations, consts.AnnotationGroveWorkerHashSuffixEnabled)
-			},
-			wantSuffix:   true,
-			wantProvider: consts.WorkloadProviderGrove,
+			name:           "UPDATE preserves a suffix enabled by an earlier Grove admission",
+			op:             admissionv1.Update,
+			provider:       consts.WorkloadProviderGrove,
+			previousSuffix: true,
+			wantSuffix:     true,
+			wantProvider:   consts.WorkloadProviderGrove,
 		},
 		{
-			name:         "UPDATE removes a user-supplied suffix marker for a component provider",
-			op:           admissionv1.Update,
-			groveEnabled: true,
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				return groveWorkerHashSuffixTestDGD(consts.WorkloadProviderComponent)
-			},
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
-				prefill := dgd.GetComponentByName("prefill")
-				prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
-			},
-			wantProvider: consts.WorkloadProviderComponent,
+			name:               "UPDATE removes a user-supplied suffix marker for a component provider",
+			op:                 admissionv1.Update,
+			groveEnabled:       true,
+			provider:           consts.WorkloadProviderComponent,
+			userSuppliedSuffix: true,
+			update:             workerUpdate,
+			wantProvider:       consts.WorkloadProviderComponent,
 		},
 	}
 
@@ -629,15 +608,28 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build the incoming DGD and preserve the old object for update admission")
 			var old *nvidiacomv1beta1.DynamoGraphDeployment
-			var dgd *nvidiacomv1beta1.DynamoGraphDeployment
-			if tt.old == nil {
-				dgd = groveWorkerHashSuffixTestDGD("")
-			} else {
-				old = tt.old()
+			dgd := groveWorkerHashSuffixTestDGD("")
+			if tt.op == admissionv1.Update {
+				old = groveWorkerHashSuffixTestDGD(tt.provider)
+				if tt.previousSuffix {
+					old.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
+				}
 				dgd = old.DeepCopy()
 			}
-			if tt.mutate != nil {
-				tt.mutate(dgd)
+			if tt.userSuppliedSuffix {
+				dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
+			}
+			switch tt.update {
+			case frontendOnlyUpdate:
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
+					corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
+			case workerUpdate:
+				prefill := dgd.GetComponentByName("prefill")
+				prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
+			}
+			if tt.disableGroveIntent {
+				dgd.Annotations[consts.KubeAnnotationEnableGrove] = consts.KubeLabelValueFalse
 			}
 
 			t.Log("Run defaulting with the configured feature-gate state")
@@ -663,44 +655,26 @@ func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
 }
 
 func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUnhashableUpdate(t *testing.T) {
+	type failureSource string
+
+	const (
+		previousWorkerSpec failureSource = "previous"
+		currentWorkerSpec  failureSource = "current"
+	)
+
 	tests := []struct {
 		name      string
-		old       func() *nvidiacomv1beta1.DynamoGraphDeployment
-		mutate    func(*nvidiacomv1beta1.DynamoGraphDeployment)
+		source    failureSource
 		wantError string
 	}{
 		{
-			name: "rejects an unhashable previous worker spec",
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				dgd := groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-				prefill := dgd.GetComponentByName("prefill")
-				prefill.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
-						Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
-						ExtraClientContainers: []string{"missing-client"},
-					},
-				}
-				return dgd
-			},
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.GetComponentByName("prefill").Experimental = nil
-			},
+			name:      "rejects an unhashable previous worker spec",
+			source:    previousWorkerSpec,
 			wantError: "failed to compute previous Grove worker hash suffix",
 		},
 		{
-			name: "rejects an unhashable current worker spec",
-			old: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				return groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-			},
-			mutate: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				prefill := dgd.GetComponentByName("prefill")
-				prefill.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
-						Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
-						ExtraClientContainers: []string{"missing-client"},
-					},
-				}
-			},
+			name:      "rejects an unhashable current worker spec",
+			source:    currentWorkerSpec,
 			wantError: "failed to compute Grove worker hash suffix",
 		},
 	}
@@ -708,10 +682,14 @@ func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUnhashableUpdate(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build an immutable Grove update with an invalid worker spec")
-			old := tt.old()
+			old := groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
 			dgd := old.DeepCopy()
 			dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
-			tt.mutate(dgd)
+			if tt.source == previousWorkerSpec {
+				setUnhashableGroveWorkerSpec(old)
+			} else {
+				setUnhashableGroveWorkerSpec(dgd)
+			}
 
 			t.Log("Default the update admission")
 			ctx := admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK, old)
@@ -745,29 +723,15 @@ func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUpdateWithoutOldDGD(t *testing
 	if err == nil {
 		t.Fatal("Default() error = nil, want error for UPDATE without old DynamoGraphDeployment")
 	}
-
 }
-func groveWorkerHashSuffixTestDGD(provider string) *nvidiacomv1beta1.DynamoGraphDeployment {
-	component := func(
-		name string,
-		componentType nvidiacomv1beta1.ComponentType,
-		image string,
-	) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
-		return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-			ComponentName: name,
-			ComponentType: componentType,
-			PodTemplate: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: image}}},
-			},
-		}
-	}
 
+func groveWorkerHashSuffixTestDGD(provider string) *nvidiacomv1beta1.DynamoGraphDeployment {
 	annotations := make(map[string]string)
 	if provider != "" {
 		annotations[consts.KubeAnnotationWorkloadProvider] = provider
 	}
 
-	prefill := component("prefill", nvidiacomv1beta1.ComponentTypePrefill, "registry.example/dynamo-worker:1.4.0")
+	prefill := groveWorkerHashSuffixTestComponent("prefill", nvidiacomv1beta1.ComponentTypePrefill, "registry.example/dynamo-worker:1.4.0")
 	prefill.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "MODEL_MAX_LEN", Value: "4096"}}
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", Annotations: annotations},
@@ -775,8 +739,32 @@ func groveWorkerHashSuffixTestDGD(provider string) *nvidiacomv1beta1.DynamoGraph
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				prefill,
-				component("frontend", nvidiacomv1beta1.ComponentTypeFrontend, "registry.example/dynamo-frontend:1.4.0"),
+				groveWorkerHashSuffixTestComponent("frontend", nvidiacomv1beta1.ComponentTypeFrontend, "registry.example/dynamo-frontend:1.4.0"),
 			},
+		},
+	}
+}
+
+func groveWorkerHashSuffixTestComponent(
+	name string,
+	componentType nvidiacomv1beta1.ComponentType,
+	image string,
+) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: name,
+		ComponentType: componentType,
+		PodTemplate: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: image}}},
+		},
+	}
+}
+
+func setUnhashableGroveWorkerSpec(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	prefill := dgd.GetComponentByName("prefill")
+	prefill.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+			Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"missing-client"},
 		},
 	}
 }

@@ -254,14 +254,14 @@ func TestGetGroveRuntimeNamespace(t *testing.T) {
 			}
 
 			t.Log("Select the Grove runtime namespace from the modeled cutover state")
-			got, err := GetGroveRuntimeNamespace(dgd, component, tt.completed)
+			got, err := getGroveRuntimeNamespace(dgd, component, tt.completed, "")
 			if err != nil {
-				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
+				t.Fatalf("getGroveRuntimeNamespace() error = %v", err)
 			}
 
 			t.Log("Verify the selected runtime namespace")
 			if got != tt.wantNamespace {
-				t.Fatalf("GetGroveRuntimeNamespace() = %q, want %q", got, tt.wantNamespace)
+				t.Fatalf("getGroveRuntimeNamespace() = %q, want %q", got, tt.wantNamespace)
 			}
 		})
 	}

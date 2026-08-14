@@ -301,29 +301,15 @@ func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 	)
 }
 
-// GetGroveRuntimeNamespace returns the runtime namespace published for a Grove
-// component. A worker keeps its previous namespace until its child has
-// completed the accepted PCS revision. The caller obtains that completion
-// result while reading the child for readiness.
-func GetGroveRuntimeNamespace(
-	dgd *v1beta1.DynamoGraphDeployment,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	componentCompletedAcceptedPCSRevision bool,
-) (string, error) {
-	return getGroveRuntimeNamespace(dgd, component, componentCompletedAcceptedPCSRevision, "")
-}
-
+// getGroveRuntimeNamespace returns the runtime namespace published for a Grove
+// component. dgd and component must be non-nil. A worker keeps its previous
+// namespace until its child has completed the accepted PCS revision.
 func getGroveRuntimeNamespace(
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	componentCompletedAcceptedPCSRevision bool,
 	workerHash string,
 ) (string, error) {
-	// A missing graph or component has no namespace to publish.
-	if dgd == nil || component == nil {
-		return "", nil
-	}
-
 	// Non-workers and unmarked workers remain in the component's base namespace.
 	namespace := dgd.GetDynamoNamespaceForComponent(component)
 	if !IsWorkerComponent(string(component.ComponentType)) ||

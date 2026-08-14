@@ -230,6 +230,7 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 }
 
 // getGrovePodCliqueSet reads the parent status once for a readiness evaluation.
+// dgd must be non-nil. It returns nil when the parent has not been created.
 func getGrovePodCliqueSet(
 	ctx context.Context,
 	reader client.Reader,
@@ -251,7 +252,8 @@ func getGrovePodCliqueSet(
 }
 
 // getAcceptedPCSRevisionHash returns the current PCS revision after Grove has
-// observed the latest PCS generation.
+// observed the latest PCS generation. It returns nil when pcs is nil, stale, or
+// has not published a current revision.
 func getAcceptedPCSRevisionHash(pcs *grovev1alpha1.PodCliqueSet) *string {
 	if pcs == nil ||
 		pcs.Status.ObservedGeneration == nil ||
@@ -273,6 +275,9 @@ type groveComponentRevisionState struct {
 	updateEnded            bool
 }
 
+// hasCompletedAcceptedPCSRevision reports whether this child completed the
+// accepted PCS revision. A nil acceptedPCSRevisionHash means no revision has
+// been accepted yet.
 func (s groveComponentRevisionState) hasCompletedAcceptedPCSRevision(acceptedPCSRevisionHash *string) bool {
 	return acceptedPCSRevisionHash != nil &&
 		s.currentPCSRevisionHash != nil &&
@@ -291,6 +296,9 @@ type groveRuntimeNamespaceContext struct {
 	workerHash              string
 }
 
+// setRuntimeNamespace leaves componentStatus unchanged when c is nil, which
+// lets readiness-only callers omit namespace publication. componentStatus must
+// be non-nil when c is non-nil.
 func (c *groveRuntimeNamespaceContext) setRuntimeNamespace(
 	componentStatus *v1beta1.ComponentReplicaStatus,
 	revisionState groveComponentRevisionState,
@@ -323,7 +331,8 @@ func (c *groveRuntimeNamespaceContext) setRuntimeNamespace(
 // InsufficientCapacity for a scheduling/capacity blocker, Updating while the
 // rollout is unfinished, PodsNotReady when scheduled but not enough replicas
 // are ready, or SomeResourcesNotReady when the cause cannot be determined. It
-// is empty when the component is ready.
+// is empty when the component is ready. runtimeNamespaceContext may be nil for
+// callers that only need readiness; otherwise it publishes the runtime namespace.
 func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger, runtimeNamespaceContext *groveRuntimeNamespaceContext) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
 	podClique := &grovev1alpha1.PodClique{}
 	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
@@ -448,7 +457,8 @@ func CheckPodCliqueReady(ctx context.Context, reader client.Reader, resourceName
 // CheckPCSGReady determines if a Grove PodCliqueScalingGroup is fully ready and available.
 // It checks various status fields to ensure all replicas are available and the PCSG
 // configuration has been fully applied. This is the PodCliqueScalingGroup equivalent of IsDeploymentReady
-// for standard Kubernetes Deployments.
+// for standard Kubernetes Deployments. runtimeNamespaceContext may be nil for
+// callers that only need readiness; otherwise it publishes the runtime namespace.
 func CheckPCSGReady(ctx context.Context, reader client.Reader, resourceName, namespace string, logger logr.Logger, runtimeNamespaceContext *groveRuntimeNamespaceContext) (bool, string, v1beta1.ComponentReplicaStatus, string, error) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
 	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)

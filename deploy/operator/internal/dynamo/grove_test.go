@@ -1333,6 +1333,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		previousRevision = "previous-revision"
 	)
 
+	t.Log("Build reusable Grove cutover fixtures")
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -1453,6 +1454,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Configure the requested Grove cutover state")
 			dgd := dgd.DeepCopy()
 			podCliqueSet := podCliqueSet.DeepCopy()
 			podClique := podClique.DeepCopy()

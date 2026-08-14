@@ -143,28 +143,33 @@ func startGroveWorkerHashSuffixTestController(t *testing.T, env *operatorenv.Tes
 }
 
 func newGroveWorkerHashSuffixTestDGD(namespace, name string) *nvidiacomv1beta1.DynamoGraphDeployment {
-	component := func(name string, componentType nvidiacomv1beta1.ComponentType, image string) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
-		return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-			ComponentName: name,
-			ComponentType: componentType,
-			PodTemplate: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{
-					Name:  consts.MainContainerName,
-					Image: image,
-				}}},
-			},
-		}
-	}
-	prefill := component("prefill", nvidiacomv1beta1.ComponentTypePrefill, "registry.example/dynamo-worker:1.4.0")
+	prefill := groveWorkerHashSuffixTestComponent("prefill", nvidiacomv1beta1.ComponentTypePrefill, "registry.example/dynamo-worker:1.4.0")
 	prefill.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "MODEL_MAX_LEN", Value: "4096"}}
-	decode := component("decode", nvidiacomv1beta1.ComponentTypeDecode, "registry.example/dynamo-worker:1.4.0")
-	frontend := component("frontend", nvidiacomv1beta1.ComponentTypeFrontend, "registry.example/dynamo-frontend:1.4.0")
+	decode := groveWorkerHashSuffixTestComponent("decode", nvidiacomv1beta1.ComponentTypeDecode, "registry.example/dynamo-worker:1.4.0")
+	frontend := groveWorkerHashSuffixTestComponent("frontend", nvidiacomv1beta1.ComponentTypeFrontend, "registry.example/dynamo-frontend:1.4.0")
 
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{prefill, decode, frontend},
+		},
+	}
+}
+
+func groveWorkerHashSuffixTestComponent(
+	name string,
+	componentType nvidiacomv1beta1.ComponentType,
+	image string,
+) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: name,
+		ComponentType: componentType,
+		PodTemplate: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  consts.MainContainerName,
+				Image: image,
+			}}},
 		},
 	}
 }
