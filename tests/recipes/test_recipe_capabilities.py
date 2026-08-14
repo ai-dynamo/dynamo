@@ -22,9 +22,12 @@ Deliberately NOT here:
 """
 
 import json
-import urllib.request
 
 import pytest
+
+from tests.recipes.helpers import assert_natural_language
+from tests.recipes.helpers import post as _post
+from tests.recipes.helpers import stream as _stream
 
 pytestmark = [
     pytest.mark.endpoint_only,
@@ -32,35 +35,6 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.gpu_0,
 ]
-
-
-def _post(endpoint, path, body, timeout=300):
-    data = json.dumps({"model": endpoint.model, **body}).encode()
-    headers = {"Content-Type": "application/json", **dict(endpoint.headers or {})}
-    request = urllib.request.Request(
-        f"{endpoint.base_url}{path}", data=data, headers=headers
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read())
-
-
-def _stream(endpoint, body, timeout=300):
-    data = json.dumps({"model": endpoint.model, **body}).encode()
-    headers = {"Content-Type": "application/json", **dict(endpoint.headers or {})}
-    request = urllib.request.Request(
-        f"{endpoint.base_url}/v1/chat/completions", data=data, headers=headers
-    )
-    chunks = []
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        for raw in response:
-            line = raw.decode(errors="replace").strip()
-            if not line.startswith("data: ") or line.endswith("[DONE]"):
-                continue
-            try:
-                chunks.append(json.loads(line[6:]))
-            except json.JSONDecodeError:
-                pytest.fail(f"malformed SSE chunk: {line[:200]}")
-    return chunks
 
 
 def test_reasoning_content_is_emitted(attached_endpoint):
@@ -87,6 +61,10 @@ def test_reasoning_content_is_emitted(attached_endpoint):
         "reasoning_content present but content empty -- the think block never "
         "closed within max_tokens"
     )
+    # Presence is not enough: a replica with a stuck decoder fills
+    # reasoning_content with one repeated token, which is truthy.
+    assert_natural_language(message["reasoning_content"], "reasoning_content")
+    assert_natural_language(message["content"], "content")
 
 
 def test_thinking_false_suppresses_reasoning(attached_endpoint):
@@ -109,6 +87,7 @@ def test_thinking_false_suppresses_reasoning(attached_endpoint):
         "reasoning_content"
     ), "thinking:false did not suppress reasoning_content"
     assert message.get("content"), "no content with reasoning suppressed"
+    assert_natural_language(message["content"], "content")
 
 
 def test_streaming_emits_chunks(attached_endpoint):
@@ -125,6 +104,15 @@ def test_streaming_emits_chunks(attached_endpoint):
     assert any(
         c["choices"][0].get("finish_reason") for c in chunks if c.get("choices")
     ), "stream never reported a finish_reason"
+    # Reassemble the stream: a finish_reason alone says the stream terminated,
+    # not that it carried anything meaningful. A stuck decoder still terminates
+    # -- on `length` -- after emitting one repeated token.
+    streamed = "".join(
+        (delta.get("reasoning_content") or "") + (delta.get("content") or "")
+        for chunk in chunks
+        for delta in [(chunk.get("choices") or [{}])[0].get("delta") or {}]
+    )
+    assert_natural_language(streamed, "streamed text")
 
 
 def test_continuous_usage_stats_on_every_chunk(attached_endpoint):

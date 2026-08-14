@@ -17,6 +17,13 @@ Run::
 Deliberately NOT here: anything asserting on which worker served a request,
 worker ``/metrics``, pod logs, or replica counts. Those need a deployment handle
 and belong behind ``topology_dependent``.
+
+Also NOT here: whether the generated text is *language*. These tests go through
+``run_payloads``, which returns None and so exposes no response body to assert
+on, and they are the transport/envelope checks. Output quality -- and the
+per-replica version of it -- lives in ``test_recipe_output_quality.py``. Do not
+read a pass here as evidence the deployment is generating sensible tokens; a
+replica with a stuck decoder passes every assertion in this module.
 """
 
 import pytest
