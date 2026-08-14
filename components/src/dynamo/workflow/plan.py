@@ -7,10 +7,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Union
 
 from dynamo.workflow.ir import WorkflowIR
-from dynamo.workflow.types import StageContract, WorkflowValidationError, validate_name
+from dynamo.workflow.types import (
+    StageContract,
+    WorkflowValidationError,
+    _require_value_spec,
+    validate_name,
+)
+
+REMOTE_VALUE_TYPES = frozenset({"bytes", "json", "text"})
 
 
 @dataclass(frozen=True)
@@ -23,7 +30,75 @@ class InlineBinding:
         validate_name(self.runner_key, "inline runner key")
 
 
-Binding = InlineBinding
+def _validate_endpoint_id(endpoint_id: str) -> None:
+    if not isinstance(endpoint_id, str):
+        raise WorkflowValidationError("remote endpoint id must be a string")
+    parts = endpoint_id.split(".")
+    if len(parts) != 3:
+        raise WorkflowValidationError(
+            "remote endpoint id must use 'namespace.component.endpoint'"
+        )
+    for kind, part in zip(("namespace", "component", "endpoint"), parts):
+        validate_name(part, f"remote {kind}")
+
+
+@dataclass(frozen=True)
+class RemoteBinding:
+    """Resolve one logical stage through a discovered Dynamo endpoint."""
+
+    endpoint_id: str
+    routing_policy: str = "round_robin"
+
+    def __post_init__(self) -> None:
+        _validate_endpoint_id(self.endpoint_id)
+        if self.routing_policy != "round_robin":
+            raise WorkflowValidationError(
+                f"unsupported remote routing policy {self.routing_policy!r}"
+            )
+
+
+Binding = Union[InlineBinding, RemoteBinding]
+
+
+def _validate_process_boundaries(
+    workflow: WorkflowIR, bindings: Mapping[str, Binding]
+) -> None:
+    stages_by_id = {stage.id: stage for stage in workflow.stages}
+    for stage in workflow.stages:
+        target_binding = bindings[stage.id]
+        for port, source in stage.inputs.items():
+            source_binding = (
+                None if source.stage_id is None else bindings[source.stage_id]
+            )
+            crosses_process = isinstance(source_binding, RemoteBinding) or isinstance(
+                target_binding, RemoteBinding
+            )
+            value_spec = _require_value_spec(
+                stage.contract.inputs[port],
+                f"stage {stage.id!r} input {port!r}",
+            )
+            if crosses_process and value_spec.type not in REMOTE_VALUE_TYPES:
+                raise WorkflowValidationError(
+                    f"value type {value_spec.type!r} cannot cross a process boundary "
+                    f"to stage {stage.id!r} port {port!r}"
+                )
+
+    for output_name, source in workflow.outputs.items():
+        if source.stage_id is None or not isinstance(
+            bindings[source.stage_id], RemoteBinding
+        ):
+            continue
+        source_port = source.output_name
+        assert source_port is not None
+        value_spec = _require_value_spec(
+            stages_by_id[source.stage_id].contract.outputs[source_port],
+            f"workflow output {output_name!r}",
+        )
+        if value_spec.type not in REMOTE_VALUE_TYPES:
+            raise WorkflowValidationError(
+                f"workflow output {output_name!r} with value type "
+                f"{value_spec.type!r} cannot cross a process boundary"
+            )
 
 
 @dataclass(frozen=True)
@@ -42,7 +117,7 @@ class ExecutionPlan:
         bindings: dict[str, Binding] = {}
         for stage_id, binding in sorted(self.bindings.items()):
             validate_name(stage_id, "binding stage id")
-            if not isinstance(binding, InlineBinding):
+            if not isinstance(binding, (InlineBinding, RemoteBinding)):
                 raise WorkflowValidationError(
                     f"binding for stage {stage_id!r} uses an unsupported type"
                 )
@@ -57,6 +132,7 @@ class ExecutionPlan:
                 f"extra={sorted(actual_stages - expected_stages)}"
             )
 
+        _validate_process_boundaries(self.workflow, bindings)
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
     @property
@@ -65,4 +141,12 @@ class ExecutionPlan:
 
         return MappingProxyType(
             {stage.id: stage.contract for stage in self.workflow.stages}
+        )
+
+    @property
+    def remote(self) -> bool:
+        """Whether every stage is bound to a remote endpoint."""
+
+        return bool(self.bindings) and all(
+            isinstance(binding, RemoteBinding) for binding in self.bindings.values()
         )

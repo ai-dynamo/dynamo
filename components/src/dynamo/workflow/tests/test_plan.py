@@ -7,6 +7,7 @@ from dynamo.workflow import (
     DeploymentSpec,
     ExecutionPlan,
     InlineBinding,
+    RemoteBinding,
     StageContract,
     Workflow,
     WorkflowValidationError,
@@ -58,3 +59,79 @@ def test_execution_plan_rejects_missing_stage_bindings() -> None:
             workflow=plan.workflow,
             bindings={},
         )
+
+
+def test_remote_plan_records_remote_binding() -> None:
+    plan = compile_workflow(
+        _workflow(),
+        DeploymentSpec.remote(normalize="workflows.normalize.generate"),
+    )
+
+    assert plan.remote
+    assert plan.bindings == {"normalize": RemoteBinding("workflows.normalize.generate")}
+
+
+def test_mixed_placement_records_each_stage_binding() -> None:
+    contract = StageContract(
+        id="text-stage",
+        inputs={"text": ValueSpec(type="text")},
+        outputs={"text": ValueSpec(type="text")},
+    )
+    workflow = Workflow("mixed-placement")
+    value = workflow.input("text", ValueSpec(type="text"))
+    first = workflow.stage("first", contract, text=value)
+    second = workflow.stage("second", contract, text=first.text)
+    workflow.output("text", second.text)
+
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                "first": InlineBinding("first"),
+                "second": RemoteBinding("workflows.second.generate"),
+            }
+        ),
+    )
+
+    assert plan.bindings == {
+        "first": InlineBinding("first"),
+        "second": RemoteBinding("workflows.second.generate"),
+    }
+
+
+@pytest.mark.parametrize(
+    "value_spec",
+    [
+        ValueSpec(type="tensor"),
+        ValueSpec(type="image"),
+        ValueSpec(type="object", class_id="opaque.Value"),
+    ],
+    ids=["tensor", "image", "object"],
+)
+def test_remote_rich_value_cannot_cross_a_process_boundary(
+    value_spec: ValueSpec,
+) -> None:
+    contract = StageContract(
+        id="rich-stage",
+        inputs={"value": value_spec},
+        outputs={"result": ValueSpec(type="json")},
+    )
+    workflow = Workflow("remote-rich-value")
+    value = workflow.input("value", value_spec)
+    result = workflow.stage("stage", contract, value=value)
+    workflow.output("result", result.result)
+
+    with pytest.raises(WorkflowValidationError, match="cannot cross a process boundary"):
+        compile_workflow(
+            workflow,
+            DeploymentSpec.remote(stage="workflows.stage.generate"),
+        )
+
+
+def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
+    assert RemoteBinding("namespace.component.endpoint").endpoint_id == (
+        "namespace.component.endpoint"
+    )
+
+    with pytest.raises(WorkflowValidationError, match="namespace.component.endpoint"):
+        RemoteBinding("component.endpoint")
