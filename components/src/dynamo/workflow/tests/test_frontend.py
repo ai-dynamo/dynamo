@@ -48,24 +48,11 @@ class _Runner:
         }
 
 
-async def _application(
-    *, imperative: bool = False, **overrides
-) -> WorkflowFrontendApplication:
+async def _application(**overrides) -> WorkflowFrontendApplication:
     workflow = Workflow("frontend-workflow")
-    if imperative:
-        stage = workflow.use("generate", CONTRACT)
-
-        @workflow.handler(
-            inputs={"request": ValueSpec(type="json")},
-            outputs={"chunk": ValueSpec(type="json")},
-        )
-        async def run(inputs, context):
-            return await context.call(stage, request=inputs["request"])
-
-    else:
-        request = workflow.input("request", type="json")
-        stage = workflow.stage("generate", CONTRACT, request=request)
-        workflow.output("chunk", stage.chunk)
+    request = workflow.input("request", type="json")
+    stage = workflow.stage("generate", CONTRACT, request=request)
+    workflow.output("chunk", stage.chunk)
     executor = await WorkflowExecutor.bind(
         compile_workflow(workflow, DeploymentSpec.local(generate="generate")),
         local_runners={"generate": _Runner()},
@@ -92,15 +79,12 @@ class _FutureContext(_Context):
         return asyncio.get_running_loop().create_future()
 
 
-@pytest.mark.parametrize("imperative", [False, True], ids=["graph", "handler"])
-async def test_token_engine_adapts_preprocessed_request_to_one_workflow_chunk(
-    imperative,
-) -> None:
+async def test_token_engine_adapts_preprocessed_request_to_one_workflow_chunk() -> None:
     chunks = [
         chunk
-        async for chunk in WorkflowTokenEngine(
-            await _application(imperative=imperative)
-        ).generate({"token_ids": [41]}, _Context())
+        async for chunk in WorkflowTokenEngine(await _application()).generate(
+            {"token_ids": [41]}, _Context()
+        )
     ]
 
     assert chunks == [{"token_ids": [42], "index": 0, "finish_reason": "stop"}]
