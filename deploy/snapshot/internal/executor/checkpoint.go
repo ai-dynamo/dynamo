@@ -78,9 +78,12 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
-	cudaJobFile, err := cuda.StageJobFile(snapshotruntime.HostProcPath, state.CUDAHostPIDs, tmpDir, len(state.GPUUUIDs))
-	if err != nil {
-		return err
+	cudaJobFile := ""
+	if len(state.CUDAHostPIDs) > 0 {
+		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUUUIDs))
+		if err != nil {
+			return err
+		}
 	}
 
 	// Phase 2: Configure CRIU options and build checkpoint manifest
