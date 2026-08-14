@@ -16,11 +16,15 @@ rather than invented examples.
 import pytest
 
 from tests.recipes.helpers import (
+    KNOWN_ANSWER_PROBES,
+    answer_text,
+    assert_answers,
     assert_natural_language,
     degeneracy_reason,
     message_text,
     unique_prompt,
     worker_id_of,
+    wrong_answer_reason,
 )
 
 pytestmark = [
@@ -119,3 +123,86 @@ def test_unique_prompt_varies_the_prefix():
     a, b = unique_prompt("hello"), unique_prompt("hello")
     assert a != b
     assert a.endswith("hello") and b.endswith("hello")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("Paris.", id="bare"),
+        pytest.param("The capital of France is Paris.", id="sentence"),
+        pytest.param("paris", id="lowercase"),
+        pytest.param("It is **PARIS**, the largest city in France.", id="markdown"),
+    ],
+)
+def test_correct_answer_accepted(text):
+    assert wrong_answer_reason(text, ("paris",)) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("The capital of France is Lyon.", id="wrong_city"),
+        pytest.param("I don't know.", id="refusal"),
+        pytest.param("The capital is Parisian architecture.", id="substring_only"),
+    ],
+)
+def test_incorrect_answer_rejected(text):
+    """Fluent, well-formed and wrong must fail -- that is the whole point.
+
+    ``Parisian`` is included because a naive substring check would accept it
+    while the model never actually named the city.
+    """
+    assert degeneracy_reason(text) is None, "these are all valid language"
+    assert wrong_answer_reason(text, ("paris",)) is not None
+
+
+@pytest.mark.parametrize(
+    "text,accepted,should_match",
+    [
+        pytest.param("The answer is 4.", ("4",), True, id="digit_alone"),
+        pytest.param("There are 24 hours.", ("4",), False, id="digit_inside_number"),
+        pytest.param("It orbits the Sun.", ("sun",), True, id="word"),
+        pytest.param("See you on Sunday.", ("sun",), False, id="word_inside_word"),
+        pytest.param("The answer is four.", ("4", "four"), True, id="alternate_form"),
+    ],
+)
+def test_matching_is_whole_word(text, accepted, should_match):
+    """Word boundaries stop '4' matching '24' and 'sun' matching 'Sunday'."""
+    assert (wrong_answer_reason(text, accepted) is None) is should_match
+
+
+def test_degeneracy_is_reported_before_incorrectness():
+    """A stuck decoder must report the decoder, not a missing keyword."""
+    with pytest.raises(AssertionError, match="repeating one token"):
+        assert_answers("The" + "!" * 400, ("paris",))
+
+
+def test_answer_text_prefers_content_over_reasoning():
+    """Reasoning explores wrong answers; only the conclusion is the claim."""
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "reasoning_content": "Maybe Lyon? No, it is Paris.",
+                    "content": "Paris",
+                }
+            }
+        ]
+    }
+    assert answer_text(body) == "Paris"
+
+
+def test_answer_text_falls_back_when_content_empty():
+    body = {"choices": [{"message": {"reasoning_content": "thinking", "content": ""}}]}
+    assert answer_text(body) == "thinking"
+
+
+def test_known_answer_probes_are_well_formed():
+    """Each probe must ask a question and accept at least one answer."""
+    assert KNOWN_ANSWER_PROBES
+    for prompt, accepted in KNOWN_ANSWER_PROBES:
+        assert prompt.strip()
+        assert accepted, f"no accepted answers for {prompt!r}"
+        assert all(
+            a == a.lower() for a in accepted
+        ), f"accepted answers should be lowercase for readability: {accepted}"

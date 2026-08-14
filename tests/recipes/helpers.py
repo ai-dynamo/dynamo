@@ -19,10 +19,11 @@ deployment.
 """
 
 import json
+import re
 import urllib.request
 import uuid
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pytest
 
@@ -126,6 +127,62 @@ def assert_natural_language(text: str, label: str = "response") -> None:
         f"  first 120 chars: {text[:120]!r}\n"
         f"  length: {len(text)}"
     )
+
+
+def answer_text(body: Dict) -> str:
+    """The model's final answer: ``content``, or reasoning if content is empty.
+
+    Correctness should be judged on the answer, not on the thinking -- a model
+    exploring "maybe Lyon? no, Paris" mentions several cities and only the
+    conclusion is the claim. ``content`` is therefore preferred. The fallback
+    exists because a reasoning deployment that never closes its think block
+    within ``max_tokens`` returns ``content=""``, and failing with "no answer"
+    is less useful than judging what it did produce.
+    """
+    message = (body.get("choices") or [{}])[0].get("message") or {}
+    return (message.get("content") or "").strip() or (
+        message.get("reasoning_content") or ""
+    )
+
+
+# Questions with a single uncontroversial answer, phrased to ask for it
+# directly. These check the deployment is computing rather than merely emitting
+# well-formed text: a numerically broken replica can produce fluent prose and
+# still be wrong, which the degeneracy check alone would pass.
+KNOWN_ANSWER_PROBES: Sequence[Tuple[str, Tuple[str, ...]]] = (
+    ("What is the capital of France? Answer with the city name only.", ("paris",)),
+    ("What is 2+2? Answer with the number only.", ("4", "four")),
+    (
+        "Complete this sentence with one word: The Earth orbits the ___.",
+        ("sun",),
+    ),
+)
+
+
+def wrong_answer_reason(text: str, accepted: Sequence[str]) -> Optional[str]:
+    """Return why ``text`` does not contain an accepted answer, else None.
+
+    Matching is whole-word and case-insensitive so that ``"4"`` does not match
+    inside ``"24"`` and ``"sun"`` does not match inside ``"Sunday"``.
+    """
+    for candidate in accepted:
+        if re.search(rf"\b{re.escape(candidate)}\b", text, re.IGNORECASE):
+            return None
+    return (
+        f"none of {list(accepted)} appears as a whole word in the answer: "
+        f"{text[:150]!r}"
+    )
+
+
+def assert_answers(text: str, accepted: Sequence[str], label: str = "answer") -> None:
+    """Assert the response actually answers the question correctly.
+
+    Runs the degeneracy check first so a stuck decoder reports "repeating one
+    token" rather than the far less informative "paris not found".
+    """
+    assert_natural_language(text, label)
+    reason = wrong_answer_reason(text, accepted)
+    assert reason is None, f"{label} is fluent but incorrect: {reason}"
 
 
 def worker_id_of(body: Dict) -> Optional[str]:
