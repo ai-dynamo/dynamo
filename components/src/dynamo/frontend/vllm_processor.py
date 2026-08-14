@@ -88,6 +88,19 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     return context_length
 
 
+def _runtime_config_structural_tag_options(
+    mdc: ModelDeploymentCard,
+) -> tuple[str, str, str]:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return "off", "auto", "auto"
+    return (
+        runtime_config.get("structural_tag_mode", "off"),
+        runtime_config.get("structural_tag_scope", "auto"),
+        runtime_config.get("structural_tag_schema", "auto"),
+    )
+
+
 def _ensure_chat_template(
     tokenizer: Any, local_dir: str, chat_template_flag: str | None
 ) -> None:
@@ -265,6 +278,9 @@ class VllmProcessor:
         enable_auto_tool_choice: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         default_thinking_mode: str | None = None,
+        structural_tag_mode: str = "off",
+        structural_tag_scope: str = "auto",
+        structural_tag_schema: str = "auto",
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -277,6 +293,9 @@ class VllmProcessor:
         self.enable_auto_tool_choice = enable_auto_tool_choice
         self.default_chat_template_kwargs = default_chat_template_kwargs
         self.default_thinking_mode = default_thinking_mode
+        self.structural_tag_mode = structural_tag_mode
+        self.structural_tag_scope = structural_tag_scope
+        self.structural_tag_schema = structural_tag_schema
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -482,6 +501,9 @@ class VllmProcessor:
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
                 default_thinking_mode=self.default_thinking_mode,
+                structural_tag_mode=self.structural_tag_mode,
+                structural_tag_scope=self.structural_tag_scope,
+                structural_tag_schema=self.structural_tag_schema,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -489,6 +511,7 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
+        guided_decoding = pre.guided_decoding
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -611,6 +634,8 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        if guided_decoding is not None:
+            dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_ended is not None:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
@@ -662,6 +687,9 @@ class VllmProcessor:
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
                     stream_response=bool(request.get("stream", False)),
+                    uses_dynamo_json_tool_call_fallback=(
+                        pre.uses_dynamo_json_tool_call_fallback
+                    ),
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so
@@ -1046,6 +1074,11 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        (
+            structural_tag_mode,
+            structural_tag_scope,
+            structural_tag_schema,
+        ) = _runtime_config_structural_tag_options(mdc)
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -1062,6 +1095,9 @@ class EngineFactory:
                 self.flags, "default_chat_template_kwargs", None
             ),
             default_thinking_mode=default_thinking_mode,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

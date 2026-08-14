@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 
 use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 use thiserror::Error;
 
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
@@ -35,6 +36,15 @@ pub(crate) fn overload_status_code() -> StatusCode {
 pub struct HttpError {
     pub code: u16,
     pub message: String,
+}
+
+/// Construct a typed invalid-argument error for validation performed at an
+/// HTTP protocol adapter boundary.
+pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(DynamoErrorType::InvalidArgument)
+        .message(message)
+        .build()
 }
 
 /// Canonical sanitized error responses returned at the HTTP boundary.

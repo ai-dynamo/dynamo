@@ -207,7 +207,11 @@ pub async fn sync_pulse(
     sub_handle: &mut ZmqSubHandle,
     timeout: Duration,
 ) -> bool {
-    let sentinel = TestBatch(0.0, vec![RawKvEvent::AllBlocksCleared], None);
+    let sentinel = TestBatch(
+        0.0,
+        vec![RawKvEvent::AllBlocksCleared { source_kind: None }],
+        None,
+    );
     // Keep sending until we see the response.
     let start = tokio::time::Instant::now();
     loop {

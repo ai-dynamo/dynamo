@@ -335,6 +335,7 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage;
 
     /// Returns the request tracker if available, for accessing worker timing metrics.
+    /// Implementors that own request timing data must override this method.
     fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {
         None
     }
@@ -361,6 +362,16 @@ pub struct ParsingOptions {
     /// fire. `None` / `Some(true)` leave the tool calls untouched.
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
+
+    /// Non-streaming only: when the aggregated message has no non-reasoning
+    /// `content`, move the parsed `reasoning_content` into `content` instead of
+    /// returning empty content. Set by the chat and Anthropic HTTP handlers for
+    /// any request carrying `force_nonempty_content=true` — the caller asked for
+    /// non-empty content, so a reasoning-only turn must surface the reasoning as
+    /// content. Not keyed on the model or its parser. When content was
+    /// generated, reasoning stays in `reasoning_content`.
+    #[serde(default)]
+    pub move_reasoning_to_content_when_empty: bool,
 }
 
 impl ParsingOptions {
@@ -370,6 +381,7 @@ impl ParsingOptions {
             reasoning_parser,
             experimental_v2_batch_eligible: false,
             parallel_tool_calls: None,
+            move_reasoning_to_content_when_empty: false,
         }
     }
 
@@ -386,6 +398,14 @@ impl ParsingOptions {
     /// untouched.
     pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: Option<bool>) -> Self {
         self.parallel_tool_calls = parallel_tool_calls;
+        self
+    }
+
+    /// Set whether a reasoning-only aggregated message should surface its
+    /// `reasoning_content` as `content` (non-streaming force_nonempty_content;
+    /// see the field docs).
+    pub fn with_move_reasoning_to_content_when_empty(mut self, enabled: bool) -> Self {
+        self.move_reasoning_to_content_when_empty = enabled;
         self
     }
 }

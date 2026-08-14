@@ -8,6 +8,7 @@ use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::pipeline::{Context, SingleIn};
 
 use super::{InnerPrefillRouter, PrefillRouter};
+use crate::kv_router::to_worker_selection_session_context;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::{
     extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -128,10 +129,10 @@ where
             .routing
             .as_ref()
             .and_then(|routing| routing.allowed_worker_ids.clone());
-        let session_id = req
+        let session_context = req
             .agent_context
             .as_ref()
-            .map(|context| context.session_id.clone());
+            .map(to_worker_selection_session_context);
         let request_pinned_worker = match resolve_request_decode_pin(req.routing.as_ref(), |id| {
             decode_router.unique_dp_rank_for_worker(id)
         }) {
@@ -184,7 +185,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class.clone(),
-                session_id.clone(),
+                session_context,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -218,7 +219,7 @@ where
         let mut input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {
             let busy = self
-                .peek_prefill_chosen_worker_busy(req, policy_class, session_id, session_affinity)
+                .peek_prefill_chosen_worker_busy(req, policy_class, session_affinity)
                 .await;
             tracing::debug!(
                 request_id,
@@ -299,12 +300,11 @@ where
         &self,
         req: &PreprocessedRequest,
         policy_class: Option<String>,
-        session_id: Option<String>,
         session_affinity: Option<&SessionAffinityId>,
     ) -> Option<bool> {
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
-        let prefill_router = self.prefill_router.get()?;
-        let router = match prefill_router {
+        let binding = self.binding.load_full()?;
+        let router = match &binding.router {
             InnerPrefillRouter::KvRouter(router) => router,
             InnerPrefillRouter::SimpleRouter(_) => return None,
         };
@@ -363,7 +363,9 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
+                req.agent_context
+                    .as_ref()
+                    .map(to_worker_selection_session_context),
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,

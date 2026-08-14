@@ -69,9 +69,11 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 # aiperf is required by the thorough profiler path (profiler/utils/aiperf.py).
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
+    --mount=type=bind,source=./container/deps/overrides.planner.txt,target=/tmp/overrides.planner.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
+        --overrides /tmp/overrides.planner.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -80,11 +82,17 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
 
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
-# runtime code comes from the wheel installed above; copy only its tests.
+# runtime code comes from the wheel installed above. The Router adapter and
+# replay bridge unit tests also run here because this image installs that wheel;
+# copy the AI Simulate examples exercised by those tests as test fixtures.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation.py /workspace/components/src/dynamo/replay/tests/test_simulation.py
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation_integration.py /workspace/components/src/dynamo/replay/tests/test_simulation_integration.py
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_sweep_config_provider.py /workspace/components/src/dynamo/router/tests/test_router_sweep_config_provider.py
+COPY --chmod=775 --chown=dynamo:0 aisimulate/examples/sweeper/tools/run_sweep.py /workspace/aisimulate/examples/sweeper/tools/run_sweep.py
 COPY --chmod=775 --chown=dynamo:0 aisimulate/tests /workspace/aisimulate/tests
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev

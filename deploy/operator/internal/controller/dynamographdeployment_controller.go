@@ -27,10 +27,11 @@ import (
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -72,8 +73,8 @@ type DynamoGraphDeploymentReconciler struct {
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
-	Recorder              record.EventRecorder
-	DockerSecretRetriever dockerSecretRetriever
+	Recorder              events.EventRecorder
+	DockerSecretRetriever DockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
@@ -189,7 +190,7 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 	}
 	if r.Recorder != nil {
 		for _, event := range result.Events {
-			r.Recorder.Event(dgd, event.Type, event.Reason, event.Message)
+			r.Recorder.Eventf(dgd, nil, event.Type, event.Reason, "Update", "%s", event.Message)
 		}
 	}
 	return nil
@@ -262,7 +263,22 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
+		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
+		ctrlBuilder = ctrlBuilder.Watches(
+			&resourcev1.ResourceClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).Watches(
+			&resourcev1.ResourceClaimTemplate{},
+			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimTemplateToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).Watches(
+			&resourcev1.DeviceClass{},
+			handler.EnqueueRequestsFromMapFunc(r.mapDeviceClassToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.Istio) {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -279,7 +295,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	return ctrlBuilder.Complete(observedReconciler)
 }
 
-func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
+func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 

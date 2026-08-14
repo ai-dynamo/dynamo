@@ -671,8 +671,9 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
-    /// Request plane payload codec selection: "json" or "msgpack".
-    /// JSON is the compatibility default.
+    /// Preferred payload codec advertised by every request-plane endpoint in this process.
+    /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
+    /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 

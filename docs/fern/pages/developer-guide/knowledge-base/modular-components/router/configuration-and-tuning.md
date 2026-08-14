@@ -25,7 +25,7 @@ For the routing cost model and worker-selection behavior, see
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only policy-family and cache-bucket YAML path. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`.
+- `--router-policy-config`: Startup-only YAML path for policy-class queues and custom worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
@@ -95,6 +95,10 @@ python -m dynamo.frontend \
     --router-mode kv \
     --router-policy-config examples/router/policy-class-queues.yaml
 ```
+
+For a minimal two-class walkthrough showing how one request class can receive
+a larger service share without starving another, see
+[Prioritize Premium Requests with Policy Classes](deficit-round-robin.md#prioritize-premium-requests-with-policy-classes).
 
 The previous missing-ISL global admission cap is removed. Cache-derived bucket
 selection now resolves directly to an ordinary policy class, and that class
