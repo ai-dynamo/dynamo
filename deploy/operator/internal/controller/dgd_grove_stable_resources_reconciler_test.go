@@ -1,0 +1,280 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package controller
+
+import (
+	"context"
+	"testing"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+// elasticEPArgs is the command line that marks a component as an elastic-EP Ray launch:
+// elastic EP only works on the Ray data-parallel backend, so both flags are required.
+const elasticEPArgs = "python3 -m dynamo.vllm --enable-elastic-ep --data-parallel-backend ray"
+
+// elasticEPComponentName is the one component every case in this file builds, so the
+// assertions can derive the expected Service name from it.
+const elasticEPComponentName = "worker"
+
+// newElasticEPComponent builds a worker component whose main container carries the given
+// command line, so a test can describe eligibility by its command line and scale alone.
+func newElasticEPComponent(args string) v1beta1.DynamoComponentDeploymentSharedSpec {
+	return v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: elasticEPComponentName,
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: commonconsts.MainContainerName, Args: []string{args}},
+				},
+			},
+		},
+	}
+}
+
+func TestIsSinglePodElasticEPLeader(t *testing.T) {
+	tests := []struct {
+		name      string
+		component func() v1beta1.DynamoComponentDeploymentSharedSpec
+		want      bool
+	}{
+		{
+			name: "single-pod elastic-EP leader qualifies",
+			component: func() v1beta1.DynamoComponentDeploymentSharedSpec {
+				return newElasticEPComponent(elasticEPArgs)
+			},
+			want: true,
+		},
+		{
+			name: "an explicit single replica qualifies",
+			component: func() v1beta1.DynamoComponentDeploymentSharedSpec {
+				component := newElasticEPComponent(elasticEPArgs)
+				component.Replicas = ptr.To(int32(1))
+				return component
+			},
+			want: true,
+		},
+		{
+			name: "replicas > 1 is excluded because every replica runs its own Ray head",
+			component: func() v1beta1.DynamoComponentDeploymentSharedSpec {
+				component := newElasticEPComponent(elasticEPArgs)
+				component.Replicas = ptr.To(int32(2))
+				return component
+			},
+			want: false,
+		},
+		{
+			name: "multinode is excluded because its worker pods share the component labels",
+			component: func() v1beta1.DynamoComponentDeploymentSharedSpec {
+				component := newElasticEPComponent(elasticEPArgs)
+				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+				return component
+			},
+			want: false,
+		},
+		{
+			name: "elastic EP on a non-Ray data-parallel backend is excluded",
+			component: func() v1beta1.DynamoComponentDeploymentSharedSpec {
+				return newElasticEPComponent("python3 -m dynamo.vllm --enable-elastic-ep")
+			},
+			want: false,
+		},
+		{
+			name: "a plain component is excluded",
+			component: func() v1beta1.DynamoComponentDeploymentSharedSpec {
+				return newElasticEPComponent("python3 -m dynamo.vllm")
+			},
+			want: false,
+		},
+		{
+			name: "a component without a main container is excluded",
+			component: func() v1beta1.DynamoComponentDeploymentSharedSpec {
+				return v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: elasticEPComponentName,
+					ComponentType: v1beta1.ComponentTypeWorker,
+				}
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Classify the component against the single-pod elastic-EP leader gate")
+			component := tt.component()
+			got := isSinglePodElasticEPLeader(&component)
+
+			t.Log("Verify only a component that renders as exactly one Ray head qualifies")
+			if got != tt.want {
+				t.Errorf("isSinglePodElasticEPLeader = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(component *v1beta1.DynamoComponentDeploymentSharedSpec)
+		wantEmitted   bool
+		wantSelectors map[string]string
+	}{
+		{
+			name:        "emits the leader Service for a single-pod elastic-EP component",
+			mutate:      func(*v1beta1.DynamoComponentDeploymentSharedSpec) {},
+			wantEmitted: true,
+			wantSelectors: map[string]string{
+				commonconsts.KubeLabelDynamoComponent:     elasticEPComponentName,
+				commonconsts.KubeLabelDynamoComponentType: string(v1beta1.ComponentTypeWorker),
+			},
+		},
+		{
+			name: "does not emit for replicas > 1",
+			mutate: func(component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+				component.Replicas = ptr.To(int32(2))
+			},
+			wantEmitted: false,
+		},
+		{
+			name: "does not emit for a multinode component",
+			mutate: func(component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+			},
+			wantEmitted: false,
+		},
+		{
+			name: "does not emit for a component that is not an elastic-EP Ray launch",
+			mutate: func(component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+				component.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm"}
+			},
+			wantEmitted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD with one worker component and apply the case's shape")
+			component := newElasticEPComponent(elasticEPArgs)
+			tt.mutate(&component)
+			dgd := newElasticEPTestDGD(component)
+
+			t.Log("Reconcile the Grove stable resources")
+			ctx := context.Background()
+			reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
+			if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+				t.Fatalf("Reconcile returned an error: %v", err)
+			}
+
+			t.Log("Verify the leader Service exists only for the single-pod elastic-EP shape")
+			service := &corev1.Service{}
+			err := kubeClient.Get(ctx, types.NamespacedName{
+				Name:      dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
+				Namespace: dgd.Namespace,
+			}, service)
+			if tt.wantEmitted {
+				if err != nil {
+					t.Fatalf("expected the leader Service to exist, got error: %v", err)
+				}
+				for key, want := range tt.wantSelectors {
+					if got := service.Spec.Selector[key]; got != want {
+						t.Errorf("Selector[%q] = %q, want %q", key, got, want)
+					}
+				}
+				return
+			}
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("expected the leader Service to be absent, got service %q with error %v", service.Name, err)
+			}
+		})
+	}
+}
+
+func TestGroveStableResourcesReconcilerDeletesElasticEPLeaderServiceWhenEligibilityIsRemoved(t *testing.T) {
+	t.Log("Reconcile a single-pod elastic-EP component so the leader Service is created")
+	ctx := context.Background()
+	dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
+	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
+	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+		t.Fatalf("first Reconcile returned an error: %v", err)
+	}
+
+	serviceKey := types.NamespacedName{
+		Name:      dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
+		Namespace: dgd.Namespace,
+	}
+	if err := kubeClient.Get(ctx, serviceKey, &corev1.Service{}); err != nil {
+		t.Fatalf("expected the leader Service to exist after the first reconcile: %v", err)
+	}
+
+	t.Log("Drop elastic EP from the component and reconcile again")
+	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm"}
+	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+		t.Fatalf("second Reconcile returned an error: %v", err)
+	}
+
+	t.Log("Verify the now-stale leader Service was deleted rather than left pointing at the component")
+	err := kubeClient.Get(ctx, serviceKey, &corev1.Service{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected the leader Service to be deleted, got error %v", err)
+	}
+}
+
+// newElasticEPTestDGD wraps a single component in the smallest DGD the stable-resources
+// reconciler accepts: no modelRef, so no model service, and no frontend, so no ingress.
+func newElasticEPTestDGD(component v1beta1.DynamoComponentDeploymentSharedSpec) *v1beta1.DynamoGraphDeployment {
+	return &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components:       []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+		},
+	}
+}
+
+func newElasticEPTestStableResourcesReconciler(
+	t testing.TB,
+	dgd *v1beta1.DynamoGraphDeployment,
+) (*groveStableResourcesReconciler, client.Client) {
+	t.Helper()
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		Build()
+	reconciler := newGroveStableResourcesReconciler(
+		kubeClient,
+		events.NewFakeRecorder(100),
+		&configv1alpha1.OperatorConfiguration{},
+	)
+	return reconciler, kubeClient
+}
