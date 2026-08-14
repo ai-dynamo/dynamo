@@ -10,7 +10,6 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
-from dynamo.experimental.workflow.builder import StageDefinition
 from dynamo.experimental.workflow.types import StageContract, ValueSpec
 
 
@@ -63,7 +62,7 @@ class StageContext:
 
 
 @runtime_checkable
-class StageRunner(StageDefinition, Protocol):
+class StageRunner(Protocol):
     """The small interface implemented by custom and Dynamo-provided workers."""
 
     contract: StageContract
