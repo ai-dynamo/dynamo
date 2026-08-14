@@ -477,7 +477,7 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 }
 
 func dgdHubComponentOriginSaveNeeded(src *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return src != nil && (src.PodTemplate != nil || len(src.ContainerArgsPatches) > 0)
+	return src != nil && src.PodTemplate != nil
 }
 
 func marshalDGDHubSpec(src *v1beta1.DynamoGraphDeploymentSpec) ([]byte, error) {

@@ -1660,11 +1660,6 @@ func GenerateBasePodSpec(
 	}
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
-
-	// Apply explicit argument appends after defaults, overrides, and backend updates.
-	if err := applyContainerArgsPatches(&podSpec, component.ContainerArgsPatches); err != nil {
-		return nil, err
-	}
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
@@ -1723,29 +1718,6 @@ func GenerateBasePodSpec(
 	}
 
 	return &podSpec, nil
-}
-
-func applyContainerArgsPatches(podSpec *corev1.PodSpec, patches []v1beta1.ContainerArgsPatch) error {
-	// Apply each patch to its named target in the final rendered container list.
-	for _, patch := range patches {
-		// Resolve the patch target after all earlier container merges.
-		targetIndex := -1
-		for i := range podSpec.Containers {
-			if podSpec.Containers[i].Name == patch.Name {
-				targetIndex = i
-				break
-			}
-		}
-
-		// Reject stale or invalid targets before mutating the rendered pod.
-		if targetIndex == -1 {
-			return fmt.Errorf("containerArgsPatches references unknown container %q", patch.Name)
-		}
-
-		// Append arguments only after the target has been validated.
-		podSpec.Containers[targetIndex].Args = append(podSpec.Containers[targetIndex].Args, patch.Append...)
-	}
-	return nil
 }
 
 func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {

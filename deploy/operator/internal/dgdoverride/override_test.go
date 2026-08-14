@@ -139,10 +139,10 @@ func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	assert.Equal(t, "added", findNamedObject(t, env, "ADDED")["value"])
 }
 
-func TestApplyExtractsExplicitBetaArgsAppendPatch(t *testing.T) {
+func TestApplyMaterializesExplicitBetaArgsAppend(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Apply an args append directive to the generated frontend main container")
+	t.Log("Apply an args append directive to a main container present in the blueprint")
 	result, warnings, err := Apply(
 		mustObject(t, betaBlueprintYAML),
 		mustObject(t, `
@@ -150,7 +150,7 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 spec:
   components:
-  - name: Frontend
+  - name: Worker
     podTemplate:
       spec:
         containers:
@@ -165,25 +165,20 @@ spec:
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 
-	t.Log("Verify the directive is materialized without replacing generated container args")
-	frontend := mustBetaComponent(t, result, "Frontend")
+	t.Log("Verify the directive becomes a complete argument list in the resulting DGD")
+	worker := mustBetaWorker(t, result)
 	main := findNamedObject(
 		t,
-		mustNestedSlice(t, frontend, "podTemplate", "spec", "containers"),
+		mustNestedSlice(t, worker, "podTemplate", "spec", "containers"),
 		"main",
 	)
 	require.NotNil(t, main)
-	assert.NotContains(t, main, "args", "generated defaults remain owned by pod rendering")
+	assert.Equal(t, []interface{}{"--base", "--router-mode", "kv"}, main["args"])
 	assert.NotContains(t, main, "$patch")
-	assert.Equal(t, []interface{}{
-		map[string]interface{}{
-			"name":   "main",
-			"append": []interface{}{"--router-mode", "kv"},
-		},
-	}, frontend["containerArgsPatches"])
+	assert.NotContains(t, worker, "containerArgsPatches")
 }
 
-func TestApplyExtractsBetaArgsAppendPatchForExistingSidecar(t *testing.T) {
+func TestApplyMaterializesBetaArgsAppendForExistingSidecar(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Apply an args append directive to a sidecar present in the generated blueprint")
@@ -208,7 +203,7 @@ spec:
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 
-	t.Log("Verify the existing sidecar remains intact and receives a typed append patch")
+	t.Log("Verify the existing sidecar remains intact and receives the complete argument list")
 	worker := mustBetaWorker(t, result)
 	sidecar := findNamedObject(
 		t,
@@ -217,14 +212,9 @@ spec:
 	)
 	require.NotNil(t, sidecar)
 	assert.Equal(t, "sidecar-image", sidecar["image"])
-	assert.NotContains(t, sidecar, "args")
+	assert.Equal(t, []interface{}{"--verbose"}, sidecar["args"])
 	assert.NotContains(t, sidecar, "$patch")
-	assert.Equal(t, []interface{}{
-		map[string]interface{}{
-			"name":   "sidecar",
-			"append": []interface{}{"--verbose"},
-		},
-	}, worker["containerArgsPatches"])
+	assert.NotContains(t, worker, "containerArgsPatches")
 }
 
 func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
@@ -233,6 +223,7 @@ func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
 	t.Log("Define invalid args append directives")
 	tests := []struct {
 		name          string
+		componentName string
 		containerName string
 		modifier      string
 		argsLine      string
@@ -244,6 +235,7 @@ func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
 		{name: "empty string arg", containerName: "main", modifier: "append", argsLine: "          args: [--flag, \"\"]\n", wantError: "args[1] must be non-empty"},
 		{name: "empty container name", containerName: `""`, modifier: "append", argsLine: "          args: [--flag]\n", wantError: "name must be a non-empty string"},
 		{name: "unknown sidecar", containerName: "missing", modifier: "append", argsLine: "          args: [--flag]\n", wantError: "is not present in the generated blueprint"},
+		{name: "generated main is absent", componentName: "Frontend", containerName: "main", modifier: "append", argsLine: "          args: [--flag]\n", wantError: "is not present in the generated blueprint"},
 	}
 
 	for _, test := range tests {
@@ -251,19 +243,23 @@ func TestApplyRejectsInvalidBetaArgsAppendPatch(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Apply an invalid args append directive")
+			componentName := test.componentName
+			if componentName == "" {
+				componentName = "Worker"
+			}
 			override := fmt.Sprintf(`
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 spec:
   components:
-  - name: Worker
+  - name: %s
     podTemplate:
       spec:
         containers:
         - name: %s
           $patch:
             args: %s
-%s`, test.containerName, test.modifier, test.argsLine)
+%s`, componentName, test.containerName, test.modifier, test.argsLine)
 			_, _, err := Apply(mustObject(t, betaBlueprintYAML), mustObject(t, override))
 
 			t.Log("Verify the invalid directive fails before structural merge")

@@ -11777,36 +11777,6 @@ spec:
                   required:
                     - pvcName
                   type: object
-                containerArgsPatches:
-                  description: |-
-                    containerArgsPatches appends arguments to named containers after the
-                    operator has generated component defaults and applied podTemplate
-                    overrides. The DGDR override engine populates this field from an explicit
-                    $patch args=append directive.
-                  items:
-                    description: ContainerArgsPatch appends command-line arguments to one rendered container.
-                    properties:
-                      append:
-                        description: append contains arguments added after defaults and normal overrides.
-                        items:
-                          minLength: 1
-                          type: string
-                        minItems: 1
-                        type: array
-                      name:
-                        description: |-
-                          name identifies a rendered container. Use main for the generated workload
-                          container or the name of a container in podTemplate.spec.containers.
-                        minLength: 1
-                        type: string
-                    required:
-                      - append
-                      - name
-                    type: object
-                  type: array
-                  x-kubernetes-list-map-keys:
-                    - name
-                  x-kubernetes-list-type: map
                 eppConfig:
                   description: |-
                     eppConfig holds EPP-specific configuration for Endpoint Picker Plugin

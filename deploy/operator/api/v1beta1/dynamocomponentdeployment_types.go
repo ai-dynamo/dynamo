@@ -125,15 +125,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
-	// containerArgsPatches appends arguments to named containers after the
-	// operator has generated component defaults and applied podTemplate
-	// overrides. The DGDR override engine populates this field from an explicit
-	// $patch args=append directive.
-	// +optional
-	// +listType=map
-	// +listMapKey=name
-	ContainerArgsPatches []ContainerArgsPatch `json:"containerArgsPatches,omitempty"`
-
 	// replicas is the desired number of Pods for this component. When
 	// `scalingAdapter` is set on this component, this field is managed by
 	// the DynamoGraphDeploymentScalingAdapter and should not be modified
@@ -228,19 +219,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// depend on them for production workloads.
 	// +optional
 	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
-}
-
-// ContainerArgsPatch appends command-line arguments to one rendered container.
-type ContainerArgsPatch struct {
-	// name identifies a rendered container. Use main for the generated workload
-	// container or the name of a container in podTemplate.spec.containers.
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// append contains arguments added after defaults and normal overrides.
-	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:items:MinLength=1
-	Append []string `json:"append"`
 }
 
 // DynamoComponentDeploymentStatus defines the observed state of a DynamoComponentDeployment.

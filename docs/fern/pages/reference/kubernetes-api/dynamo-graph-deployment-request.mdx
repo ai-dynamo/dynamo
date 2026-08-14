@@ -616,7 +616,7 @@ generated DGD. Use `apiVersion: nvidia.com/v1beta1` and
 `kind: DynamoGraphDeployment` for new overrides. Components, pod-template
 containers, and container environment variables merge by `name`; atomic lists
 such as graph-level `spec.env` and container `args` replace their generated
-values unless an explicit append modifier is present.
+values.
 
 For example, set an environment variable on one generated component:
 
@@ -650,8 +650,8 @@ warning, and an override cannot add deployment topology. Labels and annotations 
 `metadata.name` selects the final DGD name, and other identity metadata is ignored. `status`, null
 values for typed fields, and field deletion are not supported.
 
-To retain generated container arguments and add flags after them, set `$patch.args` to `append` on
-an existing named container:
+To add flags to a container already present in the generated DGD, set `$patch.args` to `append` on
+that named container:
 
 ```yaml
 spec:
@@ -661,28 +661,30 @@ spec:
       kind: DynamoGraphDeployment
       spec:
         components:
-        - name: Frontend
+        - name: Worker
           podTemplate:
             spec:
               containers:
-              - name: main
+              - name: metrics
                 $patch:
                   args: append
                 args:
-                - --router-mode
-                - kv
+                - --verbose
 ```
 
 The only supported modifier is `args: append`, and its `args` list must contain at least one
-string. The target can be the generated `main` container or a sidecar already present in the
-generated blueprint. Without `$patch`, specifying `args` retains the standard replacement
-behavior.
+non-empty string. The target container must already be present in the generated blueprint. The
+override helper combines the argument lists and removes `$patch` before returning the final DGD.
+Without `$patch`, specifying `args` retains the standard replacement behavior. To override a
+container that the Operator adds later, such as a generated frontend `main` container, provide the
+complete desired argument list instead.
 
 <Note>
   Existing `nvidia.com/v1alpha1` overrides remain supported. They use the older `spec.services`
   shape, merge services by name, and append `extraPodSpec.mainContainer.args` to generated worker
-  arguments. In `v1beta1`, container `args` is atomic and replaces the generated list unless
-  `$patch.args` is `append`. Use `v1beta1` for new overrides.
+  arguments. In `v1beta1`, container `args` is atomic and replaces the generated list. Use
+  `v1beta1` for new overrides and provide the complete desired argument list when overriding
+  `args`.
 </Note>
 
 <Note>

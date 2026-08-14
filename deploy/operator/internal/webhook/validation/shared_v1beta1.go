@@ -118,30 +118,6 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	// Every patch target must resolve to a container the operator will render.
-	for i, patch := range spec.ContainerArgsPatches {
-		targetExists := patch.Name == nvidiacomv1beta1.MainContainerName ||
-			(spec.PodTemplate != nil && hasContainerNamed(spec.PodTemplate.Spec.Containers, patch.Name))
-		if !targetExists {
-			allErrs = append(allErrs, field.Invalid(
-				fldPath.Child("containerArgsPatches").Index(i).Child("name"),
-				patch.Name,
-				"must match main or a podTemplate.spec.containers name",
-			))
-		}
-
-		// Reject empty arguments even when validation is invoked without the CRD schema.
-		for j, arg := range patch.Append {
-			if arg == "" {
-				allErrs = append(allErrs, field.Invalid(
-					fldPath.Child("containerArgsPatches").Index(i).Child("append").Index(j),
-					arg,
-					"must not be empty",
-				))
-			}
-		}
-	}
-
 	if spec.Experimental != nil {
 		allErrs = append(allErrs, v.validateExperimentalSpec(
 			spec.Experimental,
