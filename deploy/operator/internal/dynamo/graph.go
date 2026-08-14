@@ -1026,10 +1026,12 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 // the engine only starts once its data-parallel ranks (the followers) have joined, so
 // gating the address on readiness would deadlock.
 //
-// The selector matches the elastic-EP component. Today that is a single-pod leader, so
-// it resolves to exactly the leader pod. When the follower clique (Phase 4) lands it
-// shares this component label, so that change must narrow this selector to the leader
-// role to keep the Service leader-only.
+// The selector matches the elastic-EP component and resolves to exactly the leader pod.
+// The Phase 4 follower does not widen it: the follower is synthesized as its own
+// "<leader>-flw" component (see synthesizeElasticEPFollowerDCD), so it carries a
+// different KubeLabelDynamoComponent value and this selector never matches it. Keep the
+// follower's component identity distinct from the leader's, or this Service starts
+// resolving to followers and `ray start --address=<svc>:6379` will flap between them.
 func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
 	labels := make(map[string]string)
 	for k, v := range params.Labels {
@@ -1409,8 +1411,11 @@ func LongestPodCliqueNameForDGDComponent(
 		return lowerComponentName
 	}
 
-	// Iterate the concrete roles (not just PCSG components) so the elastic-EP
-	// follower's "-flw" clique is counted toward the Grove name-length budget.
+	// Iterate the concrete roles for every component, not just PCSG ones, so the
+	// budget reflects whatever expandRolesForComponent actually renders. For a
+	// non-PCSG component that expansion is named after the component itself, so this
+	// is a no-op today; gating it on UsesPCSG would silently undercount the moment a
+	// role suffix is added to another pathway.
 	longestName := lowerComponentName
 	for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
 		roleName := strings.ToLower(role.Name)
@@ -2339,8 +2344,6 @@ type cliqueParams struct {
 // each elastic-EP follower (and the leader it selects) lands on its own node -- packing
 // several data-parallel ranks onto a node would starve them of the cross-node NVLink the
 // EP collective needs. The term selects this component's pods by their identity labels.
-//
-//nolint:gocyclo
 func injectElasticEPFollowerAntiAffinity(podSpec *corev1.PodSpec, componentName, dynamoNamespace string) {
 	if podSpec.Affinity == nil {
 		podSpec.Affinity = &corev1.Affinity{}
@@ -2364,6 +2367,8 @@ func injectElasticEPFollowerAntiAffinity(podSpec *corev1.PodSpec, componentName,
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
+//
+//nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,

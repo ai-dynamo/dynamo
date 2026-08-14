@@ -89,6 +89,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		expectProbesRemoved bool // If true, probes should be nil
 		expectProbesKept    bool // If true, probes should survive untouched
 		expectDPMasterIPEnv bool // If true, VLLM_DP_MASTER_IP should be bound to the pod IP
+		expectPodIPEnv      bool // If true, POD_IP alone should be bound (follower: not the DP master)
 	}{
 		{
 			name:              "single node does not modify args",
@@ -409,6 +410,27 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			gpuCount:          2,
 			expectNotModified: true,
 		},
+		// The follower's serve command is replaced with a bare `ray start --block`, so
+		// nothing ever listens on DynamoSystemPort. Keeping the worker probes (liveness
+		// has FailureThreshold 1) would make the kubelet kill it on the first probe and
+		// restart it forever.
+		{
+			name:              "elastic EP follower drops the probes it can never satisfy",
+			numberOfNodes:     1,
+			role:              RoleFollower,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "test", "--data-parallel-backend", "ray", enableElasticEPFlag},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
+			},
+			gpuCount:            4,
+			expectProbesRemoved: true,
+			expectPodIPEnv:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -462,6 +484,11 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				// The launch command interpolates POD_IP into --node-ip-address, so
 				// an unset value would start the Ray head with an empty address.
 				t.Log("the Ray head registers under this address; vLLM searches for it")
+				g.Expect(podIP).ToNot(gomega.BeNil())
+				g.Expect(podIP.ValueFrom.FieldRef.FieldPath).To(gomega.Equal("status.podIP"))
+			} else if tt.expectPodIPEnv {
+				t.Log("the follower pins --node-ip-address to POD_IP but is not the DP master")
+				g.Expect(dpMasterIP).To(gomega.BeNil())
 				g.Expect(podIP).ToNot(gomega.BeNil())
 				g.Expect(podIP.ValueFrom.FieldRef.FieldPath).To(gomega.Equal("status.podIP"))
 			} else {

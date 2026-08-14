@@ -119,6 +119,16 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
 				},
 			})
+			// Drop the worker health probes. component_worker.go points all three at
+			// /live and /health on DynamoSystemPort, but the launch command above
+			// replaced the serve command with a bare `ray start --block`: this pod
+			// never runs the Dynamo system server, so nothing ever listens on that
+			// port. The liveness probe has FailureThreshold 1, so the kubelet would
+			// kill the follower on its first probe and restart it forever. The
+			// follower's health is the raylet's, which Ray reports to the leader.
+			container.LivenessProbe = nil
+			container.ReadinessProbe = nil
+			container.StartupProbe = nil
 		}
 	}
 
