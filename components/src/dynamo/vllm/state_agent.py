@@ -7,10 +7,10 @@ import asyncio
 import ipaddress
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from vllm.config import VllmConfig
-from vllm.distributed.kv_events import ZmqEventPublisher
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 from dynamo.llm import KvStateAttachmentOwner
 from dynamo.runtime import Endpoint
@@ -120,7 +120,7 @@ def validate_state_agent_worker(config: Any) -> None:
 async def start_attachment_owner(
     config: Any,
     generate_endpoint: Endpoint,
-    vllm_config: VllmConfig,
+    vllm_config: "VllmConfig",
     image_token_id: int | None,
 ) -> KvStateAttachmentOwner | None:
     settings = state_agent_settings(config)
@@ -148,13 +148,13 @@ async def start_attachment_owner(
     )
     descriptors = []
     for rank in sorted(expected_ranks):
-        owner = settings.cache_owner_ids[rank]
+        cache_owner_id = settings.cache_owner_ids[rank]
         descriptors.append(
             {
-                "cache_owner_id": owner,
+                "cache_owner_id": cache_owner_id,
                 "global_dp_rank": rank,
                 "kv_state_endpoint": kv_state_endpoint,
-                "indexer_domain_id": owner.split("/", 1)[0],
+                "indexer_domain_id": cache_owner_id.split("/", 1)[0],
                 "kv_block_size": block_size,
                 "raw_zmq_endpoint": _advertised_raw_endpoint(
                     events.endpoint, rank, settings.raw_advertise_host
@@ -163,16 +163,18 @@ async def start_attachment_owner(
                 "image_token_id": image_token_id,
             }
         )
-    owner = KvStateAttachmentOwner(
+    attachment_owner = KvStateAttachmentOwner(
         generate_endpoint,
         generate_endpoint.connection_id(),
         descriptors,
     )
-    await owner.start()
-    return owner
+    await attachment_owner.start()
+    return attachment_owner
 
 
 def _advertised_raw_endpoint(base: str, rank: int, host: str) -> str:
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
     endpoint = ZmqEventPublisher.offset_endpoint_port(base, data_parallel_rank=rank)
     if not endpoint.startswith("tcp://") or ":" not in endpoint[6:]:
         raise ValueError(f"unsupported vLLM KV event endpoint: {endpoint!r}")

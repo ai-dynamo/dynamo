@@ -609,7 +609,7 @@ class WorkerFactory:
         vllm_config: VllmConfig,
         *,
         consolidator_enabled: bool,
-        consolidator_port: int,
+        consolidator_port: int | None,
     ) -> Optional[Any]:
         from .state_agent import state_agent_settings
 
