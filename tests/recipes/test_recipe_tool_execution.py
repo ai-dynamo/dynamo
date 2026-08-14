@@ -170,7 +170,9 @@ def test_model_call_executes_a_real_tool_and_uses_its_output(
     ]
 
     def lookup_access_code(args):
-        return _run_cli(_LOOKUP_CODE, str(args.get("user", "")), {"ACCESS_CODE": secret})
+        return _run_cli(
+            _LOOKUP_CODE, str(args.get("user", "")), {"ACCESS_CODE": secret}
+        )
 
     text, calls = _tool_loop(
         endpoint_client,
@@ -276,18 +278,18 @@ def test_chained_tools_second_call_uses_first_calls_real_output(
     names = [c["name"] for c in calls]
     assert "get_user_id" in names, f"never resolved the id; calls={names}"
     assert "get_quota" in names, f"never fetched the quota; calls={names}"
-    assert names.index("get_user_id") < names.index("get_quota"), (
-        f"called get_quota before get_user_id: {names}"
-    )
+    assert names.index("get_user_id") < names.index(
+        "get_quota"
+    ), f"called get_quota before get_user_id: {names}"
 
     quota_call = calls[names.index("get_quota")]
     assert quota_call["args"].get("user_id") == user_id, (
         f"second call used {quota_call['args'].get('user_id')!r} instead of the "
         f"id the first call actually returned ({user_id!r})"
     )
-    assert quota_call["output"] == quota, (
-        f"get_quota returned {quota_call['output']!r} -- it was handed the wrong id"
-    )
+    assert (
+        quota_call["output"] == quota
+    ), f"get_quota returned {quota_call['output']!r} -- it was handed the wrong id"
     assert quota in text, (
         f"final answer omitted the quota the tool actually returned.\n"
         f"quota={quota!r}\nanswer={text[:400]!r}"
