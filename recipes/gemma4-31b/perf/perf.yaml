@@ -52,6 +52,8 @@ spec:
                 - key: nvidia.com/dynamo-graph-deployment-name
                   operator: In
                   values:
+                  # Change together with ENDPOINT below.
+                  # Variants: gemma4-31b-agg-{b200,gb200}-agentic
                   - gemma4-31b-agg-b200-agentic
               topologyKey: kubernetes.io/hostname
       # tolerations: # Uncomment and populate for tainted frontend nodes.
@@ -172,6 +174,7 @@ spec:
         # --synthesis-max-isl "$SYNTHESIS_MAX_ISL" \
         # --synthesis-max-osl 12000 \
         env:
+        # Change together with podAffinity graph-deployment-name above.
         - name: ENDPOINT
           value: gemma4-31b-agg-b200-agentic-frontend:8000
         - name: TRACE_FILE
