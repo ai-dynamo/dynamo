@@ -1350,6 +1350,13 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			ready:          true,
 		},
 		{
+			name:                "legacy base namespace stays active until the parent accepts a completed child revision",
+			hasPrevious:         true,
+			childAtTarget:       true,
+			childUpdateFinished: true,
+			ready:               true,
+		},
+		{
 			name:           "legacy base namespace stays active while the child reports the old revision",
 			hasPrevious:    true,
 			parentAccepted: true,
@@ -1456,7 +1463,6 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				Status: grovev1alpha1.PodCliqueSetStatus{
 					ObservedGeneration:    &parentObservedGeneration,
 					CurrentGenerationHash: &targetRevision,
-					UpdateProgress:        &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateEndedAt: &completedAt},
 				},
 			}
 			updatedReplicas := int32(0)
@@ -1495,7 +1501,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(readiness.Ready).To(gomega.Equal(tt.ready))
 
-			t.Log("Publish the previous namespace only until the target revision commits.")
+			t.Log("Publish the previous namespace only until the child completes the accepted PCS revision.")
 			wantNamespace := previousNamespace
 			if tt.wantDesired || previousNamespace == "" {
 				wantNamespace = desiredNamespace
@@ -1506,7 +1512,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 }
 
 // ---------------------------------------------------------------------------
-func TestGroveComponentTargetRevisionCommittedForPCSG(t *testing.T) {
+func TestGroveComponentHasCompletedPCSRevisionForPCSG(t *testing.T) {
 	ctx := context.Background()
 	targetRevision := "target-revision"
 	completedAt := metav1.Now()
@@ -1517,16 +1523,16 @@ func TestGroveComponentTargetRevisionCommittedForPCSG(t *testing.T) {
 		updatedReplicas int32
 		want            bool
 	}{
-		{name: "completed scaling group commits target revision", finished: true, updatedReplicas: 1, want: true},
-		{name: "unfinished scaling group keeps target pending", finished: false, updatedReplicas: 1, want: false},
-		{name: "scaling group with stale update count keeps target pending", finished: true, updatedReplicas: 0, want: false},
+		{name: "completed scaling group completes the PCS revision", finished: true, updatedReplicas: 1, want: true},
+		{name: "unfinished scaling group keeps the PCS revision pending", finished: false, updatedReplicas: 1, want: false},
+		{name: "scaling group with stale update count keeps the PCS revision pending", finished: true, updatedReplicas: 0, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			t.Log("Build a multinode worker and accepted Grove parent revision.")
+			t.Log("Build a multinode worker and accepted PCS revision hash.")
 			dgd := &v1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -1538,15 +1544,6 @@ func TestGroveComponentTargetRevisionCommittedForPCSG(t *testing.T) {
 				},
 			}
 			component := dgd.GetComponentByName("prefill")
-			pcs := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Generation: 1},
-				Status: grovev1alpha1.PodCliqueSetStatus{
-					ObservedGeneration:    ptr.To(int64(1)),
-					CurrentGenerationHash: &targetRevision,
-					UpdateProgress:        &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateEndedAt: &completedAt},
-				},
-			}
-
 			t.Log("Seed the scaling group at the requested revision-completion state.")
 			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1564,11 +1561,11 @@ func TestGroveComponentTargetRevisionCommittedForPCSG(t *testing.T) {
 				pcsg.Status.UpdateProgress = &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &completedAt}
 			}
 
-			t.Log("Evaluate whether the scaling group commits the target revision.")
+			t.Log("Evaluate whether the scaling group completed the accepted PCS revision.")
 			reader := newFakeGroveClient(g, pcsg)
-			committed, err := groveComponentTargetRevisionCommitted(ctx, reader, dgd, component, pcs)
+			completed, err := groveComponentHasCompletedPCSRevision(ctx, reader, dgd, component, &targetRevision)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(committed).To(gomega.Equal(tt.want))
+			g.Expect(completed).To(gomega.Equal(tt.want))
 		})
 	}
 }

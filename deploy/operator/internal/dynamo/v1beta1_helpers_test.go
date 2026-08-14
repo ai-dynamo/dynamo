@@ -236,9 +236,9 @@ func TestGetGroveRuntimeNamespaceUsesCanonicalWorkerHash(t *testing.T) {
 				want += "-" + hash
 			}
 
-			t.Log("Read the namespace against a Grove worker at the committed target revision.")
-			reader, pcs := committedGroveWorkerReader(t, dgd, component)
-			got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, pcs)
+			t.Log("Read the namespace against a Grove worker that completed the accepted PCS revision.")
+			reader, acceptedPCSRevisionHash := completedGroveWorkerReader(t, dgd, component)
+			got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, acceptedPCSRevisionHash)
 			if err != nil {
 				t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 			}
@@ -273,9 +273,9 @@ func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilTargetRevisi
 
 	g := gomega.NewWithT(t)
 	var reader client.Reader = newFakeGroveClient(g)
-	t.Log("Keep the active namespace while the target revision is pending.")
-	var pcs *grovev1alpha1.PodCliqueSet
-	got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, pcs)
+	t.Log("Keep the active namespace while the accepted PCS revision is pending.")
+	var acceptedPCSRevisionHash *string
+	got, err := GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, acceptedPCSRevisionHash)
 	if err != nil {
 		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 	}
@@ -283,14 +283,14 @@ func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilTargetRevisi
 		t.Fatalf("GetGroveRuntimeNamespace() = %q, want active worker namespace", got)
 	}
 
-	t.Log("Publish the desired namespace after the target revision commits.")
+	t.Log("Publish the desired namespace after the child completes the accepted PCS revision.")
 	hash, err := ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
 	}
 	want := ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), hash)
-	reader, pcs = committedGroveWorkerReader(t, dgd, component)
-	got, err = GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, pcs)
+	reader, acceptedPCSRevisionHash = completedGroveWorkerReader(t, dgd, component)
+	got, err = GetGroveRuntimeNamespace(context.Background(), reader, dgd, component, acceptedPCSRevisionHash)
 	if err != nil {
 		t.Fatalf("GetGroveRuntimeNamespace() error = %v", err)
 	}
@@ -299,28 +299,16 @@ func TestGetGroveRuntimeNamespacePreservesActiveWorkerNamespaceUntilTargetRevisi
 	}
 }
 
-func committedGroveWorkerReader(
+func completedGroveWorkerReader(
 	t *testing.T,
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-) (client.Reader, *grovev1alpha1.PodCliqueSet) {
+) (client.Reader, *string) {
 	t.Helper()
 	g := gomega.NewWithT(t)
 	targetRevision := "target-revision"
 	completedAt := metav1.Now()
 
-	pcs := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-			Namespace:  dgd.Namespace,
-			Generation: 1,
-		},
-		Status: grovev1alpha1.PodCliqueSetStatus{
-			ObservedGeneration:    ptr.To(int64(1)),
-			CurrentGenerationHash: &targetRevision,
-			UpdateProgress:        &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateEndedAt: &completedAt},
-		},
-	}
 	podClique := &grovev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      GroveComponentResourceName(dgd, component.ComponentName),
@@ -334,7 +322,7 @@ func committedGroveWorkerReader(
 			UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
 		},
 	}
-	return newFakeGroveClient(g, pcs, podClique), pcs
+	return newFakeGroveClient(g, podClique), &targetRevision
 }
 
 func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testing.T) {

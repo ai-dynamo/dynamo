@@ -161,6 +161,7 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 	if err != nil {
 		return false, "", "", nil, err
 	}
+	acceptedPCSRevisionHash := getAcceptedPCSRevisionHash(pcs)
 
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
@@ -187,7 +188,7 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 		if checkErr != nil {
 			return false, "", "", nil, fmt.Errorf("component %q: %w", componentName, checkErr)
 		}
-		runtimeNamespace, err := GetGroveRuntimeNamespace(ctx, reader, dgd, component, pcs)
+		runtimeNamespace, err := GetGroveRuntimeNamespace(ctx, reader, dgd, component, acceptedPCSRevisionHash)
 		if err != nil {
 			return false, "", "", nil, fmt.Errorf("component %q runtime namespace: %w", componentName, err)
 		}
@@ -219,7 +220,7 @@ func getGrovePodCliqueSet(
 	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	// Treat a missing parent as a target revision that has not committed yet.
+	// Treat a missing parent as a deployment with no accepted PCS revision.
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	pcsKey := types.NamespacedName{
 		Name:      PCSNameForDGD(dgd.Name, dgd.Spec.Components),
@@ -234,36 +235,40 @@ func getGrovePodCliqueSet(
 	return pcs, nil
 }
 
-// groveComponentTargetRevisionCommitted reports whether the live Grove child
-// has completed the current PodCliqueSet revision for one worker component.
-func groveComponentTargetRevisionCommitted(
+// getAcceptedPCSRevisionHash returns the current PCS revision after Grove has
+// observed the latest PCS generation.
+func getAcceptedPCSRevisionHash(pcs *grovev1alpha1.PodCliqueSet) *string {
+	if pcs == nil ||
+		pcs.Status.ObservedGeneration == nil ||
+		*pcs.Status.ObservedGeneration < pcs.Generation ||
+		pcs.Status.CurrentGenerationHash == nil {
+		return nil
+	}
+	return pcs.Status.CurrentGenerationHash
+}
+
+// groveComponentHasCompletedPCSRevision reports whether the live Grove child
+// has observed and completed the accepted PCS revision for one worker component.
+func groveComponentHasCompletedPCSRevision(
 	ctx context.Context,
 	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	pcs *grovev1alpha1.PodCliqueSet,
-) (bool, error) {
-	if pcs == nil {
-		return false, nil
-	}
+	acceptedPCSRevisionHash *string,
 
-	// A target revision is not committed until Grove accepts the latest PCS update.
-	if pcs.Status.ObservedGeneration == nil ||
-		*pcs.Status.ObservedGeneration < pcs.Generation ||
-		pcs.Status.CurrentGenerationHash == nil ||
-		pcs.Status.UpdateProgress == nil ||
-		pcs.Status.UpdateProgress.UpdateEndedAt == nil {
+) (bool, error) {
+	if acceptedPCSRevisionHash == nil {
 		return false, nil
 	}
 
 	resourceName := GroveComponentResourceName(dgd, component.ComponentName)
 	if component.UsesPCSG() {
-		return grovePCSGRevisionCommitted(ctx, reader, resourceName, dgd.Namespace, *pcs.Status.CurrentGenerationHash)
+		return grovePCSGHasCompletedPCSRevision(ctx, reader, resourceName, dgd.Namespace, *acceptedPCSRevisionHash)
 	}
-	return grovePodCliqueRevisionCommitted(ctx, reader, resourceName, dgd.Namespace, *pcs.Status.CurrentGenerationHash)
+	return grovePodCliqueHasCompletedPCSRevision(ctx, reader, resourceName, dgd.Namespace, *acceptedPCSRevisionHash)
 }
 
-func grovePodCliqueRevisionCommitted(
+func grovePodCliqueHasCompletedPCSRevision(
 	ctx context.Context,
 	reader client.Reader,
 	resourceName string,
@@ -287,7 +292,7 @@ func grovePodCliqueRevisionCommitted(
 		podClique.Status.UpdateProgress.UpdateEndedAt != nil, nil
 }
 
-func grovePCSGRevisionCommitted(
+func grovePCSGHasCompletedPCSRevision(
 	ctx context.Context,
 	reader client.Reader,
 	resourceName string,
