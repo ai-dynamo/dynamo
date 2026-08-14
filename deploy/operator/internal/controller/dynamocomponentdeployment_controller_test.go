@@ -814,6 +814,69 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NotEqual(t, service.Name, lws.Name)
 }
 
+// The elastic-EP follower runs a bare Ray join, not the Dynamo runtime, so it never
+// registers a DynamoWorkerMetadata CR. Labelling it for K8s discovery would only make
+// the Rust discovery daemon hold it in its reflector store and wake its debounce loop
+// on every follower scale-up/scale-down.
+func TestDynamoComponentDeploymentReconciler_DiscoveryLabelsByRole(t *testing.T) {
+	tests := []struct {
+		name       string
+		role       dynamo.Role
+		wantLabels bool
+	}{
+		{name: "main registers a worker and is discoverable", role: dynamo.RoleMain, wantLabels: true},
+		{name: "elastic-EP follower never registers a worker", role: dynamo.RoleFollower, wantLabels: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := scheme.Scheme
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			require.NoError(t, appsv1.AddToScheme(s))
+			require.NoError(t, corev1.AddToScheme(s))
+
+			t.Log("render a pod template for the role, with the Kubernetes discovery backend enabled")
+			dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "mydgd-decode", Namespace: "default"},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "decode",
+						ComponentType:   commonconsts.ComponentTypeWorker,
+						DynamoNamespace: ptr.To("default"),
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Name:  commonconsts.MainContainerName,
+								Image: "test-image:latest",
+							},
+						},
+					},
+				},
+			})
+
+			r := &DynamoComponentDeploymentReconciler{
+				Client: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{
+					Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+				},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+				},
+			}
+
+			podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(context.Background(), dcd, tt.role)
+			require.NoError(t, err)
+
+			t.Log("only a role that runs the Dynamo runtime carries the discovery labels")
+			_, gotBackend := podTemplate.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend]
+			_, gotEnabled := podTemplate.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled]
+			require.Equal(t, tt.wantLabels, gotBackend, "discovery-backend label presence")
+			require.Equal(t, tt.wantLabels, gotEnabled, "discovery-enabled label presence")
+		})
+	}
+}
+
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t *testing.T) {
 	s := scheme.Scheme
 	require.NoError(t, v1alpha1.AddToScheme(s))
