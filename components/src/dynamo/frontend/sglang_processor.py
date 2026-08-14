@@ -854,8 +854,10 @@ class SglangProcessor:
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                raw_finish = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish)
+                raw_finish = engine_response.get(
+                    "raw_finish_reason", engine_response.get("finish_reason")
+                )
+                finish_reason = _map_finish_reason(engine_response.get("finish_reason"))
                 stop_reason = engine_response.get("stop_reason")
 
                 if usage := engine_response.get("completion_usage"):

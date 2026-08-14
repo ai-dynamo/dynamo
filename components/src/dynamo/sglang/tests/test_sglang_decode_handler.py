@@ -177,6 +177,7 @@ def test_user_stop_token_ids_ignores_hidden_ids():
             "stop_conditions": {
                 "stop_token_ids": [576],
                 "stop_token_ids_hidden": [128001],
+                "stop_token_ids_visible": [128009],
             }
         }
     ) == {576}
@@ -195,15 +196,16 @@ def test_user_stop_token_ids_treats_token_id_display_as_string_stop():
     assert _user_stop_token_ids({"stop": ["token_id:576"]}) == set()
 
 
-def test_suppressed_stop_token_ids_ignores_plain_stop_token_ids():
+def test_suppressed_stop_token_ids_includes_plain_and_hidden_stop_token_ids():
     assert _suppressed_stop_token_ids(
         {
             "stop_conditions": {
                 "stop_token_ids": [576],
                 "stop_token_ids_hidden": [128001],
+                "stop_token_ids_visible": [128009],
             }
         }
-    ) == {128001}
+    ) == {576, 128001}
 
 
 def test_remove_suppressed_stop_tokens_removes_matched_tail_sequence():
@@ -615,7 +617,7 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["max_new_tokens"] == 8
 
 
-def test_build_sampling_params_forwards_string_stop_for_token_requests():
+def test_build_sampling_params_omits_string_stop_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
@@ -629,7 +631,7 @@ def test_build_sampling_params_forwards_string_stop_for_token_requests():
         }
     )
 
-    assert sampling_params["stop"] == ["<|user|>"]
+    assert "stop" not in sampling_params
     assert sampling_params["stop_token_ids"] == [128001]
 
 
@@ -1011,9 +1013,15 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
     )
 
     assert chunks == [
-        {"index": 0, "finish_reason": "stop", "token_ids": []},
+        {
+            "index": 0,
+            "raw_finish_reason": {"type": "stop"},
+            "finish_reason": "stop",
+            "token_ids": [],
+        },
         {
             "index": 1,
+            "raw_finish_reason": {"type": "stop"},
             "finish_reason": "stop",
             "token_ids": [],
             "completion_usage": {
@@ -1521,7 +1529,49 @@ async def test_process_token_stream_removes_matched_hidden_stop_token():
         )
     )
 
-    assert chunks == [{"index": 0, "finish_reason": "stop", "token_ids": [101]}]
+    assert chunks == [
+        {
+            "index": 0,
+            "raw_finish_reason": {"type": "stop", "matched": 128001},
+            "finish_reason": "stop",
+            "token_ids": [101],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_removes_plain_stop_token_and_keeps_reason():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101, 576],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": 576},
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            user_stop_token_ids={576},
+            suppressed_stop_token_ids={576},
+        )
+    )
+
+    assert chunks == [
+        {
+            "index": 0,
+            "raw_finish_reason": {"type": "stop", "matched": 576},
+            "finish_reason": "stop",
+            "stop_reason": 576,
+            "token_ids": [101],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1551,7 +1601,17 @@ async def test_process_token_stream_removes_matched_hidden_stop_token_sequence()
         )
     )
 
-    assert chunks == [{"index": 0, "finish_reason": "stop", "token_ids": [101]}]
+    assert chunks == [
+        {
+            "index": 0,
+            "raw_finish_reason": {
+                "type": "stop",
+                "matched": [128001, 128009],
+            },
+            "finish_reason": "stop",
+            "token_ids": [101],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1588,7 +1648,15 @@ async def test_process_token_stream_buffers_split_hidden_stop_token_sequence():
 
     assert chunks == [
         {"index": 0, "token_ids": [101]},
-        {"index": 0, "finish_reason": "stop", "token_ids": []},
+        {
+            "index": 0,
+            "raw_finish_reason": {
+                "type": "stop",
+                "matched": [128001, 128009],
+            },
+            "finish_reason": "stop",
+            "token_ids": [],
+        },
     ]
 
 
@@ -1627,6 +1695,7 @@ async def test_process_token_stream_trims_logprobs_for_suppressed_stop_token():
     assert chunks == [
         {
             "index": 0,
+            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "token_ids": [101],
             "log_probs": [-0.1],
@@ -1661,7 +1730,14 @@ async def test_process_token_stream_keeps_final_stop_when_hidden_token_removed_t
         )
     )
 
-    assert chunks == [{"index": 0, "finish_reason": "stop", "token_ids": []}]
+    assert chunks == [
+        {
+            "index": 0,
+            "raw_finish_reason": {"type": "stop", "matched": 128001},
+            "finish_reason": "stop",
+            "token_ids": [],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1690,6 +1766,7 @@ async def test_process_token_stream_keeps_visible_stop_token():
     assert chunks == [
         {
             "index": 0,
+            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "stop_reason": 128001,
             "token_ids": [101, 128001],
@@ -1724,6 +1801,7 @@ async def test_process_token_stream_keeps_hidden_stop_token_when_match_is_not_ta
     assert chunks == [
         {
             "index": 0,
+            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "token_ids": [128001, 101],
         }

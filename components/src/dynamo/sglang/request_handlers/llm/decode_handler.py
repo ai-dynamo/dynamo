@@ -109,7 +109,10 @@ def _suppressed_stop_token_ids(request: Dict[str, Any]) -> set[int]:
     if not isinstance(stop_conditions, dict):
         return set()
 
-    values = stop_conditions.get("stop_token_ids_hidden") or []
+    values = [
+        *(stop_conditions.get("stop_token_ids") or []),
+        *(stop_conditions.get("stop_token_ids_hidden") or []),
+    ]
     return {
         token_id
         for token_id in values
@@ -376,16 +379,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             _plain = stop_conditions.get("stop_token_ids") or []
             _merged = list(set(_hidden).union(_plain))
             stop_token_ids = _merged if _merged else None
-            stop = stop_conditions.get("stop") or None
-
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
-                # With --skip-tokenizer-init, SGLang may not have a tokenizer
-                # available for stop-string matching; tokenizer-enabled workers
-                # still need the string stop conditions forwarded.
-                "stop": stop,
                 "stop_token_ids": stop_token_ids,
                 **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
@@ -717,6 +714,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out: dict[str, Any] = {"index": output_idx}
                 finish_reason = meta_info["finish_reason"]
                 if finish_reason:
+                    out["raw_finish_reason"] = finish_reason
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )

@@ -1162,14 +1162,46 @@ class SglangStreamingPostProcessor:
 
         return ""
 
+    def _trailing_logprobs_count(self, text: str) -> int:
+        if not text:
+            return 0
+        decoded = ""
+        count = 0
+        for entry in reversed(self._pending_logprobs_content):
+            token = entry.get("token")
+            if not isinstance(token, str):
+                return 0
+            decoded = token + decoded
+            count += 1
+            if len(decoded) >= len(text):
+                if not decoded.endswith(text):
+                    return 0
+                while (
+                    count < len(self._pending_logprobs_content)
+                    and self._pending_logprobs_content[-count - 1].get("token") == ""
+                ):
+                    count += 1
+                return count
+        return 0
+
     def _take_pending_logprobs(self) -> dict[str, Any] | None:
         if not self._pending_logprobs_content:
             return None
-        content = self._pending_logprobs_content
-        self._pending_logprobs_content = []
+
+        pending_count = self._trailing_logprobs_count(self._pending_stop_text)
+        if pending_count:
+            content = self._pending_logprobs_content[:-pending_count]
+            self._pending_logprobs_content = self._pending_logprobs_content[
+                -pending_count:
+            ]
+        else:
+            content = self._pending_logprobs_content
+            self._pending_logprobs_content = []
+        if not content:
+            return None
         return {"content": content, "refusal": None}
 
-    def _matched_stop_string(self, raw_finish_reason: Any) -> str | None:
+    def _matched_stop_string(self, raw_finish_reason: Any, text: str) -> str | None:
         if not isinstance(raw_finish_reason, dict):
             return None
         if raw_finish_reason.get("type") != "stop":
@@ -1177,6 +1209,21 @@ class SglangStreamingPostProcessor:
         matched = raw_finish_reason.get("matched")
         if isinstance(matched, str) and matched in self._stop_strings:
             return matched
+        is_matched_token_id = isinstance(matched, int) and not isinstance(matched, bool)
+        is_matched_token_id_sequence = (
+            isinstance(matched, list)
+            and matched
+            and all(
+                isinstance(token_id, int) and not isinstance(token_id, bool)
+                for token_id in matched
+            )
+        )
+        if is_matched_token_id or is_matched_token_id_sequence:
+            return max(
+                (stop for stop in self._stop_strings if text.endswith(stop)),
+                key=len,
+                default=None,
+            )
         return None
 
     def _strip_stop_string_suffix(
@@ -1188,6 +1235,9 @@ class SglangStreamingPostProcessor:
         # stop string after detokenization while special tokens are preserved for
         # reasoning/tool parsers.
         if text.endswith(matched_stop_string):
+            suppressed_count = self._trailing_logprobs_count(matched_stop_string)
+            if suppressed_count:
+                del self._pending_logprobs_content[-suppressed_count:]
             return text[: -len(matched_stop_string)]
         return text
 
@@ -1195,10 +1245,11 @@ class SglangStreamingPostProcessor:
         self,
         text: str,
         finish_reason: str | None,
-        matched_stop_string: str | None,
+        raw_finish_reason: Any,
     ) -> str:
         text = self._pending_stop_text + text
         self._pending_stop_text = ""
+        matched_stop_string = self._matched_stop_string(raw_finish_reason, text)
         text = self._strip_stop_string_suffix(text, matched_stop_string)
         if finish_reason or not text or not self._stop_strings:
             return text
@@ -1276,7 +1327,6 @@ class SglangStreamingPostProcessor:
         finish_reason = engine_response.get("finish_reason")
         if isinstance(finish_reason, dict):
             finish_reason = finish_reason.get("type")
-        matched_stop_string = self._matched_stop_string(raw_finish_reason)
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
         if finish_reason is not None:
@@ -1302,7 +1352,7 @@ class SglangStreamingPostProcessor:
                 self._pending_logprobs_content.extend(openai_logprobs["content"])
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
         delta_text = self._filter_stop_string_delta(
-            delta_text, finish_reason, matched_stop_string
+            delta_text, finish_reason, raw_finish_reason
         )
 
         if self._fast_plain_text:
