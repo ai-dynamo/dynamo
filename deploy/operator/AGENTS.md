@@ -9,6 +9,16 @@ SPDX-License-Identifier: Apache-2.0
 - Keep chart-only grants in the manual section of the platform chart's
   `../helm/charts/platform/components/operator/templates/manager-rbac.yaml`.
 
+## Reconciliation and Admission Semantics
+
+- Reconcilers must be level-based. Derive actions from desired and observed
+  state on every invocation; never depend on the request operation or an event
+  edge to determine what to do.
+- Admission validation should enforce state invariants independent of the
+  request operation. Distinguish between `CREATE` and `UPDATE` only for
+  exceptional, intentional API semantics, and document why the distinction is
+  required.
+
 ## Go Code Style
 
 - Put a one-line story comment above every multi-line block of logically
