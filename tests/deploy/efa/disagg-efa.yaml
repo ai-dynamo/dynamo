@@ -59,8 +59,6 @@ spec:
           - Qwen/Qwen3-0.6B
           - --disaggregation-mode
           - prefill
-          - --tensor-parallel-size
-          - "1"
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           envFrom:
@@ -109,8 +107,6 @@ spec:
           - Qwen/Qwen3-0.6B
           - --disaggregation-mode
           - decode
-          - --tensor-parallel-size
-          - "1"
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           envFrom:

@@ -226,7 +226,7 @@ def assert_nixl_used_libfabric(deployment: ManagedDeployment) -> None:
     )
 
 
-def _read_nixl_rx_bytes(pod) -> float | None:
+def _read_nixl_rx_bytes(pod) -> tuple[str, float | None]:
     """Return the summed NIXL ``agent_rx_bytes`` counter from a worker pod.
 
     Scrapes the in-pod NIXL Prometheus endpoint via ``pod.exec`` and sums every
@@ -242,9 +242,9 @@ def _read_nixl_rx_bytes(pod) -> float | None:
     try:
         result = pod.exec(["python3", "-c", snippet])
         text = result.stdout.decode()
-    except Exception as e:  # noqa: BLE001 - telemetry may not be up yet
+    except Exception as e:  # noqa: BLE001 - classified as a scrape failure below
         logger.warning("Could not scrape NIXL telemetry from %s: %s", pod.name, e)
-        return None
+        return ("scrape_failed", None)
 
     total = 0.0
     found = False
@@ -260,43 +260,51 @@ def _read_nixl_rx_bytes(pod) -> float | None:
                 found = True
             except (IndexError, ValueError):
                 continue
-    return total if found else None
+    return ("ok", total) if found else ("absent", None)
 
 
-def assert_efa_rdma_traffic(rx_before: float | None, rx_after: float | None) -> None:
+def assert_efa_rdma_traffic(
+    before: tuple[str, float | None], after: tuple[str, float | None]
+) -> None:
     """Assert the decode worker's NIXL rx-bytes counter grew across the request.
 
-    This is the direct "traffic actually went over EFA RDMA" proof. Combined with
-    assert_nixl_used_libfabric (which proves the *backend* is LIBFABRIC/EFA), a
-    strictly increasing ``agent_rx_bytes`` proves KV bytes physically moved through
-    the NIXL/EFA agent for this inference — not merely that the path was configured.
+    Combined with assert_nixl_used_libfabric (which proves the *backend* is
+    LIBFABRIC/EFA), a strictly increasing ``agent_rx_bytes`` proves KV bytes
+    physically moved through the NIXL/EFA agent for this inference -- not merely
+    that the path was configured.
 
-    Capability-gated rather than mandatory: the NIXL Prometheus exporter is not
-    reachable on every platform we run this on (it has not been observed working
-    on GB200), and the libfabric log evidence is the assertion that must hold
-    everywhere. When the counter cannot be read at all we log loudly and leave
-    the verdict to assert_nixl_used_libfabric; when it CAN be read, it must grow.
+    Fails closed. This lane is pinned to aws-dev-02/H100, where the exporter is
+    known to work, so a scrape that errors is an infrastructure failure and must
+    not silently delete the only direct proof that bytes moved. Only a
+    *successful* scrape that genuinely lacks the metric is treated as a platform
+    without NIXL telemetry -- and even that is reported loudly, since on this
+    lane it is not expected either. A GB200 lane can add an explicit capability
+    gate when it exists.
     """
-    if rx_before is None and rx_after is None:
+    before_status, rx_before = before
+    after_status, rx_after = after
+
+    failed = [s for s in (before_status, after_status) if s == "scrape_failed"]
+    assert not failed, (
+        f"EFA RDMA traffic NOT confirmed: scraping NIXL {NIXL_RX_BYTES_METRIC} failed "
+        f"(before={before_status}, after={after_status}). The exporter on "
+        f":{NIXL_TELEMETRY_PORT} is expected to work on this lane, so this is an "
+        "infrastructure failure, not a platform without telemetry."
+    )
+
+    if before_status == "absent" and after_status == "absent":
         logger.warning(
-            "NIXL %s not readable on this platform — skipping the RDMA-traffic "
-            "assertion and relying on the libfabric log evidence. Check "
-            "NIXL_TELEMETRY_ENABLE=y and the exporter on :%s if this is unexpected.",
+            "NIXL %s absent from a successfully scraped endpoint on both samples — "
+            "skipping the RDMA-traffic assertion and relying on the libfabric log "
+            "evidence. This is unexpected on this lane; check NIXL_TELEMETRY_ENABLE=y.",
             NIXL_RX_BYTES_METRIC,
-            NIXL_TELEMETRY_PORT,
         )
         return
 
-    # Exactly one sample is an infrastructure failure, not a platform without
-    # telemetry. Substituting a zero baseline here would let any pre-existing
-    # counter value satisfy the delta below without the request having moved a
-    # single byte -- and the counter is routinely nonzero before the request,
-    # because model-availability probing already warms the path.
     assert rx_before is not None and rx_after is not None, (
-        f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} was readable on "
-        f"only one of the two scrapes (before={rx_before}, after={rx_after}). Treating "
-        "the missing sample as zero would be a false pass. Check the exporter on "
-        f":{NIXL_TELEMETRY_PORT}."
+        f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} was present on "
+        f"only one of the two samples (before={before_status}, after={after_status}). "
+        "Treating the missing one as zero would be a false pass."
     )
 
     assert rx_after > rx_before, (
