@@ -44,6 +44,10 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Target identity and failover policy consumed after engine construction.
+    "ENGINE_ID",
+    "FAILOVER_LOCK_PATH",
+    "DYN_VLLM_GMS_SHADOW_MODE",
     # Optional non-secret platform endpoints that may be consumed after restore.
     "MODEL_EXPRESS_URL",
     "PROMETHEUS_ENDPOINT",
