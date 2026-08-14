@@ -45,6 +45,8 @@ def _get_workspace_dir() -> str:
 SCHEMA_V1ALPHA1 = "v1alpha1"
 SCHEMA_V1BETA1 = "v1beta1"
 
+_PORT_FORWARD_STOP_TIMEOUT = 5.0
+
 
 class ServiceSpec:
     """Wrapper around a single service/component in the deployment spec.
@@ -1580,46 +1582,11 @@ class ManagedDeployment:
                         f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
                     )
 
-                # Restart port-forward for next attempt (except on last attempt)
-                if attempt == max_connection_attempts - 1:
-                    continue
-                try:
-                    port_forward.stop()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error stopping port forward for pod {pod.name}: {e}"
-                    )
-                # kr8s' sync stop() can return before the background thread has
-                # fully torn down (or even finished starting), so we can't assume
-                # the old forward is dead once stop() returns. Track it so
-                # _cleanup() stops it later regardless of whether stop() raised,
-                # rather than losing the reference when we replace the object.
-                if port_forward not in self._active_port_forwards:
-                    self._active_port_forwards.append(port_forward)
-                # Create a fresh portforward object so local_port=0 picks a new
-                # ephemeral port rather than re-binding the previously assigned
-                # port that may still be in TIME_WAIT.
-                try:
-                    port_forward = pod.portforward(
-                        remote_port=remote_port,
-                        local_port=0,
-                        address="127.0.0.1",
-                    )
-                    port_forward.start()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error restarting port forward for pod {pod.name}: {e}"
-                    )
-                    break
-
             # All attempts failed
             self._logger.warning(
                 f"Port forward failed after {max_connection_attempts} attempts for pod {pod.name}"
             )
-            try:
-                port_forward.stop()
-            except Exception:
-                pass  # Ignore errors during cleanup
+            self._stop_port_forward(port_forward)
             return None
 
         except Exception as e:
@@ -1627,6 +1594,34 @@ class ManagedDeployment:
                 f"Failed to create port forward for pod {pod.name}: {e}"
             )
             return None
+
+    def _stop_port_forward(self, port_forward: Any) -> None:
+        """Stop a kr8s port forward and wait for its background thread to exit."""
+        try:
+            port_forward.stop()
+        except RuntimeError as e:
+            # Expected when the pod is terminated while kr8s is cleaning up its
+            # async generator.
+            if "anext()" in str(e) or "already running" in str(e):
+                self._logger.debug(f"Port forward cleanup: {e}")
+            else:
+                self._logger.warning(f"Unexpected error stopping port forward: {e}")
+        except Exception as e:
+            self._logger.debug(f"Error stopping port forward: {e}")
+
+        # kr8s 0.20.x stop() closes the asyncio servers but does not join the
+        # thread created by start(). Reaping it prevents a subsequent forward
+        # from racing the old listener for the same ephemeral port.
+        background_thread = getattr(port_forward, "_bg_thread", None)
+        if background_thread is None:
+            return
+
+        background_thread.join(timeout=_PORT_FORWARD_STOP_TIMEOUT)
+        if background_thread.is_alive():
+            self._logger.warning(
+                "Port forward background thread did not stop within %.1fs",
+                _PORT_FORWARD_STOP_TIMEOUT,
+            )
 
     async def _cleanup(self):
         try:
@@ -1636,19 +1631,7 @@ class ManagedDeployment:
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
             for port_forward in self._active_port_forwards:
-                try:
-                    port_forward.stop()
-                except RuntimeError as e:
-                    # Expected error when pod is terminated:
-                    # "anext(): asynchronous generator is already running"
-                    if "anext()" in str(e) or "already running" in str(e):
-                        self._logger.debug(f"Port forward cleanup: {e}")
-                    else:
-                        self._logger.warning(
-                            f"Unexpected error stopping port forward: {e}"
-                        )
-                except Exception as e:
-                    self._logger.debug(f"Error stopping port forward: {e}")
+                self._stop_port_forward(port_forward)
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
