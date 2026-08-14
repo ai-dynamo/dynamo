@@ -255,14 +255,14 @@ pub trait RegistationHandle: std::any::Any + Send + Sync + 'static {
     /// This should be called when the external registration of this storage
     /// is no longer needed.
     ///
-    /// Note: All `RegistrationHandle`s should be explicitly released before
+    /// Note: All `RegistationHandle`s should be explicitly released before
     /// the [Storage] is dropped.
     fn release(&mut self);
 }
 
-/// A collection of `RegistrationHandle`s for a [RegisterableStorage].
+/// A collection of `RegistationHandle`s for a [RegisterableStorage].
 ///
-/// This is used to ensure that all `RegistrationHandle`s are explicitly released
+/// This is used to ensure that all `RegistationHandle`s are explicitly released
 /// before the [RegisterableStorage] is dropped.
 #[derive(Default)]
 pub struct RegistrationHandles {

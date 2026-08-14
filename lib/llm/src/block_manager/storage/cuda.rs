@@ -115,7 +115,7 @@ impl Cuda {
     /// If the context does not exist, it will be created or fail.
     ///
     /// This will lazily instantiate a context for a device. Use
-    /// `CudaContextManager::device` to get an existing context.
+    /// [`Cuda::device`] to get an existing context.
     pub fn device_or_create(device_id: usize) -> Result<Arc<CudaContext>, StorageError> {
         Cuda::instance().lock().unwrap().get_context(device_id)
     }

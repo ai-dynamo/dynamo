@@ -162,7 +162,7 @@ pub struct WorkerSchedulerRequest {
     pub cancel_token: CancellationToken,
 }
 
-/// One-time use object returned from `Scheduler::schedule_transfer`
+/// One-time use object returned from `TransferSchedulerClient::schedule_transfer`
 /// This object carries with it the [`SchedulingDecision`] and is used to mark the transfer as complete.
 #[async_trait::async_trait]
 pub trait TransferCompletionHandle: Send {
