@@ -78,6 +78,28 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
+{% if device == "cuda" %}
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl && \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
 # UID 2000, so after freeing 1000 (ubuntu) useradd would otherwise auto-assign the

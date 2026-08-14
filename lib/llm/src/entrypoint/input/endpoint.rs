@@ -78,7 +78,7 @@ pub async fn run(
                 .link(backend.forward_edge())?
                 .link(engine)?
                 .link(backend.backward_edge())?
-                .link(frontend)?;
+                .link_terminal(frontend)?;
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             // The disaggregation role is carried by `worker_type`, not

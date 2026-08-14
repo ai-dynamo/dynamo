@@ -2879,7 +2879,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let mut configs = runtime_config_watch(&serving).await.unwrap();
+            let mut configs = runtime_config_watch(&serving, CancellationToken::new())
+                .await
+                .unwrap();
             configs
                 .wait_for(|configs| configs.contains_key(&logical_worker_id))
                 .await
