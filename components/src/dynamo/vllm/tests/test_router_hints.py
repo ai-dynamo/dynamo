@@ -71,21 +71,14 @@ pytestmark = [
             {"0": "tcp://worker-a:23280"},
             id="decode-worker-type",
         ),
-        # A worker managing global DP ranks 4 and 5 uses control_ports[4:6].
+        # A worker managing global DP ranks 4 and 5 uses local ports[0:2].
         pytest.param(
             {
                 "type": "custom",
                 "router_capabilities": ["router_hint"],
                 "control_host": "0.0.0.0",
                 "control_advertise_host": "worker-a",
-                "control_ports": [
-                    "23280",
-                    "23281",
-                    "23282",
-                    "23283",
-                    "24000",
-                    "24001",
-                ],
+                "control_ports": ["24000", "24001"],
             },
             WorkerType.Prefill,
             (4, 2),
@@ -213,25 +206,19 @@ def test_enable_router_hint_support_skips_without_supported_hint_participant(
             "router_hint support requires",
             id="invalid-control-port",
         ),
-        # Global-DP-indexed lists must include entries for every managed rank.
+        # The port list is worker-local, so it must match this worker's DP size.
         pytest.param(
             [
                 {
                     "type": "custom",
                     "router_capabilities": ["router_hint"],
                     "control_advertise_host": "worker-a",
-                    "control_ports": [
-                        "23280",
-                        "23281",
-                        "23282",
-                        "23283",
-                        "24000",
-                    ],
+                    "control_ports": ["24000"],
                 }
             ],
             (4, 2),
             "router_hint support requires",
-            id="missing-ports-for-managed-dp-range",
+            id="wrong-local-port-count-for-managed-dp-range",
         ),
         # Exactly one secondary tier may provide router-hint source endpoints.
         pytest.param(

@@ -85,18 +85,22 @@ def _router_hint_source_port(configured_port: object) -> int | None:
 def _router_hint_source_control_endpoints(
     tier: Mapping[str, Any], dp_range: tuple[int, int]
 ) -> dict[str, str] | None:
-    """Build source-control endpoints keyed by global DP rank."""
+    """Build source-control endpoints keyed by global DP rank.
+
+    ``control_ports`` is local to this worker: entry 0 belongs to dp_start,
+    entry 1 belongs to dp_start + 1, and so on. vLLM/KVCC selects from the
+    same list with data_parallel_rank_local.
+    """
     dp_start, dp_size = dp_range
     if dp_start < 0 or dp_size <= 0:
         return None
     control_ports = tier.get("control_ports")
     if not isinstance(control_ports, list):
         raise ValueError("router_hint support requires control_ports to be a list")
-    dp_end = dp_start + dp_size
-    if len(control_ports) < dp_end:
+    if len(control_ports) != dp_size:
         raise ValueError(
-            "router_hint support requires control_ports to contain at least "
-            f"{dp_end} entries because ports are indexed by global DP rank; "
+            "router_hint support requires control_ports to contain exactly "
+            f"{dp_size} entries for the worker-local DP ranks; "
             f"got {len(control_ports)}"
         )
     configured_host = tier.get("control_advertise_host")
@@ -106,8 +110,8 @@ def _router_hint_source_control_endpoints(
     if host is None:
         return None
     endpoints: dict[str, str] = {}
-    for global_dp_rank in range(dp_start, dp_end):
-        control_port = _router_hint_source_port(control_ports[global_dp_rank])
+    for local_dp_rank, global_dp_rank in enumerate(range(dp_start, dp_start + dp_size)):
+        control_port = _router_hint_source_port(control_ports[local_dp_rank])
         if control_port is None:
             return None
         endpoints[str(global_dp_rank)] = f"tcp://{host}:{control_port}"
