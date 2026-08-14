@@ -17,6 +17,19 @@ SPDX-License-Identifier: Apache-2.0
   line. Do not add trailing blank lines before a closing delimiter or between
   a block-leading comment and its code.
 
+## Function Preconditions and Nil Handling
+
+- Treat pointer inputs as non-nil by default. Document non-nil preconditions in
+  the function's Go doc.
+- Do not defensively check pointer inputs for `nil` unless `nil` has an explicit
+  domain meaning.
+- Callers must establish non-nil preconditions before calling the function.
+- If a function validates caller-provided input, return an error for invalid
+  values. Do not disguise an invalid call by returning a zero value.
+- Getters and transformation functions must not translate a `nil` input into a
+  zero value by default. Do so only when nil-tolerant behavior is an intentional,
+  documented API convention, such as JSON-path-style getters.
+
 ## Go Test Style
 
 - Use `t.Log` to tell the test's story, with one heading before each block that
