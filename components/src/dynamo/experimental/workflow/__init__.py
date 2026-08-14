@@ -3,7 +3,7 @@
 
 """Experimental inference workflow APIs."""
 
-from dynamo.experimental.workflow.bindings import InlineBinding
+from dynamo.experimental.workflow.bindings import InlineBinding, RemoteBinding
 from dynamo.experimental.workflow.builder import StageHandle, Workflow
 from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
 from dynamo.experimental.workflow.orchestrator import WorkflowOrchestrator
@@ -31,4 +31,5 @@ __all__ = [
     "WorkflowOrchestrator",
     "WorkflowValidationError",
     "InlineBinding",
+    "RemoteBinding",
 ]
