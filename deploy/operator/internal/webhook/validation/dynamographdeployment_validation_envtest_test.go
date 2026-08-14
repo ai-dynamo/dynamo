@@ -1227,7 +1227,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint: checkpointRef must be omitted so the DGD owns the automatic checkpoint",
+				"spec.components[1].experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint: checkpointRef must be omitted so the DGD owns the automatic checkpoint",
 			},
 		},
 		{
