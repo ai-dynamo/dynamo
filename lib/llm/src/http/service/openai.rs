@@ -2003,11 +2003,13 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
 }
 
 fn ensure_json_content_type(headers: &HeaderMap) -> Result<(), ErrorResponse> {
+    // FastAPI treats an absent Content-Type as JSON, so vLLM/SGLang accept these. A header
+    // that is present but not JSON still fails: the caller asserted a format we cannot parse.
     let Some(content_type) = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
     else {
-        return Err(unsupported_media_type_error());
+        return Ok(());
     };
 
     if is_json_content_type(content_type) {
@@ -4638,10 +4640,18 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_json_content_type_rejects_missing_or_non_json() {
+    fn test_ensure_json_content_type_accepts_absent_header() {
         let headers = HeaderMap::new();
-        let err = ensure_json_content_type(&headers).expect_err("missing content type should fail");
-        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(ensure_json_content_type(&headers).is_ok());
+    }
+
+    #[test]
+    fn test_ensure_json_content_type_rejects_non_json() {
+        let headers = HeaderMap::new();
+        assert!(
+            ensure_json_content_type(&headers).is_ok(),
+            "an absent Content-Type is treated as JSON, matching FastAPI"
+        );
 
         let mut headers = HeaderMap::new();
         headers.insert(
