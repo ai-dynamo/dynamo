@@ -102,7 +102,12 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     (priority_jump, strict_priority, priority)
 }
 
-fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
+/// Decode a base64-encoded little-endian f32 byte string back into a float
+/// vector. The byte length must be a multiple of 4; trailing bytes are
+/// rejected. Shared by the tokens-path postprocessor and the HTTP embedding
+/// handler, which converts leftover Base64 payloads to Float when the client
+/// asked for floats.
+pub(crate) fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let bytes = STANDARD
         .decode(encoded)
@@ -121,12 +126,18 @@ fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
 
 #[cfg(test)]
 mod embedding_base64_transport_tests {
-    use super::decode_base64_to_floats;
+    use super::{OpenAIPreprocessor, decode_base64_to_floats};
+    use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+    use crate::protocols::openai::embeddings::NvCreateEmbeddingRequest;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::StreamExt;
+    use futures::stream;
 
     #[test]
     fn portable_embedding_bytes_decode() {
-        let expected = vec![0.0, 1.0, -1.0, 3.25];
+        // Avoid 3.14 to side-step clippy::approx_constant.
+        let expected = vec![0.0, 1.0, -1.0, 2.5, -42.5, 3.25, f32::MIN, f32::MAX];
         let bytes = expected
             .iter()
             .flat_map(|value: &f32| value.to_le_bytes())
@@ -136,10 +147,49 @@ mod embedding_base64_transport_tests {
     }
 
     #[test]
+    fn portable_embedding_bytes_reject_invalid_base64() {
+        let result = decode_base64_to_floats("not!valid!base64");
+        assert!(
+            result.is_err(),
+            "non-base64 input should fail decode, got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    #[test]
     fn portable_embedding_bytes_reject_partial_float() {
         let encoded = STANDARD.encode([0_u8; 5]);
         let error = decode_base64_to_floats(&encoded).unwrap_err();
         assert!(error.to_string().contains("not a multiple of 4"));
+    }
+
+    #[test]
+    fn empty_embeddings_engine_output_surfaces_as_error() {
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "input": "hello"
+        }))
+        .unwrap();
+        let output = Annotated::from_data(EmbeddingsEngineOutput {
+            embeddings: vec![],
+            prompt_tokens: 0,
+            total_tokens: 0,
+        });
+        let items = futures::executor::block_on(
+            OpenAIPreprocessor::transform_embedding_postprocessor_stream(
+                stream::iter(vec![output]),
+                request,
+            )
+            .collect::<Vec<_>>(),
+        );
+        assert_eq!(items.len(), 1);
+        let item = items.into_iter().next().unwrap();
+        assert!(item.is_error(), "empty embeddings must be a stream error");
+        let err = item.into_result().unwrap_err();
+        assert!(
+            err.to_string().contains("empty `embeddings` field"),
+            "error should name the empty embeddings field, got: {err}"
+        );
     }
 }
 

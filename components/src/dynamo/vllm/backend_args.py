@@ -768,6 +768,15 @@ class DynamoVllmConfig(ConfigBase):
                 "DYN_TCP_RPC_PORT to use OS-assigned ports."
             )
 
+        # Children inherit the parent's argv, so embedding_worker_processes is
+        # still N, but _child_environment has already rewritten DYN_SYSTEM_PORT
+        # to base+index. Validating [base+i, base+i+N-1] is a phantom range the
+        # child never claims and can false-reject a layout the parent accepted.
+        from .embedding_worker_processes import is_embedding_process_child
+
+        if is_embedding_process_child():
+            return
+
         system_range = self._validate_system_port_range()
         self._validate_port_reservation_collisions(system_range)
 
@@ -775,8 +784,10 @@ class DynamoVllmConfig(ConfigBase):
         """Reject a system-port range that would not fit.
 
         Each embedding process binds DYN_SYSTEM_PORT + its index, so a pool of N
-        claims N consecutive ports. Failing here names the conflict instead of
-        letting an out-of-range child die during startup with a bind error.
+        claims N consecutive ports. Only the parent owns that range; children
+        skip this check because their DYN_SYSTEM_PORT has already been shifted.
+        Failing here names the conflict instead of letting an out-of-range child
+        die during startup with a bind error.
         """
         raw = os.environ.get("DYN_SYSTEM_PORT")
         if raw is None or not raw.strip():

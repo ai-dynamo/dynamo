@@ -335,6 +335,7 @@ class TestEmbeddingWorkerProcesses:
             "NIXL_TELEMETRY_ENABLE",
             "NIXL_TELEMETRY_EXPORTER",
             "NIXL_TELEMETRY_PROMETHEUS_PORT",
+            "DYN_VLLM_EMBEDDING_PROCESS_ROLE",
             "ENGINE_ID",
             "CONTAINER_NAME",
             "FAILOVER_LOCK_PATH",
@@ -503,3 +504,41 @@ class TestEmbeddingWorkerProcesses:
         config.embedding_worker = True
         config.embedding_worker_processes = 4096
         config._validate_embedding_worker_processes()
+
+    def test_child_skips_phantom_system_port_overflow(self, monkeypatch):
+        """A child near the top of the port space must not validate base+i..base+i+N-1.
+
+        Parent DYN_SYSTEM_PORT=65533 with N=3 claims 65533-65535 and is legal.
+        After _child_environment, child index 1 sees 65534 and would otherwise
+        check 65534-65536, which exceeds MAX_PORT.
+        """
+        monkeypatch.setenv("DYN_VLLM_EMBEDDING_PROCESS_ROLE", "child")
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "65534")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+        config._validate_embedding_worker_processes()
+
+    def test_child_skips_phantom_adjacent_fpm_collision(self, monkeypatch):
+        """A child must not treat ports past the parent's range as reserved.
+
+        Parent base=20377 with N=3 claims 20377-20379; FPM at 20380 is adjacent
+        and legal. Child index 1 sees 20378 and would otherwise check 20378-20380.
+        """
+        monkeypatch.setenv("DYN_VLLM_EMBEDDING_PROCESS_ROLE", "child")
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "20378")
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "20380")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+        config._validate_embedding_worker_processes()
+
+    def test_child_still_rejects_headless(self, monkeypatch):
+        """Skipping the phantom range check must not skip the other N>1 guards."""
+        monkeypatch.setenv("DYN_VLLM_EMBEDDING_PROCESS_ROLE", "child")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+        config.headless = True
+        with pytest.raises(ValueError, match="--headless"):
+            config._validate_embedding_worker_processes()

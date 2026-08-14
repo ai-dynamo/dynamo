@@ -46,7 +46,7 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
     agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
@@ -1194,7 +1194,7 @@ async fn embeddings(
     if client_wants_float {
         for embedding_obj in response.inner.data.iter_mut() {
             if let dynamo_protocols::types::EmbeddingVector::Base64(s) = &embedding_obj.embedding {
-                match decode_base64_embedding_to_floats(s) {
+                match decode_base64_to_floats(s) {
                     Ok(floats) => {
                         embedding_obj.embedding =
                             dynamo_protocols::types::EmbeddingVector::Float(floats);
@@ -1221,27 +1221,6 @@ async fn embeddings(
         .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
     Ok(Json(response).into_response())
-}
-
-/// Decode a base64-encoded little-endian f32 byte string back into a float
-/// vector. The byte length must be a multiple of 4; trailing bytes are
-/// rejected. Mirrors the decoder in `lib/llm/src/preprocessor.rs` and the
-/// Python `_encode_floats_to_base64` helper in
-/// `components/src/dynamo/vllm/handlers.py`.
-fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let bytes = STANDARD.decode(s)?;
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
-        anyhow::bail!(
-            "base64-decoded byte length {} is not a multiple of 4",
-            bytes.len()
-        );
-    }
-    let mut floats = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
-    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
-        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(floats)
 }
 
 async fn handler_chat_completions(
@@ -6220,60 +6199,6 @@ mod tests {
         assert!(
             !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
             "usage present → not empty",
-        );
-    }
-
-    // ── decode_base64_embedding_to_floats ────────────────────────────────
-    //
-    // The Python embedding worker always emits ``embedding`` as a base64
-    // string in the new internal wire format; the HTTP handler decodes
-    // back to ``Vec<f32>`` at the response boundary when the client
-    // requested float. These tests cover the decoder's three invariants:
-    // little-endian f32 byte-for-byte equivalence, invalid base64
-    // rejection, and non-multiple-of-4 byte length rejection.
-
-    #[test]
-    fn decode_base64_embedding_to_floats_round_trips_little_endian_f32() {
-        use base64::Engine as _;
-        // Avoid 3.14 to side-step ``clippy::approx_constant`` -- the lint
-        // would force importing ``std::f32::consts::PI``, which isn't the
-        // point of the test.
-        let floats: Vec<f32> = vec![0.0, 1.0, -1.0, 2.5, -42.5, f32::MIN, f32::MAX];
-        let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 4);
-        for f in &floats {
-            bytes.extend_from_slice(&f.to_le_bytes());
-        }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let decoded = decode_base64_embedding_to_floats(&encoded)
-            .expect("valid base64 of f32 bytes should decode");
-        assert_eq!(decoded, floats);
-    }
-
-    #[test]
-    fn decode_base64_embedding_to_floats_rejects_invalid_base64() {
-        // Padding and alphabet violations: standard base64 alphabet is
-        // A-Za-z0-9+/= -- the '!' byte forces a decode error.
-        let result = decode_base64_embedding_to_floats("not!valid!base64");
-        assert!(
-            result.is_err(),
-            "non-base64 input should fail decode, got Ok({:?})",
-            result.ok()
-        );
-    }
-
-    #[test]
-    fn decode_base64_embedding_to_floats_rejects_non_multiple_of_4_byte_length() {
-        // 5 raw bytes -> base64 string. The handler must reject because
-        // 5 is not a whole number of f32 values.
-        use base64::Engine as _;
-        let bytes: Vec<u8> = vec![1, 2, 3, 4, 5];
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let result = decode_base64_embedding_to_floats(&encoded);
-        assert!(result.is_err(), "5-byte payload must fail, got Ok");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("not a multiple of 4"),
-            "error should mention the multiple-of-4 check, got: {err_msg}"
         );
     }
 }
