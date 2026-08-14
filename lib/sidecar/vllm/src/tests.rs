@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -45,6 +45,19 @@ struct FakeVllm {
     first_token_pending: Arc<AtomicBool>,
     release_first_token: Arc<Notify>,
     server_stream_dropped: Arc<AtomicBool>,
+    control_calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    paused: Arc<AtomicBool>,
+    sleeping_tags: Arc<Mutex<BTreeSet<String>>>,
+    weight_version: Arc<Mutex<String>>,
+}
+
+impl FakeVllm {
+    async fn record_control(&self, name: &str, body: serde_json::Value) {
+        self.control_calls
+            .lock()
+            .await
+            .push((name.to_string(), body));
+    }
 }
 
 struct DropSignal(Arc<AtomicBool>);
@@ -259,98 +272,152 @@ impl pb::control_server::Control for FakeVllm {
 
     async fn pause_generation(
         &self,
-        _request: Request<pb::PauseGenerationRequest>,
+        request: Request<pb::PauseGenerationRequest>,
     ) -> Result<Response<pb::PauseGenerationResponse>, Status> {
-        Err(rl_control_unavailable())
+        let request = request.into_inner();
+        self.record_control(
+            "pause_generation",
+            json!({"mode": request.mode, "clear_cache": request.clear_cache}),
+        )
+        .await;
+        self.paused.store(true, Ordering::SeqCst);
+        Ok(Response::new(pb::PauseGenerationResponse {}))
     }
 
     async fn resume_generation(
         &self,
         _request: Request<pb::ResumeGenerationRequest>,
     ) -> Result<Response<pb::ResumeGenerationResponse>, Status> {
-        Err(rl_control_unavailable())
+        self.record_control("resume_generation", json!({})).await;
+        self.paused.store(false, Ordering::SeqCst);
+        Ok(Response::new(pb::ResumeGenerationResponse {}))
     }
 
     async fn is_paused(
         &self,
         _request: Request<pb::IsPausedRequest>,
     ) -> Result<Response<pb::IsPausedResponse>, Status> {
-        Err(rl_control_unavailable())
+        Ok(Response::new(pb::IsPausedResponse {
+            paused: self.paused.load(Ordering::SeqCst),
+        }))
     }
 
     async fn sleep(
         &self,
-        _request: Request<pb::SleepRequest>,
+        request: Request<pb::SleepRequest>,
     ) -> Result<Response<pb::SleepResponse>, Status> {
-        Err(rl_control_unavailable())
+        let request = request.into_inner();
+        self.record_control(
+            "sleep",
+            json!({"level": request.level, "mode": request.mode}),
+        )
+        .await;
+        let mut sleeping_tags = self.sleeping_tags.lock().await;
+        *sleeping_tags = if request.level == Some(0) {
+            BTreeSet::from(["scheduling".to_string()])
+        } else {
+            BTreeSet::from(["kv_cache".to_string(), "weights".to_string()])
+        };
+        Ok(Response::new(pb::SleepResponse {}))
     }
 
     async fn wake_up(
         &self,
-        _request: Request<pb::WakeUpRequest>,
+        request: Request<pb::WakeUpRequest>,
     ) -> Result<Response<pb::WakeUpResponse>, Status> {
-        Err(rl_control_unavailable())
+        let tags = request.into_inner().tags;
+        self.record_control("wake_up", json!({"tags": tags.clone()}))
+            .await;
+        let mut sleeping_tags = self.sleeping_tags.lock().await;
+        if tags.is_empty() {
+            sleeping_tags.clear();
+        } else {
+            for tag in tags {
+                sleeping_tags.remove(&tag);
+            }
+        }
+        Ok(Response::new(pb::WakeUpResponse {}))
     }
 
     async fn is_sleeping(
         &self,
         _request: Request<pb::IsSleepingRequest>,
     ) -> Result<Response<pb::IsSleepingResponse>, Status> {
-        Err(rl_control_unavailable())
+        Ok(Response::new(pb::IsSleepingResponse {
+            sleeping: !self.sleeping_tags.lock().await.is_empty(),
+        }))
     }
 
     async fn init_weight_transfer_engine(
         &self,
-        _request: Request<pb::InitWeightTransferEngineRequest>,
+        request: Request<pb::InitWeightTransferEngineRequest>,
     ) -> Result<Response<pb::InitWeightTransferEngineResponse>, Status> {
-        Err(rl_control_unavailable())
+        let body = serde_json::from_slice(&request.into_inner().init_info_json)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        self.record_control("init_weight_transfer_engine", body)
+            .await;
+        Ok(Response::new(pb::InitWeightTransferEngineResponse {}))
     }
 
     async fn start_weight_update(
         &self,
         _request: Request<pb::StartWeightUpdateRequest>,
     ) -> Result<Response<pb::StartWeightUpdateResponse>, Status> {
-        Err(rl_control_unavailable())
+        self.record_control("start_weight_update", json!({})).await;
+        Ok(Response::new(pb::StartWeightUpdateResponse {}))
     }
 
     async fn start_draft_weight_update(
         &self,
         _request: Request<pb::StartDraftWeightUpdateRequest>,
     ) -> Result<Response<pb::StartDraftWeightUpdateResponse>, Status> {
-        Err(rl_control_unavailable())
+        self.record_control("start_draft_weight_update", json!({}))
+            .await;
+        Ok(Response::new(pb::StartDraftWeightUpdateResponse {}))
     }
 
     async fn update_weights(
         &self,
-        _request: Request<pb::UpdateWeightsRequest>,
+        request: Request<pb::UpdateWeightsRequest>,
     ) -> Result<Response<pb::UpdateWeightsResponse>, Status> {
-        Err(rl_control_unavailable())
+        let body = serde_json::from_slice(&request.into_inner().update_info_json)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        self.record_control("update_weights", body).await;
+        Ok(Response::new(pb::UpdateWeightsResponse {}))
     }
 
     async fn finish_weight_update(
         &self,
-        _request: Request<pb::FinishWeightUpdateRequest>,
+        request: Request<pb::FinishWeightUpdateRequest>,
     ) -> Result<Response<pb::FinishWeightUpdateResponse>, Status> {
-        Err(rl_control_unavailable())
+        let version = request.into_inner().weight_version;
+        if let Some(version) = &version {
+            self.weight_version.lock().await.clone_from(version);
+        }
+        self.record_control("finish_weight_update", json!({"weight_version": version}))
+            .await;
+        Ok(Response::new(pb::FinishWeightUpdateResponse {}))
     }
 
     async fn update_weight_version(
         &self,
-        _request: Request<pb::UpdateWeightVersionRequest>,
+        request: Request<pb::UpdateWeightVersionRequest>,
     ) -> Result<Response<pb::UpdateWeightVersionResponse>, Status> {
-        Err(rl_control_unavailable())
+        let version = request.into_inner().weight_version;
+        self.weight_version.lock().await.clone_from(&version);
+        self.record_control("update_weight_version", json!({"weight_version": version}))
+            .await;
+        Ok(Response::new(pb::UpdateWeightVersionResponse {}))
     }
 
     async fn get_weight_version(
         &self,
         _request: Request<pb::GetWeightVersionRequest>,
     ) -> Result<Response<pb::GetWeightVersionResponse>, Status> {
-        Err(rl_control_unavailable())
+        Ok(Response::new(pb::GetWeightVersionResponse {
+            weight_version: self.weight_version.lock().await.clone(),
+        }))
     }
-}
-
-fn rl_control_unavailable() -> Status {
-    Status::unimplemented("RL control RPCs are not implemented in this protocol-only test server")
 }
 
 fn model_info() -> pb::ModelInfo {
@@ -383,7 +450,12 @@ fn server_info() -> pb::ServerInfo {
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
-        rl_capabilities: None,
+        rl_capabilities: Some(pb::RlCapabilities {
+            weight_transfer_enabled: true,
+            weight_transfer_backend: "nccl".to_string(),
+            sleep_mode_enabled: true,
+            draft_weight_updates_enabled: true,
+        }),
     }
 }
 
@@ -660,13 +732,23 @@ fn engine(
     connections: usize,
     model: pb::ModelInfo,
 ) -> VllmSidecarEngine {
+    engine_with_server_info(endpoint, mode, connections, model, server_info())
+}
+
+fn engine_with_server_info(
+    endpoint: &str,
+    mode: DisaggregationMode,
+    connections: usize,
+    model: pb::ModelInfo,
+    server: pb::ServerInfo,
+) -> VllmSidecarEngine {
     let transport = GrpcTransportConfig {
         connections: NonZeroUsize::new(connections).expect("non-zero connection count"),
         ..Default::default()
     };
     VllmSidecarEngine::new(
         GrpcEndpoint::parse(endpoint, "--vllm-endpoint").expect("valid test endpoint"),
-        DiscoveredModel::from_proto(model, server_info()).expect("valid discovery"),
+        DiscoveredModel::from_proto(model, server).expect("valid discovery"),
         mode,
         transport,
     )
@@ -847,6 +929,235 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
         struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
+}
+
+#[tokio::test]
+async fn rl_engine_routes_preserve_lifecycle_payloads_and_version() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    engine.start(0).await.expect("start");
+
+    assert_eq!(
+        engine
+            .supported_controls()
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        [
+            "get_weight_version",
+            "is_paused",
+            "is_sleeping",
+            "pause_generation",
+            "resume_generation",
+            "sleep",
+            "wake_up",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    );
+    assert_eq!(
+        engine
+            .supported_updates()
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        [
+            "finish_weight_update",
+            "init_weight_transfer_engine",
+            "start_draft_weight_update",
+            "start_weight_update",
+            "update_weight_version",
+            "update_weights",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    );
+
+    // Regression: unsupported sleep levels or wake tags can enter vLLM's
+    // destructive/partial sleep paths while still returning gRPC success.
+    for (control, body, expected) in [
+        ("sleep", json!({"level": 3}), "one of 0, 1, or 2"),
+        (
+            "wake_up",
+            json!({"tags": ["unknown"]}),
+            "weights, kv_cache, or scheduling",
+        ),
+    ] {
+        let error = engine
+            .engine_control(control.to_string(), body)
+            .await
+            .expect_err("unsupported lifecycle value must fail before gRPC");
+        assert!(error.to_string().contains(expected), "unexpected {error}");
+    }
+
+    for (control, body, expected) in [
+        ("is_paused", json!({}), json!({"is_paused": false})),
+        (
+            "pause_generation",
+            json!({"mode": "keep", "clear_cache": false}),
+            json!({"status": "paused"}),
+        ),
+        ("is_paused", json!({}), json!({"is_paused": true})),
+        ("resume_generation", json!({}), json!({"status": "resumed"})),
+        ("is_paused", json!({}), json!({"is_paused": false})),
+        ("is_sleeping", json!({}), json!({"is_sleeping": false})),
+        (
+            "sleep",
+            json!({"level": 2, "mode": "wait"}),
+            json!({"status": "sleeping"}),
+        ),
+        ("is_sleeping", json!({}), json!({"is_sleeping": true})),
+        (
+            "wake_up",
+            json!({"tags": ["weights"]}),
+            json!({"status": "partially_awake", "is_sleeping": true}),
+        ),
+        ("is_sleeping", json!({}), json!({"is_sleeping": true})),
+    ] {
+        assert_eq!(
+            engine
+                .engine_control(control.to_string(), body)
+                .await
+                .unwrap(),
+            expected,
+            "unexpected {control} response"
+        );
+    }
+
+    for (update, body, expected) in [
+        (
+            "init_weight_transfer_engine",
+            json!({"init_info": {"master_addr": "trainer", "master_port": 1234}}),
+            json!({"message": "Weight transfer initialized"}),
+        ),
+        (
+            "start_weight_update",
+            json!({}),
+            json!({"message": "Weight update started"}),
+        ),
+        (
+            "start_draft_weight_update",
+            json!({}),
+            json!({"message": "Draft weight update started"}),
+        ),
+        (
+            "update_weights",
+            json!({"update_info": {"names": ["layer.weight"], "shape": [4, 8]}}),
+            json!({"message": "Weights updated"}),
+        ),
+        (
+            "finish_weight_update",
+            json!({"weight_version": "step-42"}),
+            json!({"message": "Weight update finished"}),
+        ),
+    ] {
+        assert_eq!(
+            engine
+                .engine_update(update.to_string(), body)
+                .await
+                .unwrap(),
+            expected,
+            "unexpected {update} response"
+        );
+    }
+    assert_eq!(
+        engine
+            .engine_control("get_weight_version".to_string(), json!({}))
+            .await
+            .unwrap(),
+        json!({"weight_version": "step-42"})
+    );
+    assert_eq!(
+        engine
+            .engine_update(
+                "update_weight_version".to_string(),
+                json!({"new_version": "step-43"}),
+            )
+            .await
+            .unwrap(),
+        json!({"success": true, "new_version": "step-43"})
+    );
+    assert_eq!(
+        engine
+            .engine_control("get_weight_version".to_string(), json!({}))
+            .await
+            .unwrap(),
+        json!({"weight_version": "step-43"})
+    );
+
+    let calls = server.service.control_calls.lock().await;
+    let actual = calls.iter().cloned().collect::<BTreeMap<_, _>>();
+    let expected = BTreeMap::from([
+        (
+            "pause_generation".to_string(),
+            json!({"mode": pb::PauseMode::Keep as i32, "clear_cache": false}),
+        ),
+        ("resume_generation".to_string(), json!({})),
+        (
+            "sleep".to_string(),
+            json!({"level": 2, "mode": pb::PauseMode::Wait as i32}),
+        ),
+        ("wake_up".to_string(), json!({"tags": ["weights"]})),
+        (
+            "init_weight_transfer_engine".to_string(),
+            json!({"master_addr": "trainer", "master_port": 1234}),
+        ),
+        ("start_weight_update".to_string(), json!({})),
+        ("start_draft_weight_update".to_string(), json!({})),
+        (
+            "update_weights".to_string(),
+            json!({"names": ["layer.weight"], "shape": [4, 8]}),
+        ),
+        (
+            "finish_weight_update".to_string(),
+            json!({"weight_version": "step-42"}),
+        ),
+        (
+            "update_weight_version".to_string(),
+            json!({"weight_version": "step-43"}),
+        ),
+    ]);
+    assert_eq!(calls.len(), expected.len(), "each mutating RPC runs once");
+    assert_eq!(actual, expected);
+}
+
+/// Regression: vLLM exposes sleep status independently of CUDA sleep-mode
+/// allocation support, so capability discovery must not hide the status RPC
+/// when only the mutating sleep/wake operations are disabled.
+#[tokio::test]
+async fn sleep_status_remains_advertised_without_sleep_mode() {
+    let mut server = server_info();
+    server
+        .rl_capabilities
+        .as_mut()
+        .expect("RL capabilities")
+        .sleep_mode_enabled = false;
+    let engine = engine_with_server_info(
+        "http://127.0.0.1:1",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+        server,
+    );
+
+    let controls = engine
+        .supported_controls()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(controls.contains("is_sleeping"));
+    assert!(!controls.contains("sleep"));
+    assert!(!controls.contains("wake_up"));
 }
 
 #[tokio::test]
