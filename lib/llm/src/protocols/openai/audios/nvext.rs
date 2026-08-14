@@ -19,6 +19,11 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
 
+    /// Whether the receiving frontend can concatenate incremental audio responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub supports_audio_chunking: Option<bool>,
+
     /// Language: Auto, Chinese, English, Japanese, Korean, German, French, etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]

@@ -4637,7 +4637,7 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateAudioSpeechRequest>,
+    Json(mut request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
@@ -4646,6 +4646,16 @@ async fn handler_audio_speech(
 
     let streaming = request.data_source.as_deref() != Some("url");
     let request_id = get_or_create_request_id(&headers);
+    if streaming {
+        // Compatibility with v1.3/v1.4 frontends during v1.5-v1.6 rolling
+        // upgrades. A new worker must not emit chunks to an older frontend,
+        // which decodes only the first aggregated audio item.
+        // TODO(v1.7): Remove when v1.4 falls outside the N-2 window.
+        request
+            .nvext
+            .get_or_insert_default()
+            .supports_audio_chunking = Some(true);
+    }
     let request = context_from_headers(request, request_id, &headers)?;
 
     // model is optional in the request; fall back to a model that can actually

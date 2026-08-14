@@ -403,6 +403,20 @@ class TestAudioFormatterFormat:
         assert result["data"][0]["b64_json"] is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", [AudioStreamState(), AudioAggregateState()])
+    async def test_empty_incremental_frame_is_skipped(self, state):
+        formatter = AudioFormatter("test", None, None)
+        state_arg = (
+            {"audio_stream_state": state}
+            if isinstance(state, AudioStreamState)
+            else {"audio_aggregate_state": state}
+        )
+
+        response = await formatter.format({}, "req-1", **state_arg)
+
+        assert response is None
+
+    @pytest.mark.asyncio
     async def test_streaming_cumulative_chunks_emit_only_new_audio(self):
         formatter = AudioFormatter("test", None, None)
         state = AudioStreamState()

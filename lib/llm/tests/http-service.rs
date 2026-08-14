@@ -118,6 +118,12 @@ impl
         let ctx = context.context();
         let response_ctx = ctx.clone();
         let request_id = ctx.id().to_string();
+        assert_eq!(
+            request
+                .nvext
+                .and_then(|nvext| nvext.supports_audio_chunking),
+            Some(true)
+        );
         let model = request.model.unwrap_or_default();
         let release = self.release.clone();
         let stream = stream! {

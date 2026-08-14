@@ -357,11 +357,11 @@ class OmniHandler(BaseOmniHandler):
             "prompt": inputs.prompt,
             "request_id": request_id,
         }
-        sampling_params_list = inputs.sampling_params_list
         if inputs.request_type == RequestType.AUDIO_GENERATION:
-            sampling_params_list = streaming_sampling_params(
-                self.engine_client, sampling_params_list
+            inputs.sampling_params_list = streaming_sampling_params(
+                self.engine_client, inputs.sampling_params_list
             )
+        sampling_params_list = inputs.sampling_params_list
         if sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = sampling_params_list
             # Note: For diffusion paths, lora_request is embedded in sampling_params_list
