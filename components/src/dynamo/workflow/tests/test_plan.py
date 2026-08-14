@@ -192,7 +192,7 @@ def test_declared_nixl_carrier_lowers_tensor_fanout_per_consumer() -> None:
         outputs={"text": ValueSpec(type="text")},
     )
     workflow = Workflow("nixl-fanout")
-    request = workflow.input("request", type="json")
+    request = workflow.input("request", ValueSpec(type="json"))
     encoder = workflow.stage("encoder", encoder_contract, request=request)
     classifier = workflow.stage(
         "classifier", classifier_contract, embedding=encoder.embedding
