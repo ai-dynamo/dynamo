@@ -3,9 +3,24 @@
 #
 # Third-party Python dependencies for the trtllm runtime image. Installed with
 # --no-deps, so pip does not re-resolve upstream
-# nvcr.io/nvidia/tensorrt-llm/release's dependency graph. That does not leave
-# the base image untouched: any package named here is installed over the copy
-# it bundles, which is exactly what the version floors below are for.
+# nvcr.io/nvidia/tensorrt-llm/release's dependency graph.
+#
+# A floor here does NOT refresh a copy the base image bundles. This install runs
+# with VIRTUAL_ENV set, so it lands in /opt/dynamo/venv; the base image's copy
+# stays under /usr/local/lib/python3.12/dist-packages, which is what an image
+# inventory reads. Because the venv is --system-site-packages, the newer copy
+# shadows the older one at import time, so the gap is invisible from inside the
+# container. Raising the floors here for aiohttp, gitpython, jupyter-server,
+# jupyterlab, mistune, pillow, soupsieve and tornado left every one of those
+# packages shipping at the base image's version.
+#
+# For a package the base image bundles, a floor here is necessary but not
+# sufficient: it must ALSO be added to the system-interpreter install and the
+# pre_runtime whiteout in container/templates/trtllm_runtime.Dockerfile, which
+# is where the shipped copy is actually replaced. Packages upstream does not
+# bundle (imageio, imageio-ffmpeg, msgspec, PyNvVideoCodec, uvloop) need only
+# the floor.
+#
 # Sorted alphabetically per pre-commit requirements-txt-fixer.
 
 # Force a source install of imageio-ffmpeg. The PyPI wheel bundles a prebuilt,
@@ -15,8 +30,9 @@
 # The upstream tensorrt-llm/release image bundles the JupyterLab developer stack
 # (jupyterlab/notebook -> jupyter-server -> tornado; nbconvert -> mistune;
 # beautifulsoup4 -> soupsieve) at older releases than PyPI currently publishes.
-# Floor them so the --no-deps install refreshes the bundled copies in place to
-# the current patch releases (see also mistune/soupsieve/tornado below).
+# These are base-bundled, so the floor alone does not reach the shipped copy --
+# they are also installed through the system interpreter and whited out in
+# trtllm_runtime.Dockerfile (see the header note above).
 aiohttp>=3.14.3
 gitpython>=3.1.58
 
@@ -32,8 +48,9 @@ mistune>=3.3.0  # JupyterLab stack; see note above jupyter-server
 # does not need this).
 msgspec>=0.19.0
 # NIXL is unpinned here; trtllm_runtime.Dockerfile installs it from NIXL_REF.
-# Bundled by the upstream image at an older patch release; floor keeps it on
-# the current patch line.
+# Bundled by the upstream image at an older patch release. Base-bundled, so the
+# shipped copy is replaced by the system-interpreter install in
+# trtllm_runtime.Dockerfile; this floor governs the venv copy only.
 pillow>=12.3.0
 # NVDEC hardware decode for H.264/H.265 video input (dynamo common.multimodal.
 # nvdec_decoder). Pin >=2.2.0: it bundles only libavutil + libavformat (container
