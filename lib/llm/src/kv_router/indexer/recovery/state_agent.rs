@@ -9,6 +9,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -32,12 +36,12 @@ use dynamo_runtime::{
     transports::event_plane::EventSubscriber,
 };
 use futures::StreamExt;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::kv_state_agent::{
     KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
-    KvStateAttachmentAdvertisement, KvStateSourceAdvertisement,
+    KvStateAttachmentAdvertisement, KvStateSourceAdvertisement, attachment_record_id,
 };
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
@@ -95,13 +99,29 @@ pub(crate) async fn start_state_agent_router(
         .await
         .context("failed to watch V2 KV state sources")?;
 
-    let (recognized_tx, recognized_rx) = watch::channel(HashSet::new());
+    let (recognized_tx, recognized_rx) =
+        watch::channel(source_mode_suppressed_workers(&membership.borrow()));
     let legacy_membership = filtered_legacy_membership(
         membership.clone(),
         recognized_rx,
         cancellation_token.child_token(),
     );
     let (completion_tx, completion_rx) = oneshot::channel();
+    let observation_revision = Arc::new(AtomicU64::new(0));
+    let projection_commit = Arc::new(Mutex::new(()));
+    let (observation_tx, observation_rx) = watch::channel(0u64);
+    start_observation_fence(
+        component.clone(),
+        indexer.clone(),
+        membership.clone(),
+        endpoint.clone(),
+        recognized_tx.clone(),
+        observation_revision.clone(),
+        projection_commit.clone(),
+        observation_tx,
+        cancellation_token.child_token(),
+    )
+    .await?;
     component.drt().runtime().secondary().spawn(async move {
         run_state_agent_router(
             indexer,
@@ -111,6 +131,9 @@ pub(crate) async fn start_state_agent_router(
             expected_block_size,
             sources,
             recognized_tx,
+            observation_revision,
+            projection_commit,
+            observation_rx,
             cancellation_token,
         )
         .await;
@@ -120,6 +143,76 @@ pub(crate) async fn start_state_agent_router(
         legacy_membership,
         completion: completion_rx,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_observation_fence(
+    component: Component,
+    indexer: Indexer,
+    mut membership: KvSourceMembershipWatch,
+    endpoint: EndpointId,
+    recognized_tx: watch::Sender<HashSet<WorkerWithDpRank>>,
+    revision: Arc<AtomicU64>,
+    projection_commit: Arc<Mutex<()>>,
+    revision_tx: watch::Sender<u64>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let discovery = component.drt().discovery();
+    let mut sources = discovery
+        .list_and_watch(
+            DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+                endpoint.clone(),
+                KV_STATE_SOURCE_TOPIC_V2,
+            )),
+            Some(cancel.child_token()),
+        )
+        .await?;
+    let mut attachments = discovery
+        .list_and_watch(
+            DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+                endpoint,
+                KV_STATE_ATTACHMENT_TOPIC_V2,
+            )),
+            Some(cancel.child_token()),
+        )
+        .await?;
+    component.drt().runtime().secondary().spawn(async move {
+        loop {
+            let observed = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                changed = membership.changed() => {
+                    if changed.is_err() { break; }
+                    membership.borrow_and_update();
+                    recognized_tx.send_modify(|recognized| {
+                        recognized.extend(source_mode_suppressed_workers(&membership.borrow()));
+                    });
+                    true
+                }
+                event = sources.next() => event.is_some(),
+                event = attachments.next() => event.is_some(),
+            };
+            if !observed {
+                tracing::error!("KV state observation fence lost a discovery watch");
+                let _commit = projection_commit.lock().await;
+                indexer.set_residency_projection(ResidencyProjection::default());
+                break;
+            }
+            let _commit = projection_commit.lock().await;
+            indexer.set_residency_projection(ResidencyProjection::default());
+            let next = revision
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_add(1)
+                })
+                .unwrap_or_else(|_| {
+                    tracing::error!("KV state observation revision exhausted");
+                    u64::MAX
+                })
+                .saturating_add(1);
+            revision_tx.send_replace(next);
+        }
+    });
+    Ok(())
 }
 
 fn filtered_legacy_membership(
@@ -160,6 +253,19 @@ fn suppress_recognized(
     view
 }
 
+fn source_mode_suppressed_workers(view: &KvSourceMembershipView) -> HashSet<WorkerWithDpRank> {
+    view.sources
+        .keys()
+        .copied()
+        .filter(|worker| {
+            !matches!(
+                view.kv_event_source_mode(worker.worker_id),
+                None | Some("framework_v1")
+            )
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_state_agent_router(
     indexer: Indexer,
@@ -169,6 +275,9 @@ async fn run_state_agent_router(
     expected_block_size: u32,
     mut source_stream: dynamo_runtime::discovery::DiscoveryStream,
     recognized_tx: watch::Sender<HashSet<WorkerWithDpRank>>,
+    observation_revision: Arc<AtomicU64>,
+    projection_commit: Arc<Mutex<()>>,
+    mut observation_rx: watch::Receiver<u64>,
     cancel: CancellationToken,
 ) {
     let mut attachment_stream: Option<dynamo_runtime::discovery::DiscoveryStream> = None;
@@ -179,6 +288,7 @@ async fn run_state_agent_router(
     let mut sources = HashMap::new();
     let mut attachments = HashMap::new();
     let mut runtime: HashMap<CacheOwnerId, OwnerRuntime> = HashMap::new();
+    let mut committed_revision = None;
 
     loop {
         enum Input {
@@ -193,6 +303,7 @@ async fn run_state_agent_router(
                     )>,
                 >,
             ),
+            Observation,
             Cancelled,
         }
         let input = tokio::select! {
@@ -214,12 +325,29 @@ async fn run_state_agent_router(
                     None => std::future::pending().await,
                 }
             } => Input::Events(event),
+            changed = observation_rx.changed() => {
+                if changed.is_err() { Input::Cancelled } else { Input::Observation }
+            },
         };
         let mut reconcile = false;
         match input {
             Input::Cancelled => break,
             Input::Membership => {
                 membership.borrow_and_update();
+                let snapshot = membership.borrow();
+                let mut recognized = source_mode_suppressed_workers(&snapshot);
+                recognized.extend(
+                    recognized_tx
+                        .borrow()
+                        .iter()
+                        .copied()
+                        .filter(|worker| snapshot.sources.contains_key(worker)),
+                );
+                recognized_tx.send_replace(recognized);
+                reconcile = true;
+            }
+            Input::Observation => {
+                observation_rx.borrow_and_update();
                 reconcile = true;
             }
             Input::Source(Some(event)) => match update_advertisements(
@@ -249,8 +377,19 @@ async fn run_state_agent_router(
                 break;
             }
             Input::Events(Some(Ok((envelope, events)))) => {
-                if apply_live_events(&indexer, envelope.publisher_id, events, &mut runtime).await {
-                    publish_projection(&indexer, &runtime);
+                if apply_live_events(&indexer, envelope.publisher_id, events, &mut runtime).await
+                    && let Some(revision) = committed_revision
+                    && publish_projection_if_current(
+                        &indexer,
+                        &runtime,
+                        &observation_revision,
+                        &projection_commit,
+                        revision,
+                    )
+                    .await
+                    .is_err()
+                {
+                    committed_revision = None;
                 }
             }
             Input::Events(Some(Err(error))) => {
@@ -287,6 +426,7 @@ async fn run_state_agent_router(
             let Some(transport) = transport.as_ref() else {
                 continue;
             };
+            let revision = observation_revision.load(Ordering::Acquire);
             if let Err(error) = reconcile_state_sources(
                 &indexer,
                 transport,
@@ -297,10 +437,16 @@ async fn run_state_agent_router(
                 &attachments,
                 &mut runtime,
                 &recognized_tx,
+                &observation_revision,
+                &projection_commit,
+                revision,
             )
             .await
             {
                 tracing::warn!(%error, %endpoint, "KV state-source reconciliation failed closed");
+                committed_revision = None;
+            } else {
+                committed_revision = Some(revision);
             }
         }
     }
@@ -405,7 +551,11 @@ async fn reconcile_state_sources(
     attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
     runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
     recognized_tx: &watch::Sender<HashSet<WorkerWithDpRank>>,
+    observation_revision: &AtomicU64,
+    projection_commit: &Mutex<()>,
+    expected_revision: u64,
 ) -> Result<()> {
+    ensure_observation_revision(observation_revision, expected_revision)?;
     let live_workers: HashSet<_> = membership.sources.keys().copied().collect();
     let mut source_by_owner: HashMap<CacheOwnerId, Vec<&KvStateSourceAdvertisement>> =
         HashMap::new();
@@ -429,7 +579,8 @@ async fn reconcile_state_sources(
     let mut attachment_by_owner: HashMap<CacheOwnerId, Vec<&KvStateAttachmentAdvertisement>> =
         HashMap::new();
     for (discovery_id, attachment) in attachments {
-        if attachment.publisher_id != *discovery_id
+        if attachment_record_id(attachment.publisher_id, attachment.attachment_generation)
+            != *discovery_id
             || attachment.protocol_version != KvStateProtocolVersion::V2
         {
             continue;
@@ -443,7 +594,7 @@ async fn reconcile_state_sources(
     // Publish source-mode selection before applying any replacement reset or
     // snapshot. The legacy event client consults this watch at admission, so a
     // late legacy event cannot repopulate Worker ownership during activation.
-    let mut provisional_recognized = HashSet::new();
+    let mut provisional_recognized = source_mode_suppressed_workers(&membership);
     for (owner, matching_sources) in &source_by_owner {
         let [source] = matching_sources.as_slice() else {
             if matching_sources.len() > 1
@@ -619,6 +770,7 @@ async fn reconcile_state_sources(
                 continue;
             }
         };
+        ensure_observation_revision(observation_revision, expected_revision)?;
         let needs_recovery = previous.is_none_or(|value| {
             value.publisher_id != source.publisher_id
                 || value.attachment_generation != expected_generation
@@ -662,6 +814,7 @@ async fn reconcile_state_sources(
                     continue;
                 }
             };
+            ensure_observation_revision(observation_revision, expected_revision)?;
             recovered_cursor = match apply_recovery_response(
                 indexer,
                 owner,
@@ -720,6 +873,7 @@ async fn reconcile_state_sources(
         } else {
             status
         };
+        ensure_observation_revision(observation_revision, expected_revision)?;
         let ready = attachment.is_some_and(|attachment| {
             attachment.cache_readable
                 && live_workers.contains(&attachment.worker)
@@ -753,7 +907,34 @@ async fn reconcile_state_sources(
     let mut recognized = provisional_recognized;
     recognized.extend(runtime.values().filter_map(|value| value.last_worker));
     recognized_tx.send_replace(recognized);
+    publish_projection_if_current(
+        indexer,
+        runtime,
+        observation_revision,
+        projection_commit,
+        expected_revision,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn publish_projection_if_current(
+    indexer: &Indexer,
+    runtime: &HashMap<CacheOwnerId, OwnerRuntime>,
+    observation_revision: &AtomicU64,
+    projection_commit: &Mutex<()>,
+    expected_revision: u64,
+) -> Result<()> {
+    let _commit = projection_commit.lock().await;
+    ensure_observation_revision(observation_revision, expected_revision)?;
     publish_projection(indexer, runtime);
+    Ok(())
+}
+
+fn ensure_observation_revision(revision: &AtomicU64, expected: u64) -> Result<()> {
+    if revision.load(Ordering::Acquire) != expected {
+        anyhow::bail!("KV state reconciliation was superseded by a newer observation");
+    }
     Ok(())
 }
 
@@ -1021,10 +1202,33 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
             sources: HashMap::from([(worker, KvSourceStatus::ActiveLiveOnly(source))]),
             kv_event_publishing_enabled: HashMap::from([(worker.worker_id, Some(true))]),
+            kv_event_source_mode: HashMap::new(),
             recovery_expected: HashMap::from([(worker, false)]),
         };
         let filtered = suppress_recognized(view, &HashSet::from([worker]));
         assert_eq!(filtered.status(&worker), Some(&KvSourceStatus::Suppressed));
+    }
+
+    #[test]
+    fn explicit_source_mode_suppresses_legacy_before_state_source_is_ready() {
+        let worker = WorkerWithDpRank::new(7, 3);
+        let endpoint = EndpointId::from("ns.backend.generate");
+        let mut view = KvSourceMembershipView {
+            serving_endpoint: endpoint.clone(),
+            endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
+            sources: HashMap::from([(worker, KvSourceStatus::Missing)]),
+            kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::from([(
+                worker.worker_id,
+                Some("state_agent_v2".to_string()),
+            )]),
+            recovery_expected: HashMap::new(),
+        };
+        let recognized = source_mode_suppressed_workers(&view);
+        assert_eq!(recognized, HashSet::from([worker]));
+        view.kv_event_source_mode
+            .insert(worker.worker_id, Some("future_mode".to_string()));
+        assert_eq!(source_mode_suppressed_workers(&view), recognized);
     }
 
     #[tokio::test]

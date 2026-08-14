@@ -869,6 +869,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     kv_event_publishing_enabled: bool | None
+    kv_event_source_mode: str | None
     kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
@@ -2834,6 +2835,26 @@ class KvStateAgentHost:
         ...
 
     async def shutdown(self) -> None:
+        ...
+
+    async def wait_terminated(self) -> None:
+        ...
+
+class KvStateAttachmentOwner:
+    def __init__(
+        self, endpoint: Endpoint, worker_id: int, descriptors: List[Dict[str, Any]]
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def set_cache_readable(
+        self, global_dp_rank: int, readable: bool
+    ) -> None:
+        ...
+
+    async def close(self) -> None:
         ...
 
 class KvRouter:

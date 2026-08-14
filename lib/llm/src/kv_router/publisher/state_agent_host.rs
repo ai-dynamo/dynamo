@@ -55,6 +55,7 @@ enum SlotLifecycle {
 
 struct HostedSlot {
     intent_incarnation: Option<u64>,
+    producer_instance: Option<dynamo_runtime::component::Instance>,
     lifecycle: SlotLifecycle,
     agent: Option<Arc<KvStateAgent>>,
     global_dp_rank: u32,
@@ -121,6 +122,7 @@ impl HostMetrics {
 
 struct HostControlEngine {
     status: Arc<ArcSwap<KvStateHostStatus>>,
+    slots: Arc<Mutex<HashMap<CacheOwnerId, HostedSlot>>>,
 }
 
 #[async_trait]
@@ -131,7 +133,42 @@ impl AsyncEngine<SingleIn<KvStateHostControlRequest>, ManyOut<KvStateHostStatus>
         &self,
         request: SingleIn<KvStateHostControlRequest>,
     ) -> Result<ManyOut<KvStateHostStatus>> {
-        let (_request, context) = request.into_parts();
+        let (request, context) = request.into_parts();
+        if let KvStateHostControlRequest::SetCacheReadable {
+            cache_owner_id,
+            producer_instance,
+            intent_incarnation,
+            readable,
+        } = request
+        {
+            let (agent, generation) = {
+                let slots = self.slots.lock().await;
+                let slot = slots
+                    .get(&cache_owner_id)
+                    .context("KV state-agent slot is not present")?;
+                if slot.lifecycle != SlotLifecycle::Active
+                    || slot.intent_incarnation != Some(intent_incarnation)
+                    || slot.producer_instance.as_ref() != Some(producer_instance.as_ref())
+                {
+                    anyhow::bail!("readability update does not match the active attachment intent");
+                }
+                let agent = slot
+                    .agent
+                    .clone()
+                    .context("active slot has no state agent")?;
+                let generation = agent
+                    .status()
+                    .attachment
+                    .as_ref()
+                    .context("active slot has no engine attachment")?
+                    .generation;
+                (agent, generation)
+            };
+            agent
+                .set_cache_readable(generation, readable)
+                .await
+                .context("failed to update CacheOwner readability")?;
+        }
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![(*self.status.load_full()).clone()])),
             context.context(),
@@ -146,7 +183,8 @@ pub struct KvStateAgentHost {
     cancel: CancellationToken,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     control_endpoint: Mutex<Option<StartedEndpoint>>,
-    host_advertisement: Mutex<Option<DiscoveryInstance>>,
+    host_advertisement: Arc<Mutex<Option<DiscoveryInstance>>>,
+    terminated: CancellationToken,
 }
 
 impl KvStateAgentHost {
@@ -156,6 +194,7 @@ impl KvStateAgentHost {
         }
 
         let component = config.endpoint.component().clone();
+        let slots = Arc::new(Mutex::new(HashMap::new()));
         let status = Arc::new(ArcSwap::from_pointee(KvStateHostStatus {
             healthy: true,
             ..Default::default()
@@ -165,6 +204,7 @@ impl KvStateAgentHost {
             .endpoint_builder()
             .handler(Ingress::for_engine(Arc::new(HostControlEngine {
                 status: status.clone(),
+                slots: slots.clone(),
             }))?)
             .graceful_shutdown(true)
             .start_with_registration()
@@ -222,23 +262,31 @@ impl KvStateAgentHost {
             }
         };
 
+        let host_advertisement = Arc::new(Mutex::new(Some(host_advertisement)));
         let metrics = HostMetrics::new(&component);
         let cancel = CancellationToken::new();
+        let terminated = CancellationToken::new();
         let supervisor_cancel = cancel.clone();
         let supervisor_component = component.clone();
         let supervisor_status = status.clone();
+        let supervisor_slots = slots.clone();
+        let supervisor_host_advertisement = host_advertisement.clone();
+        let supervisor_terminated = terminated.clone();
         let supervisor = component.drt().runtime().secondary().spawn(async move {
             run_host_supervisor(
                 supervisor_component,
                 control_target,
                 config.max_slots,
                 stream,
+                supervisor_slots,
                 supervisor_status,
                 metrics,
                 supervisor_cancel,
+                supervisor_host_advertisement,
             )
             .await;
             watch_cancel.cancel();
+            supervisor_terminated.cancel();
         });
 
         Ok(Arc::new(Self {
@@ -247,12 +295,17 @@ impl KvStateAgentHost {
             cancel,
             supervisor: Mutex::new(Some(supervisor)),
             control_endpoint: Mutex::new(Some(control)),
-            host_advertisement: Mutex::new(Some(host_advertisement)),
+            host_advertisement,
+            terminated,
         }))
     }
 
     pub fn status(&self) -> Arc<KvStateHostStatus> {
         self.status.load_full()
+    }
+
+    pub async fn wait_terminated(&self) {
+        self.terminated.cancelled().await;
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -287,14 +340,16 @@ async fn run_host_supervisor(
     host_instance: dynamo_runtime::component::Instance,
     max_slots: usize,
     mut stream: dynamo_runtime::discovery::DiscoveryStream,
+    slots: Arc<Mutex<HashMap<CacheOwnerId, HostedSlot>>>,
     status: Arc<ArcSwap<KvStateHostStatus>>,
     metrics: HostMetrics,
     cancel: CancellationToken,
+    host_advertisement: Arc<Mutex<Option<DiscoveryInstance>>>,
 ) {
     let mut intents: HashMap<CacheOwnerId, HashMap<u64, KvStateAttachmentIntent>> = HashMap::new();
     let mut intent_owners: HashMap<u64, CacheOwnerId> = HashMap::new();
-    let mut slots: HashMap<CacheOwnerId, HostedSlot> = HashMap::new();
     let mut capacity_rejected_total = 0u64;
+    let mut watch_ended = false;
 
     loop {
         let event = tokio::select! {
@@ -304,6 +359,7 @@ async fn run_host_supervisor(
         };
         let Some(event) = event else {
             tracing::error!("KV state-agent attachment-intent watch ended");
+            watch_ended = true;
             break;
         };
         let owner =
@@ -317,11 +373,12 @@ async fn run_host_supervisor(
         let Some(owner) = owner else {
             continue;
         };
+        let mut slots_guard = slots.lock().await;
         if let Err(error) = reconcile_owner(
             &component,
             owner,
             &intents,
-            &mut slots,
+            &mut slots_guard,
             max_slots,
             &mut capacity_rejected_total,
             &metrics,
@@ -330,15 +387,41 @@ async fn run_host_supervisor(
         {
             tracing::error!(%owner, %error, "Failed to reconcile KV state-agent slot");
         }
-        publish_host_status(&slots, capacity_rejected_total, true, &status, &metrics);
+        publish_host_status(
+            &slots_guard,
+            capacity_rejected_total,
+            true,
+            &status,
+            &metrics,
+        );
     }
 
+    let mut slots = slots.lock().await;
     publish_host_status(&slots, capacity_rejected_total, false, &status, &metrics);
-    for (_, slot) in slots {
-        if let Some(agent) = slot.agent
+    for slot in slots.values_mut() {
+        if let Some(agent) = slot.agent.take()
             && let Err(error) = agent.shutdown().await
         {
             tracing::warn!(%error, "Failed to stop hosted KV state agent");
+        }
+    }
+    drop(slots);
+    if watch_ended {
+        let current = host_advertisement.lock().await.clone();
+        if let Some(current) = current {
+            if let Err(error) = component
+                .drt()
+                .discovery()
+                .unregister(current.clone())
+                .await
+            {
+                tracing::error!(%error, "Failed to withdraw unhealthy KV state-agent host advertisement");
+            } else {
+                let mut advertisement = host_advertisement.lock().await;
+                if advertisement.as_ref() == Some(&current) {
+                    *advertisement = None;
+                }
+            }
         }
     }
 }
@@ -428,8 +511,8 @@ fn validate_intent(
     if intent.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
         anyhow::bail!("unsupported state-agent raw ingress protocol");
     }
-    if intent.raw_zmq_endpoint.is_empty() || intent.raw_topic.is_empty() {
-        anyhow::bail!("attachment intent must supply a resolved raw endpoint and topic");
+    if intent.raw_zmq_endpoint.is_empty() {
+        anyhow::bail!("attachment intent must supply a resolved raw endpoint");
     }
     Ok(())
 }
@@ -476,6 +559,7 @@ async fn reconcile_owner(
         }
         let slot_shape = HostedSlot {
             intent_incarnation: Some(intent.intent_incarnation),
+            producer_instance: Some(intent.producer_instance.clone()),
             lifecycle: SlotLifecycle::Failed,
             agent: None,
             global_dp_rank: intent.worker.dp_rank,
@@ -534,17 +618,18 @@ async fn reconcile_owner(
                 image_token_id: intent.image_token_id,
                 ingress_protocol: intent.ingress_protocol,
             },
-            cache_readable: intent.cache_readable,
         })
         .await
         .context("failed to attach raw KV source")?;
     slot.intent_incarnation = Some(intent.intent_incarnation);
+    slot.producer_instance = Some(intent.producer_instance);
     slot.lifecycle = SlotLifecycle::Active;
     Ok(())
 }
 
 async fn detach_slot(slot: &mut HostedSlot) -> Result<()> {
     slot.intent_incarnation = None;
+    slot.producer_instance = None;
     slot.lifecycle = SlotLifecycle::Failed;
     let Some(agent) = slot.agent.as_ref() else {
         return Ok(());
@@ -663,7 +748,6 @@ mod tests {
             raw_zmq_endpoint: format!("tcp://127.0.0.1:{}", 20_000 + worker.dp_rank),
             raw_topic: "kv-events-residency-v1".to_string(),
             image_token_id: None,
-            cache_readable: true,
         }
     }
 

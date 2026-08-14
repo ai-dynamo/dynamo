@@ -24,6 +24,7 @@ use crate::kv_router::{
     metrics::KvPublisherMetrics,
 };
 
+mod attachment_owner;
 mod batching;
 mod dedup;
 mod event_processor;
@@ -35,6 +36,8 @@ mod state_agent_host;
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
+
+pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
 pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]

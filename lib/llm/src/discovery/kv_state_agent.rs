@@ -28,6 +28,26 @@ pub const KV_STATE_SOURCE_TOPIC_V2: &str = "kv-state-sources-v2";
 pub const KV_STATE_ATTACHMENT_TOPIC_V2: &str = "kv-state-attachments-v2";
 pub const KV_STATE_EVENT_TOPIC_V2: &str = "kv-state-events-v2";
 
+/// Deterministic identity of one immutable attachment advertisement.
+///
+/// The advertisement payload keeps `publisher_id` as the state-source
+/// publisher incarnation. The discovery record itself must be distinct for
+/// each attachment generation so stale removal cannot withdraw its successor.
+pub fn attachment_record_id(publisher_id: PublisherId, generation: u64) -> PublisherId {
+    const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"dynamo/kv-state-attachment-record/v2");
+    hasher.update(&publisher_id.to_be_bytes());
+    hasher.update(&generation.to_be_bytes());
+    let digest = hasher.finalize();
+    let value = u64::from_be_bytes(
+        digest.as_bytes()[..8]
+            .try_into()
+            .expect("BLAKE3 digest has eight prefix bytes"),
+    );
+    (value & JSON_SAFE_MASK).max(1)
+}
+
 /// Immutable raw ingress contract selected for one stable slot.
 ///
 /// This is deliberately independent of [`KvStateProtocolVersion`], which
@@ -63,13 +83,18 @@ pub struct KvStateAttachmentIntent {
     pub raw_topic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_token_id: Option<u32>,
-    pub cache_readable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KvStateHostControlRequest {
     Status,
+    SetCacheReadable {
+        cache_owner_id: CacheOwnerId,
+        producer_instance: Box<Instance>,
+        intent_incarnation: u64,
+        readable: bool,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,6 +329,15 @@ mod tests {
     use dynamo_runtime::component::TransportType;
 
     use super::*;
+
+    #[test]
+    fn attachment_record_identity_fences_generations_from_state_publisher() {
+        let first = attachment_record_id(41, 1);
+        let replacement = attachment_record_id(41, 2);
+        assert_ne!(first, 41);
+        assert_ne!(first, replacement);
+        assert_eq!(first, attachment_record_id(41, 1));
+    }
 
     fn owner() -> CacheOwnerId {
         CacheOwnerId::new(

@@ -169,6 +169,58 @@ async def test_decode_worker_without_custom_encoder_uses_lifecycle():
 
 
 @pytest.mark.asyncio
+async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
+    calls = []
+    state_agent_lifecycle = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
+    )
+    factory = _make_factory(state_agent_lifecycle=state_agent_lifecycle)
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+
+    async def fail_after_setup(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise RuntimeError("startup failed")
+
+    factory._run_decode_worker = fail_after_setup  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await factory._create_decode_worker(
+            Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
+        )
+
+    assert calls == ["state-agent", "handler", "engine"]
+
+
+@pytest.mark.asyncio
+async def test_state_agent_setup_failure_never_falls_back_to_legacy(monkeypatch):
+    from dynamo.vllm import state_agent
+
+    monkeypatch.setattr(state_agent, "state_agent_settings", lambda _config: object())
+    setup_legacy = Mock(return_value=["legacy"])
+    setup_owner = AsyncMock(side_effect=RuntimeError("host is unavailable"))
+    factory = _make_factory(
+        setup_kv_event_publisher_fn=setup_legacy,
+        setup_kv_state_attachment_owner_fn=setup_owner,
+    )
+
+    result = await factory._setup_kv_routing(
+        Mock(),
+        Mock(),
+        Mock(),
+        consolidator_enabled=False,
+        consolidator_port=0,
+    )
+
+    assert result is None
+    setup_owner.assert_awaited_once()
+    setup_legacy.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["configure", "handler"])
 async def test_custom_encoder_shutdown_engine_on_startup_failure(
     monkeypatch, failure_stage, tmp_path

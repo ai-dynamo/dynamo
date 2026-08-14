@@ -434,6 +434,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
             recovery_expected: HashMap::new(),
             kv_event_publishing_enabled: capabilities.into_iter().collect(),
+            kv_event_source_mode: HashMap::new(),
             sources,
         }
     }

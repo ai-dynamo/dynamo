@@ -58,6 +58,7 @@ use crate::{
     discovery::kv_state_agent::{
         KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
         KvStateAttachmentAdvertisement, KvStateIngressProtocol, KvStateSourceAdvertisement,
+        attachment_record_id,
     },
     kv_router::{
         WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint_with_status,
@@ -112,7 +113,6 @@ pub struct KvStateAgentAttachmentConfig {
     pub intent_incarnation: u64,
     pub worker: WorkerWithDpRank,
     pub vllm_source: KvStateAgentVllmSource,
-    pub cache_readable: bool,
 }
 
 #[derive(Clone)]
@@ -218,6 +218,12 @@ enum ControlCommand {
         reason: &'static str,
         response: oneshot::Sender<()>,
     },
+    SetCacheReadable {
+        generation: u64,
+        readable: bool,
+        ready_at_outbound_cursor: Option<u64>,
+        response: oneshot::Sender<Result<Attachment>>,
+    },
     AbortAttach {
         generation: u64,
         response: oneshot::Sender<()>,
@@ -300,8 +306,26 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 reason,
                 response,
             } => {
+                let current = self
+                    .attachment
+                    .as_ref()
+                    .is_some_and(|attachment| attachment.generation == generation);
                 self.quarantine(generation, reason);
+                if current {
+                    self.request_attachment_withdrawal(generation);
+                }
                 let _ = response.send(());
+                false
+            }
+            ControlCommand::SetCacheReadable {
+                generation,
+                readable,
+                ready_at_outbound_cursor,
+                response,
+            } => {
+                let result =
+                    self.set_cache_readable(generation, readable, ready_at_outbound_cursor);
+                let _ = response.send(result);
                 false
             }
             ControlCommand::AbortAttach {
@@ -428,6 +452,31 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         self.ingress_generation = None;
         tracing::warn!(generation, reason, "Quarantining vLLM KV ingress");
         self.publish_status();
+    }
+
+    fn set_cache_readable(
+        &mut self,
+        generation: u64,
+        readable: bool,
+        ready_at_outbound_cursor: Option<u64>,
+    ) -> Result<Attachment> {
+        let attachment = self
+            .attachment
+            .as_mut()
+            .context("KV state agent is not attached")?;
+        if attachment.generation != generation {
+            anyhow::bail!("stale attachment generation {generation}");
+        }
+        if readable && self.cache_owner_domain_failed {
+            anyhow::bail!("CacheOwner domain is unavailable for this publisher incarnation");
+        }
+        attachment.cache_readable = readable;
+        if let Some(cursor) = ready_at_outbound_cursor {
+            attachment.ready_at_outbound_cursor = cursor;
+        }
+        let attachment = attachment.clone();
+        self.publish_status();
+        Ok(attachment)
     }
 
     async fn handle_ingress(&mut self, batch: IngressBatch) -> Result<()> {
@@ -799,7 +848,7 @@ impl KvStateAgent {
             anyhow::bail!("kv_block_size cannot be zero");
         }
         let component = config.endpoint.component().clone();
-        let cancel = CancellationToken::new();
+        let cancel = component.drt().primary_token().child_token();
         let local_indexer = Arc::new(LocalKvIndexer::new(
             cancel.child_token(),
             config.kv_block_size,
@@ -965,6 +1014,7 @@ impl KvStateAgent {
             &self.component,
             &self.attachment_source,
             "attachment advertisement",
+            &self.cancel,
         )
         .await?;
         if let Some(listener) = self.vllm_listener.lock().await.take() {
@@ -986,7 +1036,6 @@ impl KvStateAgent {
             intent_incarnation,
             worker,
             vllm_source,
-            cache_readable,
         } = config;
         if worker.dp_rank != self.slot_dp_rank {
             anyhow::bail!("attachment DP rank does not match the stable state-agent slot");
@@ -1012,7 +1061,7 @@ impl KvStateAgent {
                 raw_topic: vllm_source.topic.clone(),
                 ingress_protocol: vllm_source.ingress_protocol,
                 ready: false,
-                cache_readable,
+                cache_readable: false,
                 ready_at_outbound_cursor: 0,
             },
         )
@@ -1026,7 +1075,6 @@ impl KvStateAgent {
             self.kv_block_size,
             self.ingress_tx.clone(),
             self.control_tx.clone(),
-            self.attachment_source.clone(),
             self.status.clone(),
             self.cancel.child_token(),
         )
@@ -1047,7 +1095,7 @@ impl KvStateAgent {
                 endpoint: self.kv_state_endpoint.clone(),
             },
             KV_STATE_ATTACHMENT_TOPIC_V2,
-            attachment_discovery_id(self.identity.publisher_id, attachment.generation),
+            attachment_record_id(self.identity.publisher_id, attachment.generation),
             &attachment_ad,
         )
         .await
@@ -1083,6 +1131,77 @@ impl KvStateAgent {
         Ok(attachment.status())
     }
 
+    /// Change CacheOwner projection eligibility for the current attachment.
+    ///
+    /// The false state is committed before discovery withdrawal. A true
+    /// advertisement is registered before the callable status becomes true,
+    /// so every cross-plane observation window fails closed.
+    pub async fn set_cache_readable(&self, generation: u64, readable: bool) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let current = self
+            .attachment
+            .lock()
+            .await
+            .clone()
+            .context("KV state agent is not attached")?;
+        if current.generation != generation {
+            anyhow::bail!("stale attachment generation {generation}");
+        }
+
+        let mut staged = send_cache_readable(
+            &self.control_tx,
+            generation,
+            false,
+            Some(self.status().outbound_cursor),
+        )
+        .await?;
+        unregister_required(
+            &self.component,
+            &self.attachment_source,
+            "attachment advertisement",
+            &self.cancel,
+        )
+        .await?;
+
+        staged.cache_readable = readable;
+        let advertisement =
+            attachment_advertisement(&self.identity, &self.recovery_target, &staged);
+        let source = match register_advertisement(
+            &self.component,
+            EventScope::Endpoint {
+                endpoint: self.kv_state_endpoint.clone(),
+            },
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            attachment_record_id(self.identity.publisher_id, generation),
+            &advertisement,
+        )
+        .await
+        {
+            Ok(source) => source,
+            Err(error) => {
+                return Err(error)
+                    .context("failed to replace CacheOwner readability advertisement");
+            }
+        };
+
+        if readable
+            && let Err(error) = send_cache_readable(
+                &self.control_tx,
+                generation,
+                true,
+                Some(staged.ready_at_outbound_cursor),
+            )
+            .await
+        {
+            let _ = self.component.drt().discovery().unregister(source).await;
+            return Err(error).context("failed to commit CacheOwner readability");
+        }
+        *self.attachment_source.lock().await = Some(source);
+        staged.cache_readable = readable;
+        *self.attachment.lock().await = Some(staged);
+        Ok(())
+    }
+
     pub async fn detach(&self, generation: u64) -> Result<u64> {
         let _lifecycle = self.lifecycle.lock().await;
         let (response, received) = oneshot::channel();
@@ -1101,6 +1220,7 @@ impl KvStateAgent {
             &self.component,
             &self.attachment_source,
             "attachment advertisement",
+            &self.cancel,
         )
         .await?;
 
@@ -1213,8 +1333,28 @@ async fn run_attachment_withdrawal_supervisor(
         let Some(generation) = generation else {
             break;
         };
-        unregister_attachment_generation(&component, &attachment_source, publisher_id, generation)
-            .await;
+        let mut delay = Duration::from_millis(100);
+        loop {
+            match unregister_attachment_generation(
+                &component,
+                &attachment_source,
+                publisher_id,
+                generation,
+            )
+            .await
+            {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(generation, %error, ?delay, "Retrying failed KV state attachment withdrawal");
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
+            delay = delay.saturating_mul(2).min(Duration::from_secs(5));
+        }
     }
 }
 
@@ -1245,6 +1385,27 @@ async fn abort_attach(control_tx: &mpsc::Sender<ControlCommand>, generation: u64
     {
         let _ = received.await;
     }
+}
+
+async fn send_cache_readable(
+    control_tx: &mpsc::Sender<ControlCommand>,
+    generation: u64,
+    readable: bool,
+    ready_at_outbound_cursor: Option<u64>,
+) -> Result<Attachment> {
+    let (response, received) = oneshot::channel();
+    control_tx
+        .send(ControlCommand::SetCacheReadable {
+            generation,
+            readable,
+            ready_at_outbound_cursor,
+            response,
+        })
+        .await
+        .context("state-agent coordinator is closed")?;
+    received
+        .await
+        .context("state-agent readability update was dropped")?
 }
 
 fn attachment_advertisement(
@@ -1317,11 +1478,11 @@ async fn unregister_attachment_generation(
     instance: &Arc<Mutex<Option<DiscoveryInstance>>>,
     publisher_id: u64,
     generation: u64,
-) {
-    let expected_id = attachment_discovery_id(publisher_id, generation);
+) -> Result<()> {
+    let expected_id = attachment_record_id(publisher_id, generation);
     let current = instance.lock().await.clone();
     let Some(current) = current else {
-        return;
+        return Ok(());
     };
     let matches_generation = matches!(
         &current,
@@ -1332,38 +1493,53 @@ async fn unregister_attachment_generation(
         } if *publisher_id == expected_id && topic == KV_STATE_ATTACHMENT_TOPIC_V2
     );
     if !matches_generation {
-        return;
+        return Ok(());
     }
-    if let Err(error) = component
+    component
         .drt()
         .discovery()
         .unregister(current.clone())
         .await
-    {
-        tracing::warn!(generation, %error, "Failed to withdraw failed KV state attachment");
-        return;
-    }
+        .context("failed to withdraw failed KV state attachment")?;
     let mut instance = instance.lock().await;
     if instance.as_ref() == Some(&current) {
         *instance = None;
     }
+    Ok(())
 }
 
 async fn unregister_required(
     component: &Component,
     instance: &Arc<Mutex<Option<DiscoveryInstance>>>,
     description: &str,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     let current = instance.lock().await.clone();
     let Some(current) = current else {
         return Ok(());
     };
-    component
-        .drt()
-        .discovery()
-        .unregister(current.clone())
-        .await
-        .with_context(|| format!("failed to remove exact {description}"))?;
+    let mut delay = Duration::from_millis(100);
+    loop {
+        match component
+            .drt()
+            .discovery()
+            .unregister(current.clone())
+            .await
+        {
+            Ok(()) => break,
+            Err(error) => {
+                tracing::warn!(%error, ?delay, description, "Retrying required discovery withdrawal");
+            }
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                anyhow::bail!("state-agent lease ended before {description} was withdrawn");
+            }
+            _ = tokio::time::sleep(delay) => {}
+        }
+        delay = delay.saturating_mul(2).min(Duration::from_secs(5));
+    }
     let mut instance = instance.lock().await;
     if instance.as_ref() == Some(&current) {
         *instance = None;
@@ -1380,21 +1556,6 @@ fn event_block_count(events: &[PlacementEvent]) -> usize {
             KvCacheEventData::Cleared => 0,
         })
         .sum()
-}
-
-fn attachment_discovery_id(publisher_id: u64, generation: u64) -> u64 {
-    const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dynamo/kv-state-attachment-record/v2");
-    hasher.update(&publisher_id.to_be_bytes());
-    hasher.update(&generation.to_be_bytes());
-    let digest = hasher.finalize();
-    let value = u64::from_be_bytes(
-        digest.as_bytes()[..8]
-            .try_into()
-            .expect("BLAKE3 digest has eight prefix bytes"),
-    );
-    (value & JSON_SAFE_MASK).max(1)
 }
 
 struct VllmListener {
@@ -1425,7 +1586,6 @@ async fn start_vllm_listener(
     kv_block_size: u32,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
-    attachment_source: Arc<Mutex<Option<DiscoveryInstance>>>,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
 ) -> Result<VllmListener> {
@@ -1462,10 +1622,9 @@ async fn start_vllm_listener(
             if control_tx.send(command).await.is_ok() {
                 let _ = received.await;
             }
-            // New consumers validate endpoint status too, but exact withdrawal
-            // makes the attachment ineligible immediately without clearing
-            // retained CacheOwner state.
-            unregister_if_present(&component, &attachment_source).await;
+            // The acknowledged quarantine enqueues a generation-fenced
+            // withdrawal retained by the agent supervisor until discovery
+            // accepts it or this source lease ends.
         }
     });
     Ok(VllmListener {
@@ -1601,10 +1760,38 @@ fn normalize_raw_batch(
     let mut events = Vec::with_capacity(raw_events.len().min(MAX_INGRESS_EVENTS));
     let mut source_fault = None;
     let mut cache_owner_fault = None;
-    for raw_event in raw_events {
-        let source_kind = match raw_event.source_kind() {
-            Ok(source_kind) => source_kind,
-            Err(_) => {
+    for mut raw_event in raw_events {
+        let custom_tier = match raw_event.medium() {
+            Some("KVCC_G2") => Some(StorageTier::HostPinned),
+            Some("KVCC_G3") => Some(StorageTier::Disk),
+            _ => None,
+        };
+        let source_kind = match (raw_event.source_kind_wire(), custom_tier) {
+            (None, Some(tier)) | (Some("kvcc"), Some(tier)) => {
+                raw_event.set_medium(tier.to_kv_medium());
+                KvEventSourceKind::Kvcc
+            }
+            (Some("framework"), Some(_)) => {
+                cache_owner_fault
+                    .get_or_insert("framework attribution contradicts KVCC storage medium");
+                continue;
+            }
+            (None | Some("framework"), None) => KvEventSourceKind::Framework,
+            (Some("kvcc"), None) => {
+                if !matches!(
+                    raw_event.medium(),
+                    Some("CPU" | "CPU_PINNED" | "STORAGE" | "DISK")
+                ) && !matches!(
+                    raw_event,
+                    dynamo_kv_router::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
+                ) {
+                    cache_owner_fault
+                        .get_or_insert("KVCC attribution has an unsupported storage medium");
+                    continue;
+                }
+                KvEventSourceKind::Kvcc
+            }
+            (Some(_), _) => {
                 source_fault.get_or_insert("unknown raw source kind");
                 continue;
             }
@@ -1698,9 +1885,12 @@ fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<Placeme
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+    use std::{
+        collections::HashSet,
+        sync::{
+            Mutex as StdMutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
 
     use dynamo_kv_router::{
@@ -1887,7 +2077,7 @@ mod tests {
         );
         assert_eq!(
             normalized.cache_owner_fault,
-            Some("unsupported KVCC storage medium")
+            Some("KVCC attribution has an unsupported storage medium")
         );
         assert_eq!(normalized.source_fault, None);
         assert_eq!(normalized.events.len(), 1);
@@ -1912,6 +2102,231 @@ mod tests {
             &mut cache_owner,
         );
         assert_eq!(normalized.source_fault, Some("unknown raw source kind"));
+    }
+
+    #[tokio::test]
+    async fn production_named_map_custom_media_reaches_exact_local_recovery_owners() {
+        let wire = (
+            1.0f64,
+            vec![
+                serde_json::json!({
+                    "type": "BlockStored",
+                    "block_hashes": [101],
+                    "parent_block_hash": null,
+                    "token_ids": [10, 11, 12, 13],
+                    "block_size": 4,
+                    "medium": "KVCC_G2",
+                    "locality": "LOCAL"
+                }),
+                serde_json::json!({
+                    "type": "BlockStored",
+                    "block_hashes": [102, 202],
+                    "parent_block_hash": 101,
+                    "token_ids": [14, 15, 16, 17, 18, 19, 20, 21],
+                    "block_size": 4,
+                    "medium": "KVCC_G3",
+                    "locality": "LOCAL"
+                }),
+                serde_json::json!({
+                    "type": "BlockRemoved",
+                    "block_hashes": [102],
+                    "medium": "KVCC_G3",
+                    "locality": "LOCAL"
+                }),
+                serde_json::json!({
+                    "type": "BlockStored",
+                    "block_hashes": [105],
+                    "parent_block_hash": null,
+                    "token_ids": [22, 23, 24, 25],
+                    "block_size": 4,
+                    "medium": "KVCC_G2",
+                    "locality": "LOCAL"
+                }),
+                serde_json::json!({
+                    "type": "BlockRemoved",
+                    "block_hashes": [101],
+                    "medium": "KVCC_G2",
+                    "locality": "LOCAL"
+                }),
+                serde_json::json!({
+                    "type": "BlockStored",
+                    "block_hashes": [106],
+                    "parent_block_hash": null,
+                    "token_ids": [26, 27, 28, 29],
+                    "block_size": 4,
+                    "medium": "CPU",
+                    "locality": "LOCAL"
+                }),
+                serde_json::json!({
+                    "type": "BlockStored",
+                    "block_hashes": [104],
+                    "parent_block_hash": null,
+                    "token_ids": [30, 31, 32, 33],
+                    "block_size": 4,
+                    "medium": "GPU"
+                }),
+            ],
+            Some(3i32),
+        );
+        let payload = rmp_serde::to_vec_named(&wire).unwrap();
+        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let worker = WorkerWithDpRank::new(17, 3);
+        let mut framework = ZmqEventNormalizer::new(4);
+        let mut cache_owner = ZmqEventNormalizer::new(4);
+        let normalized = normalize_raw_batch(
+            batch.events,
+            worker,
+            4,
+            KvStateIngressProtocol::VllmResidencyV1,
+            &mut framework,
+            &mut cache_owner,
+        );
+
+        assert_eq!(normalized.cache_owner_fault, None);
+        assert_eq!(
+            normalized
+                .events
+                .iter()
+                .map(|event| (event.placement.residency_domain, event.placement.tier))
+                .collect::<Vec<_>>(),
+            vec![
+                (ResidencyDomain::CacheOwner, StorageTier::HostPinned),
+                (ResidencyDomain::CacheOwner, StorageTier::Disk),
+                (ResidencyDomain::CacheOwner, StorageTier::Disk),
+                (ResidencyDomain::CacheOwner, StorageTier::HostPinned),
+                (ResidencyDomain::CacheOwner, StorageTier::HostPinned),
+                (ResidencyDomain::Worker, StorageTier::HostPinned),
+                (ResidencyDomain::Worker, StorageTier::Device),
+            ]
+        );
+
+        let identity = KvStateAgentIdentity {
+            cache_owner_id: cache_owner_id(),
+            publisher_id: 41,
+            protocol_version: KvStateProtocolVersion::V2,
+        };
+        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+            identity: identity.clone(),
+            attachment: None,
+            cache_owner_ready: true,
+            outbound_cursor: 0,
+        }));
+        let local_indexer = Arc::new(LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        ));
+        let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let mut coordinator = Coordinator {
+            publisher: RecordingSink::default(),
+            local_indexer: local_indexer.clone(),
+            identity,
+            slot_dp_rank: 3,
+            status,
+            withdrawal_tx: mpsc::unbounded_channel().0,
+            control_rx,
+            ingress_rx,
+            attachment: None,
+            ingress_generation: None,
+            next_outbound_id: 1,
+            next_attachment_generation: 1,
+            source_cursor: SourceCursorState::default(),
+            dedup: EventDedupFilter::new(),
+            worker_domain_failed: false,
+            cache_owner_domain_failed: false,
+            source_failed: false,
+        };
+        let mut attachment = test_attachment(worker, "tcp://framework");
+        coordinator.attach(&mut attachment).await.unwrap();
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: attachment.generation,
+                source_cursor: 1,
+                chunk_index: 0,
+                final_chunk: true,
+                events: normalized.events,
+                source_fault: normalized.source_fault,
+                cache_owner_fault: normalized.cache_owner_fault,
+            })
+            .await
+            .unwrap();
+        let WorkerKvQueryResponse::TreeDump { events, .. } =
+            local_indexer.get_events_in_id_range(None, None).await
+        else {
+            panic!("expected a complete local snapshot")
+        };
+        let cache_owner_tiers = events
+            .iter()
+            .filter_map(|event| {
+                (event.state_source == Some(cache_owner_id())).then_some(event.storage_tier)
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            cache_owner_tiers,
+            HashSet::from([StorageTier::HostPinned, StorageTier::Disk])
+        );
+
+        let boundary_wire = (
+            2.0f64,
+            vec![
+                serde_json::json!({
+                    "type": "BlockStored",
+                    "block_hashes": [107],
+                    "parent_block_hash": null,
+                    "token_ids": [30, 31, 32, 33],
+                    "block_size": 4,
+                    "medium": "KVCC_G2",
+                    "locality": "LOCAL",
+                    "source_kind": "framework"
+                }),
+                serde_json::json!({
+                    "type": "BlockStored",
+                    "block_hashes": [108],
+                    "parent_block_hash": null,
+                    "token_ids": [34, 35, 36, 37],
+                    "block_size": 4,
+                    "medium": "GPU"
+                }),
+                serde_json::json!({
+                    "type": "AllBlocksCleared"
+                }),
+                serde_json::json!({
+                    "type": "AllBlocksCleared",
+                    "source_kind": "kvcc"
+                }),
+            ],
+            Some(3i32),
+        );
+        let payload = rmp_serde::to_vec_named(&boundary_wire).unwrap();
+        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let normalized = normalize_raw_batch(
+            batch.events,
+            worker,
+            4,
+            KvStateIngressProtocol::VllmResidencyV1,
+            &mut framework,
+            &mut cache_owner,
+        );
+        assert_eq!(
+            normalized.cache_owner_fault,
+            Some("framework attribution contradicts KVCC storage medium")
+        );
+        assert_eq!(
+            normalized
+                .events
+                .iter()
+                .map(|event| event.placement.residency_domain)
+                .collect::<Vec<_>>(),
+            vec![
+                ResidencyDomain::Worker,
+                ResidencyDomain::Worker,
+                ResidencyDomain::CacheOwner,
+            ]
+        );
+        assert!(StorageTier::from_kv_medium("KVCC_G2").is_none());
+        assert!(StorageTier::from_kv_medium("KVCC_G3").is_none());
     }
 
     fn send_ingress(

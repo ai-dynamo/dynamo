@@ -58,12 +58,20 @@ async def worker(runtime: DistributedRuntime) -> None:
             health_check_payload={"text": "health"},
         )
     )
+    # PyO3 exposes this as an awaitable Future, not necessarily a coroutine.
+    termination_task = asyncio.ensure_future(host.wait_terminated())
     logger.info("KV state-agent host started with max_slots=%d", args.max_slots)
     try:
+        done, _ = await asyncio.wait(
+            {health_task, termination_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if termination_task in done:
+            raise RuntimeError("KV state-agent host intent watch terminated")
         await health_task
     finally:
         health_task.cancel()
-        await asyncio.gather(health_task, return_exceptions=True)
+        termination_task.cancel()
+        await asyncio.gather(health_task, termination_task, return_exceptions=True)
         await host.shutdown()
         logger.info("KV state-agent host stopped")
 
