@@ -41,6 +41,7 @@ use crate::discovery::kv_state_agent::{
 
 const HOST_COMPONENT: &str = "kv_state_agent";
 const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
+const HOST_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct KvStateAttachmentDescriptor {
@@ -137,18 +138,22 @@ impl KvStateAttachmentOwner {
     }
 
     async fn query_host(&self, request: KvStateHostControlRequest) -> Result<KvStateHostStatus> {
-        let addressed = SingleIn::new(request).map(|request| {
-            AddressedRequest::for_instance(request, self.host.control_target.clone())
-        });
-        let mut responses: ManyOut<KvStateHostStatus> = self
-            .addressed
-            .generate(addressed)
-            .await
-            .context("failed to call KV state-agent host control endpoint")?;
-        let status = responses
-            .next()
-            .await
-            .context("KV state-agent host returned no control response")?;
+        let status = tokio::time::timeout(HOST_CONTROL_TIMEOUT, async {
+            let addressed = SingleIn::new(request).map(|request| {
+                AddressedRequest::for_instance(request, self.host.control_target.clone())
+            });
+            let mut responses: ManyOut<KvStateHostStatus> = self
+                .addressed
+                .generate(addressed)
+                .await
+                .context("failed to call KV state-agent host control endpoint")?;
+            responses
+                .next()
+                .await
+                .context("KV state-agent host returned no control response")
+        })
+        .await
+        .context("KV state-agent host control request timed out")??;
         if let Some(error) = status.err() {
             return Err(error).context("KV state-agent host rejected control request");
         }
@@ -246,7 +251,13 @@ async fn discover_single_host(
         if topic != KV_STATE_HOST_TOPIC_V2 {
             continue;
         }
-        let host: KvStateHostAdvertisement = serde_json::from_value(metadata)?;
+        let host: KvStateHostAdvertisement = match serde_json::from_value(metadata) {
+            Ok(host) => host,
+            Err(error) => {
+                tracing::warn!(%error, "Skipping undecodable KV state-agent host advertisement");
+                continue;
+            }
+        };
         if host.protocol_version == KvStateProtocolVersion::V2
             && host.host_instance == host.control_target
         {
@@ -376,6 +387,7 @@ async fn cleanup_registrations_required(
             };
             match result {
                 Ok(()) => break,
+                Err(error) if is_missing_registration(&error) => break,
                 Err(error) => {
                     tracing::warn!(%error, ?delay, "Retrying required attachment-intent withdrawal");
                 }
@@ -388,6 +400,15 @@ async fn cleanup_registrations_required(
             delay = delay.saturating_mul(2).min(Duration::from_secs(5));
         }
     }
+}
+
+fn is_missing_registration(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<dynamo_runtime::storage::kv::StoreError>(),
+            Some(dynamo_runtime::storage::kv::StoreError::MissingKey(_))
+        )
+    })
 }
 
 fn random_discovery_id() -> Result<u64> {
@@ -456,6 +477,19 @@ mod tests {
         }
 
         async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+            let target = instance.id();
+            let present = self
+                .inner
+                .list(intent_query())
+                .await?
+                .iter()
+                .any(|candidate| candidate.id() == target);
+            if !present {
+                return Err(dynamo_runtime::storage::kv::StoreError::MissingKey(format!(
+                    "{target:?}"
+                ))
+                .into());
+            }
             self.inner.unregister(instance).await
         }
 

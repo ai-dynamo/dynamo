@@ -1102,8 +1102,11 @@ impl KvStateAgent {
         {
             Ok(source) => source,
             Err(error) => {
-                listener.stop().await;
-                abort_attach(&self.control_tx, attachment.generation).await;
+                if let Err(rollback_error) =
+                    rollback_started_attach(&self.control_tx, listener, attachment.generation).await
+                {
+                    tracing::error!(%rollback_error, "Failed to roll back active KV attachment");
+                }
                 return Err(error).context("failed to advertise reattached engine attachment");
             }
         };
@@ -1114,14 +1117,15 @@ impl KvStateAgent {
             .as_ref()
             .is_some_and(|current| current.ready && current.generation == attachment.generation)
         {
-            listener.stop().await;
             let _ = self
                 .component
                 .drt()
                 .discovery()
                 .unregister(attachment_source)
                 .await;
-            abort_attach(&self.control_tx, attachment.generation).await;
+            rollback_started_attach(&self.control_tx, listener, attachment.generation)
+                .await
+                .context("failed to roll back terminated KV attachment")?;
             anyhow::bail!("raw KV listener terminated before attachment advertisement completed");
         }
 
@@ -1387,6 +1391,42 @@ async fn abort_attach(control_tx: &mpsc::Sender<ControlCommand>, generation: u64
     }
 }
 
+async fn rollback_started_attach(
+    control_tx: &mpsc::Sender<ControlCommand>,
+    listener: VllmListener,
+    generation: u64,
+) -> Result<()> {
+    let (response, received) = oneshot::channel();
+    let begin = async {
+        control_tx
+            .send(ControlCommand::BeginDetach {
+                generation,
+                response,
+            })
+            .await
+            .context("state-agent coordinator is closed")?;
+        received
+            .await
+            .context("state-agent detach begin was dropped")?
+    }
+    .await;
+    listener.stop().await;
+    begin?;
+
+    let (response, received) = oneshot::channel();
+    control_tx
+        .send(ControlCommand::CompleteDetach {
+            generation,
+            response,
+        })
+        .await
+        .context("state-agent coordinator is closed")?;
+    received
+        .await
+        .context("state-agent detach completion was dropped")??;
+    Ok(())
+}
+
 async fn send_cache_readable(
     control_tx: &mpsc::Sender<ControlCommand>,
     generation: u64,
@@ -1487,10 +1527,10 @@ async fn unregister_attachment_generation(
     let matches_generation = matches!(
         &current,
         DiscoveryInstance::EventSource {
-            publisher_id,
+            publisher_id: record_id,
             topic,
             ..
-        } if *publisher_id == expected_id && topic == KV_STATE_ATTACHMENT_TOPIC_V2
+        } if *record_id == expected_id && topic == KV_STATE_ATTACHMENT_TOPIC_V2
     );
     if !matches_generation {
         return Ok(());

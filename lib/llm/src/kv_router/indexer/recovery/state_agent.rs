@@ -55,11 +55,12 @@ const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 struct OwnerRuntime {
-    publisher_id: u64,
+    publisher_id: Option<u64>,
     recovered_cursor: u64,
     attachment_generation: Option<u64>,
     last_worker: Option<WorkerWithDpRank>,
     ready: bool,
+    recovery_required: bool,
 }
 
 /// Router-owned state-agent work plus the filtered legacy source view.
@@ -195,24 +196,30 @@ async fn start_observation_fence(
             if !observed {
                 tracing::error!("KV state observation fence lost a discovery watch");
                 let _commit = projection_commit.lock().await;
+                let next = advance_observation_revision(&revision);
                 indexer.set_residency_projection(ResidencyProjection::default());
+                revision_tx.send_replace(next);
                 break;
             }
             let _commit = projection_commit.lock().await;
             indexer.set_residency_projection(ResidencyProjection::default());
-            let next = revision
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    current.checked_add(1)
-                })
-                .unwrap_or_else(|_| {
-                    tracing::error!("KV state observation revision exhausted");
-                    u64::MAX
-                })
-                .saturating_add(1);
+            let next = advance_observation_revision(&revision);
             revision_tx.send_replace(next);
         }
     });
     Ok(())
+}
+
+fn advance_observation_revision(revision: &AtomicU64) -> u64 {
+    revision
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .unwrap_or_else(|_| {
+            tracing::error!("KV state observation revision exhausted");
+            u64::MAX
+        })
+        .saturating_add(1)
 }
 
 fn filtered_legacy_membership(
@@ -409,8 +416,8 @@ async fn run_state_agent_router(
             if !sources.is_empty() && transport.is_none() {
                 match start_state_agent_consumers(&component, &endpoint, cancel.child_token()).await
                 {
-                    Ok((attachments, events, state_transport)) => {
-                        attachment_stream = Some(attachments);
+                    Ok((attachment_watch, events, state_transport)) => {
+                        attachment_stream = Some(attachment_watch);
                         event_stream = Some(events);
                         transport = Some(state_transport);
                     }
@@ -662,9 +669,10 @@ async fn reconcile_state_sources(
             if let Some(state) = runtime.get_mut(&owner) {
                 // No overlapping source incarnation is authoritative. Fence
                 // live traffic until one exact source wins and recovers.
-                state.publisher_id = 0;
+                state.publisher_id = None;
                 state.attachment_generation = None;
                 state.ready = false;
+                state.recovery_required = true;
             }
             tracing::warn!(%owner, "Ambiguous KV state-source incarnations; retaining exact ownership unprojected");
             continue;
@@ -716,7 +724,7 @@ async fn reconcile_state_sources(
             .map(|value| value.worker)
             .or_else(|| previous.and_then(|value| value.last_worker));
         if let Some(previous) = previous
-            && (previous.publisher_id != source.publisher_id
+            && (previous.publisher_id != Some(source.publisher_id)
                 || previous.attachment_generation != expected_generation)
             && let Some(worker) = previous.last_worker
         {
@@ -735,8 +743,13 @@ async fn reconcile_state_sources(
             clear_worker(indexer, worker, owner).await?;
         }
         let previous_cursor = previous
-            .filter(|value| value.publisher_id == source.publisher_id)
+            .filter(|value| value.publisher_id == Some(source.publisher_id))
             .map_or(0, |value| value.recovered_cursor);
+        let recovery_required = previous.is_none_or(|value| {
+            value.publisher_id != Some(source.publisher_id)
+                || value.attachment_generation != expected_generation
+                || value.recovery_required
+        });
 
         let expected = KvStateAgentIdentity {
             cache_owner_id: owner,
@@ -760,28 +773,26 @@ async fn reconcile_state_sources(
                 runtime.insert(
                     owner,
                     OwnerRuntime {
-                        publisher_id: source.publisher_id,
+                        publisher_id: Some(source.publisher_id),
                         recovered_cursor: previous_cursor,
                         attachment_generation: expected_generation,
                         last_worker: recognized_worker,
                         ready: false,
+                        recovery_required,
                     },
                 );
                 continue;
             }
         };
         ensure_observation_revision(observation_revision, expected_revision)?;
-        let needs_recovery = previous.is_none_or(|value| {
-            value.publisher_id != source.publisher_id
-                || value.attachment_generation != expected_generation
-                || value.recovered_cursor
-                    < attachment.map_or(status.outbound_cursor, |value| {
-                        value.ready_at_outbound_cursor
-                    })
-        });
+        let needs_recovery = recovery_required
+            || previous_cursor
+                < attachment.map_or(status.outbound_cursor, |value| {
+                    value.ready_at_outbound_cursor
+                });
         let mut recovered_cursor = previous_cursor;
         if needs_recovery {
-            if previous.is_some_and(|value| value.publisher_id != source.publisher_id) {
+            if previous.is_some_and(|value| value.publisher_id != Some(source.publisher_id)) {
                 clear_cache_owner(indexer, owner, 0).await?;
             }
             if let Some(worker) = recognized_worker {
@@ -804,11 +815,12 @@ async fn reconcile_state_sources(
                     runtime.insert(
                         owner,
                         OwnerRuntime {
-                            publisher_id: source.publisher_id,
+                            publisher_id: Some(source.publisher_id),
                             recovered_cursor,
                             attachment_generation: expected_generation,
                             last_worker: recognized_worker,
                             ready: false,
+                            recovery_required: true,
                         },
                     );
                     continue;
@@ -831,11 +843,12 @@ async fn reconcile_state_sources(
                     runtime.insert(
                         owner,
                         OwnerRuntime {
-                            publisher_id: source.publisher_id,
+                            publisher_id: Some(source.publisher_id),
                             recovered_cursor,
                             attachment_generation: expected_generation,
                             last_worker: recognized_worker,
                             ready: false,
+                            recovery_required: true,
                         },
                     );
                     continue;
@@ -860,11 +873,12 @@ async fn reconcile_state_sources(
                     runtime.insert(
                         owner,
                         OwnerRuntime {
-                            publisher_id: source.publisher_id,
+                            publisher_id: Some(source.publisher_id),
                             recovered_cursor,
                             attachment_generation: expected_generation,
                             last_worker: recognized_worker,
                             ready: false,
+                            recovery_required: true,
                         },
                     );
                     continue;
@@ -895,11 +909,12 @@ async fn reconcile_state_sources(
         runtime.insert(
             owner,
             OwnerRuntime {
-                publisher_id: source.publisher_id,
+                publisher_id: Some(source.publisher_id),
                 recovered_cursor,
                 attachment_generation: expected_generation,
                 last_worker: recognized_worker,
                 ready,
+                recovery_required: false,
             },
         );
     }
@@ -1031,12 +1046,15 @@ async fn apply_live_events(
 ) -> bool {
     let Some((owner, state)) = runtime
         .iter_mut()
-        .find(|(_, state)| state.publisher_id == publisher_id)
+        .find(|(_, state)| state.publisher_id == Some(publisher_id))
     else {
         return false;
     };
     let was_ready = state.ready;
     for event in events {
+        if state.recovery_required {
+            break;
+        }
         let event_id = event.event.event_id;
         if event_id <= state.recovered_cursor {
             continue;
@@ -1051,18 +1069,24 @@ async fn apply_live_events(
                 "KV state-agent event gap; continuing advisory ingestion"
             );
         }
-        let valid = event
-            .resolved_residency_domain()
-            .is_ok_and(|domain| match domain {
-                ResidencyDomain::CacheOwner => event.state_source == Some(*owner),
-                ResidencyDomain::Worker => {
-                    state.attachment_generation.is_some()
-                        && state.last_worker.is_some_and(|worker| {
-                            worker.worker_id == event.worker_id
-                                && worker.dp_rank == event.event.dp_rank
-                        })
-                }
-            });
+        let domain = event.resolved_residency_domain();
+        if matches!(domain.as_ref(), Ok(ResidencyDomain::Worker))
+            && state.attachment_generation.is_none()
+        {
+            tracing::warn!(
+                publisher_id,
+                event_id,
+                "Ignoring stale Worker event while state source is detached"
+            );
+            state.recovered_cursor = event_id;
+            continue;
+        }
+        let valid = domain.is_ok_and(|domain| match domain {
+            ResidencyDomain::CacheOwner => event.state_source == Some(*owner),
+            ResidencyDomain::Worker => state.last_worker.is_some_and(|worker| {
+                worker.worker_id == event.worker_id && worker.dp_rank == event.event.dp_rank
+            }),
+        });
         if !valid {
             tracing::warn!(
                 publisher_id,
@@ -1070,14 +1094,16 @@ async fn apply_live_events(
                 "Ignoring incorrectly attributed KV state event"
             );
             state.ready = false;
-            state.recovered_cursor = event_id;
-            continue;
+            state.recovery_required = true;
+            break;
         }
         let is_clear = matches!(event.event.data, KvCacheEventData::Cleared);
         if let Err(error) = indexer.try_apply_event(event).await {
             tracing::warn!(publisher_id, event_id, %error, "Failed to apply advisory KV state event");
             if is_clear {
                 state.ready = false;
+                state.recovery_required = true;
+                break;
             }
         }
         state.recovered_cursor = event_id;
@@ -1278,11 +1304,12 @@ mod tests {
         let mut runtime = HashMap::from([(
             owner,
             OwnerRuntime {
-                publisher_id: 41,
+                publisher_id: Some(41),
                 recovered_cursor: 0,
                 attachment_generation: None,
                 last_worker: Some(worker),
                 ready: false,
+                recovery_required: false,
             },
         )]);
         let event = |event_id| {
@@ -1323,11 +1350,12 @@ mod tests {
         let mut runtime = HashMap::from([(
             selected,
             OwnerRuntime {
-                publisher_id: 41,
+                publisher_id: Some(41),
                 recovered_cursor: 0,
                 attachment_generation: Some(2),
                 last_worker: Some(worker),
                 ready: true,
+                recovery_required: false,
             },
         )]);
         let event = RouterEvent::with_cache_owner(
@@ -1346,6 +1374,7 @@ mod tests {
         assert!(apply_live_events(&Indexer::None, 41, vec![event], &mut runtime).await);
         let state = runtime.get(&selected).unwrap();
         assert!(!state.ready);
-        assert_eq!(state.recovered_cursor, 1);
+        assert!(state.recovery_required);
+        assert_eq!(state.recovered_cursor, 0);
     }
 }

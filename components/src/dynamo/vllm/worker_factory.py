@@ -1423,6 +1423,26 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[EngineSetupResult] = None,
+    ) -> None:
+        try:
+            await self._run_prefill_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine,
+            )
+        except BaseException:
+            await self.state_agent_lifecycle.close()
+            raise
+
+    async def _run_prefill_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:

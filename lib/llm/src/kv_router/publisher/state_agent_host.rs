@@ -81,7 +81,7 @@ struct HostMetrics {
 }
 
 impl HostMetrics {
-    fn new(component: &Component) -> Self {
+    fn new(component: &Component) -> Result<Self> {
         let metrics = component.metrics();
         let slots = metrics
             .create_intgaugevec(
@@ -90,18 +90,18 @@ impl HostMetrics {
                 &["state"],
                 &[],
             )
-            .expect("failed to register KV state-agent slot metrics");
+            .context("failed to register KV state-agent slot metrics")?;
         let capacity_rejected = metrics
             .create_intcounter(
                 "kv_state_agent_capacity_rejected_total",
                 "Attachment intents rejected because the host slot limit was reached",
                 &[],
             )
-            .expect("failed to register KV state-agent capacity metric");
-        Self {
+            .context("failed to register KV state-agent capacity metric")?;
+        Ok(Self {
             slots,
             capacity_rejected,
-        }
+        })
     }
 
     fn publish(&self, status: &KvStateHostStatus) {
@@ -134,40 +134,44 @@ impl AsyncEngine<SingleIn<KvStateHostControlRequest>, ManyOut<KvStateHostStatus>
         request: SingleIn<KvStateHostControlRequest>,
     ) -> Result<ManyOut<KvStateHostStatus>> {
         let (request, context) = request.into_parts();
-        if let KvStateHostControlRequest::SetCacheReadable {
-            cache_owner_id,
-            producer_instance,
-            intent_incarnation,
-            readable,
-        } = request
-        {
-            let (agent, generation) = {
-                let slots = self.slots.lock().await;
-                let slot = slots
-                    .get(&cache_owner_id)
-                    .context("KV state-agent slot is not present")?;
-                if slot.lifecycle != SlotLifecycle::Active
-                    || slot.intent_incarnation != Some(intent_incarnation)
-                    || slot.producer_instance.as_ref() != Some(producer_instance.as_ref())
-                {
-                    anyhow::bail!("readability update does not match the active attachment intent");
-                }
-                let agent = slot
-                    .agent
-                    .clone()
-                    .context("active slot has no state agent")?;
-                let generation = agent
-                    .status()
-                    .attachment
-                    .as_ref()
-                    .context("active slot has no engine attachment")?
-                    .generation;
-                (agent, generation)
-            };
-            agent
-                .set_cache_readable(generation, readable)
-                .await
-                .context("failed to update CacheOwner readability")?;
+        match request {
+            KvStateHostControlRequest::Status => {}
+            KvStateHostControlRequest::SetCacheReadable {
+                cache_owner_id,
+                producer_instance,
+                intent_incarnation,
+                readable,
+            } => {
+                let (agent, generation) = {
+                    let slots = self.slots.lock().await;
+                    let slot = slots
+                        .get(&cache_owner_id)
+                        .context("KV state-agent slot is not present")?;
+                    if slot.lifecycle != SlotLifecycle::Active
+                        || slot.intent_incarnation != Some(intent_incarnation)
+                        || slot.producer_instance.as_ref() != Some(producer_instance.as_ref())
+                    {
+                        anyhow::bail!(
+                            "readability update does not match the active attachment intent"
+                        );
+                    }
+                    let agent = slot
+                        .agent
+                        .clone()
+                        .context("active slot has no state agent")?;
+                    let generation = agent
+                        .status()
+                        .attachment
+                        .as_ref()
+                        .context("active slot has no engine attachment")?
+                        .generation;
+                    (agent, generation)
+                };
+                agent
+                    .set_cache_readable(generation, readable)
+                    .await
+                    .context("failed to update CacheOwner readability")?;
+            }
         }
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![(*self.status.load_full()).clone()])),
@@ -262,8 +266,19 @@ impl KvStateAgentHost {
             }
         };
 
+        let metrics = match HostMetrics::new(&component) {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                let _ = component
+                    .drt()
+                    .discovery()
+                    .unregister(host_advertisement)
+                    .await;
+                let _ = control.shutdown().await;
+                return Err(error);
+            }
+        };
         let host_advertisement = Arc::new(Mutex::new(Some(host_advertisement)));
-        let metrics = HostMetrics::new(&component);
         let cancel = CancellationToken::new();
         let terminated = CancellationToken::new();
         let supervisor_cancel = cancel.clone();
@@ -479,6 +494,11 @@ fn reconcile_intent_event(
     let intent: KvStateAttachmentIntent = serde_json::from_value(metadata)?;
     validate_intent(&intent, host_instance, publisher_id)?;
     let owner = intent.cache_owner_id;
+    if let Some(previous_owner) = intent_owners.get(&publisher_id)
+        && *previous_owner != owner
+    {
+        anyhow::bail!("intent discovery identity changed its CacheOwnerId");
+    }
     let owner_intents = intents.entry(owner).or_default();
     if owner_intents
         .get(&publisher_id)
@@ -862,6 +882,25 @@ mod tests {
             .is_err()
         );
         assert_eq!(intents[&accepted.cache_owner_id][&101], accepted);
+        assert_eq!(intent_owners[&101], accepted.cache_owner_id);
+
+        let moved = intent(
+            &host,
+            instance("vllm", 11),
+            owner(5),
+            WorkerWithDpRank::new(17, 4),
+            101,
+        );
+        assert!(
+            reconcile_intent_event(
+                Ok(added(&host, 101, &moved)),
+                &host,
+                &mut intents,
+                &mut intent_owners,
+            )
+            .is_err()
+        );
+        assert!(!intents.contains_key(&moved.cache_owner_id));
         assert_eq!(intent_owners[&101], accepted.cache_owner_id);
     }
 }

@@ -196,6 +196,20 @@ async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
 
 
 @pytest.mark.asyncio
+async def test_prefill_startup_failure_withdraws_state_agent_owner():
+    lifecycle = SimpleNamespace(close=AsyncMock())
+    factory = _make_factory(state_agent_lifecycle=lifecycle)
+    factory._run_prefill_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("prefill startup failed")
+    )
+
+    with pytest.raises(RuntimeError, match="prefill startup failed"):
+        await factory._create_prefill_worker(Mock(), Mock(), asyncio.Event(), [])
+
+    lifecycle.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_state_agent_setup_failure_never_falls_back_to_legacy(monkeypatch):
     from dynamo.vllm import state_agent
 

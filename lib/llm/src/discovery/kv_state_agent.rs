@@ -278,6 +278,8 @@ pub fn resolve_kv_state_projection(
         || status.identity.publisher_id != source.publisher_id
         || status.identity.protocol_version != source.protocol_version
         || source.protocol_version != attachment.protocol_version
+        || source.ingress_protocol != attachment.ingress_protocol
+        || source.global_dp_rank != attachment.worker.dp_rank
         || source.event_topic != KV_STATE_EVENT_TOPIC_V2
         || source.recovery_control_target != attachment.recovery_control_target
         || status_attachment.is_none_or(|current| {
@@ -447,6 +449,21 @@ mod tests {
             ),
             KvStateProjectionResolution::Ready { worker: ready, .. } if ready == worker
         ));
+
+        let mut wrong_rank = attachment.clone();
+        wrong_rank.worker.dp_rank += 1;
+        assert_eq!(
+            resolve_kv_state_projection(
+                true,
+                cache_owner_id,
+                std::slice::from_ref(&source),
+                std::slice::from_ref(&wrong_rank),
+                &HashSet::from([wrong_rank.worker]),
+                Some(&status),
+                Some(&receipt),
+            ),
+            KvStateProjectionResolution::Unknown(KvStateUnknownReason::StatusMismatch)
+        );
 
         let wrong_publisher_receipt = KvStateRecoveryReceipt {
             identity: KvStateAgentIdentity {

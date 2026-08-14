@@ -33,11 +33,14 @@ class StateAgentLifecycle:
 
     def __init__(self) -> None:
         self._owner: KvStateAttachmentOwner | None = None
+        self._closed = False
         self._lock = asyncio.Lock()
 
     async def install(self, owner: KvStateAttachmentOwner) -> None:
         try:
             async with self._lock:
+                if self._closed:
+                    raise RuntimeError("KV state attachment lifecycle is closed")
                 if self._owner is not None:
                     raise RuntimeError("KV state attachment owner is already installed")
                 self._owner = owner
@@ -49,6 +52,7 @@ class StateAgentLifecycle:
 
     async def close(self) -> None:
         async with self._lock:
+            self._closed = True
             owner, self._owner = self._owner, None
         if owner is not None:
             await owner.close()
@@ -190,10 +194,28 @@ def _validate_advertise_host(host: str) -> None:
         raise ValueError("raw_advertise_host must be a non-loopback connectable host")
     if "://" in host or "/" in host:
         raise ValueError("raw_advertise_host must not include a scheme, port, or path")
-    literal = host.strip("[]")
-    try:
-        address = ipaddress.ip_address(literal)
-    except ValueError:
-        return
+    if host.startswith("["):
+        if not host.endswith("]"):
+            raise ValueError("raw_advertise_host has mismatched IPv6 brackets")
+        literal = host[1:-1]
+        try:
+            address = ipaddress.ip_address(literal)
+        except ValueError as error:
+            raise ValueError(
+                "bracketed raw_advertise_host must be an IPv6 literal"
+            ) from error
+        if address.version != 6:
+            raise ValueError("only IPv6 literals may use brackets")
+    else:
+        if "[" in host or "]" in host or ":" in host or any(c.isspace() for c in host):
+            raise ValueError(
+                "raw_advertise_host must be a hostname or bracketed IPv6 literal without a port"
+            )
+        literal = host
+        try:
+            address = ipaddress.ip_address(literal)
+        except ValueError:
+            return
+
     if address.is_loopback or address.is_unspecified:
         raise ValueError("raw_advertise_host must be a non-loopback connectable host")

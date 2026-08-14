@@ -3,6 +3,7 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -62,6 +63,31 @@ def test_state_agent_config_rejects_ambiguous_identity_and_host_before_start():
         state_agent.state_agent_settings(_config({"4": _owner("a"), "7": _owner("a")}))
     with pytest.raises(ValueError, match="non-loopback"):
         state_agent.state_agent_settings(_config({"4": _owner("a")}, "127.0.0.1"))
+    for invalid in (
+        "worker.example:1234",
+        "2001:db8::1",
+        "[2001:db8::1",
+        "[127.0.0.2]",
+    ):
+        with pytest.raises(ValueError):
+            state_agent.state_agent_settings(_config({"4": _owner("a")}, invalid))
+
+    assert (
+        state_agent.state_agent_settings(_config({"4": _owner("a")}, "[2001:db8::1]"))
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+async def test_closed_lifecycle_rejects_and_closes_late_owner():
+    lifecycle = state_agent.StateAgentLifecycle()
+    owner = SimpleNamespace(close=AsyncMock())
+
+    await lifecycle.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        await lifecycle.install(owner)
+
+    owner.close.assert_awaited_once()
 
 
 def test_cli_validates_state_agent_after_vllm_engine_config():

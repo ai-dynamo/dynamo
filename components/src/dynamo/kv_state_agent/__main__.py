@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import logging
 import os
+from typing import Any
 
 import uvloop
 
@@ -49,19 +50,21 @@ async def worker(runtime: DistributedRuntime) -> None:
         args.max_slots,
     )
     await host.start()
-    diagnostics = HostDiagnostics(host)
-    health_task = asyncio.ensure_future(
-        runtime.endpoint(f"{namespace}.kv_state_agent.health").serve_endpoint(
-            diagnostics.health,
-            graceful_shutdown=True,
-            metrics_labels=[("service", "kv_state_agent")],
-            health_check_payload={"text": "health"},
-        )
-    )
-    # PyO3 exposes this as an awaitable Future, not necessarily a coroutine.
-    termination_task = asyncio.ensure_future(host.wait_terminated())
-    logger.info("KV state-agent host started with max_slots=%d", args.max_slots)
+    health_task: asyncio.Future[Any] | None = None
+    termination_task: asyncio.Future[Any] | None = None
     try:
+        diagnostics = HostDiagnostics(host)
+        health_task = asyncio.ensure_future(
+            runtime.endpoint(f"{namespace}.kv_state_agent.health").serve_endpoint(
+                diagnostics.health,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "kv_state_agent")],
+                health_check_payload={"text": "health"},
+            )
+        )
+        # PyO3 exposes this as an awaitable Future, not necessarily a coroutine.
+        termination_task = asyncio.ensure_future(host.wait_terminated())
+        logger.info("KV state-agent host started with max_slots=%d", args.max_slots)
         done, _ = await asyncio.wait(
             {health_task, termination_task}, return_when=asyncio.FIRST_COMPLETED
         )
@@ -69,9 +72,10 @@ async def worker(runtime: DistributedRuntime) -> None:
             raise RuntimeError("KV state-agent host intent watch terminated")
         await health_task
     finally:
-        health_task.cancel()
-        termination_task.cancel()
-        await asyncio.gather(health_task, termination_task, return_exceptions=True)
+        tasks = [task for task in (health_task, termination_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await host.shutdown()
         logger.info("KV state-agent host stopped")
 
