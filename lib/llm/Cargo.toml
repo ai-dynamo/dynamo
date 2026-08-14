@@ -86,10 +86,13 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 either = { workspace = true }
+etcd-client = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 ipnet = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
 oneshot = { workspace = true }

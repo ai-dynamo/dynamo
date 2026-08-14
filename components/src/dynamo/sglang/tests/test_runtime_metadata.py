@@ -93,6 +93,205 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
 
 
 @pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, "mooncake"),
+        ("", "mooncake"),
+        ("  ", "  "),
+        (" tenant-a ", " tenant-a "),
+    ],
+)
+def test_mooncake_cluster_id_for_runtime_metadata(monkeypatch, value, expected):
+    from dynamo.sglang.register import _get_mooncake_cluster_id
+
+    if value is None:
+        monkeypatch.delenv("MC_STORE_CLUSTER_ID", raising=False)
+    else:
+        monkeypatch.setenv("MC_STORE_CLUSTER_ID", value)
+
+    assert _get_mooncake_cluster_id() == expected
+
+
+@pytest.mark.parametrize(
+    "master_server_address, value, expected",
+    [
+        ("etcd://etcd:2379", "not-an-int", None),
+        ("redis://redis:6379", None, 0),
+        ("redis://redis:6379", "7", 7),
+        ("redis://redis:6379", "  +7suffix", 7),
+        ("redis://redis:6379", "255", 255),
+    ],
+)
+def test_mooncake_redis_db_index_for_runtime_metadata(
+    monkeypatch, master_server_address, value, expected
+):
+    from dynamo.sglang.register import _get_mooncake_redis_db_index
+
+    if value is None:
+        monkeypatch.delenv("MC_REDIS_DB_INDEX", raising=False)
+    else:
+        monkeypatch.setenv("MC_REDIS_DB_INDEX", value)
+
+    assert _get_mooncake_redis_db_index(master_server_address) == expected
+
+
+@pytest.mark.parametrize("value", ["bad", "  ", "-1", "256"])
+def test_mooncake_redis_db_index_rejects_invalid_values(monkeypatch, value):
+    from dynamo.sglang.register import _get_mooncake_redis_db_index
+
+    monkeypatch.setenv("MC_REDIS_DB_INDEX", value)
+
+    with pytest.raises(ValueError, match="MC_REDIS_DB_INDEX"):
+        _get_mooncake_redis_db_index("redis://redis:6379")
+
+
+def _mooncake_server_args(extra_config=None):
+    return SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=extra_config,
+        hicache_mem_layout="page_first",
+        page_size=256,
+        tp_size=2,
+        pp_size=1,
+        speculative_algorithm=None,
+        use_mla_backend=lambda: False,
+    )
+
+
+def test_mooncake_runtime_metadata_uses_env_config(monkeypatch):
+    from dynamo.sglang.register import _get_mooncake_runtime_data
+
+    monkeypatch.delenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MOONCAKE_CLIENT", raising=False)
+    monkeypatch.setenv("MOONCAKE_MASTER", "etcd://etcd-0:2379;etcd-1:2379")
+    monkeypatch.setenv("MOONCAKE_PROTOCOL", "rdma")
+    monkeypatch.setenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", "8gb")
+    monkeypatch.setenv("MC_STORE_CLUSTER_ID", "prod-cluster")
+    monkeypatch.setenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT", "tcp://mooncake-master:5557")
+
+    runtime_data = _get_mooncake_runtime_data(_mooncake_server_args())
+
+    assert runtime_data is not None
+    assert runtime_data["master_server_address"] == ("etcd://etcd-0:2379;etcd-1:2379")
+    assert runtime_data["cluster_id"] == "prod-cluster"
+    assert runtime_data["kv_events_endpoint"] == "tcp://mooncake-master:5557"
+
+
+def test_mooncake_runtime_metadata_publishes_redis_db_index(monkeypatch):
+    from dynamo.sglang.register import _get_mooncake_runtime_data
+
+    monkeypatch.delenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MOONCAKE_CLIENT", raising=False)
+    monkeypatch.setenv("MOONCAKE_MASTER", "redis://redis:6380")
+    monkeypatch.setenv("MC_REDIS_DB_INDEX", "11")
+
+    runtime_data = _get_mooncake_runtime_data(_mooncake_server_args())
+
+    assert runtime_data is not None
+    assert runtime_data["master_server_address"] == "redis://redis:6380"
+    assert runtime_data["redis_db_index"] == 11
+
+
+def test_mooncake_runtime_metadata_prefers_config_file_over_env(monkeypatch, tmp_path):
+    from dynamo.sglang.register import _get_mooncake_runtime_data
+
+    config_path = tmp_path / "mooncake.json"
+    config_path.write_text(
+        json.dumps({"master_server_address": "k8s://dynamo/mooncake-master"})
+    )
+    monkeypatch.setenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MOONCAKE_MASTER", "etcd://ignored:2379")
+
+    runtime_data = _get_mooncake_runtime_data(_mooncake_server_args())
+
+    assert runtime_data is not None
+    assert runtime_data["master_server_address"] == ("k8s://dynamo/mooncake-master")
+
+
+def test_mooncake_runtime_metadata_prefers_extra_config_over_file_and_env(
+    monkeypatch, tmp_path
+):
+    from dynamo.sglang.register import _get_mooncake_runtime_data
+
+    config_path = tmp_path / "mooncake.json"
+    config_path.write_text(
+        json.dumps({"master_server_address": "k8s://ignored/file-master"})
+    )
+    monkeypatch.setenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MOONCAKE_MASTER", "etcd://ignored:2379")
+    extra_config = json.dumps(
+        {
+            "master_server_address": "etcd://extra-config:2379",
+            "tp_lcm_size": 4,
+        }
+    )
+
+    runtime_data = _get_mooncake_runtime_data(
+        _mooncake_server_args(extra_config=extra_config)
+    )
+
+    assert runtime_data is not None
+    assert runtime_data["master_server_address"] == "etcd://extra-config:2379"
+    assert runtime_data["tp_lcm_size"] == 4
+
+
+def test_mooncake_runtime_metadata_keeps_layout_when_config_resolution_fails(
+    monkeypatch,
+):
+    from dynamo.sglang.register import _get_mooncake_runtime_data
+
+    monkeypatch.delenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MOONCAKE_CLIENT", raising=False)
+    monkeypatch.delenv("MOONCAKE_MASTER", raising=False)
+    monkeypatch.setenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT", "tcp://fallback:5557")
+
+    runtime_data = _get_mooncake_runtime_data(_mooncake_server_args())
+
+    assert runtime_data is not None
+    assert runtime_data["page_size"] == 256
+    assert runtime_data["kv_events_endpoint"] == "tcp://fallback:5557"
+    assert runtime_data["master_server_address"] is None
+    assert runtime_data["cluster_id"] is None
+    assert runtime_data["redis_db_index"] is None
+
+
+def test_mooncake_runtime_metadata_keeps_layout_when_redis_config_is_invalid(
+    monkeypatch,
+):
+    from dynamo.sglang.register import _get_mooncake_runtime_data
+
+    monkeypatch.delenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MOONCAKE_CLIENT", raising=False)
+    monkeypatch.setenv("MOONCAKE_MASTER", "redis://redis:6379")
+    monkeypatch.setenv("MC_REDIS_DB_INDEX", "invalid")
+
+    runtime_data = _get_mooncake_runtime_data(_mooncake_server_args())
+
+    assert runtime_data is not None
+    assert runtime_data["page_size"] == 256
+    assert runtime_data["master_server_address"] is None
+    assert runtime_data["cluster_id"] is None
+    assert runtime_data["redis_db_index"] is None
+
+
+def test_mooncake_runtime_metadata_keeps_layout_without_config_import(monkeypatch):
+    from dynamo.sglang import register
+
+    monkeypatch.setattr(register, "MooncakeStoreConfig", None)
+    monkeypatch.setattr(
+        register, "_MOONCAKE_CONFIG_IMPORT_ERROR", "unavailable in test"
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(_mooncake_server_args())
+
+    assert runtime_data is not None
+    assert runtime_data["page_size"] == 256
+    assert runtime_data["master_server_address"] is None
+    assert runtime_data["cluster_id"] is None
+    assert runtime_data["redis_db_index"] is None
+
+
+@pytest.mark.parametrize(
     "allow_auto_truncate, validate_total_tokens, reserved_tokens, expected",
     [
         (

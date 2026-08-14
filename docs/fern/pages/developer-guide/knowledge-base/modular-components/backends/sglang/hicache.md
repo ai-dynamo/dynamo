@@ -148,6 +148,8 @@ You also need:
 - A Mooncake master with KV events enabled. This requires the event publisher introduced by [kvcache-ai/Mooncake#2214](https://github.com/kvcache-ai/Mooncake/pull/2214) until that change is available in a Mooncake release.
 - A Mooncake KV event endpoint reachable from the Dynamo frontend host. Worker-side Mooncake config (event endpoint, page size, TP/PP layout, and split-head layout) is published automatically through each worker's registration metadata.
 
+When the Mooncake HA locator uses Kubernetes, the operator-generated frontend service account can read Leases in the DynamoGraphDeployment namespace. A `k8s://<namespace>/<lease>` locator that targets another namespace additionally requires a Role and RoleBinding in that namespace granting the frontend service account `get` access to the Lease.
+
 ## Setup
 
 > [!WARNING]

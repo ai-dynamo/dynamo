@@ -5,11 +5,26 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+try:
+    from sglang.srt.environ import envs as sglang_envs
+    from sglang.srt.mem_cache.storage.mooncake_store.mooncake_store import (
+        MooncakeStoreConfig,
+    )
+except ImportError as e:
+    # Mooncake is optional within the SGLang backend. Keep registration usable for
+    # non-Mooncake deployments and preserve pre-HA metadata when it is unavailable.
+    sglang_envs = None  # type: ignore[assignment]
+    MooncakeStoreConfig = None  # type: ignore[assignment, misc]
+    _MOONCAKE_CONFIG_IMPORT_ERROR: Optional[str] = str(e)
+else:
+    _MOONCAKE_CONFIG_IMPORT_ERROR = None
 
 from dynamo._core import Endpoint
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
@@ -262,6 +277,30 @@ def _parse_hicache_storage_extra_config(
     return {}
 
 
+def _get_mooncake_cluster_id() -> str:
+    value = os.getenv("MC_STORE_CLUSTER_ID")
+    return value if value is not None and value != "" else "mooncake"
+
+
+def _get_mooncake_redis_db_index(master_server_address: Optional[str]) -> Optional[int]:
+    if not master_server_address or not master_server_address.startswith("redis://"):
+        return None
+
+    raw_value = os.getenv("MC_REDIS_DB_INDEX")
+    if raw_value is None or raw_value == "":
+        return 0
+
+    # Match Mooncake's std::stoll behavior: leading whitespace/sign are accepted and
+    # parsing stops after the initial digit run instead of requiring full consumption.
+    match = re.match(r"^[ \t\n\r\f\v]*([+-]?[0-9]+)", raw_value)
+    if match is None:
+        raise ValueError(f"Invalid MC_REDIS_DB_INDEX={raw_value!r}")
+    db_index = int(match.group(1))
+    if not 0 <= db_index <= 255:
+        raise ValueError(f"MC_REDIS_DB_INDEX must be between 0 and 255, got {db_index}")
+    return db_index
+
+
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
     if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
         return None
@@ -307,6 +346,48 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     if not isinstance(extra_backend_tag, str) or not extra_backend_tag:
         extra_backend_tag = None
 
+    master_server_address = None
+    cluster_id = None
+    redis_db_index = None
+    if MooncakeStoreConfig is None or sglang_envs is None:
+        logging.warning(
+            "MooncakeStoreConfig import unavailable; omitting HA runtime metadata: %s",
+            _MOONCAKE_CONFIG_IMPORT_ERROR,
+        )
+    else:
+        # Publish the locator actually used by Mooncake so the router can follow
+        # the active master when subscribing to an HA cluster's KV events. Failures
+        # only omit these optional fields; the layout below remains usable by the
+        # pre-HA direct-endpoint path.
+        try:
+            if extra_config and (
+                extra_config.get("master_server_address") is not None
+                or extra_config.get("client_server_address") is not None
+            ):
+                mooncake_config = MooncakeStoreConfig.load_from_extra_config(
+                    extra_config
+                )
+            elif sglang_envs.SGLANG_HICACHE_MOONCAKE_CONFIG_PATH.is_set():
+                mooncake_config = MooncakeStoreConfig.from_file()
+            else:
+                mooncake_config = MooncakeStoreConfig.load_from_env()
+
+            master_server_address = getattr(
+                mooncake_config, "master_server_address", None
+            )
+            if not isinstance(master_server_address, str) or not master_server_address:
+                master_server_address = None
+            redis_db_index = _get_mooncake_redis_db_index(master_server_address)
+            cluster_id = _get_mooncake_cluster_id()
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as e:
+            logging.warning(
+                "Failed to resolve Mooncake HA runtime metadata; using the configured "
+                "KV event endpoint: %s",
+                e,
+            )
+            master_server_address = None
+            redis_db_index = None
+
     return {
         "backend": "mooncake",
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
@@ -318,6 +399,9 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
+        "master_server_address": master_server_address,
+        "cluster_id": cluster_id,
+        "redis_db_index": redis_db_index,
     }
 
 
