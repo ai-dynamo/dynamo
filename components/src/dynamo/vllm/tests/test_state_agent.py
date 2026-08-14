@@ -14,6 +14,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator"),
 ]
 
 
