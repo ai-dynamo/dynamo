@@ -12,7 +12,9 @@ Checks, for BOTH catalogs:
   4. Each entry validates against schema.json (uses the `jsonschema` package
      if importable; otherwise falls back to a required-top-level-keys check).
   5. Every `page:` path resolves to a real file under docs/.
-  6. Every deploy / perf / benchmark asset path resolves in the repo tree.
+  6. Every deploy / perf / benchmark asset path resolves in the repo tree;
+     declared recipe-specific images are exact image fields in an owning
+     deploy asset and are not declared by another recipe.
   7. Cross-catalog referential integrity: recipe related_benchmarks ids exist
      in the benchmark index; benchmark related_recipes ids exist in the recipe
      index (active OR deferred); benchmark promotion_candidate.deferred_recipe_id
@@ -32,6 +34,7 @@ Runnable from the repo root as:
 
 import json
 import os
+import re
 import sys
 
 # --- Locate repo root relative to this script ---------------------------------
@@ -311,6 +314,10 @@ def load_yaml(path):
 ERRORS = []
 WARNINGS = []
 
+_IMAGE_FIELD_RE = re.compile(
+    r"""^\s*(?:-\s*)?image:\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*(?:#.*)?$"""
+)
+
 
 def err(msg):
     ERRORS.append(msg)
@@ -450,19 +457,61 @@ def check_assets_recipe(obj, label):
     check_recipe_specific_images(obj, deploy_assets, label)
 
 
+def _deploy_images(path):
+    images = set()
+    with open(path, "r") as f:
+        for line in f:
+            match = _IMAGE_FIELD_RE.match(line)
+            if match:
+                images.add(next(value for value in match.groups() if value is not None))
+    return images
+
+
 def check_recipe_specific_images(obj, deploy_assets, label):
-    configured_images = (obj.get("artifacts") or {}).get("recipe_specific_images") or []
-    deploy_documents = []
+    artifacts = obj.get("artifacts")
+    if artifacts is None:
+        return
+    if not isinstance(artifacts, dict):
+        err("[%s] artifacts must be an object" % label)
+        return
+    configured_images = artifacts.get("recipe_specific_images")
+    if configured_images is None:
+        return
+    if not isinstance(configured_images, list):
+        err("[%s] artifacts.recipe_specific_images must be an array" % label)
+        return
+    deployed_images = set()
     for asset in deploy_assets:
         path = resolve_repo_path(asset)
         if os.path.isfile(path):
-            with open(path, "r") as f:
-                deploy_documents.append(f.read())
+            deployed_images.update(_deploy_images(path))
     for image in configured_images:
-        if not any(image in document for document in deploy_documents):
+        if image not in deployed_images:
             err(
                 "[%s] recipe-specific image is not referenced by a deploy asset: %s"
                 % (label, image)
+            )
+
+
+def check_recipe_specific_image_ownership(entries):
+    owners = {}
+    for recipe_id, obj in entries.items():
+        if not isinstance(obj, dict):
+            continue
+        artifacts = obj.get("artifacts")
+        if not isinstance(artifacts, dict):
+            continue
+        configured_images = artifacts.get("recipe_specific_images")
+        if not isinstance(configured_images, list):
+            continue
+        for image in configured_images:
+            if isinstance(image, str):
+                owners.setdefault(image, set()).add(recipe_id)
+    for image, recipe_ids in sorted(owners.items()):
+        if len(recipe_ids) > 1:
+            err(
+                "[recipes] recipe-specific image declared by multiple recipes: %s (%s)"
+                % (image, ", ".join(sorted(recipe_ids)))
             )
 
 
@@ -520,6 +569,7 @@ def main():
         validate_against_schema(obj, rec_schema, label)
         check_page(obj, label)
         check_assets_recipe(obj, label)
+    check_recipe_specific_image_ownership(rec_entries)
 
     for fid, obj in sorted(ben_entries.items()):
         if not isinstance(obj, dict):
