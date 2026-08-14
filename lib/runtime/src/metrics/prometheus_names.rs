@@ -749,7 +749,7 @@ pub mod transport {
         pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
         pub const ERRORS_TOTAL: &str = "tcp_errors_total";
         pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
-        /// Response-server accept failures that triggered a file-descriptor-exhaustion
+        /// Response-server accept failures that triggered a descriptor- or memory-exhaustion
         /// backoff sleep; counts per failed accept, not per backoff episode
         pub const ACCEPT_BACKOFF_TOTAL: &str = "tcp_accept_backoff_total";
     }

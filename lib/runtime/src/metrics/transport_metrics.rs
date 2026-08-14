@@ -39,15 +39,16 @@ pub static TCP_ERRORS_TOTAL: Lazy<Counter> = Lazy::new(|| {
     .expect("tcp_errors_total counter")
 });
 
-/// Incremented once per `listener.accept()` failure with `EMFILE`/`ENFILE` — that is,
-/// per failed accept while the process is at its file-descriptor ceiling, not once per
-/// backoff episode. A single episode of exhaustion therefore advances this counter many
-/// times, which is what makes it usable as a rate. Alertable signal for the condition
-/// described in <https://github.com/ai-dynamo/dynamo/issues/11822>.
+/// Incremented once per `listener.accept()` failure with `EMFILE`, `ENFILE`, `ENOBUFS`, or
+/// `ENOMEM` — that is, per failed accept while the process or kernel is out of file
+/// descriptors or memory, not once per backoff episode. A single episode of exhaustion
+/// therefore advances this counter many times, which is what makes it usable as a rate.
+/// Alertable signal for the condition described in
+/// <https://github.com/ai-dynamo/dynamo/issues/11822>.
 pub static TCP_ACCEPT_BACKOFF_TOTAL: Lazy<Counter> = Lazy::new(|| {
     Counter::new(
         transport_metric_name(transport::tcp::ACCEPT_BACKOFF_TOTAL),
-        "Total TCP response-server accept failures caused by file-descriptor exhaustion",
+        "Total TCP response-server accept failures caused by descriptor or memory exhaustion",
     )
     .expect("tcp_accept_backoff_total counter")
 });

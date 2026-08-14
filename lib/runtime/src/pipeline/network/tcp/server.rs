@@ -598,7 +598,8 @@ impl ResponseService for TcpStreamServer {
     }
 }
 
-/// First retry delay applied after an `EMFILE`/`ENFILE` accept failure.
+/// First retry delay applied after a descriptor- or memory-exhaustion accept
+/// failure (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`).
 const ACCEPT_BACKOFF_INITIAL_DELAY: Duration = Duration::from_millis(5);
 /// Ceiling the retry delay saturates at, so the listener keeps polling often
 /// enough to notice recovery while no longer spinning.
@@ -609,8 +610,9 @@ const ACCEPT_BACKOFF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// How the listener loop must treat a failed `accept()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AcceptFailure {
-    /// The process or the host is out of file descriptors (`EMFILE`/`ENFILE`).
-    /// Retrying immediately cannot succeed, so the loop must back off.
+    /// The process or the host is out of file descriptors or kernel memory
+    /// (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`). Retrying immediately cannot
+    /// succeed, so the loop must back off.
     Exhaustion,
     /// Anything else — a per-connection error that the client is expected to
     /// retry. Keeps the historical warn-and-retry-immediately behavior.
@@ -664,15 +666,24 @@ impl Default for AcceptBackoff {
 }
 
 impl AcceptBackoff {
-    /// Classify an `accept()` error. Only file-descriptor exhaustion gets the
-    /// backoff treatment; everything else stays on the pre-existing path so
-    /// genuinely unexpected failures are not hidden or slowed down.
+    /// Classify an `accept()` error. Only descriptor or kernel-memory exhaustion
+    /// gets the backoff treatment; everything else stays on the pre-existing
+    /// path so genuinely unexpected failures are not hidden or slowed down.
     fn classify(err: &std::io::Error) -> AcceptFailure {
         #[cfg(unix)]
         {
-            // `std::io::ErrorKind` has no stable variant for either errno, so the
-            // raw value is the portable-with-cfg way to recognize them.
-            if matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) {
+            // `std::io::ErrorKind` has no stable variant for any of these
+            // errnos, so the raw value is the portable-with-cfg way to
+            // recognize them.
+            //
+            // `EMFILE`/`ENFILE`: the process or host is out of file descriptors.
+            // `ENOBUFS`/`ENOMEM`: the kernel is out of network buffers or
+            // memory for the socket. All four make an immediate retry
+            // deterministic, so they get the backoff path.
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
+            ) {
                 return AcceptFailure::Exhaustion;
             }
         }
@@ -769,7 +780,7 @@ async fn handle_accept_error(err: &std::io::Error, backoff: &mut AcceptBackoff) 
                     error = %err,
                     retry_delay_ms = action.delay.as_millis() as u64,
                     suppressed_failures = suppressed,
-                    "tcp accept failed: out of file descriptors; backing off before retry"
+                    "tcp accept failed: out of file descriptors or kernel memory; backing off before retry"
                 );
             }
             time::sleep(action.delay).await;
@@ -2508,6 +2519,22 @@ mod tests {
     #[cfg(unix)]
     fn emfile_error() -> std::io::Error {
         std::io::Error::from_raw_os_error(libc::EMFILE)
+    }
+
+    /// All four exhaustion errnos — `EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM` —
+    /// must classify as `Exhaustion`. Missing any one sends that error down the
+    /// immediate-retry path, reinstating the busy loop for that failure mode.
+    #[cfg(unix)]
+    #[test]
+    fn accept_backoff_classifies_all_exhaustion_errnos() {
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            let err = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(
+                AcceptBackoff::classify(&err),
+                AcceptFailure::Exhaustion,
+                "errno {errno} must classify as exhaustion"
+            );
+        }
     }
 
     /// Consecutive exhaustion failures must produce a strictly growing delay
