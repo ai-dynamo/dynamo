@@ -350,7 +350,7 @@ impl pb::control_server::Control for FakeVllm {
 }
 
 fn rl_control_unavailable() -> Status {
-    Status::failed_precondition("RL controls are not enabled in this protocol-only test server")
+    Status::unimplemented("RL control RPCs are not implemented in this protocol-only test server")
 }
 
 fn model_info() -> pb::ModelInfo {

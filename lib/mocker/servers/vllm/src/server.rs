@@ -415,7 +415,7 @@ impl pb::control_server::Control for VllmMockerService {
 }
 
 fn rl_control_unavailable() -> Status {
-    Status::failed_precondition("the vLLM mocker does not advertise RL control capabilities")
+    Status::unimplemented("the vLLM mocker does not implement RL control RPCs")
 }
 
 fn checked_token(signal: &OutputSignal) -> BoxedStatusResult<u32> {
