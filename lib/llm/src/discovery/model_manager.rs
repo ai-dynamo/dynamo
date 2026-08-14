@@ -1880,8 +1880,9 @@ impl ModelManager {
         .await
     }
 
+    /// Construct a KV chooser with a selector resolved by the router host at startup.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn kv_chooser_for_with_selector<Sel>(
+    pub async fn kv_chooser_for_with_selector<Sel>(
         &self,
         endpoint: &Endpoint,
         kv_cache_block_size: u32,

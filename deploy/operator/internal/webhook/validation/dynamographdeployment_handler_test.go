@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -101,6 +102,18 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD.Spec.BackendFramework = sglangBackendFramework
 		_, err := handler.ValidateUpdate(ctx, oldDGD, newDGD)
 		assertBetaValidationErrors(t, err, []string{`spec.backendFramework: Invalid value: "sglang": is immutable and cannot be changed after creation`})
+	})
+
+	t.Run("missing operator identity does not block legacy provider materialization", func(t *testing.T) {
+		oldDGD := newBetaDGDForValidation()
+		newDGD := oldDGD.DeepCopy()
+		newDGD.Annotations = map[string]string{
+			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+		}
+		unconfiguredHandler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
+		if _, err := unconfiguredHandler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
+			t.Fatalf("ValidateUpdate() error = %v, want optional operator identity to remain permissive", err)
+		}
 	})
 }
 
