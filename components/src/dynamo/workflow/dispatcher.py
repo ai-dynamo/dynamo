@@ -9,7 +9,13 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from dynamo.workflow.plan import ExecutionPlan, InlineBinding, RemoteBinding
+from dynamo.workflow.generate import GenerateEndpointClient
+from dynamo.workflow.plan import (
+    ExecutionPlan,
+    GenerateEndpointBinding,
+    InlineBinding,
+    RemoteBinding,
+)
 from dynamo.workflow.remote import RemoteStageClient
 from dynamo.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
 from dynamo.workflow.types import StageContract, WorkflowValidationError
@@ -119,10 +125,30 @@ class StageDispatcher:
 
         clients: dict[str, RemoteStageInvoker] = {}
         for endpoint_id in sorted(endpoint_ids):
+            bindings = [
+                binding
+                for binding in plan.bindings.values()
+                if isinstance(binding, RemoteBinding)
+                and binding.endpoint_id == endpoint_id
+            ]
+            protocols = {
+                GenerateEndpointBinding
+                if isinstance(binding, GenerateEndpointBinding)
+                else RemoteBinding
+                for binding in bindings
+            }
+            if len(protocols) != 1:
+                raise WorkflowValidationError(
+                    f"remote endpoint {endpoint_id!r} cannot mix stage protocols"
+                )
             endpoint = runtime.endpoint(endpoint_id)
             client = await endpoint.client()
             await client.wait_for_instances()
-            clients[endpoint_id] = RemoteStageClient(client)
+            clients[endpoint_id] = (
+                GenerateEndpointClient(client)
+                if protocols == {GenerateEndpointBinding}
+                else RemoteStageClient(client)
+            )
         return cls(plan, inline_runners, clients)
 
     async def call(
