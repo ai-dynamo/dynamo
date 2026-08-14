@@ -9,7 +9,10 @@ from unittest.mock import MagicMock
 import pytest
 
 try:
-    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+    from dynamo.common.protocols.audio_protocol import (
+        AudioNvExt,
+        NvCreateAudioSpeechRequest,
+    )
     from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni import audio_handler as audio_handler_module
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
@@ -224,12 +227,27 @@ class TestEngineInputsFromAudio:
         stage.model_stage = "diffusion"
         handler.engine_client.stage_list = [stage]
 
-        req = NvCreateAudioSpeechRequest(input="Hello world")
+        req = NvCreateAudioSpeechRequest(
+            input="Hello world",
+            nvext=AudioNvExt(supports_audio_chunking=True),
+        )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
         assert inputs.sampling_params_list is None
         assert inputs.stream_audio is True
+
+    @pytest.mark.asyncio
+    async def test_old_frontend_gets_complete_response(self):
+        """Workers aggregate audio unless the frontend advertises chunk support."""
+        handler = _make_audio_handler()
+        handler.engine_client.stage_list = None
+
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hello")
+        )
+
+        assert inputs.stream_audio is False
 
     @pytest.mark.asyncio
     async def test_empty_input_rejected(self):
@@ -243,7 +261,11 @@ class TestEngineInputsFromAudio:
         """Speed from request is stored in EngineInputs."""
         handler = _make_audio_handler()
         handler.engine_client.stage_list = None  # non-TTS path
-        req = NvCreateAudioSpeechRequest(input="hello", speed=2.0)
+        req = NvCreateAudioSpeechRequest(
+            input="hello",
+            speed=2.0,
+            nvext=AudioNvExt(supports_audio_chunking=True),
+        )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.speed == 2.0
         assert inputs.stream_audio is False
@@ -261,7 +283,11 @@ class TestEngineInputsFromAudio:
         handler.engine_client.stage_list = None
 
         inputs = await handler.build_engine_inputs(
-            NvCreateAudioSpeechRequest(input="hello", **request_args)
+            NvCreateAudioSpeechRequest(
+                input="hello",
+                nvext=AudioNvExt(supports_audio_chunking=True),
+                **request_args,
+            )
         )
 
         assert inputs.stream_audio is False

@@ -219,6 +219,16 @@ mod tests {
     }
 
     #[test]
+    fn audio_request_chunking_capability_round_trips() {
+        let json = r#"{"input":"hi","nvext":{"supports_audio_chunking":true}}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.nvext.and_then(|nvext| nvext.supports_audio_chunking),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn audio_request_data_source_none_omitted_from_serialization() {
         let req = NvCreateAudioSpeechRequest {
             input: "hi".into(),

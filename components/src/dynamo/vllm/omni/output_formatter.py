@@ -305,19 +305,21 @@ class AudioFormatter:
     async def format(
         self, stage_output: Any, request_id: str, **ctx: Any
     ) -> Dict[str, Any] | None:
+        stream_state = ctx.get("audio_stream_state")
+        aggregate_state = ctx.get("audio_aggregate_state")
         mm_output = (
             stage_output.multimodal_output
             if hasattr(stage_output, "multimodal_output")
             else stage_output
         )
         if is_empty_payload(mm_output):
+            if stream_state is not None or aggregate_state is not None:
+                return None
             return self._error_response(request_id, "No audio generated")
 
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
-        stream_state = ctx.get("audio_stream_state")
-        aggregate_state = ctx.get("audio_aggregate_state")
 
         try:
             start_time = time.time()
@@ -336,7 +338,7 @@ class AudioFormatter:
 
             encode_fmt = (output_format or "wav").lower()
             if stream_state is not None:
-                audio_bytes, media_type = await asyncio.to_thread(
+                audio_bytes, _ = await asyncio.to_thread(
                     self._encode_audio_chunk,
                     audio_np,
                     sample_rate,
