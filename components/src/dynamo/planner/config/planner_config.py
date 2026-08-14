@@ -588,7 +588,8 @@ class PlannerConfig(BaseModel):
         description=(
             "Maximum time in seconds for each Prometheus API request. This bounds "
             "metric collection when Prometheus is slow or unreachable so the planner "
-            "control loop can continue."
+            "control loop can continue. Failed requests are not retried within the "
+            "same collection cycle."
         ),
     )
 

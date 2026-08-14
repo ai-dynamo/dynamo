@@ -16,7 +16,7 @@
 import logging
 import math
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from prometheus_api_client import PrometheusApiClientException
@@ -224,8 +224,10 @@ def test_prometheus_client_configures_request_timeout(mock_prometheus_connect):
     mock_prometheus_connect.assert_called_once_with(
         url="http://localhost:9090",
         disable_ssl=True,
+        retry=ANY,
         timeout=2.5,
     )
+    assert mock_prometheus_connect.call_args.kwargs["retry"].total == 0
 
 
 def test_get_average_metric_none_result():

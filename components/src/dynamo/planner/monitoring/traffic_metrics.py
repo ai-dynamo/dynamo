@@ -23,6 +23,7 @@ from prometheus_api_client import PrometheusApiClientException, PrometheusConnec
 from pydantic import BaseModel, ValidationError
 from requests import ConnectionError as RequestsConnectionError
 from requests import Timeout as RequestsTimeout
+from urllib3.util.retry import Retry
 
 from dynamo import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -121,6 +122,7 @@ class PrometheusAPIClient:
         self.prom = PrometheusConnect(
             url=url,
             disable_ssl=not ssl_verify,
+            retry=Retry(total=0),
             timeout=request_timeout_seconds,
         )
         if bearer_token:
