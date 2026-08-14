@@ -6,7 +6,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from dynamo.workflow import Workflow
+from dynamo.workflow import ValueSpec, Workflow
 from examples.custom_backend.user_ensemble.stages import (
     DummyClassifier,
     EncoderStage,
@@ -16,16 +16,16 @@ from examples.custom_backend.user_ensemble.stages import (
 
 def define_workflow() -> Workflow:
     workflow = Workflow("encoder-classifier-llm")
-    request = workflow.input("request", type="json")
-    encoder = workflow.stage("encoder", EncoderStage, request=request)
+    request = workflow.input("request", ValueSpec(type="json"))
+    encoder = workflow.stage("encoder", EncoderStage.contract, request=request)
     classifier = workflow.stage(
         "classifier",
-        DummyClassifier,
+        DummyClassifier.contract,
         encoder_features=encoder.encoder_features,
     )
     generator = workflow.stage(
         "generator",
-        StockVllmGenerator,
+        StockVllmGenerator.contract,
         request=request,
         encoder_features=encoder.encoder_features,
         encoder_metadata=encoder.encoder_metadata,
