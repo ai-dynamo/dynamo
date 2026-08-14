@@ -2886,7 +2886,14 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         if max_model_len < 3:
             return 0
-        min_blocks_per_request = self._bench_blocks_per_req(2)
+        # The smallest steady decode request has two resident main-model
+        # tokens, then allocates one new token plus speculative lookahead.
+        min_blocks_per_request = self._bench_blocks_per_req(
+            min(
+                3 + getattr(self, "num_lookahead_tokens", 0),
+                max_model_len,
+            )
+        )
         if min_blocks_per_request < 1:
             feasible_max_batch = max_num_running_reqs
         else:
@@ -2945,19 +2952,23 @@ class InstrumentedScheduler(AsyncScheduler):
         except ValueError:
             return False
         # A decode point admits at max(1, ctx-1) and measures its steady step
-        # one position later, so a request occupies max(ctx, 2) + 1 slots and
-        # the runner's post-step bookkeeping writes through slot
-        # max(ctx, 2) + 2, which must stay within the negotiated
-        # max_model_len (ctx + 2 for the ordinary ctx >= 2 case; one extra
-        # slot for clamped ctx = 1 entries, which run one token deeper than
-        # their nominal coordinate).
+        # one position later. The steady allocation reserves one new token
+        # plus speculative lookahead after max(ctx, 2) resident tokens. The
+        # runner's post-step bookkeeping writes through slot max(ctx, 2) + 2,
+        # which must stay within the negotiated max_model_len.
         max_model_len = self._bench_capacity_limit("max_model_len")
         if any(
             max(context_len, 2) + 2 > max_model_len for context_len in context_lengths
         ):
             return False
+        lookahead_tokens = getattr(self, "num_lookahead_tokens", 0)
         required_blocks = sum(
-            self._bench_blocks_per_req(max(context_len, 2) + 1)
+            self._bench_blocks_per_req(
+                min(
+                    max(context_len, 2) + 1 + lookahead_tokens,
+                    max_model_len,
+                )
+            )
             for context_len in context_lengths
         )
         return required_blocks <= self._bench_grid_usable_blocks(

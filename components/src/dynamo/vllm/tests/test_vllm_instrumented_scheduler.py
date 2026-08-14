@@ -1502,6 +1502,7 @@ def _grid_stub_with_kv_capacity(num_gpu_blocks: int, block_size: int):
     stub.block_size = block_size
     stub.max_model_len = 256
     stub.max_num_scheduled_tokens = 10_000
+    stub.num_lookahead_tokens = 0
     # Generous so the KV cap (not max_num_running_reqs) drives the boundary.
     stub.max_num_running_reqs = 10_000
     stub._bench_decode_capture_sizes = [8]
@@ -1551,6 +1552,18 @@ def test_decode_grid_first_ctx_yields_block_aligned_capacity():
     assert not InstrumentedScheduler._bench_decode_point_feasible(
         stub, 50, 50 * block_size
     )
+
+
+def test_decode_grid_reserves_speculative_lookahead():
+    """The feasibility check must match steady-step slot allocation."""
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=5, block_size=4)
+    stub.num_lookahead_tokens = 2
+
+    # One block is reserved as the null sentinel, leaving four. At the
+    # minimum context, each request needs ceil((2 + 1 + 2) / 4) == 2 blocks.
+    assert InstrumentedScheduler._bench_decode_feasible_max_batch_size(stub) == 2
+    assert InstrumentedScheduler._bench_decode_point_feasible(stub, 2, 4)
+    assert not InstrumentedScheduler._bench_decode_point_feasible(stub, 3, 6)
 
 
 def test_decode_grid_reserves_padding_and_sample_under_model_length():
