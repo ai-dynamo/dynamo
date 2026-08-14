@@ -112,11 +112,7 @@ pub struct KvStateAttachmentOwner {
 #[pymethods]
 impl KvStateAttachmentOwner {
     #[new]
-    fn new(
-        endpoint: Endpoint,
-        worker_id: u64,
-        descriptors: &Bound<'_, PyAny>,
-    ) -> PyResult<Self> {
+    fn new(endpoint: Endpoint, worker_id: u64, descriptors: &Bound<'_, PyAny>) -> PyResult<Self> {
         let inputs: Vec<AttachmentDescriptorInput> =
             pythonize::depythonize(descriptors).map_err(to_pyerr)?;
         let descriptors = inputs
