@@ -631,6 +631,7 @@ struct MockEngineArgsSerde {
     planner_profile_data: OptionalConfigValue<PathBuf>,
     aic_backend: OptionalConfigValue<String>,
     aic_system: OptionalConfigValue<String>,
+    aic_systems_path: OptionalConfigValue<String>,
     aic_backend_version: OptionalConfigValue<String>,
     aic_tp_size: OptionalConfigValue<usize>,
     aic_model_path: OptionalConfigValue<String>,
@@ -788,6 +789,12 @@ pub struct MockEngineArgs {
     #[serde(skip)]
     #[builder(default = "None")]
     pub aic_system: Option<String>,
+
+    /// Optional AIC systems root containing YAML system specs and perf DB data.
+    /// When set, native AIC timing uses this path instead of the bundled DB.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_systems_path: Option<String>,
 
     /// AIC backend engine version (e.g., "0.12.0" for vLLM, "0.5.6.post2" for SGLang).
     /// If None, uses the default version for the backend.
@@ -1238,6 +1245,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(aic_system) = compat.aic_system.into_nullable() {
             builder = builder.aic_system(aic_system);
+        }
+        if let Some(aic_systems_path) = compat.aic_systems_path.into_nullable() {
+            builder = builder.aic_systems_path(aic_systems_path);
         }
         if let Some(aic_backend_version) = compat.aic_backend_version.into_nullable() {
             builder = builder.aic_backend_version(aic_backend_version);
@@ -1735,6 +1745,7 @@ mod tests {
         });
         payload["max_model_len"] = serde_json::json!(args.max_model_len);
         payload["g1_backend"] = serde_json::json!(args.g1_backend);
+        payload["aic_systems_path"] = serde_json::json!("/opt/aic-systems");
 
         let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
 
@@ -1743,6 +1754,10 @@ mod tests {
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
         assert_eq!(restored.g1_backend, Some(G1Backend::Native));
+        assert_eq!(
+            restored.aic_systems_path.as_deref(),
+            Some("/opt/aic-systems")
+        );
         assert_eq!(
             restored.kv_transfer_timing_mode,
             KvTransferTimingMode::FullPrompt

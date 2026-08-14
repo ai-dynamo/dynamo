@@ -113,6 +113,7 @@ fn build_rust_engine(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
     // Speculative (MTP) decoding: aic-core models the cost of one verification
     // iteration from `nextn`. Dynamo retains the per-position acceptance rates
@@ -150,7 +151,7 @@ fn build_rust_engine(
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}"
+        "{backend_name}|{system}|{systems_path:?}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
@@ -201,6 +202,9 @@ fn build_rust_engine(
     if let Some(value) = comm_dtype {
         builder = builder.comm_quant_mode(value);
     }
+    if let Some(value) = systems_path {
+        builder = builder.systems_path(value);
+    }
     let engine = builder.build().map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!(
             "AIC: failed to build the Rust engine for {model_path} / {system} / {backend_name}: {e}"
@@ -233,6 +237,7 @@ pub(super) fn create_aic_callback(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<Arc<dyn AicCallback>> {
     #[cfg(feature = "aic-forward-pass")]
     {
@@ -253,6 +258,7 @@ pub(super) fn create_aic_callback(
             comm_dtype,
             nextn,
             nextn_accept_rates,
+            systems_path,
         )?;
         Ok(Arc::new(RustAicCallback { engine }))
     }
@@ -283,6 +289,7 @@ pub(super) fn create_aic_prefill_load_estimator(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<Arc<dyn PrefillLoadEstimator>> {
     #[cfg(feature = "aic-forward-pass")]
     {
@@ -303,6 +310,7 @@ pub(super) fn create_aic_prefill_load_estimator(
             comm_dtype,
             nextn,
             nextn_accept_rates,
+            systems_path,
         )?;
         Ok(Arc::new(RustAicCallback { engine }))
     }
@@ -334,6 +342,7 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     fmha_dtype: Option<&str>,
     kv_cache_dtype: Option<&str>,
     comm_dtype: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<usize> {
     let module = py.import("dynamo._internal.aic")?;
     let kwargs = PyDict::new(py);
@@ -355,6 +364,7 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     kwargs.set_item("fmha_dtype", fmha_dtype)?;
     kwargs.set_item("kv_cache_dtype", kv_cache_dtype)?;
     kwargs.set_item("comm_dtype", comm_dtype)?;
+    kwargs.set_item("systems_path", systems_path)?;
     let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;
     blocks.extract()
 }

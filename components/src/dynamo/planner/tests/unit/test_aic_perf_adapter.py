@@ -106,6 +106,7 @@ def _config(
     dp: int = 1,
     min_observations: int = 5,
     speculative_nextn: int = 0,
+    systems_path: str | None = None,
 ) -> PlannerConfig:
     pick = PickedParallelConfig(dp=dp)
     return PlannerConfig.model_construct(
@@ -113,6 +114,7 @@ def _config(
             hf_id="Qwen/Qwen3-0.6B",
             system="h200_sxm",
             backend="vllm",
+            systems_path=systems_path,
             prefill_pick=pick,
             decode_pick=pick,
         ),
@@ -220,6 +222,39 @@ def test_missing_capability_fields_use_engine_query_defaults(fake_engine_factory
     assert limits.max_num_batched_tokens == 2048
     assert limits.max_num_seqs == aic_adapter.DEFAULT_MAX_NUM_SEQS
     assert limits.max_kv_tokens == aic_adapter.DEFAULT_MAX_KV_TOKENS
+
+
+def test_aic_systems_path_reaches_rust_config_and_model_identity(
+    fake_engine_factory,
+):
+    fake = _FakeEngineModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_engine(fake_engine_factory, fake)
+
+    local = PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(systems_path="/opt/aic-systems"),
+        capabilities=_caps(),
+    )
+    assert fake_engine_factory.last_kwargs is not None
+    assert (
+        fake_engine_factory.last_kwargs["aic_config"]["systems_path"]
+        == "/opt/aic-systems"
+    )
+
+    bundled = PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(systems_path=None),
+        capabilities=_caps(),
+    )
+    assert local._model_key() != bundled._model_key()
 
 
 @pytest.mark.parametrize(

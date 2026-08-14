@@ -248,6 +248,7 @@ class PlannerEnginePerfModel:
             "model_name": spec.hf_id,
             "system_name": spec.system,
             "backend": spec.backend,
+            "systems_path": spec.systems_path,
             "backend_version": spec.backend_version,
             "kv_block_size": (
                 self._capabilities.kv_cache_block_size
@@ -284,6 +285,7 @@ class PlannerEnginePerfModel:
                 spec.hf_id,
                 spec.backend,
                 spec.system,
+                spec.systems_path,
                 spec.backend_version,
                 spec.model_arch,
                 spec.weight_dtype,

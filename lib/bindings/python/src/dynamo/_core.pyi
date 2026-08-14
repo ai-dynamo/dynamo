@@ -1737,6 +1737,7 @@ class AicPerfConfig:
         aic_fmha_dtype: Optional[str] = None,
         aic_kv_cache_dtype: Optional[str] = None,
         aic_comm_dtype: Optional[str] = None,
+        aic_systems_path: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1918,6 +1919,7 @@ class MockEngineArgs:
         planner_profile_data: Optional[str | os.PathLike[str]] = None,
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
+        aic_systems_path: Optional[str] = None,
         aic_backend_version: Optional[str] = None,
         aic_tp_size: Optional[int] = None,
         aic_model_path: Optional[str] = None,
@@ -2061,6 +2063,12 @@ class MockEngineArgs:
     def aic_system(self, value: Optional[str]) -> None: ...
 
     @property
+    def aic_systems_path(self) -> Optional[str]: ...
+
+    @aic_systems_path.setter
+    def aic_systems_path(self, value: Optional[str]) -> None: ...
+
+    @property
     def aic_backend_version(self) -> Optional[str]: ...
 
     @aic_backend_version.setter
@@ -2181,6 +2189,7 @@ class MockEngineArgs:
         num_gpu_blocks: Optional[int] = None,
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
+        aic_systems_path: Optional[str] = None,
         aic_backend_version: Optional[str] = None,
         aic_tp_size: Optional[int] = None,
         aic_model_path: Optional[str] = None,
