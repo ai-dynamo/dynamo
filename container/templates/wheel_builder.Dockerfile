@@ -323,6 +323,24 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # No H.264 parser/decoder/encoder is enabled — H.264 is not built at all. Image
 # decode does not use ffmpeg (it goes through the Rust `image` crate), so no
 # still-image decoders are enabled here.
+# IAMF is disabled explicitly because the allowlist above does not reach it.
+# CONFIG_IAMFDEC lives in configure's CONFIG_EXTRA rather than COMPONENT_LIST, so
+# --disable-demuxers leaves it alone, and configure sets
+# mov_demuxer_suggest="iamfdec zlib" -- enabling the mov demuxer we do want pulls
+# the IAMF parser back in behind it. That compiles libavformat/iamf_parse.o, and
+# mov.c reaches mix_presentation_obu() through the iacb box handler.
+#
+# Nothing in Dynamo demuxes untrusted input with this build: every in-tree ffmpeg
+# call site is an encode (imageio.get_writer -> libvpx_vp9), and video decode goes
+# through PyNvVideoCodec/NVDEC, a separate library. This is defence in depth, and
+# it keeps an image inventory from reporting IAMF parser advisories against a
+# parser we never feed.
+#
+# The two greps are the point of the change: --disable-<name> for a CONFIG_EXTRA
+# entry is not a documented user-facing option, so assert the configure result
+# rather than assume the flag took. If a future ffmpeg stops accepting these, the
+# build fails here instead of silently shipping the parser again.
+#
 # The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
 # the `fd:` protocol on ffmpeg 8.x (not `pipe:`), so omitting it breaks the
 # imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
@@ -398,7 +416,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-parsers \
         --enable-parser=vp8,vp9 \
         --disable-protocols \
-        --enable-protocol=file,pipe,fd && \
+        --enable-protocol=file,pipe,fd \
+        --disable-iamfdec \
+        --disable-iamfenc && \
+    grep -q '^#define CONFIG_IAMFDEC 0$' config.h && \
+    grep -q '^#define CONFIG_IAMFENC 0$' config.h && \
     make -j$(nproc) && \
     make install && \
     # Compliance guard: fail the build if any royalty-bearing / HW codec surface
