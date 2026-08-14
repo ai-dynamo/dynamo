@@ -1001,12 +1001,10 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 // the engine only starts once its data-parallel ranks (the followers) have joined, so
 // gating the address on readiness would deadlock.
 //
-// The selector matches every pod carrying the component labels, so the Service only
-// resolves to exactly the Ray head while the component renders as one pod. The caller
-// is responsible for that: it emits this Service only for a single-replica, single-node
-// elastic-EP component. When the follower clique (Phase 4) lands it shares this
-// component label, so that change must narrow this selector to the leader role to keep
-// the Service leader-only.
+// The selector matches every pod carrying the component labels, so this resolves to
+// exactly the Ray head only while the component renders as one pod; the caller is
+// responsible for emitting it only then. A follower clique sharing the component label
+// would have to narrow this selector to the leader role.
 func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
 	// Copy the caller's metadata so the Service carries the component's labels and
 	// annotations without aliasing the caller's maps.
