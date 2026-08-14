@@ -85,6 +85,8 @@ spec:
             # injection depend on admission ordering.
             requests:
               nvidia.com/gpu: "1"
+              # 1 EFA NIC per GPU. p5.48xlarge exposes 32 NICs for 8 GPUs, but a
+              # TP=1 transport smoke test only needs one device per worker.
               vpc.amazonaws.com/efa: "1"
               ephemeral-storage: 8Gi
             limits:
@@ -95,6 +97,20 @@ spec:
     type: decode
     podTemplate:
       spec:
+        # Force prefill and decode onto different hosts. Without this they are
+        # routinely co-scheduled, and a same-node transfer can be served without
+        # the traffic ever crossing the fabric -- which would make every EFA
+        # assertion below pass on a deployment that never exercised EFA.
+        # The label values are the operator's own (`prefill`/`decode`); the
+        # plausible-looking `dynamo-component-type: worker` matches nothing.
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-graph-deployment-name: vllm-disagg-efa
+                  nvidia.com/dynamo-component-type: prefill
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:efa
@@ -128,6 +144,8 @@ spec:
           resources:
             requests:
               nvidia.com/gpu: "1"
+              # 1 EFA NIC per GPU. p5.48xlarge exposes 32 NICs for 8 GPUs, but a
+              # TP=1 transport smoke test only needs one device per worker.
               vpc.amazonaws.com/efa: "1"
               ephemeral-storage: 8Gi
             limits:

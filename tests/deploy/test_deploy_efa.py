@@ -28,7 +28,9 @@ tests/container/test_efa_image.py is the cheap per-image packaging gate and this
 is the functional one.
 """
 
+import json
 import logging
+import shlex
 import time
 from pathlib import Path
 
@@ -95,16 +97,18 @@ def validate_completion(response, expected_model: str) -> None:
 # so request a larger budget here to keep this single-completion test robust.
 EFA_MAX_TOKENS = 64
 
-# Substrings that prove NIXL registered memory regions with the EFA libfabric
-# provider (i.e. the KV-cache transfer actually used LIBFABRIC -> EFA). These
-# appear in the worker logs when FI_LOG_LEVEL>=info, e.g.:
-#   libfabric:1234:5678:efa:mr:efa_mr_reg_impl():...
-# See the test_efa_on_aws skill (Senthil's check #3) for the canonical signal.
+# NIXL states which backend it instantiated, per worker. Both strings were
+# observed directly: a deployment with backends:["LIBFABRIC"] removed logs
+# "Backend UCX was instantiated" (plus nixl_agent.cpp warning that EFA NICs were
+# detected but UCX was configured), and a correctly pinned one logs LIBFABRIC.
+# This is a positive statement of backend selection rather than an inference.
+NIXL_BACKEND_LIBFABRIC = "Backend LIBFABRIC was instantiated"
+NIXL_BACKEND_UCX = "Backend UCX was instantiated"
+
+# libfabric's own memory-registration lines (FI_LOG_LEVEL>=info). These pin the
+# transfer to the *efa* provider specifically -- choosing the LIBFABRIC backend
+# alone would not rule out libfabric selecting shm or tcp underneath.
 LIBFABRIC_EFA_MARKERS = ("efa:mr:", "efa_mr_reg")
-# If NIXL silently falls back to UCX (e.g. the kv-transfer-config lost the
-# LIBFABRIC backend), the worker logs the UCX rcache tuning line instead and
-# never emits the libfabric:efa:mr lines above.
-UCX_FALLBACK_MARKER = "Setting UCX_RCACHE_MAX_UNRELEASED"
 
 # NIXL Prometheus telemetry (enabled via NIXL_TELEMETRY_ENABLE=y in the manifest)
 # is exposed on this port inside each worker pod. We scrape it with
@@ -118,36 +122,48 @@ NIXL_TELEMETRY_PORT = 19090
 # so the rank-0-only telemetry limitation does not apply.
 NIXL_RX_BYTES_METRIC = "agent_rx_bytes"
 
+# The efa-node-exporter DaemonSet (monitoring namespace, hostNetwork, :9102)
+# publishes per-NIC Amazon EFA counters. Unlike agent_rx_bytes -- which is a
+# NIXL agent-level counter and increments identically whichever backend moved
+# the bytes -- these are read from the adapter, so a delta here is direct
+# evidence that traffic crossed EFA. Measured idle noise on an assigned NIC is
+# zero, and the delta matches agent_rx_bytes byte-for-byte.
+EFA_EXPORTER_PORT = 9102
+# decode issues RDMA READs; prefill serves them. Assert on the side that proves
+# each worker actually moved bytes over its own adapter.
+EFA_COUNTER_BY_ROLE = {
+    DECODE_SERVICE: "node_amazonefa_rdma_read_bytes",
+    PREFILL_SERVICE: "node_amazonefa_rdma_read_resp_bytes",
+}
 
-def _read_pod_logs(pod) -> str:
-    """Return the concatenated logs of every container in a pod.
 
-    Multi-container pods (worker + optional sidecar/init containers) reject
-    ``pod.logs()`` without an explicit ``container=``, so iterate the manifest's
-    containers like ManagedDeployment.get_pod_manifest_logs_metrics does.
+def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
+    """Return this pod's logs, including the previous container instance.
+
+    ``previous`` matters both ways: a worker that restarted during startup keeps
+    its EFA registration lines in the prior instance (gate would false-fail on a
+    healthy deployment), and a fallback that happened before a restart would
+    otherwise be invisible. ``tail_lines`` bounds memory -- FI_LOG_LEVEL=info is
+    extremely chatty and both workers' logs are held at once.
     """
-    container_names = []
-    try:
-        spec = pod.raw.get("spec", {}) if hasattr(pod, "raw") else {}
-        for c in (spec.get("initContainers") or []) + (spec.get("containers") or []):
-            if c.get("name"):
-                container_names.append(c["name"])
-    except Exception as e:  # noqa: BLE001 - diagnostics only
-        logger.debug("Failed to resolve containers for %s: %s", pod.name, e)
-
-    if not container_names:
-        container_names = [""]
-
     chunks = []
-    for container in container_names:
-        try:
-            lines = pod.logs(container=container) if container else pod.logs()
-            chunks.append("\n".join(lines))
-        except Exception as e:  # noqa: BLE001 - a container may have no logs yet
-            logger.debug(
-                f"Failed to fetch logs for {pod.name} "
-                f"container={container or '<default>'}: {e}"
-            )
+    spec = pod.raw.get("spec", {}) if hasattr(pod, "raw") else {}
+    containers = [c["name"] for c in (spec.get("containers") or []) if c.get("name")]
+    for container in containers or [""]:
+        for previous in (True, False):
+            kwargs = {"tail_lines": tail_lines, "previous": previous}
+            if container:
+                kwargs["container"] = container
+            try:
+                chunks.append("\n".join(pod.logs(**kwargs)))
+            except Exception as e:  # noqa: BLE001 - no previous instance is normal
+                logger.debug(
+                    "logs(previous=%s) unavailable for %s/%s: %s",
+                    previous,
+                    pod.name,
+                    container or "<default>",
+                    e,
+                )
     return "\n".join(chunks)
 
 
@@ -179,50 +195,52 @@ def log_nixl_layout(pod) -> None:
         logger.warning("Could not read NIXL layout from %s: %s", pod.name, e)
 
 
-def assert_nixl_used_libfabric(deployment: ManagedDeployment) -> None:
-    """Fail unless the worker logs prove NIXL used the LIBFABRIC/EFA backend.
+def assert_nixl_used_libfabric(worker_pods: dict) -> None:
+    """Every worker must have instantiated the LIBFABRIC backend, and no UCX.
 
-    This is the cheap "EFA fully enabled" proof: a successful disaggregated
-    completion shows KV transfer worked, and these log lines show it rode
-    LIBFABRIC -> EFA rather than silently falling back to UCX/TCP.
+    Evaluated per pod on purpose. Concatenating both workers' logs and asking
+    ``any()`` passes when only one side used EFA -- and one-sided fallback (say
+    decode landing without a usable EFA device) is exactly the regression this
+    test exists to catch.
     """
-    worker_pods = deployment.get_pods([DECODE_SERVICE, PREFILL_SERVICE])
-    all_pods = [p for pods in worker_pods.values() for p in pods]
-    assert all_pods, "No prefill/decode worker pods found to verify EFA usage"
+    verdicts = {}
+    for role, pods in worker_pods.items():
+        for pod in pods:
+            logs = _read_pod_logs(pod)
+            verdicts[f"{role}/{pod.name}"] = {
+                "libfabric_backend": NIXL_BACKEND_LIBFABRIC in logs,
+                "ucx_backend": NIXL_BACKEND_UCX in logs,
+                "efa_provider": any(m in logs for m in LIBFABRIC_EFA_MARKERS),
+            }
 
-    combined = "\n".join(_read_pod_logs(p) for p in all_pods)
+    assert verdicts, "No prefill/decode worker pods found to verify EFA usage"
+    for name, v in verdicts.items():
+        logger.info("NIXL backend verdict %s: %s", name, v)
 
-    found_libfabric = any(marker in combined for marker in LIBFABRIC_EFA_MARKERS)
-    saw_ucx_fallback = UCX_FALLBACK_MARKER in combined
-
-    assert found_libfabric, (
-        "EFA NOT confirmed: worker logs contain no libfabric:efa memory-registration "
-        f"lines ({LIBFABRIC_EFA_MARKERS}). "
-        + (
-            "Found UCX fallback marker instead — NIXL fell back to UCX; check that "
-            "--kv-transfer-config still has kv_connector_extra_config.backends=['LIBFABRIC']."
-            if saw_ucx_fallback
-            else "Check FI_PROVIDER=efa, FI_LOG_LEVEL>=info, and the EFA device/resources."
-        )
-    )
-    # A second, independent gate. Finding libfabric registration lines does not by
-    # itself rule out a partial fallback, so require the UCX marker to be absent too.
-    # Verified safe to assert: on a known-good EFA run against
-    # vllm-runtime:1.3.1-efa the marker does not appear, so this cannot fire on a
-    # healthy deployment. The line is emitted by a dependency rather than this repo,
-    # which is why it was confirmed by observation before being made a gate.
-    sample = next((ln for ln in combined.splitlines() if UCX_FALLBACK_MARKER in ln), "")
-    assert not saw_ucx_fallback, (
-        "EFA NOT confirmed: worker logs contain the UCX fallback marker "
-        f"({UCX_FALLBACK_MARKER!r}) even though libfabric registration lines are "
-        f"present, which means at least part of the transfer used UCX: {sample.strip()!r}. "
-        "Check that --kv-transfer-config still pins "
-        "kv_connector_extra_config.backends=['LIBFABRIC']."
+    no_libfabric = sorted(n for n, v in verdicts.items() if not v["libfabric_backend"])
+    assert not no_libfabric, (
+        f"EFA NOT confirmed: {len(no_libfabric)} of {len(verdicts)} workers never logged "
+        f"{NIXL_BACKEND_LIBFABRIC!r}: {no_libfabric}. Check that --kv-transfer-config "
+        "still pins kv_connector_extra_config.backends=['LIBFABRIC']."
     )
 
+    on_ucx = sorted(n for n, v in verdicts.items() if v["ucx_backend"])
+    assert not on_ucx, (
+        f"EFA NOT confirmed: {len(on_ucx)} worker(s) instantiated the UCX backend "
+        f"({NIXL_BACKEND_UCX!r}): {on_ucx}. Even alongside LIBFABRIC this makes the "
+        "agent byte counter ambiguous about which transport moved the KV."
+    )
+
+    no_provider = sorted(n for n, v in verdicts.items() if not v["efa_provider"])
+    assert not no_provider, (
+        f"EFA NOT confirmed: {len(no_provider)} worker(s) show no libfabric EFA "
+        f"memory-registration lines {LIBFABRIC_EFA_MARKERS}: {no_provider}. The "
+        "LIBFABRIC backend was selected but libfabric may not have used the efa "
+        "provider (shm/tcp). Check FI_PROVIDER=efa and FI_LOG_LEVEL>=info."
+    )
     logger.info(
-        "EFA path confirmed: NIXL registered memory regions via LIBFABRIC/EFA, "
-        "and no UCX fallback marker present"
+        "EFA path confirmed on all %d workers: LIBFABRIC backend, no UCX, efa provider",
+        len(verdicts),
     )
 
 
@@ -261,6 +279,77 @@ def _read_nixl_rx_bytes(pod) -> tuple[str, float | None]:
             except (IndexError, ValueError):
                 continue
     return ("ok", total) if found else ("absent", None)
+
+
+def read_efa_device_counters(pod) -> dict:
+    """Read this pod's OWN EFA NIC counters from the node exporter.
+
+    Resolves the assigned device (the pod sees all 32 NICs in sysfs but is given
+    exactly one ``/dev/infiniband/uverbs*``), maps it to its ibdev name, and
+    returns only that device's ``node_amazonefa_*`` series. Returns {} if the
+    exporter is unreachable, so callers can capability-gate.
+    """
+    snippet = (
+        "import glob,os,json,urllib.request\n"
+        "u=[os.path.basename(p) for p in glob.glob('/dev/infiniband/uverbs*')]\n"
+        "if not u: print('{}'); raise SystemExit\n"
+        "dev=open('/sys/class/infiniband_verbs/%s/ibdev'%u[0]).read().strip()\n"
+        "ip=os.environ.get('EFA_EXPORTER_HOST','')\n"
+        f"t=urllib.request.urlopen('http://%s:{EFA_EXPORTER_PORT}/metrics'%ip,timeout=10).read().decode()\n"
+        "o={'_ibdev':dev}\n"
+        "for ln in t.splitlines():\n"
+        "    ln=ln.strip()\n"
+        "    if not ln.startswith('node_amazonefa_') or dev not in ln: continue\n"
+        "    try: o[ln.split('{')[0]]=float(ln.rsplit(maxsplit=1)[1])\n"
+        "    except Exception: pass\n"
+        "print(json.dumps(o))"
+    )
+    try:
+        host = pod.raw["status"]["hostIP"]
+        result = pod.exec(
+            ["sh", "-c", f"EFA_EXPORTER_HOST={host} python3 -c {shlex.quote(snippet)}"]
+        )
+        for line in result.stdout.decode().splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                return json.loads(line)
+    except Exception as e:  # noqa: BLE001 - capability-gated by the caller
+        logger.warning("EFA device counters unavailable for %s: %s", pod.name, e)
+    return {}
+
+
+def assert_efa_device_traffic(before: dict, after: dict, min_bytes: int) -> None:
+    """Assert each worker's own EFA adapter moved at least ``min_bytes``.
+
+    This is the only backend-independent proof in the test: it is read from the
+    adapter, not from NIXL, so it cannot be satisfied by a transfer that took a
+    different transport. Measured idle noise on an assigned NIC is zero.
+    """
+    if not before or not after:
+        logger.warning(
+            "EFA device counters unavailable (efa-node-exporter not reachable) — "
+            "falling back to the NIXL agent counter and the backend gates."
+        )
+        return
+
+    for role, counter in EFA_COUNTER_BY_ROLE.items():
+        b, a = before.get(role, {}), after.get(role, {})
+        if counter not in b or counter not in a:
+            logger.warning("counter %s missing for %s; skipping", counter, role)
+            continue
+        delta = a[counter] - b[counter]
+        assert delta >= min_bytes, (
+            f"EFA traffic NOT confirmed on {role} ({a.get('_ibdev')}): {counter} rose "
+            f"{delta:,.0f} bytes across the completion, expected at least "
+            f"{min_bytes:,}. The KV transfer did not cross this worker's EFA adapter."
+        )
+        logger.info(
+            "EFA adapter traffic confirmed on %s (%s): %s +%s bytes",
+            role,
+            a.get("_ibdev"),
+            counter,
+            f"{delta:,.0f}",
+        )
 
 
 def assert_efa_rdma_traffic(
@@ -439,6 +528,18 @@ async def test_efa_deployment(
         # so we can prove the completion below makes it grow (KV pulled over EFA).
         rx_before = _read_nixl_rx_bytes(decode_pod)
         logger.info("NIXL %s before request: %s", NIXL_RX_BYTES_METRIC, rx_before)
+        efa_before = {
+            role: read_efa_device_counters(pods[0])
+            for role, pods in worker_pods.items()
+            if pods
+        }
+        for role, c in efa_before.items():
+            logger.info(
+                "EFA counters before (%s, %s): %s",
+                role,
+                c.get("_ibdev"),
+                {k: v for k, v in c.items() if k.endswith("_bytes")},
+            )
 
         url = f"{base_url}{endpoint}"
         payload = {
@@ -455,13 +556,22 @@ async def test_efa_deployment(
 
         rx_after = _read_nixl_rx_bytes(decode_pod)
         logger.info("NIXL %s after request: %s", NIXL_RX_BYTES_METRIC, rx_after)
+        efa_after = {
+            role: read_efa_device_counters(pods[0])
+            for role, pods in worker_pods.items()
+            if pods
+        }
 
         # A successful disagg completion means KV moved prefill->decode. Prove it
         # (1) rode the LIBFABRIC/EFA backend rather than falling back to UCX, and
         # (2) physically moved bytes over EFA RDMA (the rx-bytes counter grew).
         log_nixl_layout(decode_pod)
-        assert_nixl_used_libfabric(deployment)
+        assert_nixl_used_libfabric(worker_pods)
         assert_efa_rdma_traffic(rx_before, rx_after)
+        # Backend-independent proof, read from the adapter rather than from NIXL.
+        # 1 MiB floor: the observed KV volume for this prompt is ~12.8 MB, so this
+        # catches "nothing moved" without being brittle about the exact figure.
+        assert_efa_device_traffic(efa_before, efa_after, min_bytes=1 << 20)
 
         logger.info(
             "EFA deployment test PASSED (image: %s, model: %s, namespace: %s)",

@@ -29,6 +29,7 @@ pytestmark = [
     pytest.mark.post_merge,
     pytest.mark.gpu_1,
     pytest.mark.vllm,
+    pytest.mark.forked,
 ]
 
 
