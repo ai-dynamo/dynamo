@@ -195,7 +195,9 @@ async def _register_model_with_runtime_config(
     # Built before the try: an invalid advertised configuration must fail
     # startup, not be swallowed by the registration handler below and logged as
     # a failed registration.
-    advertised_router_config = build_router_config(dynamo_args.router_advertisement)
+    advertised_router_config = build_router_config(
+        getattr(dynamo_args, "router_advertisement", None)
+    )
     try:
         await register_model(
             input_type,
