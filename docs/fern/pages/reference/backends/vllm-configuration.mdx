@@ -1,0 +1,313 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: vLLM Configuration (DynamoVllmConfig)
+subtitle: Field reference for the Dynamo-specific CLI flags and environment variables of the vLLM backend wrapper.
+---
+
+`DynamoVllmConfig` holds the Dynamo-specific configuration for the vLLM backend (`python -m dynamo.vllm`). Every field, type, default, and choice on this page comes from the [`DynamoVllmArgGroup` and `DynamoVllmConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/backend_args.py) definitions. For features and operational details, see the [vLLM Reference Guide](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md).
+
+<Note>
+  These are **only** the Dynamo wrapper flags. The vLLM backend also accepts every native vLLM `EngineArgs` argument (`--model`, `--tensor-parallel-size`, `--max-model-len`, and so on) in the same command, plus the cross-cutting [Dynamo Runtime](../components/runtime-configuration.mdx) flags (`--namespace`, `--endpoint`, and others). Except for the native KV event and KV transfer sections below, this page covers neither — only the vLLM-specific `DYN_VLLM_*` surface.
+</Note>
+
+## How the config is loaded
+
+Each field is both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--headless` sets it on, `--no-headless` sets it off.
+
+<Card>
+<Tabs>
+  <Tab title="Kubernetes">
+    Set flags in the worker container's `args` and environment variables in its `env`, under the vLLM worker service of a [DynamoGraphDeployment](../kubernetes-api/dynamo-graph-deployment.mdx) (DGD). The operator passes both through to the process without validation.
+
+    ```yaml
+    spec:
+      services:
+        VllmDecodeWorker:
+          extraPodSpec:
+            mainContainer:
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - meta-llama/Llama-3.1-8B-Instruct
+                - --disaggregation-mode
+                - decode
+              env:
+                - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
+                  value: nixl-read
+    ```
+  </Tab>
+  <Tab title="Local">
+    Pass the flags directly on the command line:
+
+    ```bash
+    python -m dynamo.vllm \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --disaggregation-mode decode \
+        --embedding-transfer-mode nixl-read
+    ```
+  </Tab>
+</Tabs>
+</Card>
+
+## Native KV event configuration
+
+`--kv-events-config` and `--enable-prefix-caching` are native vLLM engine arguments rather than `DynamoVllmConfig` fields, but they determine whether a worker publishes the cache events used by event-driven KV-aware routing.
+
+<Info>
+Starting the frontend with `--router-mode kv` does not configure event publishing on vLLM workers. Enable publishing explicitly on every aggregated or prefill worker whose cache state the router should track.
+</Info>
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enable-prefix-caching \
+  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+```
+
+The `endpoint` value is the base ZeroMQ port. vLLM assigns each data-parallel rank the port at `base port + data-parallel rank`. When multiple workers share a host or network namespace, reserve one port per rank and choose base ports whose resulting ranges do not overlap.
+
+If workers do not publish KV events, configure the frontend with `--no-router-kv-events` for prediction-based KV routing or `--load-aware` for load-only routing.
+
+## Native KV transfer configuration
+
+`--kv-transfer-config` is a native vLLM engine argument rather than a `DynamoVllmConfig` field, so it has no `DYN_VLLM_*` environment variable. It selects the KV connector that moves cache blocks between prefill and decode workers.
+
+<Warning>
+A worker started with `--disaggregation-mode prefill` must be passed `--kv-transfer-config` explicitly. Without it, the worker raises a `ValueError` during argument parsing and never starts. All non-prefill modes — `agg`, `pd`, `decode`, and `encode` — do not enforce this check.
+</Warning>
+
+The value is a JSON object. For NIXL-based prefill/decode disaggregation:
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+```
+
+Only the prefill worker is required to set it, but both halves of a NIXL pair must agree on a connector for transfers to succeed. Pass the same `--kv-transfer-config` value to the decode worker, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) does.
+
+The earlier `--connector` flag is no longer accepted by the vLLM backend. Setting it — on the command line or through the `DYN_CONNECTOR` environment variable — raises a `ValueError` during argument parsing. The message depends on the value:
+
+- An active connector, such as `--connector nixl` or `DYN_CONNECTOR=nixl`, reports the equivalent `--kv-transfer-config` JSON to use instead.
+- `--connector none` or `--connector null` reports that the flag is no longer needed, because no connector is already the default. There is no equivalent value to migrate to, so none is shown.
+- `DYN_CONNECTOR` set to an empty or whitespace-only value reports that the variable is no longer supported, without an equivalent value.
+
+## Worker role and disaggregation
+
+These flags control which role this worker plays in a disaggregated deployment. The default when no `--disaggregation-mode` is set is aggregated (`agg`).
+
+<ParamField path="--disaggregation-mode" type="string" default="null">
+  Worker disaggregation mode. `agg` (default when unset) runs a combined aggregated prefill+decode worker. `pd` is a legacy alias for `agg`. `prefill` and `decode` split the pipeline for prefill/decode disaggregation. `encode` starts a multimodal encode-only worker.
+
+  `prefill` additionally requires the native `--kv-transfer-config` argument — see [Native KV transfer configuration](#native-kv-transfer-configuration).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>pd</Badge> <Badge intent="note" minimal>agg</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>encode</Badge></span>
+
+  Environment variable: `DYN_VLLM_DISAGGREGATION_MODE`
+</ParamField>
+
+<ParamField path="--headless" type="boolean" default="false">
+  Run in headless mode for multi-node tensor-parallel or pipeline-parallel deployments. Secondary nodes run vLLM workers only with no Dynamo endpoints. See the vLLM multi-node data parallel documentation for details.
+
+  Environment variable: `DYN_VLLM_HEADLESS`
+</ParamField>
+
+## Tokenizer and multimodal
+
+<ParamField path="--use-vllm-tokenizer" type="boolean" default="false">
+  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend.
+
+  Environment variable: `DYN_VLLM_USE_TOKENIZER`
+</ParamField>
+
+<ParamField path="--enable-multimodal" type="boolean" default="false">
+  Enable multimodal processing. Combine it with `--disaggregation-mode=encode`, `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode` to select a disaggregated multimodal role. Use the default `agg` mode for aggregated multimodal serving.
+
+  Environment variable: `DYN_VLLM_ENABLE_MULTIMODAL`
+</ParamField>
+
+<ParamField path="--route-to-encoder" type="boolean" default="false">
+  Enable routing to separate encoder workers for multimodal processing.
+
+  Environment variable: `DYN_VLLM_ROUTE_TO_ENCODER`
+</ParamField>
+
+<ParamField path="--mm-prompt-template" type="string" default="USER: <image>\n<prompt> ASSISTANT:">
+  Prompt template used to construct the final multimodal prompt sent to the model. The literal `<prompt>` token is replaced with the user's text at inference time; `<image>` marks where the image placeholder appears. Update this template to match your model's expected format.
+
+  Environment variable: `DYN_VLLM_MM_PROMPT_TEMPLATE`
+</ParamField>
+
+<ParamField path="--frontend-decoding" type="boolean" default="false">
+  Enable frontend decoding of multimodal images. Images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode.
+
+  Environment variable: `DYN_VLLM_FRONTEND_DECODING`
+</ParamField>
+
+## Embedding
+
+<ParamField path="--embedding-transfer-mode" type="string" default="nixl-write">
+  Embedding transfer mode used between encode and decode workers. `local` keeps embeddings on the local file system. `nixl-write` and `nixl-read` transfer them over NIXL RDMA (writer-initiated or reader-initiated, respectively).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>local</Badge> <Badge intent="note" minimal>nixl-write</Badge> <Badge intent="note" minimal>nixl-read</Badge></span>
+
+  Environment variable: `DYN_VLLM_EMBEDDING_TRANSFER_MODE`
+</ParamField>
+
+<ParamField path="--embedding-worker" type="boolean" default="false">
+  Run as a text-embedding worker. The vLLM engine must be started with `--runner pooling`. KV-event publishing, KV router registration, and `InstrumentedScheduler` injection are all skipped, as they do not apply to pooling models.
+
+  Environment variable: `DYN_VLLM_EMBEDDING_WORKER`
+</ParamField>
+
+## Other
+
+<ParamField path="--enable-rl" type="boolean" default="false">
+  Enable reinforcement-learning training support. Selects RL-friendly vLLM defaults for token-in/token-out (TITO) workloads and per-token logprob parity. Mirrors `--enable-rl` on the SGLang backend.
+
+  Environment variable: `DYN_ENABLE_RL`
+</ParamField>
+
+<ParamField path="--gms-shadow-mode" type="boolean" default="false">
+  Enable GMS (GPU Memory Service) shadow/standby mode. Shadow engines skip KV cache allocation at startup, automatically pause after initialization, and resume on demand when the active engine dies. Requires `--load-format=gms`.
+
+  Environment variable: `DYN_VLLM_GMS_SHADOW_MODE`
+</ParamField>
+
+## Benchmarking
+
+These flags control the self-benchmark sweep that runs on startup before the worker begins accepting production requests.
+
+<ParamField path="--benchmark-mode" type="string" default="null">
+  Run a self-benchmark on startup before accepting requests. Sweeps prefill input sequence lengths (ISLs) and/or decode `(context_length × batch_size)` operating points, collecting `ForwardPassMetrics` at each point.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>agg</Badge></span>
+
+  Environment variable: `DYN_BENCHMARK_MODE`
+</ParamField>
+
+<ParamField path="--benchmark-points-file" type="string" default="null">
+  JSON file of explicit pure prefill/decode benchmark points, applied uniformly to every data-parallel rank. The file completely replaces generated grid sampling for the phases selected by `--benchmark-mode`, so the sampling limits below are ignored when it is set. It is read and normalized once before vLLM workers start, then the same contents are forwarded to every rank.
+
+  Environment variable: `DYN_BENCHMARK_POINTS_FILE`
+</ParamField>
+
+<ParamField path="--prefill-max-new-token-samples" type="integer" default="64">
+  Maximum number of iteration-total prefill new-token samples. If the CUDA-graph-aware axis has more points, points are selected uniformly across the sorted axis while always retaining its minimum and maximum. Must be at least 2.
+
+  Environment variable: `DYN_PREFILL_MAX_NEW_TOKEN_SAMPLES`
+</ParamField>
+
+<ParamField path="--prefill-max-kv-read-token-samples" type="integer" default="16">
+  Maximum number of iteration-total prefill KV-read-token samples for each (new tokens, batch size) pair. If the block-aligned KV ladder has more points, points are selected uniformly while always retaining zero and the feasible maximum. Must be at least 2.
+
+  Environment variable: `DYN_PREFILL_MAX_KV_READ_TOKEN_SAMPLES`
+</ParamField>
+
+<ParamField path="--prefix-max-batch-size-samples" type="integer" default="3">
+  Maximum number of prefill request-batch-size samples for each new-token point. Keeps the first N values from the sorted power-of-two-plus-legal-maximum axis, so the default of 3 selects `[1, 2, 4]` when all three are legal. Must be positive.
+
+  Environment variable: `DYN_PREFIX_MAX_BATCH_SIZE_SAMPLES`
+</ParamField>
+
+<ParamField path="--decode-max-kv-read-token-samples" type="integer" default="128">
+  Maximum number of iteration-total decode KV-read-token samples for each batch size. If the KV ladder has more points, points are selected uniformly while always retaining its minimum and feasible maximum. Must be at least 2.
+
+  Environment variable: `DYN_DECODE_MAX_KV_READ_TOKEN_SAMPLES`
+</ParamField>
+
+<ParamField path="--decode-max-batch-size-samples" type="integer" default="128">
+  Maximum number of decode batch-size samples. If the CUDA-graph-aware axis has more points, points are selected uniformly while always retaining the minimum and feasible maximum. Must be at least 2.
+
+  Environment variable: `DYN_DECODE_MAX_BATCH_SIZE_SAMPLES`
+</ParamField>
+
+<ParamField path="--benchmark-warmup-iterations" type="integer" default="5">
+  Number of warmup iterations to run before benchmark measurement begins.
+
+  Environment variable: `DYN_BENCHMARK_WARMUP_ITERATIONS`
+</ParamField>
+
+<ParamField path="--benchmark-output-path" type="string" default="/tmp/benchmark_results.json">
+  File path where benchmark results are written in JSON format.
+
+  Environment variable: `DYN_BENCHMARK_OUTPUT_PATH`
+</ParamField>
+
+<ParamField path="--benchmark-timeout" type="integer" default="900">
+  Soft limit, in seconds, for the self-benchmark. Reaching it does not fail worker startup: the iteration being measured finishes, the partial results collected so far are returned, and engine startup continues. A bounded cleanup grace still fails closed if no result is written at all. Must be positive.
+
+  Environment variable: `DYN_BENCHMARK_TIMEOUT`
+</ParamField>
+
+## Deprecated
+
+These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
+
+The five `--benchmark-*-granularity` flags below are read only when `--benchmark-mode` is set and `--benchmark-points-file` is not; otherwise they are ignored entirely, and none of the translation, range checking, or deprecation warnings described here takes place. Under those conditions each is translated to its replacement at startup, with a deprecation warning, and is accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
+
+<Warning>
+With `--benchmark-mode` set and no points file, passing a legacy flag together with its replacement raises a `ValueError` at startup, for example `cannot combine --benchmark-decode-length-granularity with --decode-max-kv-read-token-samples`, and likewise for each of the other pairs. Migrate to the replacement rather than setting both. All five are ignored when `--benchmark-points-file` is set.
+</Warning>
+
+<ParamField path="--benchmark-prefill-granularity" type="integer" default="null" deprecated={true}>
+  **Deprecated** — use `--prefill-max-new-token-samples`. Legacy values are translated to the new sampling limit.
+
+  Environment variable: `DYN_BENCHMARK_PREFILL_GRANULARITY`
+</ParamField>
+
+<ParamField path="--benchmark-prefill-kv-read-granularity" type="integer" default="null" deprecated={true}>
+  **Deprecated** — use `--prefill-max-kv-read-token-samples`. Legacy values are translated to the new sampling limit.
+
+  Environment variable: `DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY`
+</ParamField>
+
+<ParamField path="--benchmark-prefill-batch-granularity" type="integer" default="null" deprecated={true}>
+  **Deprecated** — use `--prefix-max-batch-size-samples`. Legacy values are translated to the new sampling limit.
+
+  Environment variable: `DYN_BENCHMARK_PREFILL_BATCH_GRANULARITY`
+</ParamField>
+
+<ParamField path="--benchmark-decode-length-granularity" type="integer" default="null" deprecated={true}>
+  **Deprecated** — use `--decode-max-kv-read-token-samples`. Legacy values are translated to the new sampling limit.
+
+  Environment variable: `DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY`
+</ParamField>
+
+<ParamField path="--benchmark-decode-batch-granularity" type="integer" default="null" deprecated={true}>
+  **Deprecated** — use `--decode-max-batch-size-samples`. Legacy values are translated to the new sampling limit.
+
+  Environment variable: `DYN_BENCHMARK_DECODE_BATCH_GRANULARITY`
+</ParamField>
+
+<ParamField path="--model-express-url" type="string" default="null" deprecated={true}>
+  **Deprecated** — accepted for compatibility with older ModelExpress manifests only. The vLLM ModelExpress plugin reads its own configuration.
+
+  Environment variable: `MODEL_EXPRESS_URL`
+</ParamField>
+
+## Validation rules
+
+- `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with `--enable-multimodal` or `--benchmark-mode`.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="vLLM Reference Guide" href="../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md" icon="book">
+    Features, worker roles, and operational details for the vLLM backend.
+  </Card>
+  <Card title="Runtime Configuration" href="../components/runtime-configuration.mdx" icon="gear">
+    Cross-cutting `DYN_*` flags shared by every backend and the frontend.
+  </Card>
+  <Card title="SGLang Configuration" href="sglang-configuration.mdx" icon="book">
+    The equivalent Dynamo flag reference for the SGLang backend.
+  </Card>
+  <Card title="TensorRT-LLM Configuration" href="tensorrt-llm-configuration.mdx" icon="book">
+    The equivalent Dynamo flag reference for the TensorRT-LLM backend.
+  </Card>
+</CardGroup>

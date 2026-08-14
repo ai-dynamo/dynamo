@@ -6,8 +6,9 @@
  *
  * Answers "I run v1.1.x — what must I read to get to the current release?".
  * Self-configuring from releases.data: the target is CURRENT_VERSION and the
- * from-candidates are every older stable release that has a RELEASE_STATS
- * entry, labeled by line ("v1.2.x"). Each line maps to its LATEST release
+ * from-candidates are every older stable release that has both a RELEASE_STATS
+ * entry and a docs-native notes page, labeled by line ("v1.2.x"). Each line
+ * maps to its LATEST release
  * including patches (v1.2.x -> v1.2.1) so the migration strip reflects the
  * pins the user actually runs. Each panel reuses UpgradePanel's internals
  * (buildRows + MigrationStrip + ReadingListFooter + UpgradePanelStyles); the
@@ -104,10 +105,18 @@ function buildFromLines(): FromLine[] {
   const currentIdx = RELEASES.findIndex((r) => r.version === CURRENT_VERSION);
   if (currentIdx < 0) return [];
 
-  /* All stable releases carrying RELEASE_STATS, in RELEASES (newest-first)
-     order, with their array index for older/newer comparisons. */
+  /* Stable releases carrying RELEASE_STATS *and* a docs-native notes page, in
+     RELEASES (newest-first) order, with their array index for older/newer
+     comparisons. notesHref is the gate because the reading-list chips deep-link
+     to per-release sections on the Deprecations and Known Issues pages, which
+     exist only for releases that have a notes page. RELEASE_STATS on its own
+     also covers pre-v1.0.0 releases, which are counted on Release History but
+     have no such sections to point at. */
   const statStables = RELEASES.map((release, index) => ({ release, index })).filter(
-    ({ release }) => release.kind === "stable" && RELEASE_STATS[release.version] !== undefined,
+    ({ release }) =>
+      release.kind === "stable" &&
+      release.notesHref !== undefined &&
+      RELEASE_STATS[release.version] !== undefined,
   );
 
   return statStables
