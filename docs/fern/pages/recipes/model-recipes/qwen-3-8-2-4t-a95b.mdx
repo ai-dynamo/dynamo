@@ -1,0 +1,338 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.8-2.4T-A95B"
+subtitle: "Serve Qwen3.8-2.4T-A95B with Dynamo and vLLM or SGLang on GB300 or GB200, aggregated or disaggregated."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+
+Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B-FP8) — a hybrid gated-delta-net + MoE model with 512 experts and a 262k-token context — with KV-aware routing and FP8 weights/KV cache. Tensor parallelism runs over MNNVL through Kubernetes ComputeDomains. Pick your GPU architecture, serving topology, and inference engine; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" defaultChecked />
+<label htmlFor="recipe-sku-gb300">GB300</label>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Engine</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
+<input type="radio" id="recipe-engine-sglang" name="recipe-engine" value="sglang" />
+<label htmlFor="recipe-engine-sglang">SGLang</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8 (FP8)</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 16x GB300 (4 nodes), 1 replica</span>
+<span><b>Parallelism</b> TP16 over MNNVL</span>
+<span><b>Routing</b> event-driven KV-aware, prefix caching</span>
+</div>
+
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="disagg" data-engine="sglang">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8 (FP8)</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 16x GB300 prefill (4 nodes) + 16x GB300 decode (4 nodes)</span>
+<span><b>Parallelism</b> TP16 / TP16 over MNNVL</span>
+<span><b>KV transfer</b> NIXL over cuda_ipc + MNNVL</span>
+<span><b>Routing</b> KV-aware, load-balanced prefill; NIXL KV transfer</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg" data-engine="vllm">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8 (FP8)</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 16x GB200 (4 nodes), 1 replica</span>
+<span><b>Parallelism</b> TP16 over MNNVL</span>
+<span><b>MoE backend</b> flashinfer_trtllm</span>
+<span><b>Routing</b> KV-aware (ZMQ events)</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg" data-engine="sglang">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8 (FP8)</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 16x GB200 (4 nodes), 1 replica</span>
+<span><b>Parallelism</b> TP16 over MNNVL</span>
+<span><b>MoE backend</b> flashinfer_trtllm; trtllm_mha attention</span>
+<span><b>Routing</b> KV-aware (ZMQ events)</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg" data-engine="sglang">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8 (FP8)</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 16x GB200 × 2 prefill + 16x GB200 decode (2P1D, 12 nodes)</span>
+<span><b>Parallelism</b> TP16 / TP16 over MNNVL</span>
+<span><b>MoE backend</b> flashinfer_trtllm; trtllm_mha attention</span>
+<span><b>Routing</b> KV-aware, load-balanced across prefill replicas; NIXL KV transfer over cuda_ipc + MNNVL</span>
+</div>
+</div>
+
+## Prerequisites
+
+<div data-sku="gb300">
+
+- A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes). See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
+- A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
+
+</div>
+
+<div data-sku="gb200">
+
+- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated; 48x (12 nodes, 2×4 prefill + 4 decode) for 2P1D disaggregated. See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
+- A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
+- The `model-cache` PVC, populated by the model-download Job (see step 3 below).
+
+</div>
+
+Create the namespace:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+```
+
+Create the Hugging Face token secret:
+
+```bash
+kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
+```
+
+<Warning>
+Edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your
+cluster (`kubectl get storageclass`) before applying it. Review namespace, image tag, node selectors,
+and resource claims in the manifests as well.
+</Warning>
+
+## Deploy
+
+<div data-sku="gb300">
+
+Stage the weights into the cache, then deploy:
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
+```
+
+</div>
+
+<div data-sku="gb200">
+
+Stage the weights into the model-cache PVC, then deploy:
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
+```
+
+</div>
+
+Then deploy the target DGD:
+
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-chat" name="recipe-usecase" value="chat" defaultChecked />
+<label htmlFor="recipe-usecase-chat">Chat</label>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" />
+<label htmlFor="recipe-usecase-agentic">Agentic</label>
+</div>
+
+<div data-sku="gb300" data-variant="agg" data-engine="vllm" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/vllm/agg-gb300-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="agg" data-engine="vllm" data-usecase="agentic">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="agg" data-engine="sglang" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/sglang/agg-gb300-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg" data-engine="sglang" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/sglang/disagg-gb300-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+
+<div data-sku="gb200" data-variant="agg" data-engine="vllm" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/vllm/agg-gb200-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+
+<div data-sku="gb200" data-variant="agg" data-engine="vllm" data-usecase="agentic">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+
+<div data-sku="gb200" data-variant="agg" data-engine="sglang" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/sglang/agg-gb200-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg" data-engine="sglang" data-usecase="chat">
+
+```bash
+kubectl apply -f recipes/qwen3.8-2.4t-a95b/sglang/disagg-gb200-chat/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+First worker launch loads ~2.4 TB of FP8 weights across the TP ranks and warms CUDA graphs. Allow up to 4 hours; the multinode pod set reports ready only once all nodes have joined the TP group.
+
+## Smoke Test
+
+Forward the frontend port:
+
+<div data-sku="gb300" data-variant="agg">
+
+```bash
+kubectl port-forward svc/qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/sglang-qwen38max-1p1d-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/qwen38max-sgl-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+Send a test request:
+
+<div data-sku="gb300">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3.8-2.4T-A95B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+</div>
+
+<div data-sku="gb200">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3.8-2.4T-A95B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+</div>
+
+Qwen3.8-2.4T-A95B reasons before answering; chain-of-thought lands in `choices[0].message.reasoning_content` and the answer in `choices[0].message.content`. The deployment wires the `qwen3` reasoning parser and `qwen3_coder` tool-call parser at the frontend.
+
+## Benchmark
+
+Standard chat workload: 8k total context / 1k output, 70% KV cache reuse.
+
+```bash
+BASE_URL="http://localhost:8000"
+SALT=$(openssl rand -base64 4 | tr -d '=+/')
+for C in 2 4 8 16 32 64 128; do
+  aiperf profile \
+    --model Qwen/Qwen3.8-2.4T-A95B-FP8 \
+    --url "${BASE_URL}" \
+    --endpoint-type chat --streaming \
+    --shared-system-prompt-length 5734 \
+    --isl 2458 --osl 1024 \
+    --concurrency ${C} --workers-max ${C} \
+    --num-requests $((C*3)) --num-prompts $((C*3)) \
+    --extra-inputs ignore_eos:true \
+    --extra-inputs "cache_salt:salt_${SALT}_c${C}" \
+    --request-timeout-seconds 300 \
+    --warmup-request-count 1 \
+    --tokenizer builtin --use-server-token-count
+done
+```
+
+## Compare All Targets
+
+Aggregated targets support both vLLM and SGLang. Disaggregated targets are SGLang only. GB300 disagg is 1P1D; GB200 disagg is 2P1D.
+
+| | GB300 agg | GB300 disagg (SGLang) | GB200 agg | GB200 disagg (SGLang, 2P1D) |
+|---|---|---|---|---|
+| **GPUs** | 16× GB300, 4 nodes | 16× GB300 prefill + 16× GB300 decode (1P1D, 8 nodes) | 16× GB200, 4 nodes | 2× 16× GB200 prefill + 16× GB200 decode (2P1D, 12 nodes) |
+| **Parallelism** | TP16 | TP16 / TP16 | TP16 | TP16 / TP16 |
+| **KV transfer** | — | NIXL over cuda_ipc + MNNVL | — | NIXL over cuda_ipc + MNNVL |
+| **MoE backend** | flashinfer_trtllm | flashinfer_trtllm | flashinfer_trtllm | flashinfer_trtllm |
+| **Precision** | FP8 weights, FP8 KV | FP8 weights, FP8 KV | FP8 weights, FP8 KV | FP8 weights, FP8 KV |
+| **Context length** | 262 144 | 262 144 | 262 144 | 262 144 |
+
+## Notes
+
+- **Event-driven KV-aware routing.** Both workers publish KV events (`--kv-events-config` over ZMQ), and the frontend enables `--router-kv-events`; otherwise the disaggregated route cannot be verified.
+- **`--no-async-scheduling`** is required for the shipped fixed shapes.
+- **MNNVL all-reduce.** `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Keep `VLLM_USE_NCCL_SYMM_MEM=0` alongside it.
+- **GB300 P-to-D fabric.** The disaggregated workers select the DRA-injected RoCE HCA and use `UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc` with Ethernet GIDs. This is RC/GDR for NIXL payloads; MNNVL remains the TP all-reduce fabric.
+
+## Source
+
+- Source README: [recipes/qwen3.8-2.4t-a95b/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/README.md)
+- GB300 aggregated chat (vLLM): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/vllm/agg-gb300-chat/deploy.yaml)
+- GB300 aggregated agentic (vLLM): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/vllm/agg-gb300-agentic/deploy.yaml)
+- GB200 aggregated chat (vLLM): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/vllm/agg-gb200-chat/deploy.yaml)
+- GB200 aggregated agentic (vLLM): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/vllm/agg-gb200-agentic/deploy.yaml)
+- GB300 aggregated chat (SGLang): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/sglang/agg-gb300-chat/deploy.yaml)
+- GB300 disaggregated chat (SGLang): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/sglang/disagg-gb300-chat/deploy.yaml)
+- GB200 aggregated chat (SGLang): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/sglang/agg-gb200-chat/deploy.yaml)
+- GB200 disaggregated chat (SGLang): [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/sglang/disagg-gb200-chat/deploy.yaml)
+- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-2.4t-a95b/model-cache/model-download.yaml)
