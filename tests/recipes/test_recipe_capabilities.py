@@ -105,9 +105,9 @@ def test_thinking_false_suppresses_reasoning(attached_endpoint):
         },
     )
     message = body["choices"][0]["message"]
-    assert not message.get("reasoning_content"), (
-        "thinking:false did not suppress reasoning_content"
-    )
+    assert not message.get(
+        "reasoning_content"
+    ), "thinking:false did not suppress reasoning_content"
     assert message.get("content"), "no content with reasoning suppressed"
 
 
