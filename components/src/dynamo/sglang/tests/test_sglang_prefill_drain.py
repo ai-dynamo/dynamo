@@ -69,6 +69,7 @@ async def test_prefill_result_drain_timeout_does_not_cancel_transfer():
 @pytest.mark.asyncio
 async def test_regular_prefill_registers_transfer_before_bootstrap_yield(monkeypatch):
     transfer_terminal = asyncio.Event()
+    consumer_cancelled = False
     result_drain = PrefillResultDrain()
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.bootstrap_host = "127.0.0.1"
@@ -82,7 +83,12 @@ async def test_regular_prefill_registers_transfer_before_bootstrap_yield(monkeyp
     handler.engine = SimpleNamespace(async_generate=AsyncMock(return_value=object()))
 
     async def consume_results(results, context):
-        await transfer_terminal.wait()
+        nonlocal consumer_cancelled
+        try:
+            await transfer_terminal.wait()
+        except asyncio.CancelledError:
+            consumer_cancelled = True
+            raise
 
     handler._consume_results = consume_results
     monkeypatch.setattr(
@@ -101,12 +107,25 @@ async def test_regular_prefill_registers_transfer_before_bootstrap_yield(monkeyp
     assert bootstrap["disaggregated_params"]["bootstrap_room"] == 42
     assert result_drain.pending_count == 1
 
+    # Simulate the outer RPC stream being cancelled after the router received
+    # bootstrap. The shielded result consumer must remain tracked and draining.
+    outer_rpc_task = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    outer_rpc_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await outer_rpc_task
+
+    assert not consumer_cancelled
+    assert result_drain.pending_count == 1
+
     drain_task = asyncio.create_task(handler.drain())
     await asyncio.sleep(0)
     assert not drain_task.done()
 
     transfer_terminal.set()
     await drain_task
+    assert not consumer_cancelled
+    assert result_drain.pending_count == 0
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
 
