@@ -1638,15 +1638,15 @@ fn infer_metric_worker_type(
     }
 }
 
-/// Keep the advertised role for existing router metadata, but give policy factories a concrete
-/// role even when a legacy model card omitted `worker_type`.
+/// Keep the advertised role for existing router metadata and require the same explicit role for
+/// custom-policy dispatch. Legacy cards are ambiguous between decode and aggregated workers.
 fn advertised_and_policy_worker_roles(
     card: &llm_rs::model_card::ModelDeploymentCard,
 ) -> (
     Option<llm_rs::worker_type::WorkerType>,
-    llm_rs::worker_type::WorkerType,
+    Option<llm_rs::worker_type::WorkerType>,
 ) {
-    (card.worker_type, card.effective_worker_type())
+    (card.worker_type, card.worker_type)
 }
 
 #[cfg(test)]
@@ -1670,16 +1670,16 @@ mod metric_worker_type_tests {
     }
 
     #[test]
-    fn preserves_unknown_advertised_role_for_legacy_cards() {
+    fn requires_explicit_policy_role_for_legacy_cards() {
         let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("legacy");
         let (advertised, policy) = advertised_and_policy_worker_roles(&card);
         assert_eq!(advertised, None);
-        assert_eq!(policy, llm_rs::worker_type::WorkerType::Aggregated);
+        assert_eq!(policy, None);
 
-        card.model_type = llm_rs::model_type::ModelType::Prefill;
+        card.worker_type = Some(llm_rs::worker_type::WorkerType::Decode);
         let (advertised, policy) = advertised_and_policy_worker_roles(&card);
-        assert_eq!(advertised, None);
-        assert_eq!(policy, llm_rs::worker_type::WorkerType::Prefill);
+        assert_eq!(advertised, Some(llm_rs::worker_type::WorkerType::Decode));
+        assert_eq!(policy, Some(llm_rs::worker_type::WorkerType::Decode));
     }
 }
 
@@ -1758,18 +1758,23 @@ async fn create_kv_router_from_endpoint(
             Some(card) => {
                 let model_name = needs_model_name.then(|| card.display_name.clone());
                 let (worker_role, policy_worker_role) = advertised_and_policy_worker_roles(&card);
+                if needs_policy_role && policy_worker_role.is_none() {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "worker-selection policy requires a discovered model card with an explicit typed worker role",
+                    ));
+                }
                 (
                     model_name,
                     Some(card.display_name.clone()),
                     card.runtime_config.enable_eagle,
                     worker_role,
-                    Some(policy_worker_role),
+                    policy_worker_role,
                 )
             }
             None => {
                 if needs_policy_role {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "worker-selection policy requires a discovered model card with a typed worker role",
+                        "worker-selection policy requires a discovered model card with an explicit typed worker role",
                     ));
                 }
                 tracing::warn!(

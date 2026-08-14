@@ -225,6 +225,8 @@ where
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
+    require_typed_worker_role: bool,
 }
 
 pub(crate) struct PreparedWorkerSet {
@@ -313,6 +315,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
+            false,
             Arc::new(|config, worker_type, _partition| {
                 DefaultWorkerSelector::new(
                     Some(config.clone()),
@@ -337,6 +340,7 @@ where
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
+        require_typed_worker_role: bool,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
     ) -> Self {
         Self {
@@ -356,6 +360,7 @@ where
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
+            require_typed_worker_role,
         }
     }
 
@@ -451,6 +456,8 @@ where
 
         card.download_config(self.local_model_path.as_deref())
             .await?;
+
+        validate_selector_worker_role(card, self.require_typed_worker_role)?;
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
@@ -1291,6 +1298,18 @@ fn effective_router_config<'a>(
     Cow::Owned(effective)
 }
 
+fn validate_selector_worker_role(
+    card: &ModelDeploymentCard,
+    require_typed_worker_role: bool,
+) -> anyhow::Result<()> {
+    if require_typed_worker_role && card.worker_type.is_none() {
+        anyhow::bail!(
+            "custom worker-selection policies require model cards with an explicit worker_type"
+        );
+    }
+    Ok(())
+}
+
 fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<String> {
     let mut value = serde_json::json!({
         "display_name": &card.display_name,
@@ -1701,6 +1720,16 @@ mod tests {
             effective_worker_type(None, ModelType::empty()),
             WorkerType::Aggregated
         );
+    }
+
+    #[test]
+    fn custom_selector_requires_explicit_worker_type() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        assert!(validate_selector_worker_role(&card, false).is_ok());
+        assert!(validate_selector_worker_role(&card, true).is_err());
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(validate_selector_worker_role(&card, true).is_ok());
     }
 
     #[test]
