@@ -29,6 +29,9 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -165,38 +168,14 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		return nil, nil
 	}
 
-	if syncedService.Annotations == nil {
-		syncedService.Annotations = make(map[string]string)
-	}
 	desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(
 		renderDeployment,
 		componentName,
 		component,
 	)
-	updateAnnotations := false
-	for key, value := range desiredAnnotations {
-		if current, ok := syncedService.Annotations[key]; !ok || current != value {
-			syncedService.Annotations[key] = value
-			updateAnnotations = true
-		}
-	}
-	if updateAnnotations {
-		if err := r.Update(ctx, syncedService); err != nil {
-			logger.Error(err, "Failed to update main component service", "component", componentName)
-			if r.GetRecorder() != nil {
-				r.GetRecorder().Eventf(
-					dgd,
-					syncedService,
-					corev1.EventTypeWarning,
-					"UpdateService",
-					"Update",
-					"Failed to update Service %s: %s",
-					componentName,
-					err,
-				)
-			}
-			return nil, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
-		}
+	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, desiredAnnotations, componentName); err != nil {
+		logger.Error(err, "Failed to update main component service", "component", componentName)
+		return nil, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
 	}
 
 	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) {
@@ -206,6 +185,49 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		return nil, fmt.Errorf("failed to sync the main component service: %w", err)
 	}
 	return resource, nil
+}
+
+// syncServiceAnnotations merges the desired annotations onto an already-synced Service
+// and updates it when any changed. SyncResource hashes and copies only the spec, so
+// metadata edits on the DGD never converge onto the Service without this.
+func (r *groveStableResourcesReconciler) syncServiceAnnotations(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	service *corev1.Service,
+	desired map[string]string,
+	componentName string,
+) error {
+	if service.Annotations == nil {
+		service.Annotations = make(map[string]string)
+	}
+
+	changed := false
+	for key, value := range desired {
+		if current, ok := service.Annotations[key]; !ok || current != value {
+			service.Annotations[key] = value
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+
+	if err := r.Update(ctx, service); err != nil {
+		if r.GetRecorder() != nil {
+			r.GetRecorder().Eventf(
+				dgd,
+				service,
+				corev1.EventTypeWarning,
+				"UpdateService",
+				"Update",
+				"Failed to update Service %s: %s",
+				componentName,
+				err,
+			)
+		}
+		return err
+	}
+	return nil
 }
 
 // isSinglePodElasticEPLeader reports whether the component is the single-pod elastic-EP
@@ -242,6 +264,7 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	toDelete bool,
 ) (Resource, error) {
 	componentName := component.ComponentName
+	desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component)
 	service := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
@@ -249,8 +272,21 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		DynamoNamespace: renderDeployment.GetDynamoNamespaceForComponent(component),
 		ComponentName:   componentName,
 		Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
-		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
+		Annotations:     desiredAnnotations,
 	})
+
+	// SyncResource resolves the live object by name alone and deletes it without checking
+	// ownership, so a Service this DGD never created must not be removed just because its
+	// name collides.
+	if toDelete {
+		owned, err := r.ownsService(ctx, dgd, service.Name)
+		if err != nil {
+			return nil, err
+		}
+		if !owned {
+			return nil, nil
+		}
+	}
 
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
@@ -270,11 +306,32 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		return nil, nil
 	}
 
+	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, desiredAnnotations, componentName); err != nil {
+		return nil, fmt.Errorf("failed to update the elastic-EP leader service %s: %w", componentName, err)
+	}
+
 	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) { return true, "" })
 	if err != nil {
 		return nil, fmt.Errorf("failed to wrap the elastic-EP leader service: %w", err)
 	}
 	return resource, nil
+}
+
+// ownsService reports whether the named Service exists and is controlled by this DGD.
+func (r *groveStableResourcesReconciler) ownsService(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	name string,
+) (bool, error) {
+	existing := &corev1.Service{}
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: dgd.Namespace}, existing)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get service %s: %w", name, err)
+	}
+	return metav1.IsControlledBy(existing, dgd), nil
 }
 
 func (r *groveStableResourcesReconciler) reconcileFrontendIngress(
