@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from dynamo.workflow.plan import ExecutionPlan, InlineBinding, RemoteBinding
+from dynamo.workflow.remote import RemoteStageClient
 from dynamo.workflow.runtime import (
     StageContext,
     StageRunner,
@@ -110,8 +111,6 @@ class StageDispatcher:
         inline_runners: Mapping[str, StageRunner] = MappingProxyType({}),
     ) -> "StageDispatcher":
         """Resolve remote endpoints once and bind all physical stage targets."""
-
-        from dynamo.workflow.remote import RemoteStageClient
 
         endpoint_ids = {
             binding.endpoint_id

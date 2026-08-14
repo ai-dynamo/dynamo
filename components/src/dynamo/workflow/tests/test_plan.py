@@ -163,6 +163,7 @@ def test_remote_rich_value_requires_a_transport_carrier(
             DeploymentSpec.remote(stage="workflows.stage.generate"),
         )
 
+
 def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
     assert RemoteBinding("namespace.component.endpoint").endpoint_id == (
         "namespace.component.endpoint"
