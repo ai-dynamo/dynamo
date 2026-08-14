@@ -294,17 +294,34 @@ pub(crate) fn warn_if_standalone_ignores_stage_policies(
 }
 
 #[cfg(feature = "select-service")]
+/// Resolve only the aggregated policy used by standalone selection hosts.
 pub(crate) fn standalone_worker_selection_policy_factory(
     config: &KvRouterConfig,
 ) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
     warn_if_standalone_ignores_stage_policies(config)?;
-    if config
-        .selected_worker_selection_policy_instance_for(dynamo_kv_router::WorkerType::Aggregated)?
-        .is_none()
+
+    #[cfg(feature = "custom-policy")]
     {
-        return Ok(None);
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| {
+                registry.resolve_for_worker_type(config, dynamo_kv_router::WorkerType::Aggregated)
+            })
+            .transpose()?
+            .flatten())
     }
-    worker_selection_policy_factory(config)
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_worker_selection_policy_instance_for(
+            dynamo_kv_router::WorkerType::Aggregated,
+        )? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(feature = "custom-policy")]
