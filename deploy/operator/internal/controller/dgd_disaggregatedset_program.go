@@ -28,6 +28,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// disaggregatedSetEligibleConditionType reports whether the DisaggregatedSet
+// pathway was selected for a DGD and why a requested selection is unsupported.
+const disaggregatedSetEligibleConditionType = "DisaggregatedSetEligible"
+
 type disaggregatedSetProgram struct {
 	sharedResources   *dgdSharedResourcesReconciler
 	rollout           *dgdWorkerRolloutReconciler
@@ -138,14 +142,14 @@ func setDisaggregatedSetEligibilityCondition(
 	reason string,
 	message string,
 ) bool {
-	previous := apiMeta.FindStatusCondition(result.Status.Conditions, "DisaggregatedSetEligible")
+	previous := apiMeta.FindStatusCondition(result.Status.Conditions, disaggregatedSetEligibleConditionType)
 	changed := previous == nil ||
 		previous.Status != status ||
 		previous.ObservedGeneration != generation ||
 		previous.Reason != reason ||
 		previous.Message != message
 	apiMeta.SetStatusCondition(&result.Status.Conditions, metav1.Condition{
-		Type:               "DisaggregatedSetEligible",
+		Type:               disaggregatedSetEligibleConditionType,
 		Status:             status,
 		ObservedGeneration: generation,
 		Reason:             reason,

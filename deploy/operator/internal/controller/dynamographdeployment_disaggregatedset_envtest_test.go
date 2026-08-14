@@ -313,7 +313,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		By("reporting unsupported intent without switching workload pathways")
 		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateFailed))
-		eligibility := apiMeta.FindStatusCondition(result.Status.Conditions, "DisaggregatedSetEligible")
+		eligibility := apiMeta.FindStatusCondition(result.Status.Conditions, disaggregatedSetEligibleConditionType)
 		Expect(eligibility).NotTo(BeNil())
 		Expect(eligibility.Status).To(Equal(metav1.ConditionFalse))
 		Expect(eligibility.Reason).To(Equal("UnsupportedIntent"))

@@ -32,6 +32,10 @@ import (
 
 type disaggregatedSetWorkloadsReconciler struct {
 	client.Client
+	// reader defaults to the cached client. The graph reconciler replaces it
+	// with the uncached API reader because compatibility cleanup must act on
+	// the authoritative DisaggregatedSet at a pathway switch even when the
+	// informer has not yet observed a write from a previous reconcile.
 	reader                   client.Reader
 	Config                   *configv1alpha1.OperatorConfiguration
 	RuntimeConfig            *commoncontroller.RuntimeConfig

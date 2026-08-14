@@ -267,6 +267,65 @@ func (c *staleDisaggregatedSetClient) Get(
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
+func TestDeleteStaleDisaggregatedSetServicesRemovesUndesiredModelService(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	controlledService := func(name string, labels map[string]string) *corev1.Service {
+		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       dgd.Namespace,
+			Labels:          labels,
+			OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(dgd)},
+		}}
+	}
+	desiredComponent := controlledService("demo-prefill", map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoComponent:           "prefill",
+	})
+	staleComponent := controlledService("demo-removed", map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoComponent:           "removed",
+	})
+	staleModel := controlledService(dynamo.GenerateServiceName("removed-model"), map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoBaseModelHash:       dynamo.HashModelName("removed-model"),
+	})
+	foreignModel := controlledService(dynamo.GenerateServiceName("foreign-model"), map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoBaseModelHash:       dynamo.HashModelName("foreign-model"),
+	})
+	foreignModel.OwnerReferences = nil
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(dgd, desiredComponent, staleComponent, staleModel, foreignModel).
+		Build()
+	workloads := newDisaggregatedSetWorkloadsReconciler(
+		k8sClient,
+		events.NewFakeRecorder(10),
+		nil,
+		nil,
+		nil,
+		newDGDWorkerRolloutReconciler(k8sClient, events.NewFakeRecorder(10)),
+	)
+
+	t.Log("stale component and model services are removed while desired and foreign services remain")
+	require.NoError(t, workloads.deleteStaleDisaggregatedSetServices(t.Context(), dgd, map[string]struct{}{
+		desiredComponent.Name: {},
+	}))
+	for _, name := range []string{staleComponent.Name, staleModel.Name} {
+		err := k8sClient.Get(t.Context(), client.ObjectKey{Name: name, Namespace: dgd.Namespace}, &corev1.Service{})
+		require.True(t, apierrors.IsNotFound(err))
+	}
+	for _, name := range []string{desiredComponent.Name, foreignModel.Name} {
+		require.NoError(t, k8sClient.Get(t.Context(), client.ObjectKey{Name: name, Namespace: dgd.Namespace}, &corev1.Service{}))
+	}
+}
+
 func TestSelectDisaggregatedSetComponents(t *testing.T) {
 	t.Run("selects multinode worker roles", func(t *testing.T) {
 		dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
