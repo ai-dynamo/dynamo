@@ -732,6 +732,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=42,
         help="seed for synthetic open-loop arrival timestamps",
     )
+    parser.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "uniformly sample synthetic input and output lengths from "
+            "[int(ratio * configured_length), configured_length]; default 1.0 "
+            "keeps lengths fixed; currently supports single-turn workloads only"
+        ),
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=0,
+        help="seed for synthetic input/output length sampling",
+    )
     parser.add_argument("--turns-per-session", type=int, default=1)
     parser.add_argument("--shared-prefix-ratio", type=float, default=0.0)
     parser.add_argument("--num-prefix-groups", type=int, default=0)
@@ -977,6 +993,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_rate=args.request_rate,
             arrival_interval_ms=args.arrival_interval_ms,
             arrival_seed=args.arrival_seed,
+            random_range_ratio=args.random_range_ratio,
+            random_seed=args.random_seed,
             turns_per_session=args.turns_per_session,
             shared_prefix_ratio=args.shared_prefix_ratio,
             num_prefix_groups=args.num_prefix_groups,

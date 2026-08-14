@@ -696,6 +696,51 @@ def test_run_synthetic_concurrency_replay_counts_match(
     )
 
 
+def test_run_synthetic_concurrency_replay_randomizes_lengths_deterministically():
+    def run(seed):
+        return run_synthetic_trace_replay(
+            100,
+            50,
+            32,
+            extra_engine_args=_vllm_args(),
+            replay_mode="offline",
+            replay_concurrency=8,
+            random_range_ratio=0.8,
+            random_seed=seed,
+            capture_per_request=True,
+        )
+
+    first = run(0)
+    repeated = run(0)
+    reseeded = run(1)
+
+    def lengths(report):
+        return [
+            (row["input_length"], row["requested_output_length"])
+            for row in report.per_request
+        ]
+
+    first_lengths = lengths(first)
+    assert first_lengths == lengths(repeated)
+    assert first_lengths != lengths(reseeded)
+    assert len(set(first_lengths)) > 1
+    assert all(80 <= isl <= 100 and 40 <= osl <= 50 for isl, osl in first_lengths)
+
+
+@pytest.mark.parametrize("ratio", [0.0, -0.1, 1.1, float("inf"), float("nan")])
+def test_run_synthetic_replay_rejects_invalid_random_range_ratio(ratio):
+    with pytest.raises(Exception, match="random_range_ratio"):
+        run_synthetic_trace_replay(
+            64,
+            2,
+            2,
+            extra_engine_args=_vllm_args(),
+            replay_mode="offline",
+            replay_concurrency=1,
+            random_range_ratio=ratio,
+        )
+
+
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_accepts_router_config(tmp_path, replay_mode):
     trace_path = _write_trace_and_args(tmp_path)

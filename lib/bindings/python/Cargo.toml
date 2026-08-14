@@ -77,6 +77,7 @@ rmp = { version = "0.8" }
 rmpv = { version = "1", features = ["with-serde"] }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
+rand = "0.9.2"
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
 serde-transcode = "1.1"
