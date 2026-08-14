@@ -194,13 +194,132 @@ type DynamoComponentDeploymentSharedSpec struct {
 	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
+// MultinodeMode selects who owns engine-specific multinode arguments.
+// +kubebuilder:validation:Enum=Automatic;Manual
+type MultinodeMode string
+
+const (
+	// MultinodeModeAutomatic keeps the existing operator-generated multinode launch configuration.
+	MultinodeModeAutomatic MultinodeMode = "Automatic"
+	// MultinodeModeManual uses the user-supplied leader and worker launch configuration.
+	MultinodeModeManual MultinodeMode = "Manual"
+)
+
+// MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
+	// Mode selects ownership of engine-specific multinode configuration.
+	// Automatic preserves the existing operator-generated launch configuration.
+	// Manual uses the component pod configuration for the leader and applies
+	// Worker.PodTemplateOverrides to construct the worker template. Manual requires
+	// users to provide all engine-specific topology arguments. For vLLM
+	// multiprocessing, the operator still adds --master-port=29500 to both roles.
+	// +optional
+	// +kubebuilder:default=Automatic
+	Mode MultinodeMode `json:"mode,omitempty"`
+
+	// NodeCount is the number of nodes to deploy for the multinode component.
+	// Total GPUs used is NodeCount multiplied by the container GPU limit.
 	// +kubebuilder:default=2
-	// Indicates the number of nodes to deploy for multinode components.
-	// Total number of GPUs is NumberOfNodes * GPU limit.
-	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
+
+	// Worker contains worker-only settings. It is required when Mode is Manual
+	// and must be omitted when Mode is Automatic.
+	// +optional
+	Worker *MultinodeWorkerSpec `json:"worker,omitempty"`
+}
+
+// MultinodeWorkerSpec configures worker pods in Manual multinode mode.
+type MultinodeWorkerSpec struct {
+	// PodTemplateOverrides is a restricted, presence-aware overlay applied to
+	// the component pod configuration for workers. Omitted fields inherit the
+	// leader value; present fields replace it, including explicit empty maps and lists.
+	// +optional
+	PodTemplateOverrides *MultinodePodTemplateOverrides `json:"podTemplateOverrides,omitempty"`
+}
+
+// MultinodePodTemplateOverrides is the restricted worker PodTemplate overlay.
+type MultinodePodTemplateOverrides struct {
+	// Metadata overrides worker labels and annotations.
+	// +optional
+	Metadata *MultinodePodTemplateMetadataOverrides `json:"metadata,omitempty"`
+
+	// Spec overrides the supported worker PodSpec fields.
+	// +optional
+	Spec *MultinodePodSpecOverrides `json:"spec,omitempty"`
+}
+
+// MultinodePodTemplateMetadataOverrides contains worker metadata overrides.
+type MultinodePodTemplateMetadataOverrides struct {
+	// Labels replaces the inherited labels when present.
+	// +optional
+	Labels *map[string]string `json:"labels,omitempty"`
+
+	// Annotations replaces the inherited annotations when present.
+	// +optional
+	Annotations *map[string]string `json:"annotations,omitempty"`
+}
+
+// MultinodePodSpecOverrides contains the supported worker PodSpec overrides.
+type MultinodePodSpecOverrides struct {
+	// NodeSelector replaces the inherited node selector when present.
+	// +optional
+	NodeSelector *map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations replaces the inherited tolerations when present.
+	// +optional
+	Tolerations *[]corev1.Toleration `json:"tolerations,omitempty"`
+
+	// ResourceClaims replaces inherited pod-level DRA claim references when present.
+	// +optional
+	ResourceClaims *[]corev1.PodResourceClaim `json:"resourceClaims,omitempty"`
+
+	// ImagePullSecrets replaces inherited image pull secrets when present.
+	// +optional
+	ImagePullSecrets *[]corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// Containers, when present, contains exactly one override named main.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +listType=map
+	// +listMapKey=name
+	Containers []MultinodeContainerOverride `json:"containers,omitempty"`
+}
+
+// MultinodeContainerOverride contains the supported worker main-container overrides.
+type MultinodeContainerOverride struct {
+	// Name must be main. Other containers cannot be overridden.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=main
+	Name string `json:"name"`
+
+	// Image replaces the inherited image when present.
+	// +optional
+	Image *string `json:"image,omitempty"`
+
+	// Command replaces the inherited command when present.
+	// +optional
+	Command *[]string `json:"command,omitempty"`
+
+	// Args replaces the inherited arguments when present.
+	// +optional
+	Args *[]string `json:"args,omitempty"`
+
+	// Env replaces the inherited user environment when present.
+	// +optional
+	Env *[]corev1.EnvVar `json:"env,omitempty"`
+
+	// Resources contains the supported worker container resource overrides.
+	// +optional
+	Resources *MultinodeContainerResourceOverrides `json:"resources,omitempty"`
+}
+
+// MultinodeContainerResourceOverrides contains worker container DRA claim overrides.
+type MultinodeContainerResourceOverrides struct {
+	// Claims replaces inherited container-level DRA claim references when present.
+	// +optional
+	Claims *[]corev1.ResourceClaim `json:"claims,omitempty"`
 }
 
 type IngressTLSSpec struct {

@@ -813,13 +813,188 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 // ConvertFromMultinodeSpec converts multinode settings from v1alpha1 to
 // v1beta1.
 func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
-	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
+	*dst = v1beta1.MultinodeSpec{
+		Mode:      v1beta1.MultinodeMode(src.Mode),
+		NodeCount: src.NodeCount,
+	}
+	if src.Worker == nil {
+		return
+	}
+	dst.Worker = &v1beta1.MultinodeWorkerSpec{}
+	if src.Worker.PodTemplateOverrides == nil {
+		return
+	}
+	dst.Worker.PodTemplateOverrides = &v1beta1.MultinodePodTemplateOverrides{}
+	convertFromMultinodePodTemplateOverrides(src.Worker.PodTemplateOverrides, dst.Worker.PodTemplateOverrides)
 }
 
 // ConvertToMultinodeSpec converts multinode settings from v1beta1 to
 // v1alpha1.
 func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
-	*dst = MultinodeSpec{NodeCount: src.NodeCount}
+	*dst = MultinodeSpec{
+		Mode:      MultinodeMode(src.Mode),
+		NodeCount: src.NodeCount,
+	}
+	if src.Worker == nil {
+		return
+	}
+	dst.Worker = &MultinodeWorkerSpec{}
+	if src.Worker.PodTemplateOverrides == nil {
+		return
+	}
+	dst.Worker.PodTemplateOverrides = &MultinodePodTemplateOverrides{}
+	convertToMultinodePodTemplateOverrides(src.Worker.PodTemplateOverrides, dst.Worker.PodTemplateOverrides)
+}
+
+func convertFromMultinodePodTemplateOverrides(src *MultinodePodTemplateOverrides, dst *v1beta1.MultinodePodTemplateOverrides) {
+	if src.Metadata != nil {
+		dst.Metadata = &v1beta1.MultinodePodTemplateMetadataOverrides{
+			Labels:      cloneStringMapPointer(src.Metadata.Labels),
+			Annotations: cloneStringMapPointer(src.Metadata.Annotations),
+		}
+	}
+	if src.Spec == nil {
+		return
+	}
+	dst.Spec = &v1beta1.MultinodePodSpecOverrides{
+		NodeSelector:     cloneStringMapPointer(src.Spec.NodeSelector),
+		Tolerations:      cloneTolerationsPointer(src.Spec.Tolerations),
+		ResourceClaims:   clonePodResourceClaimsPointer(src.Spec.ResourceClaims),
+		ImagePullSecrets: cloneLocalObjectReferencesPointer(src.Spec.ImagePullSecrets),
+	}
+	if src.Spec.Containers != nil {
+		dst.Spec.Containers = make([]v1beta1.MultinodeContainerOverride, len(src.Spec.Containers))
+		for i := range src.Spec.Containers {
+			convertFromMultinodeContainerOverride(&src.Spec.Containers[i], &dst.Spec.Containers[i])
+		}
+	}
+}
+
+func convertToMultinodePodTemplateOverrides(src *v1beta1.MultinodePodTemplateOverrides, dst *MultinodePodTemplateOverrides) {
+	if src.Metadata != nil {
+		dst.Metadata = &MultinodePodTemplateMetadataOverrides{
+			Labels:      cloneStringMapPointer(src.Metadata.Labels),
+			Annotations: cloneStringMapPointer(src.Metadata.Annotations),
+		}
+	}
+	if src.Spec == nil {
+		return
+	}
+	dst.Spec = &MultinodePodSpecOverrides{
+		NodeSelector:     cloneStringMapPointer(src.Spec.NodeSelector),
+		Tolerations:      cloneTolerationsPointer(src.Spec.Tolerations),
+		ResourceClaims:   clonePodResourceClaimsPointer(src.Spec.ResourceClaims),
+		ImagePullSecrets: cloneLocalObjectReferencesPointer(src.Spec.ImagePullSecrets),
+	}
+	if src.Spec.Containers != nil {
+		dst.Spec.Containers = make([]MultinodeContainerOverride, len(src.Spec.Containers))
+		for i := range src.Spec.Containers {
+			convertToMultinodeContainerOverride(&src.Spec.Containers[i], &dst.Spec.Containers[i])
+		}
+	}
+}
+
+func convertFromMultinodeContainerOverride(src *MultinodeContainerOverride, dst *v1beta1.MultinodeContainerOverride) {
+	*dst = v1beta1.MultinodeContainerOverride{
+		Name:    src.Name,
+		Image:   cloneStringPointer(src.Image),
+		Command: cloneStringSlicePointer(src.Command),
+		Args:    cloneStringSlicePointer(src.Args),
+		Env:     cloneEnvVarsPointer(src.Env),
+	}
+	if src.Resources != nil {
+		dst.Resources = &v1beta1.MultinodeContainerResourceOverrides{
+			Claims: cloneResourceClaimsPointer(src.Resources.Claims),
+		}
+	}
+}
+
+func convertToMultinodeContainerOverride(src *v1beta1.MultinodeContainerOverride, dst *MultinodeContainerOverride) {
+	*dst = MultinodeContainerOverride{
+		Name:    src.Name,
+		Image:   cloneStringPointer(src.Image),
+		Command: cloneStringSlicePointer(src.Command),
+		Args:    cloneStringSlicePointer(src.Args),
+		Env:     cloneEnvVarsPointer(src.Env),
+	}
+	if src.Resources != nil {
+		dst.Resources = &MultinodeContainerResourceOverrides{
+			Claims: cloneResourceClaimsPointer(src.Resources.Claims),
+		}
+	}
+}
+
+func cloneStringPointer(src *string) *string {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
+}
+
+func cloneStringMapPointer(src *map[string]string) *map[string]string {
+	if src == nil {
+		return nil
+	}
+	value := maps.Clone(*src)
+	return &value
+}
+
+func cloneStringSlicePointer(src *[]string) *[]string {
+	if src == nil {
+		return nil
+	}
+	value := slices.Clone(*src)
+	return &value
+}
+
+func cloneTolerationsPointer(src *[]corev1.Toleration) *[]corev1.Toleration {
+	if src == nil {
+		return nil
+	}
+	value := make([]corev1.Toleration, len(*src))
+	for i := range *src {
+		(*src)[i].DeepCopyInto(&value[i])
+	}
+	return &value
+}
+
+func clonePodResourceClaimsPointer(src *[]corev1.PodResourceClaim) *[]corev1.PodResourceClaim {
+	if src == nil {
+		return nil
+	}
+	value := make([]corev1.PodResourceClaim, len(*src))
+	for i := range *src {
+		(*src)[i].DeepCopyInto(&value[i])
+	}
+	return &value
+}
+
+func cloneLocalObjectReferencesPointer(src *[]corev1.LocalObjectReference) *[]corev1.LocalObjectReference {
+	if src == nil {
+		return nil
+	}
+	value := slices.Clone(*src)
+	return &value
+}
+
+func cloneEnvVarsPointer(src *[]corev1.EnvVar) *[]corev1.EnvVar {
+	if src == nil {
+		return nil
+	}
+	value := make([]corev1.EnvVar, len(*src))
+	for i := range *src {
+		(*src)[i].DeepCopyInto(&value[i])
+	}
+	return &value
+}
+
+func cloneResourceClaimsPointer(src *[]corev1.ResourceClaim) *[]corev1.ResourceClaim {
+	if src == nil {
+		return nil
+	}
+	value := slices.Clone(*src)
+	return &value
 }
 
 // ConvertFromModelReference converts model references from v1alpha1 to

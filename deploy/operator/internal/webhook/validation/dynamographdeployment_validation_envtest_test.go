@@ -1395,7 +1395,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
+			wantWebhookErrs: []string{`spec.components[1].multinode: Invalid value: {"mode":"Automatic","nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
 		},
 		{
 			name: "node count-only update remains allowed",

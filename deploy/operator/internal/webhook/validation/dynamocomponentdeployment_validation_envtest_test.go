@@ -1139,7 +1139,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
-			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
+			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"mode":"Automatic","nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
 		},
 		{
 			name:               "v1alpha1 update aggregates create and DCD-specific update errors",

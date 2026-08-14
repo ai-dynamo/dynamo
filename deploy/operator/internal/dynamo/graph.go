@@ -2147,6 +2147,12 @@ type cliqueParams struct {
 //
 //nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	effectiveComponent, err := EffectiveComponentForRole(p.component, p.r.Role)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve effective component for role %s: %w", p.r.Name, err)
+	}
+	p.component = effectiveComponent
+
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
 		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName, p.checkpointInfo,
@@ -2929,7 +2935,10 @@ func GenerateBasePodSpecForController(
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
 	// Convert to our interface
-	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
+	componentSpec, err := EffectiveComponentForRole(ConvertDynamoComponentDeploymentToSpec(dynComponent), role)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve effective component for role %s: %w", role, err)
+	}
 	if options.WorkloadComponentType != "" {
 		componentSpec.ComponentType = options.WorkloadComponentType
 	}

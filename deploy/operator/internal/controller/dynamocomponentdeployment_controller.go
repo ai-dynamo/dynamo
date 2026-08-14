@@ -476,13 +476,12 @@ func IsLeaderWorkerSetReady(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) 
 	return false
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, labels map[string]string) (*corev1.PodTemplateSpec, error) {
+func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption) (*corev1.PodTemplateSpec, error) {
 	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleLeader)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
 
-	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
 	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
@@ -526,13 +525,12 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 	return nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, labels map[string]string) (*corev1.PodTemplateSpec, error) {
+func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption) (*corev1.PodTemplateSpec, error) {
 	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleWorker)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
 
-	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
 	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
@@ -558,11 +556,6 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	podLabels, err := r.getDCDWorkloadPodLabels(ctx, opt.dynamoComponentDeployment)
-	if err != nil {
-		return nil, false, err
-	}
-
 	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      kubeName,
@@ -571,20 +564,12 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		},
 	}
 
-	leaderPodLabels := make(map[string]string)
-	for k, v := range podLabels {
-		leaderPodLabels[k] = v
-	}
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, leaderPodLabels)
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate leader pod template")
 	}
 
-	workerPodLabels := make(map[string]string)
-	for k, v := range podLabels {
-		workerPodLabels[k] = v
-	}
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, workerPodLabels)
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
 	}
@@ -608,19 +593,15 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	return leaderWorkerSet, false, nil
 }
 
-// getDCDWorkloadPodLabels keeps LWS pod labels aligned with the workload
-// component type used by Deployment and Service rendering.
-func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadPodLabels(
-	ctx context.Context,
+// getDCDWorkloadPodLabels keeps pod labels aligned with the workload component
+// type used by Deployment and Service rendering.
+func getDCDWorkloadPodLabels(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-) (map[string]string, error) {
+	componentType string,
+) map[string]string {
 	labels := dynamo.GetDCDKubeLabels(dcd)
-	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
-	if err != nil {
-		return nil, err
-	}
 	if componentType == "" {
-		return labels, nil
+		return labels
 	}
 	labels[commonconsts.KubeLabelDynamoComponentType] = componentType
 	specType := string(dcd.Spec.ComponentType)
@@ -629,7 +610,7 @@ func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadPodLabels(
 		labels[commonconsts.KubeLabelDynamoSubComponentType] == "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = specType
 	}
-	return labels, nil
+	return labels
 }
 
 // leaderWorkerSetName keeps the native LWS at <dcd-name>-0 so it can adopt
@@ -918,13 +899,19 @@ type generateResourceOption struct {
 }
 
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (*corev1.PodTemplateSpec, error) {
-	dcd := opt.dynamoComponentDeployment
+	dcd := opt.dynamoComponentDeployment.DeepCopy()
+	effectiveComponent, err := dynamo.EffectiveComponentForRole(&dcd.Spec.DynamoComponentDeploymentSharedSpec, role)
+	if err != nil {
+		return nil, err
+	}
+	dcd.Spec.DynamoComponentDeploymentSharedSpec = *effectiveComponent
+	opt.dynamoComponentDeployment = dcd
 	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
 	if err != nil {
 		return nil, err
 	}
-	podLabels := dynamo.GetDCDKubeLabels(dcd)
+	podLabels := getDCDWorkloadPodLabels(dcd, componentType)
 	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
 	kubeName := dcd.Name
 

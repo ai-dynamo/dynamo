@@ -48,6 +48,9 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		container.ReadinessProbe = nil
 		container.StartupProbe = nil
 	}
+	if IsManualMultinode(component) {
+		return
+	}
 
 	// Generate the flags to add
 	flags, needsShell := b.getMultinodeFlags(numberOfNodes, role, serviceName, multinodeDeployer)

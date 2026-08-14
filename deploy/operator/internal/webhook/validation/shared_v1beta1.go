@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -74,6 +75,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			"must be non-negative",
 		))
 	}
+	allErrs = append(allErrs, v.validateMultinodeSpec(spec, fldPath)...)
 
 	if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
 		if validateInferencePoolAvailability {
@@ -140,6 +142,120 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	return allErrs
+}
+
+func (v *sharedValidation) validateMultinodeSpec(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.Multinode == nil {
+		return nil
+	}
+
+	multinodePath := fldPath.Child("multinode")
+	mode := dynamo.EffectiveMultinodeMode(spec)
+	switch mode {
+	case nvidiacomv1beta1.MultinodeModeAutomatic:
+		if spec.Multinode.Worker != nil {
+			return field.ErrorList{field.Forbidden(
+				multinodePath.Child("worker"),
+				"must be omitted when multinode.mode is Automatic",
+			)}
+		}
+		return nil
+	case nvidiacomv1beta1.MultinodeModeManual:
+		return v.validateManualMultinodeSpec(spec, fldPath)
+	default:
+		return field.ErrorList{field.NotSupported(
+			multinodePath.Child("mode"),
+			mode,
+			[]string{string(nvidiacomv1beta1.MultinodeModeAutomatic), string(nvidiacomv1beta1.MultinodeModeManual)},
+		)}
+	}
+}
+
+func (v *sharedValidation) validateManualMultinodeSpec(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	multinodePath := fldPath.Child("multinode")
+	workerPath := multinodePath.Child("worker")
+
+	if spec.ComponentType != nvidiacomv1beta1.ComponentTypeWorker {
+		allErrs = append(allErrs, field.Forbidden(
+			multinodePath.Child("mode"),
+			"Manual mode is supported only for multinode worker components",
+		))
+	}
+	if spec.Multinode.Worker == nil {
+		allErrs = append(allErrs, field.Required(workerPath, "is required when multinode.mode is Manual"))
+		return allErrs
+	}
+	overrides := spec.Multinode.Worker.PodTemplateOverrides
+	if overrides == nil {
+		allErrs = append(allErrs, field.Required(
+			workerPath.Child("podTemplateOverrides"),
+			"is required when multinode.mode is Manual",
+		))
+		return allErrs
+	}
+	if spec.Experimental != nil && (spec.Experimental.GPUMemoryService != nil || spec.Experimental.Failover != nil) {
+		allErrs = append(allErrs, field.Forbidden(
+			multinodePath.Child("mode"),
+			"Manual mode cannot be combined with gpuMemoryService or failover",
+		))
+	}
+
+	containersPath := workerPath.Child("podTemplateOverrides", "spec", "containers")
+	if overrides.Spec != nil && overrides.Spec.Containers != nil {
+		if len(overrides.Spec.Containers) != 1 {
+			allErrs = append(allErrs, field.Invalid(
+				containersPath,
+				overrides.Spec.Containers,
+				"must contain exactly one container override named main",
+			))
+		} else if overrides.Spec.Containers[0].Name != consts.MainContainerName {
+			allErrs = append(allErrs, field.NotSupported(
+				containersPath.Index(0).Child("name"),
+				overrides.Spec.Containers[0].Name,
+				[]string{consts.MainContainerName},
+			))
+		}
+	}
+
+	effectiveWorker, err := dynamo.EffectiveComponentForRole(spec, dynamo.RoleWorker)
+	if err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			workerPath.Child("podTemplateOverrides"),
+			overrides,
+			err.Error(),
+		))
+		return allErrs
+	}
+	main := dynamo.GetMainContainer(effectiveWorker)
+	if main == nil {
+		allErrs = append(allErrs, field.Required(
+			containersPath,
+			"the effective worker template must contain a main container",
+		))
+		return allErrs
+	}
+	if main.Image == "" {
+		imagePath := fldPath.Child("podTemplate", "spec", "containers")
+		if overrides.Spec != nil && len(overrides.Spec.Containers) == 1 && overrides.Spec.Containers[0].Image != nil {
+			imagePath = containersPath.Index(0).Child("image")
+		}
+		allErrs = append(allErrs, field.Required(imagePath, "the effective worker image is required"))
+	}
+	if overrides.Spec != nil && len(overrides.Spec.Containers) == 1 && overrides.Spec.Containers[0].Image != nil &&
+		!v.allowMissingRuntimeVersionOverride && runtimeVersionOverrideRequired(main.Image, spec.RuntimeVersionOverride) {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("runtimeVersionOverride"),
+			runtimeVersionOverrideRequiredMessage,
+		))
+	}
 	return allErrs
 }
 

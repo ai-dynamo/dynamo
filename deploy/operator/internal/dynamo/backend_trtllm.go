@@ -34,6 +34,9 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	if numberOfNodes <= 1 {
 		return
 	}
+	if IsManualMultinode(component) {
+		return
+	}
 
 	// Configure probes for multinode deployments
 	if role == RoleWorker {
@@ -77,7 +80,7 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 // multinode deployments so that leader and worker containers can mount it.
 func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
-	if numberOfNodes > 1 {
+	if numberOfNodes > 1 && !IsManualMultinode(component) {
 		sshVolume := corev1.Volume{
 			Name: b.MpiRunSecretName,
 			VolumeSource: corev1.VolumeSource{

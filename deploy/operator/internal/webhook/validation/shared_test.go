@@ -41,9 +41,94 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 )
 
 const alternateAdmissionModel = "Qwen/Qwen3-8B"
+
+func TestValidateMultinodeSpecModes(t *testing.T) {
+	componentPath := field.NewPath("spec", "components").Index(0)
+	validManual := func() *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+		return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+			RuntimeVersionOverride: "1.4.0",
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  consts.MainContainerName,
+				Image: "runtime:1.4.0",
+			}}}},
+			Multinode: &nvidiacomv1beta1.MultinodeSpec{
+				Mode:      nvidiacomv1beta1.MultinodeModeManual,
+				NodeCount: 2,
+				Worker: &nvidiacomv1beta1.MultinodeWorkerSpec{
+					PodTemplateOverrides: &nvidiacomv1beta1.MultinodePodTemplateOverrides{},
+				},
+			},
+		}
+	}
+	validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceDisabled}
+
+	t.Run("Automatic forbids worker configuration", func(t *testing.T) {
+		spec := validManual()
+		spec.Multinode.Mode = nvidiacomv1beta1.MultinodeModeAutomatic
+		errList := validation.validateMultinodeSpec(spec, componentPath)
+		assertFieldPaths(t, errList, []string{"spec.components[0].multinode.worker"})
+	})
+
+	t.Run("Manual requires worker component", func(t *testing.T) {
+		spec := validManual()
+		spec.ComponentType = nvidiacomv1beta1.ComponentTypeDecode
+		errList := validation.validateMultinodeSpec(spec, componentPath)
+		assertFieldPaths(t, errList, []string{"spec.components[0].multinode.mode"})
+	})
+
+	t.Run("Manual requires worker and overrides", func(t *testing.T) {
+		spec := validManual()
+		spec.Multinode.Worker = nil
+		errList := validation.validateMultinodeSpec(spec, componentPath)
+		assertFieldPaths(t, errList, []string{"spec.components[0].multinode.worker"})
+
+		spec.Multinode.Worker = &nvidiacomv1beta1.MultinodeWorkerSpec{}
+		errList = validation.validateMultinodeSpec(spec, componentPath)
+		assertFieldPaths(t, errList, []string{"spec.components[0].multinode.worker.podTemplateOverrides"})
+	})
+
+	t.Run("Manual rejects GMS", func(t *testing.T) {
+		spec := validManual()
+		spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+		errList := validation.validateMultinodeSpec(spec, componentPath)
+		assertFieldPaths(t, errList, []string{"spec.components[0].multinode.mode"})
+	})
+
+	t.Run("Manual validates the restricted main override", func(t *testing.T) {
+		spec := validManual()
+		spec.Multinode.Worker.PodTemplateOverrides.Spec = &nvidiacomv1beta1.MultinodePodSpecOverrides{
+			Containers: []nvidiacomv1beta1.MultinodeContainerOverride{{Name: "sidecar"}},
+		}
+		errList := validation.validateMultinodeSpec(spec, componentPath)
+		assertFieldPaths(t, errList, []string{
+			"spec.components[0].multinode.worker.podTemplateOverrides.spec.containers[0].name",
+			"spec.components[0].multinode.worker.podTemplateOverrides",
+		})
+	})
+
+	t.Run("Manual validates the effective worker image", func(t *testing.T) {
+		spec := validManual()
+		spec.Multinode.Worker.PodTemplateOverrides.Spec = &nvidiacomv1beta1.MultinodePodSpecOverrides{
+			Containers: []nvidiacomv1beta1.MultinodeContainerOverride{{
+				Name:  consts.MainContainerName,
+				Image: ptr.To(""),
+			}},
+		}
+		errList := validation.validateMultinodeSpec(spec, componentPath)
+		assertFieldPaths(t, errList, []string{
+			"spec.components[0].multinode.worker.podTemplateOverrides.spec.containers[0].image",
+		})
+	})
+
+	t.Run("valid Manual mode", func(t *testing.T) {
+		assertFieldPaths(t, validation.validateMultinodeSpec(validManual(), componentPath), nil)
+	})
+}
 
 type crdRequestValidator struct {
 	schemaValidator apiextensionsvalidation.SchemaValidator

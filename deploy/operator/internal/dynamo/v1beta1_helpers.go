@@ -7,6 +7,7 @@ package dynamo
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -15,6 +16,99 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// EffectiveMultinodeMode returns Automatic for the omitted API value.
+func EffectiveMultinodeMode(component *v1beta1.DynamoComponentDeploymentSharedSpec) v1beta1.MultinodeMode {
+	if component == nil || component.Multinode == nil || component.Multinode.Mode == "" {
+		return v1beta1.MultinodeModeAutomatic
+	}
+	return component.Multinode.Mode
+}
+
+// IsManualMultinode reports whether the component uses user-supplied leader
+// and worker launch configuration.
+func IsManualMultinode(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return EffectiveMultinodeMode(component) == v1beta1.MultinodeModeManual
+}
+
+// EffectiveComponentForRole returns a role-specific component copy. In Manual
+// mode the component podTemplate is the leader and common worker base, and the
+// restricted worker overlay replaces every field that is explicitly present.
+func EffectiveComponentForRole(component *v1beta1.DynamoComponentDeploymentSharedSpec, role Role) (*v1beta1.DynamoComponentDeploymentSharedSpec, error) {
+	if component == nil {
+		return nil, fmt.Errorf("component is nil")
+	}
+	effective := component.DeepCopy()
+	if role != RoleWorker || !IsManualMultinode(component) {
+		return effective, nil
+	}
+	if component.Multinode.Worker == nil || component.Multinode.Worker.PodTemplateOverrides == nil {
+		return nil, fmt.Errorf("manual multinode mode requires worker.podTemplateOverrides")
+	}
+	if effective.PodTemplate == nil {
+		return nil, fmt.Errorf("manual multinode mode requires podTemplate for the leader and worker base")
+	}
+	if err := applyMultinodeWorkerPodTemplateOverrides(effective.PodTemplate, component.Multinode.Worker.PodTemplateOverrides); err != nil {
+		return nil, err
+	}
+	return effective, nil
+}
+
+func applyMultinodeWorkerPodTemplateOverrides(podTemplate *corev1.PodTemplateSpec, overrides *v1beta1.MultinodePodTemplateOverrides) error {
+	if overrides.Metadata != nil {
+		if overrides.Metadata.Labels != nil {
+			podTemplate.Labels = maps.Clone(*overrides.Metadata.Labels)
+		}
+		if overrides.Metadata.Annotations != nil {
+			podTemplate.Annotations = maps.Clone(*overrides.Metadata.Annotations)
+		}
+	}
+	if overrides.Spec == nil {
+		return nil
+	}
+	if overrides.Spec.NodeSelector != nil {
+		podTemplate.Spec.NodeSelector = maps.Clone(*overrides.Spec.NodeSelector)
+	}
+	if overrides.Spec.Tolerations != nil {
+		podTemplate.Spec.Tolerations = (&corev1.PodSpec{Tolerations: *overrides.Spec.Tolerations}).DeepCopy().Tolerations
+	}
+	if overrides.Spec.ResourceClaims != nil {
+		podTemplate.Spec.ResourceClaims = (&corev1.PodSpec{ResourceClaims: *overrides.Spec.ResourceClaims}).DeepCopy().ResourceClaims
+	}
+	if overrides.Spec.ImagePullSecrets != nil {
+		podTemplate.Spec.ImagePullSecrets = append([]corev1.LocalObjectReference(nil), (*overrides.Spec.ImagePullSecrets)...)
+	}
+	if overrides.Spec.Containers == nil {
+		return nil
+	}
+	if len(overrides.Spec.Containers) != 1 || overrides.Spec.Containers[0].Name != commonconsts.MainContainerName {
+		return fmt.Errorf("manual multinode worker containers must contain exactly one %q override", commonconsts.MainContainerName)
+	}
+	main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplate})
+	if main == nil {
+		return fmt.Errorf("manual multinode worker base has no %q container", commonconsts.MainContainerName)
+	}
+	applyMultinodeWorkerContainerOverride(main, &overrides.Spec.Containers[0])
+	return nil
+}
+
+func applyMultinodeWorkerContainerOverride(container *corev1.Container, override *v1beta1.MultinodeContainerOverride) {
+	if override.Image != nil {
+		container.Image = *override.Image
+	}
+	if override.Command != nil {
+		container.Command = append([]string(nil), (*override.Command)...)
+	}
+	if override.Args != nil {
+		container.Args = append([]string(nil), (*override.Args)...)
+	}
+	if override.Env != nil {
+		container.Env = (&corev1.Container{Env: *override.Env}).DeepCopy().Env
+	}
+	if override.Resources != nil && override.Resources.Claims != nil {
+		container.Resources.Claims = append([]corev1.ResourceClaim(nil), (*override.Resources.Claims)...)
+	}
+}
 
 // ComponentsByName returns the graph deployment components indexed by their
 // stable v1beta1 component name.

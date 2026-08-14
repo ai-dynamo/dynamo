@@ -1540,6 +1540,168 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 	}
 }
 
+func TestGenerateLeaderWorkerSetManualRoleTemplates(t *testing.T) {
+	leaderClaimTemplate := "engine-leader-devices"
+	workerClaimTemplate := "engine-worker-devices"
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "manual-engine", Namespace: "default"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "engine",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"example.com/engine-role": "leader"}},
+					Spec: corev1.PodSpec{
+						NodeSelector: map[string]string{"pool": "leader"},
+						ResourceClaims: []corev1.PodResourceClaim{{
+							Name:                      "devices",
+							ResourceClaimTemplateName: &leaderClaimTemplate,
+						}},
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Image:   "runtime:1.4.0",
+							Command: []string{"python3", "-m", "dynamo.vllm"},
+							Args: []string{
+								"--distributed-executor-backend=mp",
+								"--nnodes=2",
+								"--node-rank=0",
+								"--master-addr=$(LWS_LEADER_ADDRESS)",
+							},
+							Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "leader-devices"}}},
+						}},
+					},
+				},
+				Multinode: &v1beta1.MultinodeSpec{
+					Mode:      v1beta1.MultinodeModeManual,
+					NodeCount: 2,
+					Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
+						Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
+							Labels: ptr.To(map[string]string{"example.com/engine-role": "worker"}),
+						},
+						Spec: &v1beta1.MultinodePodSpecOverrides{
+							NodeSelector: ptr.To(map[string]string{"pool": "worker"}),
+							ResourceClaims: ptr.To([]corev1.PodResourceClaim{{
+								Name:                      "devices",
+								ResourceClaimTemplateName: &workerClaimTemplate,
+							}}),
+							Containers: []v1beta1.MultinodeContainerOverride{{
+								Name: commonconsts.MainContainerName,
+								Args: ptr.To([]string{
+									"--distributed-executor-backend=mp",
+									"--nnodes=2",
+									"--node-rank=$(LWS_WORKER_INDEX)",
+									"--master-addr=$(LWS_LEADER_ADDRESS)",
+									"--headless",
+								}),
+								Resources: &v1beta1.MultinodeContainerResourceOverrides{
+									Claims: ptr.To([]corev1.ResourceClaim{{Name: "worker-devices"}}),
+								},
+							}},
+						},
+					}},
+				},
+			},
+		},
+	}
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Name:      "dynamo-component",
+		Namespace: "default",
+		Labels:    map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+	}}
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd, serviceAccount).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+			return nil, nil
+		}},
+	}
+
+	lws, toDelete, err := reconciler.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.NotNil(t, lws.Spec.LeaderWorkerTemplate.LeaderTemplate)
+	leader := lws.Spec.LeaderWorkerTemplate.LeaderTemplate
+	worker := &lws.Spec.LeaderWorkerTemplate.WorkerTemplate
+	require.Equal(t, "leader", leader.Labels["example.com/engine-role"])
+	require.Equal(t, "worker", worker.Labels["example.com/engine-role"])
+	require.Equal(t, "leader", leader.Spec.NodeSelector["pool"])
+	require.Equal(t, "worker", worker.Spec.NodeSelector["pool"])
+	require.Equal(t, leaderClaimTemplate, *leader.Spec.ResourceClaims[0].ResourceClaimTemplateName)
+	require.Equal(t, workerClaimTemplate, *worker.Spec.ResourceClaims[0].ResourceClaimTemplateName)
+
+	leaderMain := findContainer(leader.Spec.Containers, commonconsts.MainContainerName)
+	workerMain := findContainer(worker.Spec.Containers, commonconsts.MainContainerName)
+	require.NotNil(t, leaderMain)
+	require.NotNil(t, workerMain)
+	require.Equal(t, "runtime:1.4.0", workerMain.Image)
+	require.Contains(t, leaderMain.Args, "--node-rank=0")
+	require.Contains(t, workerMain.Args, "--node-rank=$(LWS_WORKER_INDEX)")
+	require.Contains(t, workerMain.Args, "--headless")
+	require.Contains(t, leaderMain.Args, "--master-port")
+	require.Contains(t, leaderMain.Args, commonconsts.VLLMMpMasterPort)
+	require.Contains(t, workerMain.Args, "--master-port")
+	require.Contains(t, workerMain.Args, commonconsts.VLLMMpMasterPort)
+	require.Equal(t, []corev1.ResourceClaim{{Name: "leader-devices"}}, leaderMain.Resources.Claims)
+	require.Equal(t, []corev1.ResourceClaim{{Name: "worker-devices"}}, workerMain.Resources.Claims)
+	require.Empty(t, leader.Spec.InitContainers)
+	require.Len(t, worker.Spec.InitContainers, 1)
+	require.Equal(t, "wait-for-leader-mp", worker.Spec.InitContainers[0].Name)
+	require.Contains(t, worker.Spec.InitContainers[0].Command[2], "LEADER_PORT=\""+commonconsts.VLLMMpMasterPort+"\"")
+}
+
+func TestGenerateLeaderWorkerSetOmittedModeMatchesAutomatic(t *testing.T) {
+	newDCD := func(mode v1beta1.MultinodeMode) *v1beta1.DynamoComponentDeployment {
+		return &v1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "automatic-engine", Namespace: "default"},
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				BackendFramework: string(dynamo.BackendFrameworkVLLM),
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "engine",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name:    commonconsts.MainContainerName,
+						Image:   "runtime:1.4.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--tensor-parallel-size=16"},
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8"),
+						}},
+					}}}},
+					Multinode: &v1beta1.MultinodeSpec{Mode: mode, NodeCount: 2},
+				},
+			},
+		}
+	}
+	render := func(dcd *v1beta1.DynamoComponentDeployment) *leaderworkersetv1.LeaderWorkerSet {
+		serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+			Name:      "dynamo-component",
+			Namespace: dcd.Namespace,
+			Labels:    map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+		}}
+		reconciler := &DynamoComponentDeploymentReconciler{
+			Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd, serviceAccount).Build(),
+			Config:        &configv1alpha1.OperatorConfiguration{},
+			RuntimeConfig: &controller_common.RuntimeConfig{},
+			DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			}},
+		}
+		lws, toDelete, err := reconciler.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		return lws
+	}
+
+	omitted := render(newDCD(""))
+	explicit := render(newDCD(v1beta1.MultinodeModeAutomatic))
+	if diff := cmp.Diff(omitted, explicit); diff != "" {
+		t.Fatalf("omitted mode changed Automatic LWS output (-omitted +explicit):\n%s", diff)
+	}
+}
+
 func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_ReplicaReconciliation(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
@@ -3471,7 +3633,6 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 	got, err := reconciler.generateWorkerPodTemplateSpec(
 		context.Background(),
 		generateResourceOption{dynamoComponentDeployment: dcd},
-		map[string]string{"app": "demo"},
 	)
 	require.NoError(t, err)
 	require.NotNil(t, got)

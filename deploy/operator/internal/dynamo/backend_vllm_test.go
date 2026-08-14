@@ -4,14 +4,46 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+func TestVLLMBackendManualMultinodeInjectsOnlyMpMasterPort(t *testing.T) {
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1beta1.MultinodeSpec{Mode: v1beta1.MultinodeModeManual, NodeCount: 2},
+	}
+	for _, role := range []Role{RoleLeader, RoleWorker} {
+		t.Run(string(role), func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model=test", "--distributed-executor-backend=mp"},
+			}
+			(&VLLMBackend{}).UpdateContainer(container, 2, role, component, "engine", &GroveMultinodeDeployer{})
+
+			if !containerCommandLineHasArg(container, "--master-port", commonconsts.VLLMMpMasterPort) {
+				t.Fatalf("Manual vLLM MP args %v do not contain operator master port", container.Args)
+			}
+			commandLine := strings.Join(append(append([]string{}, container.Command...), container.Args...), " ")
+			for _, operatorGeneratedFlag := range []string{"--nnodes", "--node-rank", "--master-addr", "--headless"} {
+				if strings.Contains(commandLine, operatorGeneratedFlag) {
+					t.Fatalf("Manual vLLM command contains generated flag %q: %s", operatorGeneratedFlag, commandLine)
+				}
+			}
+			for _, env := range container.Env {
+				if env.Name == "DYNAMO_RANK" || env.Name == "DYNAMO_LEADER_ADDRESS" {
+					t.Fatalf("phase-one Manual mode injected deferred topology alias %q", env.Name)
+				}
+			}
+		})
+	}
+}
 
 func TestGetContainerGPUsRecognizesMIGResources(t *testing.T) {
 	resources := &corev1.ResourceRequirements{

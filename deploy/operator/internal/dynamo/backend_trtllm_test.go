@@ -487,6 +487,32 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 	}
 }
 
+func TestTRTLLMBackend_ManualMultinodePreservesUserLaunchConfiguration(t *testing.T) {
+	backend := &TRTLLMBackend{MpiRunSecretName: mpiRunSecretName}
+	container := &corev1.Container{
+		Command:        []string{"python3"},
+		Args:           []string{"-m", "dynamo.trtllm", "--user-owned-multinode"},
+		LivenessProbe:  &corev1.Probe{},
+		ReadinessProbe: &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
+	}
+	wantContainer := container.DeepCopy()
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{Mode: v1alpha1.MultinodeModeManual, NodeCount: 2},
+	})
+
+	backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
+	if !reflect.DeepEqual(container, wantContainer) {
+		t.Fatalf("Manual mode changed user container:\n got: %#v\nwant: %#v", container, wantContainer)
+	}
+
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{*container}}
+	backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
+	if len(podSpec.Volumes) != 0 {
+		t.Fatalf("Manual mode injected TRT-LLM SSH volumes: %#v", podSpec.Volumes)
+	}
+}
+
 func TestTRTLLMBackend_hostNamesList(t *testing.T) {
 	tests := []struct {
 		name              string

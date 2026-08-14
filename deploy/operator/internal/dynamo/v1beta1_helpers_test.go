@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"maps"
+	"reflect"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -12,6 +13,179 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
+
+func TestEffectiveComponentForRoleManualWorkerOverrides(t *testing.T) {
+	terminationGracePeriod := int64(30)
+	leaderClaimTemplate := "leader-claim"
+	workerClaimTemplate := "worker-claim"
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		PodTemplate: &corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      map[string]string{"role": "leader"},
+				Annotations: map[string]string{"source": "leader"},
+			},
+			Spec: corev1.PodSpec{
+				NodeSelector: map[string]string{"pool": "leader"},
+				Tolerations:  []corev1.Toleration{{Key: "leader"}},
+				ResourceClaims: []corev1.PodResourceClaim{{
+					Name:                      "devices",
+					ResourceClaimTemplateName: &leaderClaimTemplate,
+				}},
+				ImagePullSecrets:              []corev1.LocalObjectReference{{Name: "leader-secret"}},
+				TerminationGracePeriodSeconds: &terminationGracePeriod,
+				Containers: []corev1.Container{
+					{
+						Name:    commonconsts.MainContainerName,
+						Image:   "leader:1.4.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--node-rank=0"},
+						Env:     []corev1.EnvVar{{Name: "ENGINE_ROLE", Value: "leader"}},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1")},
+							Claims: []corev1.ResourceClaim{{Name: "leader-devices"}},
+						},
+					},
+					{Name: "metrics", Image: "metrics:1.0.0"},
+				},
+			},
+		},
+		Multinode: &v1beta1.MultinodeSpec{
+			Mode:      v1beta1.MultinodeModeManual,
+			NodeCount: 2,
+			Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
+				Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
+					Labels:      ptr.To(map[string]string{"role": "worker"}),
+					Annotations: ptr.To(map[string]string{"source": "worker"}),
+				},
+				Spec: &v1beta1.MultinodePodSpecOverrides{
+					NodeSelector: ptr.To(map[string]string{"pool": "worker"}),
+					Tolerations:  ptr.To([]corev1.Toleration{{Key: "worker"}}),
+					ResourceClaims: ptr.To([]corev1.PodResourceClaim{{
+						Name:                      "devices",
+						ResourceClaimTemplateName: &workerClaimTemplate,
+					}}),
+					ImagePullSecrets: ptr.To([]corev1.LocalObjectReference{{Name: "worker-secret"}}),
+					Containers: []v1beta1.MultinodeContainerOverride{{
+						Name:    commonconsts.MainContainerName,
+						Image:   ptr.To("worker:1.4.0"),
+						Command: ptr.To([]string{"python3", "-m", "dynamo.vllm"}),
+						Args:    ptr.To([]string{"--node-rank=1", "--headless"}),
+						Env:     ptr.To([]corev1.EnvVar{{Name: "ENGINE_ROLE", Value: "worker"}}),
+						Resources: &v1beta1.MultinodeContainerResourceOverrides{
+							Claims: ptr.To([]corev1.ResourceClaim{{Name: "worker-devices"}}),
+						},
+					}},
+				},
+			}},
+		},
+	}
+
+	leader, err := EffectiveComponentForRole(component, RoleLeader)
+	if err != nil {
+		t.Fatalf("resolve leader: %v", err)
+	}
+	worker, err := EffectiveComponentForRole(component, RoleWorker)
+	if err != nil {
+		t.Fatalf("resolve worker: %v", err)
+	}
+	if !reflect.DeepEqual(leader.PodTemplate, component.PodTemplate) {
+		t.Fatalf("leader template changed: got %#v, want %#v", leader.PodTemplate, component.PodTemplate)
+	}
+	if !maps.Equal(worker.PodTemplate.Labels, map[string]string{"role": "worker"}) ||
+		!maps.Equal(worker.PodTemplate.Annotations, map[string]string{"source": "worker"}) {
+		t.Fatalf("worker metadata = labels %v annotations %v", worker.PodTemplate.Labels, worker.PodTemplate.Annotations)
+	}
+	if !maps.Equal(worker.PodTemplate.Spec.NodeSelector, map[string]string{"pool": "worker"}) ||
+		!reflect.DeepEqual(worker.PodTemplate.Spec.Tolerations, []corev1.Toleration{{Key: "worker"}}) ||
+		!reflect.DeepEqual(worker.PodTemplate.Spec.ImagePullSecrets, []corev1.LocalObjectReference{{Name: "worker-secret"}}) {
+		t.Fatalf("worker pod overrides were not applied: %#v", worker.PodTemplate.Spec)
+	}
+	if got := *worker.PodTemplate.Spec.ResourceClaims[0].ResourceClaimTemplateName; got != workerClaimTemplate {
+		t.Fatalf("worker resource claim template = %q, want %q", got, workerClaimTemplate)
+	}
+	if worker.PodTemplate.Spec.TerminationGracePeriodSeconds == nil || *worker.PodTemplate.Spec.TerminationGracePeriodSeconds != terminationGracePeriod {
+		t.Fatal("unrelated pod fields were not inherited")
+	}
+	main := GetMainContainer(worker)
+	if main == nil {
+		t.Fatal("effective worker has no main container")
+	}
+	if main.Image != "worker:1.4.0" || !reflect.DeepEqual(main.Args, []string{"--node-rank=1", "--headless"}) ||
+		!reflect.DeepEqual(main.Env, []corev1.EnvVar{{Name: "ENGINE_ROLE", Value: "worker"}}) ||
+		!reflect.DeepEqual(main.Resources.Claims, []corev1.ResourceClaim{{Name: "worker-devices"}}) {
+		t.Fatalf("worker main container override = %#v", main)
+	}
+	if gpuLimit := main.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")]; gpuLimit.Cmp(resource.MustParse("1")) != 0 {
+		t.Fatalf("unrelated main-container GPU limit = %s, want 1", gpuLimit.String())
+	}
+	if len(worker.PodTemplate.Spec.Containers) != 2 || worker.PodTemplate.Spec.Containers[1].Name != "metrics" {
+		t.Fatalf("sidecars were not inherited: %#v", worker.PodTemplate.Spec.Containers)
+	}
+	if GetMainContainer(component).Image != "leader:1.4.0" {
+		t.Fatal("effective template resolution mutated the source component")
+	}
+}
+
+func TestEffectiveComponentForRoleManualWorkerExplicitEmptyOverrides(t *testing.T) {
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		PodTemplate: &corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"leader": "true"}, Annotations: map[string]string{"leader": "true"}},
+			Spec: corev1.PodSpec{
+				NodeSelector:     map[string]string{"pool": "leader"},
+				Tolerations:      []corev1.Toleration{{Key: "leader"}},
+				ResourceClaims:   []corev1.PodResourceClaim{{Name: "devices"}},
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registry"}},
+				Containers: []corev1.Container{{
+					Name:    commonconsts.MainContainerName,
+					Image:   "runtime:1.4.0",
+					Command: []string{"python3"},
+					Args:    []string{"leader"},
+					Env:     []corev1.EnvVar{{Name: "LEADER", Value: "true"}},
+					Resources: corev1.ResourceRequirements{
+						Claims: []corev1.ResourceClaim{{Name: "devices"}},
+					},
+				}},
+			},
+		},
+		Multinode: &v1beta1.MultinodeSpec{
+			Mode: v1beta1.MultinodeModeManual,
+			Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
+				Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
+					Labels:      ptr.To(map[string]string{}),
+					Annotations: ptr.To(map[string]string{}),
+				},
+				Spec: &v1beta1.MultinodePodSpecOverrides{
+					NodeSelector:     ptr.To(map[string]string{}),
+					Tolerations:      ptr.To([]corev1.Toleration{}),
+					ResourceClaims:   ptr.To([]corev1.PodResourceClaim{}),
+					ImagePullSecrets: ptr.To([]corev1.LocalObjectReference{}),
+					Containers: []v1beta1.MultinodeContainerOverride{{
+						Name:      commonconsts.MainContainerName,
+						Command:   ptr.To([]string{}),
+						Args:      ptr.To([]string{}),
+						Env:       ptr.To([]corev1.EnvVar{}),
+						Resources: &v1beta1.MultinodeContainerResourceOverrides{Claims: ptr.To([]corev1.ResourceClaim{})},
+					}},
+				},
+			}},
+		},
+	}
+
+	worker, err := EffectiveComponentForRole(component, RoleWorker)
+	if err != nil {
+		t.Fatalf("resolve worker: %v", err)
+	}
+	main := GetMainContainer(worker)
+	if len(worker.PodTemplate.Labels) != 0 || len(worker.PodTemplate.Annotations) != 0 ||
+		len(worker.PodTemplate.Spec.NodeSelector) != 0 || len(worker.PodTemplate.Spec.Tolerations) != 0 ||
+		len(worker.PodTemplate.Spec.ResourceClaims) != 0 || len(worker.PodTemplate.Spec.ImagePullSecrets) != 0 ||
+		len(main.Command) != 0 || len(main.Args) != 0 || len(main.Env) != 0 || len(main.Resources.Claims) != 0 {
+		t.Fatalf("explicit empty overrides did not clear inherited values: %#v", worker.PodTemplate)
+	}
+	if main.Image != "runtime:1.4.0" {
+		t.Fatalf("omitted image override did not inherit leader image: %q", main.Image)
+	}
+}
 
 func TestComponentsByNameNil(t *testing.T) {
 	if got := ComponentsByName(nil); len(got) != 0 {

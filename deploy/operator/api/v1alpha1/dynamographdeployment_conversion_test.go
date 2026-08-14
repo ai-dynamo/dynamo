@@ -151,6 +151,51 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	}
 }
 
+func TestDGD_RoundTrip_ManualMultinodeIsFirstClassInV1alpha1(t *testing.T) {
+	labels := map[string]string{"dynamo.nvidia.com/role": "worker"}
+	args := []string{"--nnodes=2", "--node-rank=1", "--master-addr=leader"}
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "manual-multinode", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode: &v1beta1.MultinodeSpec{
+					Mode:      v1beta1.MultinodeModeManual,
+					NodeCount: 2,
+					Worker: &v1beta1.MultinodeWorkerSpec{
+						PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
+							Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{Labels: &labels},
+							Spec: &v1beta1.MultinodePodSpecOverrides{
+								Containers: []v1beta1.MultinodeContainerOverride{{
+									Name: v1beta1.MainContainerName,
+									Args: &args,
+								}},
+							},
+						},
+					},
+				},
+			}},
+		},
+	}
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if raw := spoke.Annotations[annDGDSpec]; raw != "" {
+		t.Fatalf("manual multinode was stored in the conversion annotation instead of v1alpha1: %s", raw)
+	}
+
+	got := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("manual multinode round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestDGD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "edit", Namespace: "ns"},

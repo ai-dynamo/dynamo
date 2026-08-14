@@ -554,6 +554,31 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 	}
 }
 
+func TestSGLangBackend_ManualMultinodePreservesUserLaunchArguments(t *testing.T) {
+	backend := &SGLangBackend{}
+	container := &corev1.Container{
+		Command:        []string{"python3"},
+		Args:           []string{"-m", "dynamo.sglang", "--nnodes=2", "--node-rank=1", "--dist-init-addr=leader:29500"},
+		LivenessProbe:  &corev1.Probe{},
+		ReadinessProbe: &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
+	}
+	wantCommand := append([]string(nil), container.Command...)
+	wantArgs := append([]string(nil), container.Args...)
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{Mode: v1alpha1.MultinodeModeManual, NodeCount: 2},
+	})
+
+	backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
+
+	if !reflect.DeepEqual(container.Command, wantCommand) || !reflect.DeepEqual(container.Args, wantArgs) {
+		t.Fatalf("Manual mode changed user launch configuration: command=%v args=%v", container.Command, container.Args)
+	}
+	if container.LivenessProbe != nil || container.ReadinessProbe != nil || container.StartupProbe != nil {
+		t.Fatal("Manual SGLang worker probes were not removed")
+	}
+}
+
 func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	backend := &SGLangBackend{}
 

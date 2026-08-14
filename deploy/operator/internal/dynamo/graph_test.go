@@ -1082,6 +1082,154 @@ func TestTopologyLabelMetadataFromConvertedAlphaDGD(t *testing.T) {
 	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
 }
 
+func TestGenerateGrovePodCliqueSetManualRoleTemplates(t *testing.T) {
+	leaderClaimTemplate := "engine-leader-devices"
+	workerClaimTemplate := "engine-worker-devices"
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "manual", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "engine",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"example.com/engine-role": "leader"}},
+					Spec: corev1.PodSpec{
+						NodeSelector: map[string]string{"pool": "leader"},
+						ResourceClaims: []corev1.PodResourceClaim{{
+							Name:                      "devices",
+							ResourceClaimTemplateName: &leaderClaimTemplate,
+						}},
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Image:   "runtime:1.4.0",
+							Command: []string{"python3", "-m", "dynamo.vllm"},
+							Args: []string{
+								"--distributed-executor-backend=mp",
+								"--nnodes=2",
+								"--node-rank=0",
+								"--master-addr=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-engine-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+							},
+							Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "leader-devices"}}},
+						}},
+					},
+				},
+				Multinode: &v1beta1.MultinodeSpec{
+					Mode:      v1beta1.MultinodeModeManual,
+					NodeCount: 2,
+					Worker: &v1beta1.MultinodeWorkerSpec{PodTemplateOverrides: &v1beta1.MultinodePodTemplateOverrides{
+						Metadata: &v1beta1.MultinodePodTemplateMetadataOverrides{
+							Labels: ptr.To(map[string]string{"example.com/engine-role": "worker"}),
+						},
+						Spec: &v1beta1.MultinodePodSpecOverrides{
+							NodeSelector: ptr.To(map[string]string{"pool": "worker"}),
+							ResourceClaims: ptr.To([]corev1.PodResourceClaim{{
+								Name:                      "devices",
+								ResourceClaimTemplateName: &workerClaimTemplate,
+							}}),
+							Containers: []v1beta1.MultinodeContainerOverride{{
+								Name: commonconsts.MainContainerName,
+								Args: ptr.To([]string{
+									"--distributed-executor-backend=mp",
+									"--nnodes=2",
+									"--node-rank=1",
+									"--master-addr=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-engine-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+									"--headless",
+								}),
+								Resources: &v1beta1.MultinodeContainerResourceOverrides{
+									Claims: ptr.To([]corev1.ResourceClaim{{Name: "worker-devices"}}),
+								},
+							}},
+						},
+					}},
+				},
+			}},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(), dgd, &configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	cliques := map[string]*grovev1alpha1.PodCliqueTemplateSpec{}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+	leader := cliques["engine-ldr"]
+	worker := cliques["engine-wkr"]
+	require.NotNil(t, leader)
+	require.NotNil(t, worker)
+	assert.Equal(t, "leader", leader.Labels["example.com/engine-role"])
+	assert.Equal(t, "worker", worker.Labels["example.com/engine-role"])
+	assert.Equal(t, "leader", leader.Spec.PodSpec.NodeSelector["pool"])
+	assert.Equal(t, "worker", worker.Spec.PodSpec.NodeSelector["pool"])
+	assert.Equal(t, leaderClaimTemplate, *leader.Spec.PodSpec.ResourceClaims[0].ResourceClaimTemplateName)
+	assert.Equal(t, workerClaimTemplate, *worker.Spec.PodSpec.ResourceClaims[0].ResourceClaimTemplateName)
+
+	leaderMain := findContainerInClique(t, leader, commonconsts.MainContainerName)
+	workerMain := findContainerInClique(t, worker, commonconsts.MainContainerName)
+	assert.Equal(t, "runtime:1.4.0", workerMain.Image)
+	assert.Contains(t, leaderMain.Args, "--node-rank=0")
+	assert.Contains(t, workerMain.Args, "--node-rank=1")
+	assert.Contains(t, workerMain.Args, "--headless")
+	assert.Contains(t, leaderMain.Args, "--master-port")
+	assert.Contains(t, leaderMain.Args, commonconsts.VLLMMpMasterPort)
+	assert.Contains(t, workerMain.Args, "--master-port")
+	assert.Contains(t, workerMain.Args, commonconsts.VLLMMpMasterPort)
+	assert.Equal(t, []corev1.ResourceClaim{{Name: "leader-devices"}}, leaderMain.Resources.Claims)
+	assert.Equal(t, []corev1.ResourceClaim{{Name: "worker-devices"}}, workerMain.Resources.Claims)
+	assert.Empty(t, leader.Spec.PodSpec.InitContainers)
+	require.Len(t, worker.Spec.PodSpec.InitContainers, 1)
+	assert.Equal(t, "wait-for-leader-mp", worker.Spec.PodSpec.InitContainers[0].Name)
+	for _, container := range []corev1.Container{*leaderMain, *workerMain} {
+		for _, env := range container.Env {
+			assert.NotEqual(t, "DYNAMO_RANK", env.Name)
+			assert.NotEqual(t, "DYNAMO_LEADER_ADDRESS", env.Name)
+		}
+	}
+}
+
+func TestGenerateGrovePodCliqueSetOmittedModeMatchesAutomatic(t *testing.T) {
+	newDGD := func(mode v1beta1.MultinodeMode) *v1beta1.DynamoGraphDeployment {
+		return &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "automatic", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: string(BackendFrameworkVLLM),
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+					ComponentName: "engine",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name:    commonconsts.MainContainerName,
+						Image:   "runtime:1.4.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--tensor-parallel-size=16"},
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8"),
+						}},
+					}}}},
+					Multinode: &v1beta1.MultinodeSpec{Mode: mode, NodeCount: 2},
+				}},
+			},
+		}
+	}
+	render := func(dgd *v1beta1.DynamoGraphDeployment) *grovev1alpha1.PodCliqueSet {
+		pcs, err := GenerateGrovePodCliqueSet(
+			context.Background(), dgd, &configv1alpha1.OperatorConfiguration{},
+			&controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil,
+		)
+		require.NoError(t, err)
+		return pcs
+	}
+
+	omitted := render(newDGD(""))
+	explicit := render(newDGD(v1beta1.MultinodeModeAutomatic))
+	if diff := cmp.Diff(omitted, explicit); diff != "" {
+		t.Fatalf("omitted mode changed Automatic Grove output (-omitted +explicit):\n%s", diff)
+	}
+}
+
 func TestGenerateDynamoComponentsDeployments_SkipsTopologyLabelAnnotationWithoutLabelKey(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{

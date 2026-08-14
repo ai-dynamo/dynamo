@@ -11505,15 +11505,390 @@ spec:
                       multinode:
                         description: Multinode is the configuration for multinode components.
                         properties:
+                          mode:
+                            default: Automatic
+                            description: |-
+                              Mode selects ownership of engine-specific multinode configuration.
+                              Automatic preserves the existing operator-generated launch configuration.
+                              Manual uses the component pod configuration for the leader and applies
+                              Worker.PodTemplateOverrides to construct the worker template. Manual requires
+                              users to provide all engine-specific topology arguments. For vLLM
+                              multiprocessing, the operator still adds --master-port=29500 to both roles.
+                            enum:
+                              - Automatic
+                              - Manual
+                            type: string
                           nodeCount:
                             default: 2
                             description: |-
-                              Indicates the number of nodes to deploy for multinode components.
-                              Total number of GPUs is NumberOfNodes * GPU limit.
-                              Must be greater than 1.
+                              NodeCount is the number of nodes to deploy for the multinode component.
+                              Total GPUs used is NodeCount multiplied by the container GPU limit.
                             format: int32
                             minimum: 2
                             type: integer
+                          worker:
+                            description: |-
+                              Worker contains worker-only settings. It is required when Mode is Manual
+                              and must be omitted when Mode is Automatic.
+                            properties:
+                              podTemplateOverrides:
+                                description: |-
+                                  PodTemplateOverrides is a restricted, presence-aware overlay applied to
+                                  the component pod configuration for workers. Omitted fields inherit the
+                                  leader value; present fields replace it, including explicit empty maps and lists.
+                                properties:
+                                  metadata:
+                                    description: Metadata overrides worker labels and annotations.
+                                    properties:
+                                      annotations:
+                                        additionalProperties:
+                                          type: string
+                                        description: Annotations replaces the inherited annotations when present.
+                                        type: object
+                                      labels:
+                                        additionalProperties:
+                                          type: string
+                                        description: Labels replaces the inherited labels when present.
+                                        type: object
+                                    type: object
+                                  spec:
+                                    description: Spec overrides the supported worker PodSpec fields.
+                                    properties:
+                                      containers:
+                                        description: Containers, when present, contains exactly one override named main.
+                                        items:
+                                          description: MultinodeContainerOverride contains the supported worker main-container overrides.
+                                          properties:
+                                            args:
+                                              description: Args replaces the inherited arguments when present.
+                                              items:
+                                                type: string
+                                              type: array
+                                            command:
+                                              description: Command replaces the inherited command when present.
+                                              items:
+                                                type: string
+                                              type: array
+                                            env:
+                                              description: Env replaces the inherited user environment when present.
+                                              items:
+                                                description: EnvVar represents an environment variable present in a Container.
+                                                properties:
+                                                  name:
+                                                    description: |-
+                                                      Name of the environment variable.
+                                                      May consist of any printable ASCII characters except '='.
+                                                    type: string
+                                                  value:
+                                                    description: |-
+                                                      Variable references $(VAR_NAME) are expanded
+                                                      using the previously defined environment variables in the container and
+                                                      any service environment variables. If a variable cannot be resolved,
+                                                      the reference in the input string will be unchanged. Double $$ are reduced
+                                                      to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                                                      "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                                                      Escaped references will never be expanded, regardless of whether the variable
+                                                      exists or not.
+                                                      Defaults to "".
+                                                    type: string
+                                                  valueFrom:
+                                                    description: Source for the environment variable's value. Cannot be used if value is not empty.
+                                                    properties:
+                                                      configMapKeyRef:
+                                                        description: Selects a key of a ConfigMap.
+                                                        properties:
+                                                          key:
+                                                            description: The key to select.
+                                                            type: string
+                                                          name:
+                                                            default: ""
+                                                            description: |-
+                                                              Name of the referent.
+                                                              This field is effectively required, but due to backwards compatibility is
+                                                              allowed to be empty. Instances of this type with an empty value here are
+                                                              almost certainly wrong.
+                                                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                                            type: string
+                                                          optional:
+                                                            description: Specify whether the ConfigMap or its key must be defined
+                                                            type: boolean
+                                                        required:
+                                                          - key
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      fieldRef:
+                                                        description: |-
+                                                          Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                                          spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                                                        properties:
+                                                          apiVersion:
+                                                            description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
+                                                            type: string
+                                                          fieldPath:
+                                                            description: Path of the field to select in the specified API version.
+                                                            type: string
+                                                        required:
+                                                          - fieldPath
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      fileKeyRef:
+                                                        description: |-
+                                                          FileKeyRef selects a key of the env file.
+                                                          Requires the EnvFiles feature gate to be enabled.
+                                                        properties:
+                                                          key:
+                                                            description: |-
+                                                              The key within the env file. An invalid key will prevent the pod from starting.
+                                                              The keys defined within a source may consist of any printable ASCII characters except '='.
+                                                              During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                                            type: string
+                                                          optional:
+                                                            default: false
+                                                            description: |-
+                                                              Specify whether the file or its key must be defined. If the file or key
+                                                              does not exist, then the env var is not published.
+                                                              If optional is set to true and the specified key does not exist,
+                                                              the environment variable will not be set in the Pod's containers.
+
+                                                              If optional is set to false and the specified key does not exist,
+                                                              an error will be returned during Pod creation.
+                                                            type: boolean
+                                                          path:
+                                                            description: |-
+                                                              The path within the volume from which to select the file.
+                                                              Must be relative and may not contain the '..' path or start with '..'.
+                                                            type: string
+                                                          volumeName:
+                                                            description: The name of the volume mount containing the env file.
+                                                            type: string
+                                                        required:
+                                                          - key
+                                                          - path
+                                                          - volumeName
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      resourceFieldRef:
+                                                        description: |-
+                                                          Selects a resource of the container: only resources limits and requests
+                                                          (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                                                        properties:
+                                                          containerName:
+                                                            description: 'Container name: required for volumes, optional for env vars'
+                                                            type: string
+                                                          divisor:
+                                                            anyOf:
+                                                              - type: integer
+                                                              - type: string
+                                                            description: Specifies the output format of the exposed resources, defaults to "1"
+                                                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                                            x-kubernetes-int-or-string: true
+                                                          resource:
+                                                            description: 'Required: resource to select'
+                                                            type: string
+                                                        required:
+                                                          - resource
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      secretKeyRef:
+                                                        description: Selects a key of a secret in the pod's namespace
+                                                        properties:
+                                                          key:
+                                                            description: The key of the secret to select from.  Must be a valid secret key.
+                                                            type: string
+                                                          name:
+                                                            default: ""
+                                                            description: |-
+                                                              Name of the referent.
+                                                              This field is effectively required, but due to backwards compatibility is
+                                                              allowed to be empty. Instances of this type with an empty value here are
+                                                              almost certainly wrong.
+                                                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                                            type: string
+                                                          optional:
+                                                            description: Specify whether the Secret or its key must be defined
+                                                            type: boolean
+                                                        required:
+                                                          - key
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                    type: object
+                                                required:
+                                                  - name
+                                                type: object
+                                              type: array
+                                            image:
+                                              description: Image replaces the inherited image when present.
+                                              type: string
+                                            name:
+                                              description: Name must be main. Other containers cannot be overridden.
+                                              enum:
+                                                - main
+                                              type: string
+                                            resources:
+                                              description: Resources contains the supported worker container resource overrides.
+                                              properties:
+                                                claims:
+                                                  description: Claims replaces inherited container-level DRA claim references when present.
+                                                  items:
+                                                    description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                                                    properties:
+                                                      name:
+                                                        description: |-
+                                                          Name must match the name of one entry in pod.spec.resourceClaims of
+                                                          the Pod where this field is used. It makes that resource available
+                                                          inside a container.
+                                                        type: string
+                                                      request:
+                                                        description: |-
+                                                          Request is the name chosen for a request in the referenced claim.
+                                                          If empty, everything from the claim is made available, otherwise
+                                                          only the result of this request.
+                                                        type: string
+                                                    required:
+                                                      - name
+                                                    type: object
+                                                  type: array
+                                              type: object
+                                          required:
+                                            - name
+                                          type: object
+                                        maxItems: 1
+                                        minItems: 1
+                                        type: array
+                                        x-kubernetes-list-map-keys:
+                                          - name
+                                        x-kubernetes-list-type: map
+                                      imagePullSecrets:
+                                        description: ImagePullSecrets replaces inherited image pull secrets when present.
+                                        items:
+                                          description: |-
+                                            LocalObjectReference contains enough information to let you locate the
+                                            referenced object inside the same namespace.
+                                          properties:
+                                            name:
+                                              default: ""
+                                              description: |-
+                                                Name of the referent.
+                                                This field is effectively required, but due to backwards compatibility is
+                                                allowed to be empty. Instances of this type with an empty value here are
+                                                almost certainly wrong.
+                                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                              type: string
+                                          type: object
+                                          x-kubernetes-map-type: atomic
+                                        type: array
+                                      nodeSelector:
+                                        additionalProperties:
+                                          type: string
+                                        description: NodeSelector replaces the inherited node selector when present.
+                                        type: object
+                                      resourceClaims:
+                                        description: ResourceClaims replaces inherited pod-level DRA claim references when present.
+                                        items:
+                                          description: |-
+                                            PodResourceClaim references exactly one ResourceClaim, either directly
+                                            or by naming a ResourceClaimTemplate which is then turned into a ResourceClaim
+                                            for the pod.
+
+                                            It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
+                                            Containers that need access to the ResourceClaim reference it with this name.
+
+                                            When the DRAWorkloadResourceClaims feature gate is enabled and this Pod
+                                            belongs to a PodGroup, a PodResourceClaim is matched to a
+                                            PodGroupResourceClaim if all of their fields are equal (Name,
+                                            ResourceClaimName, and ResourceClaimTemplateName). A matched claim references
+                                            a single ResourceClaim shared across all Pods in the PodGroup, reserved for
+                                            the PodGroup in ResourceClaimStatus.ReservedFor rather than for individual
+                                            Pods.
+                                          properties:
+                                            name:
+                                              description: |-
+                                                Name uniquely identifies this resource claim inside the pod.
+                                                This must be a DNS_LABEL.
+                                              type: string
+                                            resourceClaimName:
+                                              description: |-
+                                                ResourceClaimName is the name of a ResourceClaim object in the same
+                                                namespace as this pod.
+
+                                                Exactly one of ResourceClaimName and ResourceClaimTemplateName must
+                                                be set.
+                                              type: string
+                                            resourceClaimTemplateName:
+                                              description: |-
+                                                ResourceClaimTemplateName is the name of a ResourceClaimTemplate
+                                                object in the same namespace as this pod.
+
+                                                The template will be used to create a new ResourceClaim, which will
+                                                be bound to this pod. When this pod is deleted, the ResourceClaim
+                                                will also be deleted. The pod name and resource name, along with a
+                                                generated component, will be used to form a unique name for the
+                                                ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
+
+                                                When the DRAWorkloadResourceClaims feature gate is enabled and the pod
+                                                belongs to a PodGroup that defines a PodGroupResourceClaim with the same
+                                                Name and ResourceClaimTemplateName, this PodResourceClaim resolves to the
+                                                ResourceClaim generated for the PodGroup. All pods in the group that
+                                                define an equivalent PodResourceClaim matching the
+                                                PodGroupResourceClaim's Name and ResourceClaimTemplateName share the same
+                                                generated ResourceClaim. ResourceClaims generated for a PodGroup are
+                                                owned by the PodGroup and their lifecycles are tied to the PodGroup
+                                                instead of any individual pod.
+
+                                                This field is immutable and no changes will be made to the
+                                                corresponding ResourceClaim by the control plane after creating the
+                                                ResourceClaim.
+
+                                                Exactly one of ResourceClaimName and ResourceClaimTemplateName must
+                                                be set.
+                                              type: string
+                                          required:
+                                            - name
+                                          type: object
+                                        type: array
+                                      tolerations:
+                                        description: Tolerations replaces the inherited tolerations when present.
+                                        items:
+                                          description: |-
+                                            The pod this Toleration is attached to tolerates any taint that matches
+                                            the triple <key,value,effect> using the matching operator <operator>.
+                                          properties:
+                                            effect:
+                                              description: |-
+                                                Effect indicates the taint effect to match. Empty means match all taint effects.
+                                                When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                                              type: string
+                                            key:
+                                              description: |-
+                                                Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                                                If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                Operator represents a key's relationship to the value.
+                                                Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                                                Exists is equivalent to wildcard for value, so that a pod can
+                                                tolerate all taints of a particular category.
+                                                Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                                              type: string
+                                            tolerationSeconds:
+                                              description: |-
+                                                TolerationSeconds represents the period of time the toleration (which must be
+                                                of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                                                it is not set, which means tolerate the taint forever (do not evict). Zero and
+                                                negative values will be treated as 0 (evict immediately) by the system.
+                                              format: int64
+                                              type: integer
+                                            value:
+                                              description: |-
+                                                Value is the taint value the toleration matches to.
+                                                If the operator is Exists, the value should be empty, otherwise just a regular string.
+                                              type: string
+                                          type: object
+                                        type: array
+                                    type: object
+                                type: object
+                            type: object
                         required:
                           - nodeCount
                         type: object
@@ -12701,6 +13076,19 @@ spec:
                       multinode:
                         description: multinode configures multinode components.
                         properties:
+                          mode:
+                            default: Automatic
+                            description: |-
+                              mode selects ownership of engine-specific multinode configuration.
+                              Automatic preserves the existing operator-generated launch configuration.
+                              Manual uses podTemplate for the leader and applies worker.podTemplateOverrides
+                              to construct the worker template. Manual requires users to provide all
+                              engine-specific topology arguments. For vLLM multiprocessing, the operator
+                              still adds --master-port=29500 to both roles.
+                            enum:
+                              - Automatic
+                              - Manual
+                            type: string
                           nodeCount:
                             default: 2
                             description: |-
@@ -12709,6 +13097,378 @@ spec:
                             format: int32
                             minimum: 2
                             type: integer
+                          worker:
+                            description: |-
+                              worker contains worker-only settings. It is required when mode is Manual
+                              and must be omitted when mode is Automatic.
+                            properties:
+                              podTemplateOverrides:
+                                description: |-
+                                  podTemplateOverrides is a restricted, presence-aware overlay applied to
+                                  the component podTemplate for workers. Omitted fields inherit the leader
+                                  value; present fields replace it, including explicit empty maps and lists.
+                                properties:
+                                  metadata:
+                                    description: metadata overrides worker labels and annotations.
+                                    properties:
+                                      annotations:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          annotations replaces the inherited annotations when present. An explicit
+                                          empty map clears inherited user annotations before operator-managed
+                                          annotations are applied.
+                                        type: object
+                                      labels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          labels replaces the inherited labels when present. An explicit empty map
+                                          clears inherited user labels before operator-managed labels are applied.
+                                        type: object
+                                    type: object
+                                  spec:
+                                    description: spec overrides the supported worker PodSpec fields.
+                                    properties:
+                                      containers:
+                                        description: containers, when present, contains exactly one override named main.
+                                        items:
+                                          description: MultinodeContainerOverride contains the supported worker main-container overrides.
+                                          properties:
+                                            args:
+                                              description: args replaces the inherited arguments when present.
+                                              items:
+                                                type: string
+                                              type: array
+                                            command:
+                                              description: |-
+                                                command replaces the inherited command when present. An explicit empty
+                                                list selects the image entrypoint.
+                                              items:
+                                                type: string
+                                              type: array
+                                            env:
+                                              description: |-
+                                                env replaces the inherited user environment when present. Operator-managed
+                                                environment variables are applied after this overlay.
+                                              items:
+                                                description: EnvVar represents an environment variable present in a Container.
+                                                properties:
+                                                  name:
+                                                    description: |-
+                                                      Name of the environment variable.
+                                                      May consist of any printable ASCII characters except '='.
+                                                    type: string
+                                                  value:
+                                                    description: |-
+                                                      Variable references $(VAR_NAME) are expanded
+                                                      using the previously defined environment variables in the container and
+                                                      any service environment variables. If a variable cannot be resolved,
+                                                      the reference in the input string will be unchanged. Double $$ are reduced
+                                                      to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                                                      "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                                                      Escaped references will never be expanded, regardless of whether the variable
+                                                      exists or not.
+                                                      Defaults to "".
+                                                    type: string
+                                                  valueFrom:
+                                                    description: Source for the environment variable's value. Cannot be used if value is not empty.
+                                                    properties:
+                                                      configMapKeyRef:
+                                                        description: Selects a key of a ConfigMap.
+                                                        properties:
+                                                          key:
+                                                            description: The key to select.
+                                                            type: string
+                                                          name:
+                                                            default: ""
+                                                            description: |-
+                                                              Name of the referent.
+                                                              This field is effectively required, but due to backwards compatibility is
+                                                              allowed to be empty. Instances of this type with an empty value here are
+                                                              almost certainly wrong.
+                                                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                                            type: string
+                                                          optional:
+                                                            description: Specify whether the ConfigMap or its key must be defined
+                                                            type: boolean
+                                                        required:
+                                                          - key
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      fieldRef:
+                                                        description: |-
+                                                          Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                                          spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                                                        properties:
+                                                          apiVersion:
+                                                            description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
+                                                            type: string
+                                                          fieldPath:
+                                                            description: Path of the field to select in the specified API version.
+                                                            type: string
+                                                        required:
+                                                          - fieldPath
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      fileKeyRef:
+                                                        description: |-
+                                                          FileKeyRef selects a key of the env file.
+                                                          Requires the EnvFiles feature gate to be enabled.
+                                                        properties:
+                                                          key:
+                                                            description: |-
+                                                              The key within the env file. An invalid key will prevent the pod from starting.
+                                                              The keys defined within a source may consist of any printable ASCII characters except '='.
+                                                              During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                                            type: string
+                                                          optional:
+                                                            default: false
+                                                            description: |-
+                                                              Specify whether the file or its key must be defined. If the file or key
+                                                              does not exist, then the env var is not published.
+                                                              If optional is set to true and the specified key does not exist,
+                                                              the environment variable will not be set in the Pod's containers.
+
+                                                              If optional is set to false and the specified key does not exist,
+                                                              an error will be returned during Pod creation.
+                                                            type: boolean
+                                                          path:
+                                                            description: |-
+                                                              The path within the volume from which to select the file.
+                                                              Must be relative and may not contain the '..' path or start with '..'.
+                                                            type: string
+                                                          volumeName:
+                                                            description: The name of the volume mount containing the env file.
+                                                            type: string
+                                                        required:
+                                                          - key
+                                                          - path
+                                                          - volumeName
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      resourceFieldRef:
+                                                        description: |-
+                                                          Selects a resource of the container: only resources limits and requests
+                                                          (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                                                        properties:
+                                                          containerName:
+                                                            description: 'Container name: required for volumes, optional for env vars'
+                                                            type: string
+                                                          divisor:
+                                                            anyOf:
+                                                              - type: integer
+                                                              - type: string
+                                                            description: Specifies the output format of the exposed resources, defaults to "1"
+                                                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                                            x-kubernetes-int-or-string: true
+                                                          resource:
+                                                            description: 'Required: resource to select'
+                                                            type: string
+                                                        required:
+                                                          - resource
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                      secretKeyRef:
+                                                        description: Selects a key of a secret in the pod's namespace
+                                                        properties:
+                                                          key:
+                                                            description: The key of the secret to select from.  Must be a valid secret key.
+                                                            type: string
+                                                          name:
+                                                            default: ""
+                                                            description: |-
+                                                              Name of the referent.
+                                                              This field is effectively required, but due to backwards compatibility is
+                                                              allowed to be empty. Instances of this type with an empty value here are
+                                                              almost certainly wrong.
+                                                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                                            type: string
+                                                          optional:
+                                                            description: Specify whether the Secret or its key must be defined
+                                                            type: boolean
+                                                        required:
+                                                          - key
+                                                        type: object
+                                                        x-kubernetes-map-type: atomic
+                                                    type: object
+                                                required:
+                                                  - name
+                                                type: object
+                                              type: array
+                                            image:
+                                              description: image replaces the inherited image when present.
+                                              type: string
+                                            name:
+                                              description: name must be main. Other containers cannot be overridden.
+                                              enum:
+                                                - main
+                                              type: string
+                                            resources:
+                                              description: resources contains the supported worker container resource overrides.
+                                              properties:
+                                                claims:
+                                                  description: claims replaces the inherited container-level DRA claim references when present.
+                                                  items:
+                                                    description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                                                    properties:
+                                                      name:
+                                                        description: |-
+                                                          Name must match the name of one entry in pod.spec.resourceClaims of
+                                                          the Pod where this field is used. It makes that resource available
+                                                          inside a container.
+                                                        type: string
+                                                      request:
+                                                        description: |-
+                                                          Request is the name chosen for a request in the referenced claim.
+                                                          If empty, everything from the claim is made available, otherwise
+                                                          only the result of this request.
+                                                        type: string
+                                                    required:
+                                                      - name
+                                                    type: object
+                                                  type: array
+                                              type: object
+                                          required:
+                                            - name
+                                          type: object
+                                        maxItems: 1
+                                        minItems: 1
+                                        type: array
+                                        x-kubernetes-list-map-keys:
+                                          - name
+                                        x-kubernetes-list-type: map
+                                      imagePullSecrets:
+                                        description: imagePullSecrets replaces the inherited image pull secrets when present.
+                                        items:
+                                          description: |-
+                                            LocalObjectReference contains enough information to let you locate the
+                                            referenced object inside the same namespace.
+                                          properties:
+                                            name:
+                                              default: ""
+                                              description: |-
+                                                Name of the referent.
+                                                This field is effectively required, but due to backwards compatibility is
+                                                allowed to be empty. Instances of this type with an empty value here are
+                                                almost certainly wrong.
+                                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                              type: string
+                                          type: object
+                                          x-kubernetes-map-type: atomic
+                                        type: array
+                                      nodeSelector:
+                                        additionalProperties:
+                                          type: string
+                                        description: nodeSelector replaces the inherited node selector when present.
+                                        type: object
+                                      resourceClaims:
+                                        description: resourceClaims replaces the inherited pod-level DRA claim references when present.
+                                        items:
+                                          description: |-
+                                            PodResourceClaim references exactly one ResourceClaim, either directly
+                                            or by naming a ResourceClaimTemplate which is then turned into a ResourceClaim
+                                            for the pod.
+
+                                            It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
+                                            Containers that need access to the ResourceClaim reference it with this name.
+
+                                            When the DRAWorkloadResourceClaims feature gate is enabled and this Pod
+                                            belongs to a PodGroup, a PodResourceClaim is matched to a
+                                            PodGroupResourceClaim if all of their fields are equal (Name,
+                                            ResourceClaimName, and ResourceClaimTemplateName). A matched claim references
+                                            a single ResourceClaim shared across all Pods in the PodGroup, reserved for
+                                            the PodGroup in ResourceClaimStatus.ReservedFor rather than for individual
+                                            Pods.
+                                          properties:
+                                            name:
+                                              description: |-
+                                                Name uniquely identifies this resource claim inside the pod.
+                                                This must be a DNS_LABEL.
+                                              type: string
+                                            resourceClaimName:
+                                              description: |-
+                                                ResourceClaimName is the name of a ResourceClaim object in the same
+                                                namespace as this pod.
+
+                                                Exactly one of ResourceClaimName and ResourceClaimTemplateName must
+                                                be set.
+                                              type: string
+                                            resourceClaimTemplateName:
+                                              description: |-
+                                                ResourceClaimTemplateName is the name of a ResourceClaimTemplate
+                                                object in the same namespace as this pod.
+
+                                                The template will be used to create a new ResourceClaim, which will
+                                                be bound to this pod. When this pod is deleted, the ResourceClaim
+                                                will also be deleted. The pod name and resource name, along with a
+                                                generated component, will be used to form a unique name for the
+                                                ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
+
+                                                When the DRAWorkloadResourceClaims feature gate is enabled and the pod
+                                                belongs to a PodGroup that defines a PodGroupResourceClaim with the same
+                                                Name and ResourceClaimTemplateName, this PodResourceClaim resolves to the
+                                                ResourceClaim generated for the PodGroup. All pods in the group that
+                                                define an equivalent PodResourceClaim matching the
+                                                PodGroupResourceClaim's Name and ResourceClaimTemplateName share the same
+                                                generated ResourceClaim. ResourceClaims generated for a PodGroup are
+                                                owned by the PodGroup and their lifecycles are tied to the PodGroup
+                                                instead of any individual pod.
+
+                                                This field is immutable and no changes will be made to the
+                                                corresponding ResourceClaim by the control plane after creating the
+                                                ResourceClaim.
+
+                                                Exactly one of ResourceClaimName and ResourceClaimTemplateName must
+                                                be set.
+                                              type: string
+                                          required:
+                                            - name
+                                          type: object
+                                        type: array
+                                      tolerations:
+                                        description: tolerations replaces the inherited tolerations when present.
+                                        items:
+                                          description: |-
+                                            The pod this Toleration is attached to tolerates any taint that matches
+                                            the triple <key,value,effect> using the matching operator <operator>.
+                                          properties:
+                                            effect:
+                                              description: |-
+                                                Effect indicates the taint effect to match. Empty means match all taint effects.
+                                                When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                                              type: string
+                                            key:
+                                              description: |-
+                                                Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                                                If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                Operator represents a key's relationship to the value.
+                                                Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                                                Exists is equivalent to wildcard for value, so that a pod can
+                                                tolerate all taints of a particular category.
+                                                Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                                              type: string
+                                            tolerationSeconds:
+                                              description: |-
+                                                TolerationSeconds represents the period of time the toleration (which must be
+                                                of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                                                it is not set, which means tolerate the taint forever (do not evict). Zero and
+                                                negative values will be treated as 0 (evict immediately) by the system.
+                                              format: int64
+                                              type: integer
+                                            value:
+                                              description: |-
+                                                Value is the taint value the toleration matches to.
+                                                If the operator is Exists, the value should be empty, otherwise just a regular string.
+                                              type: string
+                                          type: object
+                                        type: array
+                                    type: object
+                                type: object
+                            type: object
                         type: object
                       name:
                         description: |-
