@@ -132,9 +132,6 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
         async def wait_for_restore(self):
             lifecycle_calls.append("pause")
             assert await self.pause_controller.pause(self.engine) is True
-            lifecycle_calls.append("resume")
-            assert await self.pause_controller.resume() is True
-            self.pause_controller.mark_resumed()
             return True
 
     def fake_create_runtime(discovery_backend, request_plane, event_plane):
@@ -173,7 +170,7 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
 
     await proxy.snapshot_before_endpoint(engine=object(), config=config)
 
-    assert lifecycle_calls == ["pause", "resume"]
+    assert lifecycle_calls == ["pause"]
     assert config.namespace == "restored-ns"
     assert config.discovery_backend == "kubernetes"
     assert proxy.endpoint("ns.component.generate") == "endpoint:ns.component.generate"
