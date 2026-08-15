@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from dynamo.experimental.workflow.generate import GenerateEndpointClient
+from dynamo.experimental.workflow.generate import GenerateEndpointInvoker
 from dynamo.experimental.workflow.plan import (
     ExecutionPlan,
     GenerateEndpointBinding,
@@ -145,7 +145,7 @@ class StageDispatcher:
             client = await endpoint.client()
             await client.wait_for_instances()
             clients[endpoint_id] = (
-                GenerateEndpointClient(client)
+                GenerateEndpointInvoker(client)
                 if protocols == {GenerateEndpointBinding}
                 else RemoteStageClient(client)
             )
