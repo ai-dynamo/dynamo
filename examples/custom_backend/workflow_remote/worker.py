@@ -5,7 +5,7 @@ import argparse
 import asyncio
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.workflow import RemoteStageServer
+from dynamo.experimental.workflow import RemoteStageServer
 from examples.custom_backend.workflow_remote.stages import STAGES
 
 

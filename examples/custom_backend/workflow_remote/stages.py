@@ -4,7 +4,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from dynamo.workflow import StageContext, StageContract, ValueSpec
+from dynamo.experimental.workflow import StageContext, StageContract, ValueSpec
 
 TOKENS = ValueSpec(type="json")
 
