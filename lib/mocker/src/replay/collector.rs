@@ -6,6 +6,8 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::thread::{self, JoinHandle};
 use uuid::Uuid;
 
 use crate::common::protocols::OutputSignal;
@@ -16,6 +18,7 @@ use crate::scheduler::EnginePassResult;
 // the two stores at their maximum size, ~1 MiB for both global sketches).
 const DDSKETCH_RELATIVE_ACCURACY: f64 = 0.001;
 const DDSKETCH_MAX_BINS: usize = 32_768;
+const TOKEN_TIMELINE_BATCH_SIZE: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct TraceSimulationReport {
@@ -457,6 +460,98 @@ impl StreamingDistribution {
     }
 }
 
+fn fold_token_timeline(
+    times: &[f64],
+    itl_distribution: &mut StreamingDistribution,
+    output_token_throughput_per_user: &mut StreamingDistribution,
+) {
+    for window in times.windows(2) {
+        let itl_ms = (window[1] - window[0]).max(0.0);
+        itl_distribution.add(itl_ms);
+        if itl_ms > 0.0 {
+            output_token_throughput_per_user.add(1000.0 / itl_ms);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TokenTimelineFolder {
+    sender: Option<SyncSender<Vec<Vec<f64>>>>,
+    pending: Vec<Vec<f64>>,
+    thread: Option<JoinHandle<(StreamingDistribution, StreamingDistribution)>>,
+}
+
+impl TokenTimelineFolder {
+    fn new() -> Self {
+        let (sender, receiver) = sync_channel::<Vec<Vec<f64>>>(8);
+        let thread = thread::Builder::new()
+            .name("offline-replay-token-folder".to_string())
+            .spawn(move || {
+                let mut itl_distribution = StreamingDistribution::default();
+                let mut output_token_throughput_per_user = StreamingDistribution::default();
+                while let Ok(batch) = receiver.recv() {
+                    for times in batch {
+                        fold_token_timeline(
+                            &times,
+                            &mut itl_distribution,
+                            &mut output_token_throughput_per_user,
+                        );
+                    }
+                }
+                (itl_distribution, output_token_throughput_per_user)
+            })
+            .expect("failed to spawn offline replay token folder");
+        Self {
+            sender: Some(sender),
+            pending: Vec::with_capacity(TOKEN_TIMELINE_BATCH_SIZE),
+            thread: Some(thread),
+        }
+    }
+
+    fn submit(&mut self, times: Vec<f64>) {
+        self.pending.push(times);
+        if self.pending.len() < TOKEN_TIMELINE_BATCH_SIZE {
+            return;
+        }
+        self.flush();
+    }
+
+    fn flush(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let batch = std::mem::replace(
+            &mut self.pending,
+            Vec::with_capacity(TOKEN_TIMELINE_BATCH_SIZE),
+        );
+        self.sender
+            .as_ref()
+            .expect("token folder sender must exist before finish")
+            .send(batch)
+            .expect("offline replay token folder stopped unexpectedly");
+    }
+
+    fn finish(mut self) -> (StreamingDistribution, StreamingDistribution) {
+        self.flush();
+        self.sender.take();
+        self.thread
+            .take()
+            .expect("token folder thread must exist before finish")
+            .join()
+            .expect("offline replay token folder panicked")
+    }
+}
+
+impl Drop for TokenTimelineFolder {
+    fn drop(&mut self) {
+        self.flush();
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct PerRequestDetail {
     prefill_reused_input_tokens: Option<usize>,
@@ -660,6 +755,9 @@ pub(crate) struct TraceCollector {
     /// completed requests no longer retain one timestamp per emitted token.
     itl_distribution: StreamingDistribution,
     output_token_throughput_per_user: StreamingDistribution,
+    /// Optional ordered worker for folding completed token timelines while
+    /// conservative replay continues on the coordinator.
+    token_timeline_folder: Option<TokenTimelineFolder>,
     /// Keep completed token timelines until `finish()` instead of folding them
     /// synchronously in `on_terminal`.
     defer_token_timeline_finalization: bool,
@@ -739,23 +837,25 @@ impl TraceRequestStats {
         itl_distribution: &mut StreamingDistribution,
         output_token_throughput_per_user: &mut StreamingDistribution,
     ) {
-        let TokenTimeline::Recording(times) = &self.token_timeline else {
+        let Some(times) = self.take_token_timeline() else {
             return;
         };
 
         if include_in_distributions {
-            for window in times.windows(2) {
-                let itl_ms = (window[1] - window[0]).max(0.0);
-                itl_distribution.add(itl_ms);
-                if itl_ms > 0.0 {
-                    output_token_throughput_per_user.add(1000.0 / itl_ms);
-                }
-            }
+            fold_token_timeline(&times, itl_distribution, output_token_throughput_per_user);
         }
+    }
 
+    fn take_token_timeline(&mut self) -> Option<Vec<f64>> {
+        let times = match std::mem::take(&mut self.token_timeline) {
+            TokenTimeline::Recording(times) => times,
+            finalized @ TokenTimeline::Finalized(_) => {
+                self.token_timeline = finalized;
+                return None;
+            }
+        };
         let Some(first_ms) = times.first().copied() else {
-            self.token_timeline = TokenTimeline::default();
-            return;
+            return Some(times);
         };
         let summary = FinalizedTokenTimeline {
             first_ms,
@@ -764,12 +864,27 @@ impl TraceRequestStats {
             len: times.len(),
         };
         self.token_timeline = TokenTimeline::Finalized(summary);
+        Some(times)
     }
 }
 
 impl TraceCollector {
+    pub(crate) fn enable_background_token_timeline_folding(&mut self) {
+        assert!(
+            !self.defer_token_timeline_finalization,
+            "background and deferred token folding are mutually exclusive"
+        );
+        if self.token_timeline_folder.is_none() {
+            self.token_timeline_folder = Some(TokenTimelineFolder::new());
+        }
+    }
+
     /// Defer token-timeline folding until the entire replay has ended.
     pub(crate) fn set_defer_token_timeline_finalization(&mut self, value: bool) {
+        assert!(
+            !value || self.token_timeline_folder.is_none(),
+            "background and deferred token folding are mutually exclusive"
+        );
         self.defer_token_timeline_finalization = value;
     }
 
@@ -1116,6 +1231,7 @@ impl TraceCollector {
             itl_distribution,
             output_token_throughput_per_user,
             defer_token_timeline_finalization,
+            token_timeline_folder,
             ..
         } = self;
         if let Some(stats) = requests.get_mut(&uuid)
@@ -1123,7 +1239,18 @@ impl TraceCollector {
         {
             stats.terminal_time_ms = Some(terminal_time_ms);
             stats.terminal_status = Some(status);
-            if !*defer_token_timeline_finalization {
+            if !*defer_token_timeline_finalization
+                && let Some(folder) = token_timeline_folder.as_mut()
+            {
+                let include_in_distributions =
+                    status == ReplayTerminalStatus::Completed && stats.first_admit_ms.is_some();
+                if let Some(times) = stats.take_token_timeline()
+                    && include_in_distributions
+                    && times.len() > 1
+                {
+                    folder.submit(times);
+                }
+            } else if !*defer_token_timeline_finalization {
                 stats.finalize_token_timeline(
                     status == ReplayTerminalStatus::Completed && stats.first_admit_ms.is_some(),
                     itl_distribution,
@@ -1243,6 +1370,11 @@ impl TraceCollector {
                 itl_distribution,
                 output_token_throughput_per_user,
             );
+        }
+        if let Some(folder) = self.token_timeline_folder.take() {
+            let (itl_distribution, output_token_throughput_per_user) = folder.finish();
+            self.itl_distribution = itl_distribution;
+            self.output_token_throughput_per_user = output_token_throughput_per_user;
         }
 
         // Build per-request records before we move `self.requests` into the
@@ -2254,5 +2386,30 @@ mod tests {
         assert_eq!(report.latency.itl.distribution.mean_ms, 2.5);
         assert_eq!(report.latency.itl.distribution.min_ms, 2.0);
         assert_eq!(report.latency.itl.distribution.max_ms, 3.0);
+    }
+
+    #[test]
+    fn background_token_timeline_folding_matches_inline() {
+        let collect = |background| {
+            let mut collector = TraceCollector::default();
+            if background {
+                collector.enable_background_token_timeline_folding();
+            }
+            for (uuid_n, times) in [
+                (9_u128, vec![10.0, 12.0, 15.0]),
+                (10_u128, vec![11.0, 11.0, 20.0, 24.0]),
+            ] {
+                let uuid = Uuid::from_u128(uuid_n);
+                collector.on_arrival(uuid, 0.0, 128, times.len());
+                collector.on_admit(uuid, 1.0, 0);
+                for time in times {
+                    collector.on_token(uuid, time);
+                }
+                collector.on_terminal(uuid, 24.0, ReplayTerminalStatus::Completed);
+            }
+            serde_json::to_value(collector.finish()).expect("report must serialize")
+        };
+
+        assert_eq!(collect(false), collect(true));
     }
 }

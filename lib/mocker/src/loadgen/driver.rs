@@ -306,6 +306,11 @@ pub struct WorkloadDriver {
 }
 
 impl WorkloadDriver {
+    pub(crate) fn supports_conservative_worker_windows(&self) -> bool {
+        matches!(self.policy, SchedulingPolicy::Trace)
+            && self.sessions.iter().all(|session| session.turns.len() == 1)
+    }
+
     pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
         Self::new(
             trace,

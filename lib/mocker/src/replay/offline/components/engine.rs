@@ -16,7 +16,7 @@ use super::super::state::OfflineWorkerState;
 #[cfg(feature = "kvbm-offload")]
 use super::ObservedOffloadEffects;
 use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
-use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, G1Backend, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
 
@@ -71,6 +71,19 @@ pub(in crate::replay::offline) struct IsolatedWorkerGroup {
     ranks: Vec<(usize, OfflineWorkerState)>,
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::replay::offline) struct WorkerCompletionMutation {
+    pub(in crate::replay::offline) rank_id: usize,
+    pub(in crate::replay::offline) completed_requests: usize,
+}
+
+pub(in crate::replay::offline) struct WorkerCompletionAugment<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) rank_id: usize,
+    pub(in crate::replay::offline) lifecycle_events: Vec<crate::scheduler::SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+    pub(in crate::replay::offline) had_raw_observations: bool,
+}
+
 impl PassBoundary {
     fn wall_time_secs(self) -> f64 {
         (self.end_ms - self.start_ms).max(0.0) / 1000.0
@@ -88,10 +101,6 @@ impl ExecutedGroupEpoch {
 
     pub(in crate::replay::offline) fn completion_capacity(&self) -> usize {
         self.boundary.completion_capacity
-    }
-
-    pub(in crate::replay::offline) fn tokens_visible(&self) -> bool {
-        self.boundary.tokens_visible
     }
 
     pub(in crate::replay::offline) fn wall_time_secs(&self) -> f64 {
@@ -188,53 +197,50 @@ impl IsolatedWorkerGroup {
         })
     }
 
-    pub(in crate::replay::offline) fn mark_epoch_started(&mut self, epoch: &ExecutedGroupEpoch) {
-        if epoch.end_ms() <= epoch.start_ms() {
+    pub(in crate::replay::offline) fn mark_epoch_started_from_times(
+        &mut self,
+        start_ms: f64,
+        end_ms: f64,
+        mutations: &[WorkerCompletionMutation],
+    ) {
+        if end_ms <= start_ms {
             return;
         }
-        for rank in &epoch.ranks {
-            let worker = self
-                .ranks
+        for mutation in mutations {
+            self.ranks
                 .iter_mut()
-                .find_map(|(candidate, worker)| (*candidate == rank.rank_id).then_some(worker))
-                .expect("executed epoch referenced an unknown rank");
-            if rank.executed.is_some() || epoch.end_ms() > epoch.start_ms() {
-                worker.mark_busy();
-            }
+                .find_map(|(rank_id, worker)| (*rank_id == mutation.rank_id).then_some(worker))
+                .expect("started epoch referenced an unknown rank")
+                .mark_busy();
         }
     }
 
-    pub(in crate::replay::offline) fn apply_completion<Observation: ReplayEngineObservation>(
+    pub(in crate::replay::offline) fn apply_completion_mutation<
+        Observation: ReplayEngineObservation,
+    >(
         &mut self,
-        mut payload: WorkerCompletionPayload<Observation::Batch>,
-    ) -> anyhow::Result<WorkerCompletionPayload<Observation::Batch>> {
-        if payload.stage != self.stage {
-            bail!(
-                "offline replay completion stage mismatch: expected {:?}, got {:?}",
-                self.stage,
-                payload.stage
-            );
-        }
+        mutation: WorkerCompletionMutation,
+    ) -> anyhow::Result<WorkerCompletionAugment<Observation::Batch>> {
         let worker = self
             .ranks
             .iter_mut()
-            .find_map(|(rank_id, worker)| (*rank_id == payload.worker_idx).then_some(worker))
+            .find_map(|(rank_id, worker)| (*rank_id == mutation.rank_id).then_some(worker))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "offline replay completion for unknown worker {}",
-                    payload.worker_idx
+                    mutation.rank_id
                 )
             })?;
         worker.mark_idle();
-        worker.mark_completed(payload.completed_requests);
-        payload
-            .lifecycle_events
-            .extend(worker.retry_pending_destinations());
+        worker.mark_completed(mutation.completed_requests);
+        let lifecycle_events = worker.retry_pending_destinations();
         let observed = Observation::drain_worker_events(worker);
-        payload.progress.had_raw_observations |= observed.had_raw_observations;
-        payload.progress.made_progress |= observed.had_raw_observations;
-        payload.engine_events.append(observed.events);
-        Ok(payload)
+        Ok(WorkerCompletionAugment {
+            rank_id: mutation.rank_id,
+            lifecycle_events,
+            engine_events: observed.events,
+            had_raw_observations: observed.had_raw_observations,
+        })
     }
 }
 
@@ -367,6 +373,31 @@ where
     ) {
         self.args = args;
         self.capture_raw = capture_raw;
+    }
+
+    pub(in crate::replay::offline) fn validate_conservative_windows(&self) -> anyhow::Result<()> {
+        if self.startup_time_ms().is_some() {
+            bail!("conservative replay does not support worker startup delays");
+        }
+        if self.args.aic_nextn.is_some() {
+            bail!("conservative replay does not support AIC speculative decoding");
+        }
+        if self.args.resolved_g1_backend() != G1Backend::Native {
+            bail!("conservative replay requires native G1 state");
+        }
+        if self.args.num_g2_blocks.is_some()
+            || self.args.num_g3_blocks.is_some()
+            || self.args.enable_g4_storage
+        {
+            bail!("conservative replay does not support KVBM offload");
+        }
+        if matches!(
+            self.args.engine_type,
+            crate::common::protocols::EngineType::Trtllm
+        ) {
+            bail!("conservative replay supports only vLLM and SGLang");
+        }
+        Ok(())
     }
 
     /// Consume a static engine into independently owned logical-worker groups.
