@@ -120,7 +120,7 @@ def _cell(wall_seconds: float, request_throughput: float) -> dict:
     }
 
 
-def test_summary_reports_both_throughput_boundaries_and_no_gate(
+def test_summary_reports_each_rate_and_workflow_gate(
     tmp_path: Path,
 ) -> None:
     _write_json(
@@ -129,37 +129,55 @@ def test_summary_reports_both_throughput_boundaries_and_no_gate(
             "dynamo_commit": "abc123",
             "container_image": "example/runtime:test",
             "gpu": {"name": "NVIDIA H100 80GB HBM3"},
+            "benchmark": {
+                "request_rates": [40, 50],
+                "concurrency_cap": 512,
+            },
         },
     )
     _write_json(
         tmp_path / "workload_audit.json",
         {"measured_sha256": "audited-workload"},
     )
-    for repetition in range(1, 4):
-        _write_json(
-            tmp_path / f"rep-{repetition}/inline/cell_audit.json",
-            _cell(10.0, 100.0),
-        )
-        _write_json(
-            tmp_path / f"rep-{repetition}/remote/cell_audit.json",
-            _cell(20.0, 50.0),
-        )
-        _write_json(
-            tmp_path / f"rep-{repetition}/remote/joined_smoke.json",
-            {
-                "classifier_scores": {"positive-mean": 0.5, "negative-mean": 0.5},
-                "classifier_score_sum": 1.0,
-            },
-        )
+    for request_rate in (40, 50):
+        for repetition in range(1, 4):
+            _write_json(
+                tmp_path
+                / f"rate-{request_rate}/rep-{repetition}/direct/cell_audit.json",
+                _cell(10.0, float(request_rate)),
+            )
+            _write_json(
+                tmp_path
+                / f"rate-{request_rate}/rep-{repetition}/workflow/cell_audit.json",
+                _cell(10.5, request_rate * 0.95),
+            )
+            _write_json(
+                tmp_path
+                / f"rate-{request_rate}/rep-{repetition}/workflow/joined_smoke.json",
+                {
+                    "classifier_scores": {
+                        "relevant": 0.75,
+                        "not_relevant": 0.25,
+                    },
+                    "classifier_score_sum": 1.0,
+                },
+            )
 
     result = summarize(tmp_path)
 
-    assert result["comparison"] == {
-        "remote_to_inline_full_client_process_ratio": 0.5,
-        "remote_full_client_process_delta_percent": -50.0,
-        "remote_to_inline_request_window_ratio": 0.5,
-        "remote_request_window_delta_percent": -50.0,
+    assert result["rates"]["40"]["comparison"] == {
+        "workflow_to_direct_request_window_ratio": 0.95,
+        "workflow_request_window_delta_percent": pytest.approx(-5.0),
+        "minimum_ratio": 0.9,
+        "passed": True,
     }
-    assert "pass" not in result["comparison"]
+    assert result["rates"]["50"]["comparison"]["passed"] is True
+    assert result["gate"] == {
+        "minimum_workflow_to_direct_ratio": 0.9,
+        "passed": True,
+    }
     assert (tmp_path / "summary.json").is_file()
     assert (tmp_path / "report.md").is_file()
+    report = (tmp_path / "report.md").read_text()
+    assert "rates: 40/50 req/s; concurrency cap: 512" in report
+    assert "Overall >=90% gate: **True**" in report

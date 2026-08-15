@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Audit and summarize the inline-versus-remote Qwen workflow benchmark."""
+"""Audit the direct-versus-workflow integrated-encoder benchmark."""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from typing import Any
 
 MEASURED_REQUESTS = 1000
 WARMUP_REQUESTS = 20
-CONCURRENCY = 64
+CONCURRENCY_CAP = 512
+REQUEST_RATES = (40, 50)
 OUTPUT_TOKENS = 7
 TEXT_TOKENS = 644
 EXPECTED_AVERAGE_ISL = 874.5
@@ -35,7 +36,8 @@ EXPECTED_PATCH_COST = 907_800
 EXPECTED_GRIDS = {"1x22x22", "1x36x36"}
 EXPECTED_GRAPH_CAPTURES = 14
 REPETITIONS = 3
-TOPOLOGIES = ("inline", "remote")
+TOPOLOGIES = ("direct", "workflow")
+MIN_WORKFLOW_TO_DIRECT_RATIO = 0.9
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 _DISPATCH_RE = re.compile(
@@ -351,6 +353,10 @@ def _parse_gpu_info(gpu_info: str, torch_gpu_count: int) -> dict[str, Any]:
 
 
 def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    if args.concurrency_cap != CONCURRENCY_CAP:
+        raise BenchmarkAuditError(
+            f"concurrency cap is {args.concurrency_cap}; expected {CONCURRENCY_CAP}"
+        )
     packages: dict[str, str] = {}
     for package in ("ai-dynamo", "aiperf", "torch", "transformers", "vllm"):
         try:
@@ -366,15 +372,17 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "gpu": _parse_gpu_info(args.gpu_info, args.torch_gpu_count),
         "versions": packages,
         "topology_order_by_repetition": [
-            ["inline", "remote"],
-            ["remote", "inline"],
-            ["inline", "remote"],
+            ["direct", "workflow"],
+            ["workflow", "direct"],
+            ["direct", "workflow"],
         ],
         "benchmark": {
             "repetitions": REPETITIONS,
             "warmup_requests": WARMUP_REQUESTS,
             "measured_requests": MEASURED_REQUESTS,
-            "concurrency": CONCURRENCY,
+            "request_rates": list(REQUEST_RATES),
+            "request_rate_mode": "constant",
+            "concurrency_cap": args.concurrency_cap,
             "streaming": False,
             "max_tokens": OUTPUT_TOKENS,
             "min_tokens": OUTPUT_TOKENS,
@@ -465,9 +473,15 @@ def _sample_stdev(values: list[float]) -> float:
     return statistics.stdev(values) if len(values) > 1 else 0.0
 
 
-def _summarize_topology(root: Path, topology: str) -> dict[str, Any]:
+def _summarize_topology(root: Path, request_rate: int, topology: str) -> dict[str, Any]:
     cells = [
-        _read_json(root / f"rep-{repetition}" / topology / "cell_audit.json")
+        _read_json(
+            root
+            / f"rate-{request_rate}"
+            / f"rep-{repetition}"
+            / topology
+            / "cell_audit.json"
+        )
         for repetition in range(1, REPETITIONS + 1)
     ]
     walls = [float(cell["full_client_process_wall_s"]) for cell in cells]
@@ -513,34 +527,47 @@ def _summarize_topology(root: Path, topology: str) -> dict[str, Any]:
 def summarize(root: Path) -> dict[str, Any]:
     metadata = _read_json(root / "benchmark_metadata.json")
     workload = _read_json(root / "workload_audit.json")
-    topologies = {
-        topology: _summarize_topology(root, topology) for topology in TOPOLOGIES
-    }
-    joined_smokes = [
-        _read_json(root / f"rep-{repetition}" / "remote" / "joined_smoke.json")
-        for repetition in range(1, REPETITIONS + 1)
-    ]
-    inline_full = topologies["inline"]["full_client_process_throughput_req_s"][
-        "from_mean_wall"
-    ]
-    remote_full = topologies["remote"]["full_client_process_throughput_req_s"][
-        "from_mean_wall"
-    ]
-    inline_window = topologies["inline"]["request_window_throughput_req_s"]["mean"]
-    remote_window = topologies["remote"]["request_window_throughput_req_s"]["mean"]
+    rates: dict[str, Any] = {}
+    joined_smokes: list[dict[str, Any]] = []
+    gate_results = []
+    for request_rate in REQUEST_RATES:
+        topologies = {
+            topology: _summarize_topology(root, request_rate, topology)
+            for topology in TOPOLOGIES
+        }
+        direct_window = topologies["direct"]["request_window_throughput_req_s"]["mean"]
+        workflow_window = topologies["workflow"]["request_window_throughput_req_s"][
+            "mean"
+        ]
+        ratio = workflow_window / direct_window
+        gate_passed = ratio >= MIN_WORKFLOW_TO_DIRECT_RATIO
+        gate_results.append(gate_passed)
+        rates[str(request_rate)] = {
+            "topologies": topologies,
+            "comparison": {
+                "workflow_to_direct_request_window_ratio": ratio,
+                "workflow_request_window_delta_percent": (ratio - 1.0) * 100,
+                "minimum_ratio": MIN_WORKFLOW_TO_DIRECT_RATIO,
+                "passed": gate_passed,
+            },
+        }
+        joined_smokes.extend(
+            _read_json(
+                root
+                / f"rate-{request_rate}"
+                / f"rep-{repetition}"
+                / "workflow"
+                / "joined_smoke.json"
+            )
+            for repetition in range(1, REPETITIONS + 1)
+        )
     summary = {
         "metadata": metadata,
         "workload": workload,
-        "topologies": topologies,
-        "comparison": {
-            "remote_to_inline_full_client_process_ratio": remote_full / inline_full,
-            "remote_full_client_process_delta_percent": (
-                remote_full / inline_full - 1.0
-            )
-            * 100,
-            "remote_to_inline_request_window_ratio": remote_window / inline_window,
-            "remote_request_window_delta_percent": (remote_window / inline_window - 1.0)
-            * 100,
+        "rates": rates,
+        "gate": {
+            "minimum_workflow_to_direct_ratio": MIN_WORKFLOW_TO_DIRECT_RATIO,
+            "passed": all(gate_results),
         },
         "joined_response_smokes": joined_smokes,
     }
@@ -556,10 +583,9 @@ def _format_runs(values: list[Any]) -> str:
 def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
     metadata = summary["metadata"]
     workload = summary["workload"]
-    topologies = summary["topologies"]
-    comparison = summary["comparison"]
+    rates = summary["rates"]
     lines = [
-        "# Inline versus remote Qwen workflow",
+        "# Direct versus integrated-encoder workflow",
         "",
         "## Audited configuration",
         "",
@@ -568,40 +594,47 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         f"- GPU: {metadata['gpu']}",
         f"- Workload SHA-256: `{workload['measured_sha256']}`",
         "- Raw text: 644 tokens plus one image; decoder ISL 773/976",
-        "- OSL: 7; concurrency: 64; 1,000 measured requests; 20 warmups",
+        "- OSL: 7; rates: 40/50 req/s; concurrency cap: 512",
+        "- 1,000 measured requests; 20 warmups per cell",
         "- Non-streaming; TTFT and ITL are intentionally not compared",
         "",
         "## Throughput",
         "",
-        "| Topology | Full-process runs (req/s) | From mean wall | "
+        "| Rate | Topology | Full-process runs (req/s) | From mean wall | "
         "Request-window runs (req/s) | Window mean |",
-        "| --- | --- | ---: | --- | ---: |",
+        "| ---: | --- | --- | ---: | --- | ---: |",
     ]
-    for topology in TOPOLOGIES:
-        full = topologies[topology]["full_client_process_throughput_req_s"]
-        window = topologies[topology]["request_window_throughput_req_s"]
-        lines.append(
-            f"| {topology} | {_format_runs(full['runs'])} | "
-            f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
-            f"{window['mean']:.3f} |"
+    for request_rate in REQUEST_RATES:
+        rate = rates[str(request_rate)]
+        for topology in TOPOLOGIES:
+            topology_summary = rate["topologies"][topology]
+            full = topology_summary["full_client_process_throughput_req_s"]
+            window = topology_summary["request_window_throughput_req_s"]
+            lines.append(
+                f"| {request_rate} | {topology} | {_format_runs(full['runs'])} | "
+                f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
+                f"{window['mean']:.3f} |"
+            )
+        comparison = rate["comparison"]
+        lines.extend(
+            [
+                "",
+                f"Rate {request_rate} workflow/direct request-window ratio: "
+                f"**{comparison['workflow_to_direct_request_window_ratio']:.3f}** "
+                f"({comparison['workflow_request_window_delta_percent']:+.2f}%).",
+            ]
         )
     lines.extend(
         [
             "",
-            "Remote/inline full-process ratio: "
-            f"**{comparison['remote_to_inline_full_client_process_ratio']:.3f}** "
-            f"({comparison['remote_full_client_process_delta_percent']:+.2f}%).",
-            "",
-            "Remote/inline request-window ratio: "
-            f"**{comparison['remote_to_inline_request_window_ratio']:.3f}** "
-            f"({comparison['remote_request_window_delta_percent']:+.2f}%).",
+            f"Overall >=90% gate: **{summary['gate']['passed']}**.",
             "",
             "## Correctness",
             "",
             "- Every measured cell completed 1,000 requests with zero errors.",
             "- Every cell produced average decoder ISL 874.5 and exact OSL 7.",
             "- Every cell processed 907,800 patches across both audited grids.",
-            "- Every remote repetition returned normalized classifier scores.",
+            "- Every workflow repetition returned normalized classifier scores.",
             "",
         ]
     )
@@ -625,6 +658,7 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--cuda-visible-devices", required=True)
     metadata.add_argument("--gpu-info", required=True)
     metadata.add_argument("--torch-gpu-count", type=int, required=True)
+    metadata.add_argument("--concurrency-cap", type=int, required=True)
 
     cell = subparsers.add_parser("validate-cell")
     cell.add_argument("--profile", type=Path, required=True)

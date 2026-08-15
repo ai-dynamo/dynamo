@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Compare the inline custom encoder with the remote encoder fan-out workflow.
-# Every cell starts fresh server processes, while the two topologies alternate
-# across three repetitions to reduce run-order bias.
+# Compare direct stock vLLM with the integrated-encoder workflow. Every cell
+# starts fresh server processes, and topology order alternates by repetition.
 
 set -euo pipefail
 
@@ -14,12 +13,16 @@ LAUNCH_ROOT="${DYN_BENCH_LAUNCH_ROOT:-$REPO_ROOT}"
 WORKLOAD_ROOT="${DYN_BENCH_WORKLOAD_ROOT:-/dynamo-tmp/logs/08-05/qwen25-user-ensemble-textisl644-osl7-mixed1000/workload}"
 OUTPUT_ROOT="${DYN_BENCH_OUTPUT_ROOT:?set DYN_BENCH_OUTPUT_ROOT to a new result directory}"
 CONTAINER_IMAGE="${DYN_BENCH_CONTAINER_IMAGE:?set DYN_BENCH_CONTAINER_IMAGE}"
+AIPERF_BIN="${DYN_BENCH_AIPERF_BIN:-aiperf}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
 WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
 SERVER_PID=""
 SAMPLER_PID=""
+CONCURRENCY_CAP=512
+DEFAULT_CELL_PLAN="40:1:direct 40:1:workflow 40:2:workflow 40:2:direct 40:3:direct 40:3:workflow 50:1:direct 50:1:workflow 50:2:workflow 50:2:direct 50:3:direct 50:3:workflow"
+CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
     echo >&2 "DYN_BENCH_OUTPUT_ROOT already exists: $OUTPUT_ROOT"
@@ -97,11 +100,13 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     --container-image "$CONTAINER_IMAGE" \
     --cuda-visible-devices "$CUDA_VISIBLE_DEVICES" \
     --gpu-info "$GPU_INFO" \
-    --torch-gpu-count "$TORCH_GPU_COUNT"
+    --torch-gpu-count "$TORCH_GPU_COUNT" \
+    --concurrency-cap "$CONCURRENCY_CAP"
 
 sha256sum \
     "$REPO_ROOT/examples/custom_backend/user_ensemble/workflow.py" \
     "$REPO_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh" \
+    "$REPO_ROOT/examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh" \
     "$REPO_ROOT/examples/custom_encoder/qwen2_5_vl_benchmark_encoder.py" \
     > "$OUTPUT_ROOT/source_files_sha256.txt"
 sha256sum "$MEASURED_INPUT" "$WARMUP_INPUT" \
@@ -134,10 +139,10 @@ launch_topology() {
     local launch_args=(--no-enable-prefix-caching)
 
     case "$topology" in
-        inline)
+        direct)
             launch_script="$LAUNCH_ROOT/examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh"
             ;;
-        remote)
+        workflow)
             launch_script="$LAUNCH_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh"
             launch_args=(--max-num-seqs 64 --no-enable-prefix-caching)
             ;;
@@ -187,10 +192,11 @@ raise SystemExit(
 }
 
 run_cell() {
-    local repetition="$1"
-    local topology="$2"
-    local output_dir="$OUTPUT_ROOT/rep-$repetition/$topology"
-    local zmq_prefix="/tmp/aiperf-qwen-workflow-r${repetition}-${topology}"
+    local request_rate="$1"
+    local repetition="$2"
+    local topology="$3"
+    local output_dir="$OUTPUT_ROOT/rate-$request_rate/rep-$repetition/$topology"
+    local zmq_prefix="/tmp/aiperf-qwen-r${request_rate}-p${repetition}-${topology}"
 
     mkdir -p "$output_dir/warmup" "$output_dir/measured"
     cleanup_cell
@@ -200,7 +206,7 @@ run_cell() {
 
     # The warmup is also the real-inference readiness gate. The measured run is
     # not started unless all 20 image-bearing requests complete successfully.
-    aiperf profile "${common_aiperf_args[@]}" \
+    "$AIPERF_BIN" profile "${common_aiperf_args[@]}" \
         --input-file "$WARMUP_INPUT" \
         --concurrency 20 \
         --conversation-num 20 \
@@ -221,9 +227,11 @@ run_cell() {
     SAMPLER_PID=$!
 
     TIMEFORMAT='%R'
-    { time aiperf profile "${common_aiperf_args[@]}" \
+    { time "$AIPERF_BIN" profile "${common_aiperf_args[@]}" \
         --input-file "$MEASURED_INPUT" \
-        --concurrency 64 \
+        --request-rate "$request_rate" \
+        --request-rate-mode constant \
+        --concurrency "$CONCURRENCY_CAP" \
         --conversation-num 1000 \
         --artifact-dir "$output_dir/measured" \
         --zmq-ipc-path "${zmq_prefix}-measured" \
@@ -234,7 +242,7 @@ run_cell() {
     wait "$SAMPLER_PID" 2>/dev/null || true
     SAMPLER_PID=""
 
-    # Validate the exact 20+1,000 encoder calls before the remote joined-response
+    # Validate the exact 20+1,000 encoder calls before the workflow smoke
     # smoke adds one intentionally excluded request to the server log.
     python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
         validate-cell \
@@ -244,7 +252,7 @@ run_cell() {
         --gpu-telemetry "$output_dir/gpu_telemetry.csv" \
         --output "$output_dir/cell_audit.json"
 
-    if [[ "$topology" == remote ]]; then
+    if [[ "$topology" == workflow ]]; then
         python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
             smoke \
             --input "$WARMUP_INPUT" \
@@ -255,13 +263,23 @@ run_cell() {
     cleanup_cell
 }
 
-orders=("inline remote" "remote inline" "inline remote")
-for repetition in 1 2 3; do
-    read -r -a order <<< "${orders[$((repetition - 1))]}"
-    for topology in "${order[@]}"; do
-        run_cell "$repetition" "$topology"
-    done
+for cell in $CELL_PLAN; do
+    request_rate="${cell%%:*}"
+    remainder="${cell#*:}"
+    repetition="${remainder%%:*}"
+    topology="${remainder#*:}"
+    if [[ ! "$request_rate" =~ ^(40|50)$ \
+        || ! "$repetition" =~ ^[1-3]$ \
+        || ! "$topology" =~ ^(direct|workflow)$ ]]; then
+        echo >&2 "invalid DYN_BENCH_CELL_PLAN entry: $cell"
+        exit 2
+    fi
+    run_cell "$request_rate" "$repetition" "$topology"
 done
 
-python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
-    summarize "$OUTPUT_ROOT" | tee "$OUTPUT_ROOT/summary.log"
+if [[ "$CELL_PLAN" == "$DEFAULT_CELL_PLAN" ]]; then
+    python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+        summarize "$OUTPUT_ROOT" | tee "$OUTPUT_ROOT/summary.log"
+else
+    printf '%s\n' "$CELL_PLAN" > "$OUTPUT_ROOT/partial_cell_plan.txt"
+fi
