@@ -142,6 +142,11 @@ impl AsyncEngine<SingleIn<KvStateHostControlRequest>, ManyOut<KvStateHostStatus>
                 intent_incarnation,
                 readable,
             } => {
+                // NOTE: The Dynamo namespace/DRT control plane is a trusted
+                // component boundary. These identities fence the current
+                // attachment; they are not authentication secrets. A future
+                // untrusted control plane requires transport authentication,
+                // not a capability copied through discovery.
                 let (agent, generation) = {
                     let slots = self.slots.lock().await;
                     let slot = slots
@@ -328,17 +333,22 @@ impl KvStateAgentHost {
         if let Some(supervisor) = self.supervisor.lock().await.take() {
             let _ = supervisor.await;
         }
-        if let Some(advertisement) = self.host_advertisement.lock().await.take() {
-            self.component
+        let unregister_result = match self.host_advertisement.lock().await.take() {
+            Some(advertisement) => self
+                .component
                 .drt()
                 .discovery()
                 .unregister(advertisement)
                 .await
-                .context("failed to remove KV state-agent host advertisement")?;
-        }
-        if let Some(endpoint) = self.control_endpoint.lock().await.take() {
-            endpoint.shutdown().await?;
-        }
+                .context("failed to remove KV state-agent host advertisement"),
+            None => Ok(()),
+        };
+        let endpoint_result = match self.control_endpoint.lock().await.take() {
+            Some(endpoint) => endpoint.shutdown().await,
+            None => Ok(()),
+        };
+        unregister_result?;
+        endpoint_result?;
         Ok(())
     }
 }
@@ -534,7 +544,22 @@ fn validate_intent(
     if intent.raw_zmq_endpoint.is_empty() {
         anyhow::bail!("attachment intent must supply a resolved raw endpoint");
     }
+    if !intent.raw_zmq_endpoint.starts_with("tcp://") {
+        anyhow::bail!("attachment intent raw endpoint must use the tcp:// scheme");
+    }
     Ok(())
+}
+
+fn slot_endpoint_name(owner: CacheOwnerId) -> String {
+    let pool = owner.pool();
+    let domain = pool.indexer_domain();
+    format!(
+        "slot_{}_{}_{}_{}",
+        domain.cache_semantics(),
+        domain.routing_scope(),
+        pool.dc_id(),
+        owner.slot()
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -571,6 +596,12 @@ async fn reconcile_owner(
     let intent = intent.expect("one intent was counted");
 
     if !slots.contains_key(&owner) {
+        // NOTE: Detached agents deliberately retain CacheOwner/index/recovery
+        // state and count against max_slots. This is a durable-slot resource
+        // budget, not an active-attachment count. Failed construction remains
+        // reserved only until its matching intent disappears.
+        // TODO(#13044): require explicit decommission/migration authority
+        // before reclaiming a durable owner from a long-lived host.
         if slots.len() >= max_slots {
             *capacity_rejected_total = capacity_rejected_total.saturating_add(1);
             metrics.capacity_rejected.inc();
@@ -590,7 +621,7 @@ async fn reconcile_owner(
         };
         slots.insert(owner, slot_shape);
         let agent = match KvStateAgent::start(KvStateAgentConfig {
-            endpoint: component.endpoint(format!("slot_{}", owner.slot())),
+            endpoint: component.endpoint(slot_endpoint_name(owner)),
             kv_state_endpoint: intent.kv_state_endpoint.clone(),
             slot: KvStateAgentSlotConfig {
                 cache_owner_id: owner,
@@ -902,5 +933,32 @@ mod tests {
         );
         assert!(!intents.contains_key(&moved.cache_owner_id));
         assert_eq!(intent_owners[&101], accepted.cache_owner_id);
+    }
+
+    #[test]
+    fn intent_rejects_non_tcp_raw_endpoint() {
+        let host = instance("kv_state_agent", 1);
+        let mut invalid = intent(
+            &host,
+            instance("vllm", 11),
+            owner(4),
+            WorkerWithDpRank::new(17, 4),
+            101,
+        );
+        invalid.raw_zmq_endpoint = "ipc:///tmp/kv-events".to_string();
+
+        let error = validate_intent(&invalid, &host, 101).unwrap_err();
+        assert!(error.to_string().contains("tcp://"));
+    }
+
+    #[test]
+    fn slot_endpoint_name_includes_pool_identity() {
+        let first = owner(4);
+        let second = CacheOwnerId::new(
+            PoolId::new(first.pool().indexer_domain(), DcId::new(4)),
+            first.slot(),
+        );
+
+        assert_ne!(slot_endpoint_name(first), slot_endpoint_name(second));
     }
 }

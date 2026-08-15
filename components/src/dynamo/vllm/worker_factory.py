@@ -620,6 +620,9 @@ class WorkerFactory:
                 consolidator_port=consolidator_port,
             )
 
+        # NOTE: Source mode is immutable for one worker lifecycle. An opted-in
+        # worker never falls back to, or concurrently starts, the ordinary KV
+        # publisher; setup failure disables KV routing while serving continues.
         try:
             if self.setup_kv_state_attachment_owner is None:
                 raise RuntimeError("KV state-agent attachment setup is unavailable")

@@ -5,6 +5,7 @@
 
 import asyncio
 import ipaddress
+import logging
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -18,9 +19,12 @@ from dynamo.runtime import Endpoint
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
 
+logger = logging.getLogger(__name__)
+
 _CACHE_OWNER_PATTERN = re.compile(
     r"^(?P<domain>[0-9a-f]{32}:[0-9a-f]{32})/[0-9a-f]{16}/[0-9a-f]{32}$"
 )
+_STATE_AGENT_CLOSE_TIMEOUT_SECS = 30.0
 
 
 @dataclass(frozen=True)
@@ -56,7 +60,16 @@ class StateAgentLifecycle:
             self._closed = True
             owner, self._owner = self._owner, None
         if owner is not None:
-            await owner.close()
+            try:
+                await asyncio.wait_for(
+                    owner.close(), timeout=_STATE_AGENT_CLOSE_TIMEOUT_SECS
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "KV state attachment cleanup timed out after %.0fs; "
+                    "continuing worker shutdown",
+                    _STATE_AGENT_CLOSE_TIMEOUT_SECS,
+                )
 
 
 def state_agent_settings(config: Any) -> StateAgentSettings | None:

@@ -16,12 +16,10 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
-use tokio::{
-    sync::{Mutex, Semaphore, watch},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
+use super::recovery_lane::{RECOVERY_CONCURRENCY_LIMIT, RecoveryLane};
 use super::target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 use super::worker_query_state::{LiveEventAction, PendingDrainPlan, RankState, RecoveryKey};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
@@ -32,7 +30,6 @@ use crate::discovery::{
 
 const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
-const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 pub(crate) const DEFAULT_RECOVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const KV_EVENT_TOPIC: &str = dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
@@ -48,11 +45,6 @@ struct SourceBinding {
     source: KvEventSource,
     source_id: KvSourceId,
     lifetime: CancellationToken,
-}
-
-struct RecoveryTask {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,8 +108,7 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     slots: DashMap<RecoveryKey, Arc<Mutex<SourceSlot>>>,
     /// Immutable publisher binding and rank slot lookup performed once per event envelope.
     publisher_bindings: DashMap<PublisherId, ActivePublisherBinding>,
-    recovery_tasks: DashMap<RecoveryKey, RecoveryTask>,
-    recovery_semaphore: Arc<Semaphore>,
+    recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
 }
@@ -158,8 +149,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
         });
@@ -198,8 +188,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
         })
@@ -727,14 +716,10 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     }
 
     async fn cancel_recovery(&self, key: RecoveryKey) {
-        if let Some((_, task)) = self.recovery_tasks.remove(&key) {
-            task.cancel.cancel();
-            task.handle.abort();
-            if let Err(error) = task.handle.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
-            }
+        if let Some(error) = self.recovery_lane.cancel(key).await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
         }
     }
 
@@ -790,8 +775,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 client.target.complete_initial_recovery(key.0, key.1).await;
             }
         });
-        self.recovery_tasks
-            .insert(key, RecoveryTask { cancel, handle });
+        self.recovery_lane.insert(key, cancel, handle);
     }
 
     fn schedule_recovery_after_current(
@@ -1024,8 +1008,8 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 // Limit only the in-flight RPC. The shared permit is deliberately released
                 // before retry backoff so unresponsive targets cannot starve unrelated pools.
                 let _permit = self
-                    .recovery_semaphore
-                    .clone()
+                    .recovery_lane
+                    .semaphore()
                     .acquire_owned()
                     .await
                     .context("recovery semaphore closed")?;

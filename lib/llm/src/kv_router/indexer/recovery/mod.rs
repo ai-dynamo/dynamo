@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod direct_zmq;
+mod recovery_lane;
 mod source_health;
 mod state_agent;
 mod subscriber;

@@ -19,7 +19,9 @@ use std::{
 use anyhow::{Context, Result};
 use dynamo_kv_router::{
     identity::CacheOwnerId,
-    indexer::{KvStateAgentIdentity, KvStateProtocolVersion, WorkerKvQueryResponse},
+    indexer::{
+        KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, WorkerKvQueryResponse,
+    },
     protocols::{
         KvCacheEvent, KvCacheEventData, ResetScope, ResidencyDomain, ResidencyProjection,
         RouterEvent, StorageTier, WorkerWithDpRank,
@@ -36,7 +38,7 @@ use dynamo_runtime::{
     transports::event_plane::EventSubscriber,
 };
 use futures::StreamExt;
-use tokio::sync::{Mutex, oneshot, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::kv_state_agent::{
@@ -48,7 +50,9 @@ use crate::{
     kv_router::Indexer,
 };
 
-use super::RuntimeWorkerQueryTransport;
+use super::{
+    RuntimeWorkerQueryTransport, recovery_lane::RecoveryLane, worker_query_state::RankState,
+};
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -61,6 +65,40 @@ struct OwnerRuntime {
     last_worker: Option<WorkerWithDpRank>,
     ready: bool,
     recovery_required: bool,
+}
+
+struct OwnerRecoveryTail {
+    publisher_id: u64,
+    attachment_generation: Option<u64>,
+    schedule_generation: u64,
+    rank: RankState,
+}
+
+#[derive(Clone)]
+struct OwnerRecoveryPlan {
+    owner: CacheOwnerId,
+    source: KvStateSourceAdvertisement,
+    attachment: Option<KvStateAttachmentAdvertisement>,
+    expected: KvStateAgentIdentity,
+    recognized_worker: Option<WorkerWithDpRank>,
+    previous_publisher_id: Option<u64>,
+    previous_cursor: u64,
+    recovery_required: bool,
+    observation_revision: u64,
+    schedule_generation: u64,
+}
+
+enum OwnerRecoveryResult {
+    Initial {
+        plan: OwnerRecoveryPlan,
+        status: Result<KvStateAgentStatus>,
+        recovery: Option<Result<WorkerKvQueryResponse>>,
+    },
+    PostStatus {
+        plan: OwnerRecoveryPlan,
+        recovered_cursor: u64,
+        status: Result<KvStateAgentStatus>,
+    },
 }
 
 /// Router-owned state-agent work plus the filtered legacy source view.
@@ -178,6 +216,12 @@ async fn start_observation_fence(
         )
         .await?;
     component.drt().runtime().secondary().spawn(async move {
+        // NOTE: This independent watch must invalidate projection while the
+        // reconciliation loop is blocked on acknowledged clears or applying a
+        // snapshot. Temporary loss of KV-aware routing is intentional;
+        // ordinary serving continues without a stale projection.
+        // TODO(#13044): share/index these model-wide watches, and invalidate
+        // only the affected owner, once that preserves the same independent fence.
         loop {
             let observed = tokio::select! {
                 biased;
@@ -291,10 +335,15 @@ async fn run_state_agent_router(
     let mut event_stream: Option<
         dynamo_runtime::transports::event_plane::TypedEventSubscriber<Vec<RouterEvent>>,
     > = None;
-    let mut transport: Option<RuntimeWorkerQueryTransport> = None;
+    let mut transport: Option<Arc<RuntimeWorkerQueryTransport>> = None;
     let mut sources = HashMap::new();
     let mut attachments = HashMap::new();
     let mut runtime: HashMap<CacheOwnerId, OwnerRuntime> = HashMap::new();
+    let recovery_lane = Arc::new(RecoveryLane::new());
+    let (recovery_tx, mut recovery_rx) = mpsc::unbounded_channel();
+    let mut recovery_tails: HashMap<CacheOwnerId, OwnerRecoveryTail> = HashMap::new();
+    let mut recovering_publishers: HashMap<u64, CacheOwnerId> = HashMap::new();
+    let mut next_recovery_schedule = 0u64;
     let mut committed_revision = None;
 
     loop {
@@ -310,6 +359,7 @@ async fn run_state_agent_router(
                     )>,
                 >,
             ),
+            Recovery(Option<OwnerRecoveryResult>),
             Observation,
             Cancelled,
         }
@@ -332,6 +382,7 @@ async fn run_state_agent_router(
                     None => std::future::pending().await,
                 }
             } => Input::Events(event),
+            result = recovery_rx.recv() => Input::Recovery(result),
             changed = observation_rx.changed() => {
                 if changed.is_err() { Input::Cancelled } else { Input::Observation }
             },
@@ -384,6 +435,15 @@ async fn run_state_agent_router(
                 break;
             }
             Input::Events(Some(Ok((envelope, events)))) => {
+                if let Some(owner) = recovering_publishers.get(&envelope.publisher_id).copied()
+                    && let Some(tail) = recovery_tails.get_mut(&owner)
+                    && tail.publisher_id == envelope.publisher_id
+                {
+                    for event in events {
+                        tail.rank.buffer_recovery_tail(event);
+                    }
+                    continue;
+                }
                 if apply_live_events(&indexer, envelope.publisher_id, events, &mut runtime).await
                     && let Some(revision) = committed_revision
                     && publish_projection_if_current(
@@ -410,22 +470,53 @@ async fn run_state_agent_router(
                 cancel.cancelled().await;
                 break;
             }
+            Input::Recovery(Some(result)) => {
+                let owner = result.owner();
+                let publisher_id = result.publisher_id();
+                recovery_lane.finish((owner, result.schedule_generation()));
+                if let Err(error) = finish_owner_recovery(
+                    result,
+                    &indexer,
+                    transport.as_ref(),
+                    &membership,
+                    &sources,
+                    &attachments,
+                    &mut runtime,
+                    &recovery_lane,
+                    &recovery_tx,
+                    &mut recovery_tails,
+                    &mut recovering_publishers,
+                    &observation_revision,
+                    &projection_commit,
+                )
+                .await
+                {
+                    fail_owner_recovery(
+                        owner,
+                        publisher_id,
+                        &mut runtime,
+                        &mut recovery_tails,
+                        &mut recovering_publishers,
+                    );
+                    tracing::warn!(%owner, %error, "KV state-source recovery completion failed closed");
+                }
+            }
+            Input::Recovery(None) => break,
         }
         if reconcile {
-            let membership_snapshot = membership.borrow().clone();
             if !sources.is_empty() && transport.is_none() {
                 match start_state_agent_consumers(&component, &endpoint, cancel.child_token()).await
                 {
                     Ok((attachment_watch, events, state_transport)) => {
                         attachment_stream = Some(attachment_watch);
                         event_stream = Some(events);
-                        transport = Some(state_transport);
+                        transport = Some(Arc::new(state_transport));
                     }
                     Err(error) => {
                         tracing::warn!(%error, %endpoint, "Failed to activate V2 KV state consumers");
                         indexer.set_residency_projection(ResidencyProjection::default());
                         recognized_tx
-                            .send_replace(membership_snapshot.sources.keys().copied().collect());
+                            .send_replace(membership.borrow().sources.keys().copied().collect());
                         continue;
                     }
                 }
@@ -433,20 +524,32 @@ async fn run_state_agent_router(
             let Some(transport) = transport.as_ref() else {
                 continue;
             };
+            let membership_snapshot = membership.borrow().clone();
             let revision = observation_revision.load(Ordering::Acquire);
-            if let Err(error) = reconcile_state_sources(
+            let Some(schedule_generation) = next_recovery_schedule.checked_add(1) else {
+                tracing::error!("KV state recovery schedule generation exhausted");
+                break;
+            };
+            next_recovery_schedule = schedule_generation;
+            recovery_lane.cancel_all().await;
+            if let Err(error) = schedule_state_sources(
                 &indexer,
-                transport,
+                transport.clone(),
                 membership_snapshot,
                 &endpoint,
                 expected_block_size,
                 &sources,
                 &attachments,
                 &mut runtime,
+                &recovery_lane,
+                &recovery_tx,
+                &mut recovery_tails,
+                &mut recovering_publishers,
                 &recognized_tx,
                 &observation_revision,
                 &projection_commit,
                 revision,
+                schedule_generation,
             )
             .await
             {
@@ -457,6 +560,7 @@ async fn run_state_agent_router(
             }
         }
     }
+    recovery_lane.cancel_all().await;
     indexer.set_residency_projection(ResidencyProjection::default());
 }
 
@@ -548,34 +652,59 @@ fn update_advertisements<T: Advertisement>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn reconcile_state_sources(
+async fn schedule_state_sources(
     indexer: &Indexer,
-    transport: &RuntimeWorkerQueryTransport,
+    transport: Arc<RuntimeWorkerQueryTransport>,
     membership: KvSourceMembershipView,
     endpoint: &EndpointId,
     expected_block_size: u32,
     sources: &HashMap<u64, KvStateSourceAdvertisement>,
     attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
     runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    recovery_lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
+    recovery_tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
+    recovery_tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
+    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
     recognized_tx: &watch::Sender<HashSet<WorkerWithDpRank>>,
     observation_revision: &AtomicU64,
     projection_commit: &Mutex<()>,
     expected_revision: u64,
+    schedule_generation: u64,
 ) -> Result<()> {
     ensure_observation_revision(observation_revision, expected_revision)?;
     let live_workers: HashSet<_> = membership.sources.keys().copied().collect();
     let mut source_by_owner: HashMap<CacheOwnerId, Vec<&KvStateSourceAdvertisement>> =
         HashMap::new();
     for (discovery_id, source) in sources {
+        let expected_ingress_protocol =
+            crate::discovery::kv_state_agent::KvStateIngressProtocol::VllmResidencyV1;
+        let expected_domain = source.cache_owner_id.pool().indexer_domain();
         if source.publisher_id != *discovery_id
             || source.protocol_version != KvStateProtocolVersion::V2
             || source.event_topic != KV_STATE_EVENT_TOPIC_V2
             || source.kv_state_endpoint != *endpoint
             || source.kv_block_size != expected_block_size
-            || source.ingress_protocol
-                != crate::discovery::kv_state_agent::KvStateIngressProtocol::VllmResidencyV1
-            || source.cache_owner_id.pool().indexer_domain() != source.indexer_domain_id
+            || source.ingress_protocol != expected_ingress_protocol
+            || expected_domain != source.indexer_domain_id
         {
+            tracing::warn!(
+                discovery_id = *discovery_id,
+                advertised_publisher_id = source.publisher_id,
+                advertised_protocol = ?source.protocol_version,
+                expected_protocol = ?KvStateProtocolVersion::V2,
+                advertised_event_topic = %source.event_topic,
+                expected_event_topic = KV_STATE_EVENT_TOPIC_V2,
+                advertised_endpoint = ?source.kv_state_endpoint,
+                expected_endpoint = ?endpoint,
+                advertised_block_size = source.kv_block_size,
+                expected_block_size,
+                advertised_ingress_protocol = ?source.ingress_protocol,
+                expected_ingress_protocol = ?expected_ingress_protocol,
+                advertised_domain = %source.indexer_domain_id,
+                expected_domain = %expected_domain,
+                owner = %source.cache_owner_id,
+                "Ignoring incompatible V2 KV state source advertisement"
+            );
             continue;
         }
         source_by_owner
@@ -651,6 +780,17 @@ async fn reconcile_state_sources(
         .chain(source_by_owner.keys().copied())
         .chain(attachment_by_owner.keys().copied())
         .collect();
+    recovery_tails.retain(|owner, tail| {
+        let keep = source_by_owner.get(owner).is_some_and(|sources| {
+            sources
+                .iter()
+                .any(|source| source.publisher_id == tail.publisher_id)
+        });
+        if !keep {
+            recovering_publishers.remove(&tail.publisher_id);
+        }
+        keep
+    });
     for owner in &known_owners {
         if let Some(state) = runtime.get_mut(owner) {
             state.ready = false;
@@ -666,6 +806,9 @@ async fn reconcile_state_sources(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         if matching_sources.len() > 1 {
+            if let Some(tail) = recovery_tails.remove(&owner) {
+                recovering_publishers.remove(&tail.publisher_id);
+            }
             if let Some(state) = runtime.get_mut(&owner) {
                 // No overlapping source incarnation is authoritative. Fence
                 // live traffic until one exact source wins and recovers.
@@ -678,6 +821,9 @@ async fn reconcile_state_sources(
             continue;
         }
         let Some(source) = matching_sources.first().copied() else {
+            if let Some(tail) = recovery_tails.remove(&owner) {
+                recovering_publishers.remove(&tail.publisher_id);
+            }
             if let Some(previous) = runtime.remove(&owner) {
                 if let Some(worker) = previous.last_worker {
                     clear_worker(indexer, worker, owner).await?;
@@ -756,165 +902,54 @@ async fn reconcile_state_sources(
             publisher_id: source.publisher_id,
             protocol_version: source.protocol_version,
         };
-        let status = match transport
-            .query_status(
-                attachment.map_or(0, |value| value.worker.worker_id),
-                source.global_dp_rank,
-                source.recovery_control_target.clone(),
-                expected.clone(),
-                expected_generation,
-                CONTROL_TIMEOUT,
-            )
-            .await
-        {
-            Ok(status) => status,
-            Err(error) => {
-                tracing::warn!(%owner, %error, "KV state-agent status handshake failed");
-                runtime.insert(
-                    owner,
-                    OwnerRuntime {
-                        publisher_id: Some(source.publisher_id),
-                        recovered_cursor: previous_cursor,
-                        attachment_generation: expected_generation,
-                        last_worker: recognized_worker,
-                        ready: false,
-                        recovery_required,
-                    },
-                );
-                continue;
-            }
-        };
-        ensure_observation_revision(observation_revision, expected_revision)?;
-        let needs_recovery = recovery_required
-            || previous_cursor
-                < attachment.map_or(status.outbound_cursor, |value| {
-                    value.ready_at_outbound_cursor
-                });
-        let mut recovered_cursor = previous_cursor;
-        if needs_recovery {
-            if previous.is_some_and(|value| value.publisher_id != Some(source.publisher_id)) {
-                clear_cache_owner(indexer, owner, 0).await?;
-            }
-            if let Some(worker) = recognized_worker {
-                clear_worker(indexer, worker, owner).await?;
-            }
-            let response = transport
-                .query_state_agent_recovery(
-                    attachment.map_or(0, |value| value.worker.worker_id),
-                    source.global_dp_rank,
-                    source.recovery_control_target.clone(),
-                    expected.clone(),
-                    expected_generation,
-                    RECOVERY_TIMEOUT,
-                )
-                .await;
-            let response = match response {
-                Ok(response) => response,
-                Err(error) => {
-                    tracing::warn!(%owner, %error, "KV state-agent recovery query failed");
-                    runtime.insert(
-                        owner,
-                        OwnerRuntime {
-                            publisher_id: Some(source.publisher_id),
-                            recovered_cursor,
-                            attachment_generation: expected_generation,
-                            last_worker: recognized_worker,
-                            ready: false,
-                            recovery_required: true,
-                        },
-                    );
-                    continue;
-                }
-            };
-            ensure_observation_revision(observation_revision, expected_revision)?;
-            recovered_cursor = match apply_recovery_response(
-                indexer,
-                owner,
-                recognized_worker,
-                &expected,
-                expected_generation,
-                response,
-            )
-            .await
-            {
-                Ok(cursor) => cursor,
-                Err(error) => {
-                    tracing::warn!(%owner, %error, "KV state-agent recovery response was rejected");
-                    runtime.insert(
-                        owner,
-                        OwnerRuntime {
-                            publisher_id: Some(source.publisher_id),
-                            recovered_cursor,
-                            attachment_generation: expected_generation,
-                            last_worker: recognized_worker,
-                            ready: false,
-                            recovery_required: true,
-                        },
-                    );
-                    continue;
-                }
-            };
-        }
-        let post_status = if needs_recovery {
-            match transport
-                .query_status(
-                    attachment.map_or(0, |value| value.worker.worker_id),
-                    source.global_dp_rank,
-                    source.recovery_control_target.clone(),
-                    expected,
-                    expected_generation,
-                    CONTROL_TIMEOUT,
-                )
-                .await
-            {
-                Ok(status) => status,
-                Err(error) => {
-                    tracing::warn!(%owner, %error, "KV state-agent post-recovery status check failed");
-                    runtime.insert(
-                        owner,
-                        OwnerRuntime {
-                            publisher_id: Some(source.publisher_id),
-                            recovered_cursor,
-                            attachment_generation: expected_generation,
-                            last_worker: recognized_worker,
-                            ready: false,
-                            recovery_required: true,
-                        },
-                    );
-                    continue;
-                }
-            }
-        } else {
-            status
-        };
-        ensure_observation_revision(observation_revision, expected_revision)?;
-        let ready = attachment.is_some_and(|attachment| {
-            attachment.cache_readable
-                && live_workers.contains(&attachment.worker)
-                && post_status.cache_owner_ready
-                && post_status.identity.publisher_id == source.publisher_id
-                && post_status
-                    .attachment
-                    .as_ref()
-                    .is_some_and(|status_attachment| {
-                        status_attachment.ready
-                            && status_attachment.cache_readable
-                            && status_attachment.generation == attachment.attachment_generation
-                            && status_attachment.worker == attachment.worker
-                            && status_attachment.ready_at_outbound_cursor
-                                == attachment.ready_at_outbound_cursor
-                    })
-                && recovered_cursor >= attachment.ready_at_outbound_cursor
-        });
         runtime.insert(
             owner,
             OwnerRuntime {
                 publisher_id: Some(source.publisher_id),
-                recovered_cursor,
+                recovered_cursor: previous_cursor,
                 attachment_generation: expected_generation,
                 last_worker: recognized_worker,
-                ready,
-                recovery_required: false,
+                ready: false,
+                recovery_required,
+            },
+        );
+        let tail = recovery_tails
+            .entry(owner)
+            .or_insert_with(|| OwnerRecoveryTail {
+                publisher_id: source.publisher_id,
+                attachment_generation: expected_generation,
+                schedule_generation,
+                rank: RankState::default(),
+            });
+        if tail.publisher_id != source.publisher_id
+            || tail.attachment_generation != expected_generation
+        {
+            recovering_publishers.remove(&tail.publisher_id);
+            *tail = OwnerRecoveryTail {
+                publisher_id: source.publisher_id,
+                attachment_generation: expected_generation,
+                schedule_generation,
+                rank: RankState::default(),
+            };
+        } else {
+            tail.schedule_generation = schedule_generation;
+        }
+        recovering_publishers.insert(source.publisher_id, owner);
+        launch_initial_recovery(
+            recovery_lane,
+            recovery_tx,
+            transport.clone(),
+            OwnerRecoveryPlan {
+                owner,
+                source: source.clone(),
+                attachment: attachment.cloned(),
+                expected,
+                recognized_worker,
+                previous_publisher_id: previous.and_then(|value| value.publisher_id),
+                previous_cursor,
+                recovery_required,
+                observation_revision: expected_revision,
+                schedule_generation,
             },
         );
     }
@@ -944,6 +979,416 @@ async fn publish_projection_if_current(
     ensure_observation_revision(observation_revision, expected_revision)?;
     publish_projection(indexer, runtime);
     Ok(())
+}
+
+impl OwnerRecoveryResult {
+    fn owner(&self) -> CacheOwnerId {
+        match self {
+            Self::Initial { plan, .. } | Self::PostStatus { plan, .. } => plan.owner,
+        }
+    }
+
+    fn publisher_id(&self) -> u64 {
+        match self {
+            Self::Initial { plan, .. } | Self::PostStatus { plan, .. } => plan.source.publisher_id,
+        }
+    }
+
+    fn schedule_generation(&self) -> u64 {
+        match self {
+            Self::Initial { plan, .. } | Self::PostStatus { plan, .. } => plan.schedule_generation,
+        }
+    }
+}
+
+fn launch_initial_recovery(
+    lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
+    tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
+    transport: Arc<RuntimeWorkerQueryTransport>,
+    plan: OwnerRecoveryPlan,
+) {
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task_tx = tx.clone();
+    let semaphore = lane.semaphore();
+    let owner = plan.owner;
+    let schedule_generation = plan.schedule_generation;
+    let handle = tokio::spawn(async move {
+        let status_query = transport.query_status(
+            plan.attachment
+                .as_ref()
+                .map_or(0, |value| value.worker.worker_id),
+            plan.source.global_dp_rank,
+            plan.source.recovery_control_target.clone(),
+            plan.expected.clone(),
+            plan.attachment
+                .as_ref()
+                .map(|value| value.attachment_generation),
+            CONTROL_TIMEOUT,
+        );
+        let status = tokio::select! {
+            biased;
+            _ = task_cancel.cancelled() => return,
+            result = status_query => result,
+        };
+        let needs_recovery = status.as_ref().is_ok_and(|status| {
+            plan.recovery_required
+                || plan.previous_cursor
+                    < plan
+                        .attachment
+                        .as_ref()
+                        .map_or(status.outbound_cursor, |value| {
+                            value.ready_at_outbound_cursor
+                        })
+        });
+        let recovery = if needs_recovery {
+            let permit = tokio::select! {
+                biased;
+                _ = task_cancel.cancelled() => return,
+                permit = semaphore.acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
+            };
+            let query = transport.query_state_agent_recovery(
+                plan.attachment
+                    .as_ref()
+                    .map_or(0, |value| value.worker.worker_id),
+                plan.source.global_dp_rank,
+                plan.source.recovery_control_target.clone(),
+                plan.expected.clone(),
+                plan.attachment
+                    .as_ref()
+                    .map(|value| value.attachment_generation),
+                RECOVERY_TIMEOUT,
+            );
+            let result = tokio::select! {
+                biased;
+                _ = task_cancel.cancelled() => return,
+                result = query => result,
+            };
+            drop(permit);
+            Some(result)
+        } else {
+            None
+        };
+        let _ = task_tx.send(OwnerRecoveryResult::Initial {
+            plan,
+            status,
+            recovery,
+        });
+    });
+    lane.insert((owner, schedule_generation), cancel, handle);
+}
+
+fn launch_post_status(
+    lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
+    tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
+    transport: Arc<RuntimeWorkerQueryTransport>,
+    plan: OwnerRecoveryPlan,
+    recovered_cursor: u64,
+) {
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task_tx = tx.clone();
+    let owner = plan.owner;
+    let schedule_generation = plan.schedule_generation;
+    let handle = tokio::spawn(async move {
+        let query = transport.query_status(
+            plan.attachment
+                .as_ref()
+                .map_or(0, |value| value.worker.worker_id),
+            plan.source.global_dp_rank,
+            plan.source.recovery_control_target.clone(),
+            plan.expected.clone(),
+            plan.attachment
+                .as_ref()
+                .map(|value| value.attachment_generation),
+            CONTROL_TIMEOUT,
+        );
+        let status = tokio::select! {
+            biased;
+            _ = task_cancel.cancelled() => return,
+            result = query => result,
+        };
+        let _ = task_tx.send(OwnerRecoveryResult::PostStatus {
+            plan,
+            recovered_cursor,
+            status,
+        });
+    });
+    lane.insert((owner, schedule_generation), cancel, handle);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_owner_recovery(
+    result: OwnerRecoveryResult,
+    indexer: &Indexer,
+    transport: Option<&Arc<RuntimeWorkerQueryTransport>>,
+    membership: &KvSourceMembershipWatch,
+    sources: &HashMap<u64, KvStateSourceAdvertisement>,
+    attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
+    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
+    tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
+    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
+    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
+    observation_revision: &AtomicU64,
+    projection_commit: &Mutex<()>,
+) -> Result<()> {
+    let plan = match &result {
+        OwnerRecoveryResult::Initial { plan, .. }
+        | OwnerRecoveryResult::PostStatus { plan, .. } => plan,
+    };
+    if !owner_recovery_is_current(plan, membership, sources, attachments, observation_revision) {
+        return Ok(());
+    }
+    if !tails
+        .get(&plan.owner)
+        .is_some_and(|tail| tail.schedule_generation == plan.schedule_generation)
+    {
+        return Ok(());
+    }
+    let expected_revision = plan.observation_revision;
+
+    match result {
+        OwnerRecoveryResult::Initial {
+            plan,
+            status,
+            recovery,
+        } => {
+            let status = match status {
+                Ok(status) => status,
+                Err(error) => {
+                    fail_owner_recovery(
+                        plan.owner,
+                        plan.source.publisher_id,
+                        runtime,
+                        tails,
+                        recovering_publishers,
+                    );
+                    tracing::warn!(owner = %plan.owner, %error, "KV state-agent status handshake failed");
+                    return Ok(());
+                }
+            };
+            let recovered_cursor = if let Some(recovery) = recovery {
+                let response = match recovery {
+                    Ok(response) => response,
+                    Err(error) => {
+                        fail_owner_recovery(
+                            plan.owner,
+                            plan.source.publisher_id,
+                            runtime,
+                            tails,
+                            recovering_publishers,
+                        );
+                        tracing::warn!(owner = %plan.owner, %error, "KV state-agent recovery query failed");
+                        return Ok(());
+                    }
+                };
+                if plan.recovery_required
+                    && plan.previous_publisher_id != Some(plan.source.publisher_id)
+                {
+                    clear_cache_owner(indexer, plan.owner, 0).await?;
+                }
+                if let Some(worker) = plan.recognized_worker {
+                    clear_worker(indexer, worker, plan.owner).await?;
+                }
+                let recovered_cursor = apply_recovery_response(
+                    indexer,
+                    plan.owner,
+                    plan.recognized_worker,
+                    &plan.expected,
+                    plan.attachment
+                        .as_ref()
+                        .map(|value| value.attachment_generation),
+                    response,
+                )
+                .await?;
+                apply_recovery_tail(indexer, &plan, recovered_cursor, runtime, tails).await?;
+                let Some(transport) = transport else {
+                    anyhow::bail!("state-agent recovery transport disappeared");
+                };
+                launch_post_status(lane, tx, (*transport).clone(), plan, recovered_cursor);
+                return Ok(());
+            } else {
+                apply_recovery_tail(indexer, &plan, plan.previous_cursor, runtime, tails).await?
+            };
+            finish_owner_readiness(
+                &plan,
+                status,
+                recovered_cursor,
+                membership,
+                runtime,
+                tails,
+                recovering_publishers,
+            );
+        }
+        OwnerRecoveryResult::PostStatus {
+            plan,
+            recovered_cursor,
+            status,
+        } => {
+            let status = match status {
+                Ok(status) => status,
+                Err(error) => {
+                    fail_owner_recovery(
+                        plan.owner,
+                        plan.source.publisher_id,
+                        runtime,
+                        tails,
+                        recovering_publishers,
+                    );
+                    tracing::warn!(owner = %plan.owner, %error, "KV state-agent post-recovery status check failed");
+                    return Ok(());
+                }
+            };
+            let recovered_cursor =
+                apply_recovery_tail(indexer, &plan, recovered_cursor, runtime, tails).await?;
+            finish_owner_readiness(
+                &plan,
+                status,
+                recovered_cursor,
+                membership,
+                runtime,
+                tails,
+                recovering_publishers,
+            );
+        }
+    }
+    publish_projection_if_current(
+        indexer,
+        runtime,
+        observation_revision,
+        projection_commit,
+        expected_revision,
+    )
+    .await
+}
+
+fn owner_recovery_is_current(
+    plan: &OwnerRecoveryPlan,
+    membership: &KvSourceMembershipWatch,
+    sources: &HashMap<u64, KvStateSourceAdvertisement>,
+    attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
+    observation_revision: &AtomicU64,
+) -> bool {
+    if observation_revision.load(Ordering::Acquire) != plan.observation_revision
+        || sources.get(&plan.source.publisher_id) != Some(&plan.source)
+        || plan
+            .recognized_worker
+            .is_some_and(|worker| !membership.borrow().sources.contains_key(&worker))
+    {
+        return false;
+    }
+    match &plan.attachment {
+        Some(attachment) => {
+            attachments.get(&attachment_record_id(
+                attachment.publisher_id,
+                attachment.attachment_generation,
+            )) == Some(attachment)
+        }
+        None => true,
+    }
+}
+
+async fn apply_recovery_tail(
+    indexer: &Indexer,
+    plan: &OwnerRecoveryPlan,
+    recovered_cursor: u64,
+    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
+) -> Result<u64> {
+    let events = tails
+        .get_mut(&plan.owner)
+        .filter(|tail| {
+            tail.publisher_id == plan.source.publisher_id
+                && tail.attachment_generation
+                    == plan
+                        .attachment
+                        .as_ref()
+                        .map(|value| value.attachment_generation)
+        })
+        .map_or_else(Vec::new, |tail| {
+            tail.rank.drain_advisory_tail_after(recovered_cursor)
+        });
+    let state = runtime.entry(plan.owner).or_insert(OwnerRuntime {
+        publisher_id: Some(plan.source.publisher_id),
+        recovered_cursor,
+        attachment_generation: plan
+            .attachment
+            .as_ref()
+            .map(|value| value.attachment_generation),
+        last_worker: plan.recognized_worker,
+        ready: false,
+        recovery_required: false,
+    });
+    state.recovered_cursor = recovered_cursor;
+    state.recovery_required = false;
+    apply_events_for_owner(indexer, plan.owner, plan.source.publisher_id, events, state).await;
+    if state.recovery_required {
+        anyhow::bail!("buffered state-agent recovery tail was rejected");
+    }
+    Ok(state.recovered_cursor)
+}
+
+fn finish_owner_readiness(
+    plan: &OwnerRecoveryPlan,
+    status: KvStateAgentStatus,
+    recovered_cursor: u64,
+    membership: &KvSourceMembershipWatch,
+    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
+    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
+) {
+    let membership = membership.borrow();
+    let live_workers = &membership.sources;
+    let ready = plan.attachment.as_ref().is_some_and(|attachment| {
+        attachment.cache_readable
+            && live_workers.contains_key(&attachment.worker)
+            && status.cache_owner_ready
+            && status.identity.publisher_id == plan.source.publisher_id
+            && status.attachment.as_ref().is_some_and(|status_attachment| {
+                status_attachment.ready
+                    && status_attachment.cache_readable
+                    && status_attachment.generation == attachment.attachment_generation
+                    && status_attachment.worker == attachment.worker
+                    && status_attachment.ready_at_outbound_cursor
+                        == attachment.ready_at_outbound_cursor
+            })
+            && recovered_cursor >= attachment.ready_at_outbound_cursor
+    });
+    runtime.insert(
+        plan.owner,
+        OwnerRuntime {
+            publisher_id: Some(plan.source.publisher_id),
+            recovered_cursor,
+            attachment_generation: plan
+                .attachment
+                .as_ref()
+                .map(|value| value.attachment_generation),
+            last_worker: plan.recognized_worker,
+            ready,
+            recovery_required: false,
+        },
+    );
+    tails.remove(&plan.owner);
+    recovering_publishers.remove(&plan.source.publisher_id);
+}
+
+fn fail_owner_recovery(
+    owner: CacheOwnerId,
+    publisher_id: u64,
+    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
+    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
+) {
+    if let Some(state) = runtime.get_mut(&owner) {
+        state.ready = false;
+        state.recovery_required = true;
+    }
+    tails.remove(&owner);
+    recovering_publishers.remove(&publisher_id);
 }
 
 fn ensure_observation_revision(revision: &AtomicU64, expected: u64) -> Result<()> {
@@ -1051,6 +1496,17 @@ async fn apply_live_events(
         return false;
     };
     let was_ready = state.ready;
+    apply_events_for_owner(indexer, *owner, publisher_id, events, state).await;
+    was_ready != state.ready
+}
+
+async fn apply_events_for_owner(
+    indexer: &Indexer,
+    owner: CacheOwnerId,
+    publisher_id: u64,
+    events: Vec<RouterEvent>,
+    state: &mut OwnerRuntime,
+) {
     for event in events {
         if state.recovery_required {
             break;
@@ -1082,7 +1538,7 @@ async fn apply_live_events(
             continue;
         }
         let valid = domain.is_ok_and(|domain| match domain {
-            ResidencyDomain::CacheOwner => event.state_source == Some(*owner),
+            ResidencyDomain::CacheOwner => event.state_source == Some(owner),
             ResidencyDomain::Worker => state.last_worker.is_some_and(|worker| {
                 worker.worker_id == event.worker_id && worker.dp_rank == event.event.dp_rank
             }),
@@ -1108,7 +1564,6 @@ async fn apply_live_events(
         }
         state.recovered_cursor = event_id;
     }
-    was_ready != state.ready
 }
 
 fn publish_projection(indexer: &Indexer, runtime: &HashMap<CacheOwnerId, OwnerRuntime>) {

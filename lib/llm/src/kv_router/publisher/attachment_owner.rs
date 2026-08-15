@@ -230,6 +230,9 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
 async fn discover_single_host(
     component: &dynamo_runtime::component::Component,
 ) -> Result<KvStateHostAdvertisement> {
+    // NOTE: V2 assumes one host is already running and remains alive for this
+    // deployment run. TODO(#13044): watch and retry host selection when rolling
+    // host replacement and Kubernetes lifecycle are supported.
     let instances = component
         .drt()
         .discovery()
