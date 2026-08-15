@@ -291,9 +291,19 @@ impl CacheStatsReporter {
 
 impl Drop for CacheStatsReporter {
     fn drop(&mut self) {
-        // `cancel()` is the graceful exit the select! arm takes; `abort()` also
-        // covers the case where the task is mid-body, so no update can be
-        // observed after this returns.
+        // `cancel()` is the graceful exit the select! arm takes; `abort()`
+        // covers the task parked on `interval.tick()`, which would otherwise
+        // sit out the rest of the period before noticing the token.
+        //
+        // Neither is synchronous. A task already inside the tick arm runs that
+        // arm to completion — it holds no `.await` for the runtime to cancel
+        // at — so one last publication can land just after this returns. That
+        // write carries the rates read at the moment it was taken and nothing
+        // follows it, so what a reader sees is a current value rather than a
+        // stale one. Closing the window instead of bounding it would mean
+        // fencing the tick arm against this drop and blocking here until the
+        // arm released it, which is a poor trade in a `Drop` that can run on a
+        // runtime worker.
         self.cancel.cancel();
         self.handle.abort();
     }
