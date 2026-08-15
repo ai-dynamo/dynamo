@@ -183,6 +183,8 @@ These flags control which role this worker plays in a disaggregated deployment. 
 
 These flags control the self-benchmark sweep that runs on startup before the worker begins accepting production requests.
 
+The sweep does not walk a fixed grid of sample counts. Each axis is derived from the engine's own limits — CUDA-graph axes include every `{capture size, capture size + 1}` boundary and then continue geometrically to the engine limit, and KV-read axes use complete power-of-two block ladders plus their exact feasible maxima. The flags below are per-axis *sample limits* applied to those derived axes: if an axis has more points than its limit allows, points are selected uniformly across the sorted axis while the endpoints are retained. Raising a limit therefore measures more of the same axis; it does not change the axis itself.
+
 <ParamField path="--benchmark-mode" type="string" default="null">
   Run a self-benchmark on startup before accepting requests. Sweeps prefill input sequence lengths (ISLs) and/or decode `(context_length × batch_size)` operating points, collecting `ForwardPassMetrics` at each point.
 
@@ -192,39 +194,41 @@ These flags control the self-benchmark sweep that runs on startup before the wor
 </ParamField>
 
 <ParamField path="--benchmark-points-file" type="string" default="null">
-  JSON file of explicit pure prefill/decode benchmark points, applied uniformly to every data-parallel rank. The file completely replaces generated grid sampling for the phases selected by `--benchmark-mode`, so the sampling limits below are ignored when it is set. It is read and normalized once before vLLM workers start, then the same contents are forwarded to every rank.
+  JSON file of explicit pure prefill and decode benchmark points, applied uniformly to every data-parallel rank. The file is read and normalized once before the vLLM workers start, then the same contents are forwarded to every rank.
+
+  The file completely replaces generated grid sampling for the phases selected by `--benchmark-mode`, so all of the sample-limit flags below — and the deprecated granularity flags — are ignored when it is set. Setting it without `--benchmark-mode` raises a `ValueError`.
 
   Environment variable: `DYN_BENCHMARK_POINTS_FILE`
 </ParamField>
 
 <ParamField path="--prefill-max-new-token-samples" type="integer" default="64">
-  Maximum number of iteration-total prefill new-token samples. If the CUDA-graph-aware axis has more points, points are selected uniformly across the sorted axis while always retaining its minimum and maximum. Must be at least 2.
+  Maximum number of iteration-total prefill new-token samples. Must be at least 2, so that both endpoints of the axis are always retained.
 
   Environment variable: `DYN_PREFILL_MAX_NEW_TOKEN_SAMPLES`
 </ParamField>
 
 <ParamField path="--prefill-max-kv-read-token-samples" type="integer" default="16">
-  Maximum number of iteration-total prefill KV-read-token samples for each (new tokens, batch size) pair. If the block-aligned KV ladder has more points, points are selected uniformly while always retaining zero and the feasible maximum. Must be at least 2.
+  Maximum number of iteration-total prefill KV-read-token samples, applied for each `(new tokens, batch size)` pair. Sampling always retains zero and the feasible maximum. Must be at least 2.
 
   Environment variable: `DYN_PREFILL_MAX_KV_READ_TOKEN_SAMPLES`
 </ParamField>
 
-<ParamField path="--prefix-max-batch-size-samples" type="integer" default="3">
-  Maximum number of prefill request-batch-size samples for each new-token point. Keeps the first N values from the sorted power-of-two-plus-legal-maximum axis, so the default of 3 selects `[1, 2, 4]` when all three are legal. Must be positive.
-
-  Environment variable: `DYN_PREFIX_MAX_BATCH_SIZE_SAMPLES`
-</ParamField>
-
 <ParamField path="--decode-max-kv-read-token-samples" type="integer" default="128">
-  Maximum number of iteration-total decode KV-read-token samples for each batch size. If the KV ladder has more points, points are selected uniformly while always retaining its minimum and feasible maximum. Must be at least 2.
+  Maximum number of iteration-total decode KV-read-token samples, applied for each batch size. Sampling always retains the minimum and the feasible maximum. Must be at least 2.
 
   Environment variable: `DYN_DECODE_MAX_KV_READ_TOKEN_SAMPLES`
 </ParamField>
 
 <ParamField path="--decode-max-batch-size-samples" type="integer" default="128">
-  Maximum number of decode batch-size samples. If the CUDA-graph-aware axis has more points, points are selected uniformly while always retaining the minimum and feasible maximum. Must be at least 2.
+  Maximum number of decode batch-size samples over the CUDA-graph-aware axis. Sampling always retains the minimum and the feasible maximum. Must be at least 2.
 
   Environment variable: `DYN_DECODE_MAX_BATCH_SIZE_SAMPLES`
+</ParamField>
+
+<ParamField path="--prefix-max-batch-size-samples" type="integer" default="3">
+  Maximum number of prefill request-batch-size samples for each new-token point. Unlike the limits above, this one keeps the first N values of the sorted power-of-two-plus-legal-maximum axis rather than sampling uniformly, so the default of 3 selects `[1, 2, 4]` when all three are legal. Must be positive.
+
+  Environment variable: `DYN_PREFIX_MAX_BATCH_SIZE_SAMPLES`
 </ParamField>
 
 <ParamField path="--benchmark-warmup-iterations" type="integer" default="5">
@@ -249,46 +253,46 @@ These flags control the self-benchmark sweep that runs on startup before the wor
 
 These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
 
-The five `--benchmark-*-granularity` flags below are read only when `--benchmark-mode` is set and `--benchmark-points-file` is not; otherwise they are ignored entirely, and none of the translation, range checking, or deprecation warnings described here takes place. Under those conditions each is translated to its replacement at startup, with a deprecation warning, and is accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
+<ParamField path="--model-express-url" type="string" default="null" deprecated={true}>
+  **Deprecated** — accepted for compatibility with older ModelExpress manifests only. The vLLM ModelExpress plugin reads its own configuration.
+
+  Environment variable: `MODEL_EXPRESS_URL`
+</ParamField>
+
+The five `--benchmark-*-granularity` flags below are the previous names for the benchmark sampling limits. They are read only when `--benchmark-mode` is set and `--benchmark-points-file` is not; otherwise they are ignored entirely, and none of the translation, range checking, or deprecation warnings described here takes place. Under those conditions each is translated to its replacement at startup, with a deprecation warning, and is accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
 
 <Warning>
-With `--benchmark-mode` set and no points file, passing a legacy flag together with its replacement raises a `ValueError` at startup, for example `cannot combine --benchmark-decode-length-granularity with --decode-max-kv-read-token-samples`, and likewise for each of the other pairs. Migrate to the replacement rather than setting both. All five are ignored when `--benchmark-points-file` is set.
+With `--benchmark-mode` set and no points file, passing a legacy flag together with its replacement raises a `ValueError` at startup — `cannot combine --benchmark-decode-length-granularity with --decode-max-kv-read-token-samples`, and likewise for each of the other pairs. Migrate to the replacement rather than setting both. All five are ignored when `--benchmark-points-file` is set.
 </Warning>
 
 <ParamField path="--benchmark-prefill-granularity" type="integer" default="null" deprecated={true}>
-  **Deprecated** — use `--prefill-max-new-token-samples`. Legacy values are translated to the new sampling limit.
+  **Deprecated** — use `--prefill-max-new-token-samples` instead.
 
   Environment variable: `DYN_BENCHMARK_PREFILL_GRANULARITY`
 </ParamField>
 
 <ParamField path="--benchmark-prefill-kv-read-granularity" type="integer" default="null" deprecated={true}>
-  **Deprecated** — use `--prefill-max-kv-read-token-samples`. Legacy values are translated to the new sampling limit.
+  **Deprecated** — use `--prefill-max-kv-read-token-samples` instead.
 
   Environment variable: `DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY`
 </ParamField>
 
 <ParamField path="--benchmark-prefill-batch-granularity" type="integer" default="null" deprecated={true}>
-  **Deprecated** — use `--prefix-max-batch-size-samples`. Legacy values are translated to the new sampling limit.
+  **Deprecated** — use `--prefix-max-batch-size-samples` instead. This is the one legacy flag whose replacement does not sample uniformly, so a legacy value of `1` is carried across unchanged.
 
   Environment variable: `DYN_BENCHMARK_PREFILL_BATCH_GRANULARITY`
 </ParamField>
 
 <ParamField path="--benchmark-decode-length-granularity" type="integer" default="null" deprecated={true}>
-  **Deprecated** — use `--decode-max-kv-read-token-samples`. Legacy values are translated to the new sampling limit.
+  **Deprecated** — use `--decode-max-kv-read-token-samples` instead.
 
   Environment variable: `DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY`
 </ParamField>
 
 <ParamField path="--benchmark-decode-batch-granularity" type="integer" default="null" deprecated={true}>
-  **Deprecated** — use `--decode-max-batch-size-samples`. Legacy values are translated to the new sampling limit.
+  **Deprecated** — use `--decode-max-batch-size-samples` instead.
 
   Environment variable: `DYN_BENCHMARK_DECODE_BATCH_GRANULARITY`
-</ParamField>
-
-<ParamField path="--model-express-url" type="string" default="null" deprecated={true}>
-  **Deprecated** — accepted for compatibility with older ModelExpress manifests only. The vLLM ModelExpress plugin reads its own configuration.
-
-  Environment variable: `MODEL_EXPRESS_URL`
 </ParamField>
 
 ## Validation rules
