@@ -14,6 +14,7 @@ from dynamo.workflow.types import (
     StageContract,
     ValueRef,
     WorkflowValidationError,
+    _require_value_spec,
     validate_name,
 )
 
@@ -158,7 +159,10 @@ class ExecutionPlan:
                     f"stage {key[0]!r} port {key[1]!r} requires "
                     f"{expected_carrier!r} carrier"
                 )
-            value_spec = stages_by_id[key[0]].contract.inputs[key[1]]
+            value_spec = _require_value_spec(
+                stages_by_id[key[0]].contract.inputs[key[1]],
+                f"stage {key[0]!r} input {key[1]!r}",
+            )
             if remote and value_spec.type not in INLINE_VALUE_TYPES:
                 raise WorkflowValidationError(
                     f"remote edge targeting stage {key[0]!r} port {key[1]!r} "
@@ -171,7 +175,10 @@ class ExecutionPlan:
                     continue
                 source_port = source.output_name
                 assert source_port is not None
-                value_spec = stages_by_id[source.stage_id].contract.outputs[source_port]
+                value_spec = _require_value_spec(
+                    stages_by_id[source.stage_id].contract.outputs[source_port],
+                    f"workflow output {output_name!r}",
+                )
                 if value_spec.type not in INLINE_VALUE_TYPES:
                     raise WorkflowValidationError(
                         f"remote workflow output {output_name!r} cannot carry value "

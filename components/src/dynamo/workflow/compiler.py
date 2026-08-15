@@ -21,7 +21,12 @@ from dynamo.workflow.plan import (
     InlineBinding,
     RemoteBinding,
 )
-from dynamo.workflow.types import StreamSpec, WorkflowValidationError, validate_name
+from dynamo.workflow.types import (
+    StreamSpec,
+    WorkflowValidationError,
+    _require_value_spec,
+    validate_name,
+)
 
 
 @dataclass(frozen=True)
@@ -121,7 +126,10 @@ def compile_workflow(
                 continue
             source_port = source.output_name
             assert source_port is not None
-            value_spec = stages_by_id[source.stage_id].contract.outputs[source_port]
+            value_spec = _require_value_spec(
+                stages_by_id[source.stage_id].contract.outputs[source_port],
+                f"workflow output {output_name!r}",
+            )
             if value_spec.type not in INLINE_VALUE_TYPES:
                 raise WorkflowValidationError(
                     f"remote workflow output {output_name!r} cannot carry value type "
@@ -140,9 +148,10 @@ def compile_workflow(
     )
     if remote:
         for edge in edges:
-            value_spec = stages_by_id[edge.target_stage].contract.inputs[
-                edge.target_port
-            ]
+            value_spec = _require_value_spec(
+                stages_by_id[edge.target_stage].contract.inputs[edge.target_port],
+                f"stage {edge.target_stage!r} input {edge.target_port!r}",
+            )
             if value_spec.type not in INLINE_VALUE_TYPES:
                 raise WorkflowValidationError(
                     f"remote edge targeting stage {edge.target_stage!r} port "
