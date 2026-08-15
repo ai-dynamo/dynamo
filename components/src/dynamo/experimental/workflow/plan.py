@@ -17,20 +17,20 @@ from dynamo.experimental.workflow.types import (
     validate_name,
 )
 
-LOCAL_CARRIER = "local"
+IN_PROCESS_CARRIER = "in_process"
 
 
 @dataclass(frozen=True)
-class LocalBinding:
+class InlineBinding:
     """Resolve one logical stage to a named in-process runner at bind time."""
 
     runner_key: str
 
     def __post_init__(self) -> None:
-        validate_name(self.runner_key, "local runner key")
+        validate_name(self.runner_key, "inline runner key")
 
 
-Binding = LocalBinding
+Binding = InlineBinding
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ class EdgePlan:
             raise WorkflowValidationError("edge source must use ValueRef")
         validate_name(self.target_stage, "edge target stage")
         validate_name(self.target_port, "edge target port")
-        if self.carrier != LOCAL_CARRIER:
+        if self.carrier != IN_PROCESS_CARRIER:
             raise WorkflowValidationError(f"unsupported edge carrier {self.carrier!r}")
 
 
@@ -68,7 +68,7 @@ class ExecutionPlan:
         bindings: dict[str, Binding] = {}
         for stage_id, binding in sorted(self.bindings.items()):
             validate_name(stage_id, "binding stage id")
-            if not isinstance(binding, LocalBinding):
+            if not isinstance(binding, InlineBinding):
                 raise WorkflowValidationError(
                     f"binding for stage {stage_id!r} uses an unsupported type"
                 )
@@ -114,9 +114,10 @@ class ExecutionPlan:
                     f"edge targeting stage {key[0]!r} port {key[1]!r} "
                     "does not match the workflow definition"
                 )
-            if edge.carrier != LOCAL_CARRIER:
+            if edge.carrier != IN_PROCESS_CARRIER:
                 raise WorkflowValidationError(
-                    f"local stage {key[0]!r} port {key[1]!r} requires local carrier"
+                    f"inline stage {key[0]!r} port {key[1]!r} requires "
+                    "the in-process carrier"
                 )
 
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
