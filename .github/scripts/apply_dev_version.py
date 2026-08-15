@@ -44,6 +44,18 @@ SUBCRATE_CARGO_TARGETS = [
     "lib/kvbm-physical/Cargo.toml",
 ]
 
+# Member manifests that pin the workspace version inside a dependency
+# inline table, e.g. backend-common's
+# `dynamo-llm = { path = "../llm", version = "1.4.0", default-features = false }`
+# (a direct path dep because cargo cannot express `workspace = true` +
+# `default-features = false`). VERSION_LINE_RE is line-anchored and
+# intentionally skips inline tables, so these files get the same exact-string
+# rewrite as the root path-dep pins (the pinned value always equals
+# [workspace.package].version).
+WORKSPACE_PIN_CARGO_TARGETS = [
+    "lib/backend-common/Cargo.toml",
+]
+
 # Line-anchored: matches `version = "X.Y.Z"` lines. Skips `version.workspace = true`
 # (no quotes) and `version = { ... }` (no string). Safe for sub-crate Cargo.tomls
 # whose only `version = "..."` line is the [package] one; external-crate deps use
@@ -140,12 +152,19 @@ def rewrite_root_cargo(root: Path, suffix: str) -> None:
         return  # already stamped -- idempotent no-op
     new = semver(suffix, base)
 
-    text = re.sub(
-        rf'(\bversion\s*=\s*"){re.escape(base)}(")',
-        lambda mm: f"{mm.group(1)}{new}{mm.group(2)}",
-        text,
-    )
+    pin_re = re.compile(rf'(\bversion\s*=\s*"){re.escape(base)}(")')
+    text = pin_re.sub(lambda mm: f"{mm.group(1)}{new}{mm.group(2)}", text)
     path.write_text(text)
+
+    # Bump the same literal pin where it lives in member manifests (inline
+    # dep tables that VERSION_LINE_RE deliberately skips). The early
+    # "already stamped" return above keeps this idempotent.
+    for rel in WORKSPACE_PIN_CARGO_TARGETS:
+        p = root / rel
+        t = p.read_text()
+        t2 = pin_re.sub(lambda mm: f"{mm.group(1)}{new}{mm.group(2)}", t)
+        if t2 != t:
+            p.write_text(t2)
 
 
 def main() -> int:
