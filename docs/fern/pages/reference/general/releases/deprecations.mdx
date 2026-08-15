@@ -25,7 +25,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Multimodal load sites no longer force trust_remote_code=True** ([#10738](https://github.com/ai-dynamo/dynamo/pull/10738)).
 
-  > **Migrate:** Enable trust-remote-code on the engine (vLLM/SGLang --trust-remote-code, TRT-LLM extra_engine_args trust_remote_code: true, or --trust-remote-code for the trtllm mm_router_worker example) when serving multimodal models that require custom remote code.
+  > **Migrate:** Enable trust-remote-code on the engine (vLLM/SGLang --trust-remote-code, TensorRT-LLM extra_engine_args trust_remote_code: true, or --trust-remote-code for the trtllm mm_router_worker example) when serving multimodal models that require custom remote code.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Monitoring scripts now target dynamo-system namespace by default instead of dynamo** ([#10771](https://github.com/ai-dynamo/dynamo/pull/10771)).
 
@@ -71,9 +71,9 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Rely on service discovery removal (or set DYN_RUNTIME_INHIBITED_DURATION_SECS explicitly) if you depended on inhibited workers being skipped for direct-routed requests.
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **TRT-LLM video_url now enforced through shared SSRF/URL validation policy** ([#12002](https://github.com/ai-dynamo/dynamo/pull/12002)).
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **TensorRT-LLM video_url now enforced through shared SSRF/URL validation policy** ([#12002](https://github.com/ai-dynamo/dynamo/pull/12002)).
 
-  > **Migrate:** Set DYN_MM_ALLOW_INTERNAL=1 if you rely on internal/private/plaintext-HTTP video URLs with the TRT-LLM backend, otherwise switch to HTTPS public URLs.
+  > **Migrate:** Set DYN_MM_ALLOW_INTERNAL=1 if you rely on internal/private/plaintext-HTTP video URLs with the TensorRT-LLM backend, otherwise switch to HTTPS public URLs.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Decode workers now advertise local indexer support** ([#12084](https://github.com/ai-dynamo/dynamo/pull/12084)).
 
@@ -85,19 +85,19 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Tokenizer L1 prefix cache now enabled by default** ([#11078](https://github.com/ai-dynamo/dynamo/pull/11078)).
 
-  > **Migrate:** Set DYN_TOKENIZER_CACHE=0 to restore the previous disabled-by-default tokenizer cache behavior.
+  > **Migrate:** Set `DYN_TOKENIZER_CACHE=0` to restore the previous disabled-by-default tokenizer cache behavior.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **New required env var DYN_EPP_TOKENIZER_PROTOCOL for standalone EPP** ([#11827](https://github.com/ai-dynamo/dynamo/pull/11827)).
 
-  > **Migrate:** Set DYN_EPP_TOKENIZER_PROTOCOL=vllm-render in existing standalone EPP deployments, otherwise config parsing fails at startup.
+  > **Migrate:** Set `DYN_EPP_TOKENIZER_PROTOCOL=vllm-render` in existing standalone EPP deployments, otherwise config parsing fails at startup.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **New required env var DYN_EPP_VLLM_RENDER_URL for standalone EPP** ([#11827](https://github.com/ai-dynamo/dynamo/pull/11827)).
 
-  > **Migrate:** Set DYN_EPP_VLLM_RENDER_URL to the vLLM render endpoint base URL; validation rejects empty or non-absolute URLs.
+  > **Migrate:** Set `DYN_EPP_VLLM_RENDER_URL` to the vLLM render endpoint base URL; validation rejects empty or non-absolute URLs.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **DYN_HTTP_OVERLOAD_STATUS_CODE no longer accepts informational (1xx) status codes** ([#12738](https://github.com/ai-dynamo/dynamo/pull/12738)).
 
-  > **Migrate:** If DYN_HTTP_OVERLOAD_STATUS_CODE is set to a 1xx value, change it to a final status code in 200-999 (e.g. 503) or rely on the 529 default.
+  > **Migrate:** If `DYN_HTTP_OVERLOAD_STATUS_CODE` is set to a 1xx value, change it to a final status code in 200-999 (e.g. 503) or rely on the 529 default.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **`dimensions` on /v1/embeddings now validated by vLLM pooler; requires Matryoshka-declared models** ([#10248](https://github.com/ai-dynamo/dynamo/pull/10248)).
 
@@ -187,7 +187,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Update C API callers to pass the endpoint name explicitly instead of relying on the implicit serving endpoint.
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Audit subsystem migrated into request trace** (`"log_type":"audit"` records and the `"Audit sinks ready"` readiness marker -> records carrying `"schema":"dynamo.request.trace.v1"` and the `"Request trace sinks ready"` marker); payload logging is unified under the request-trace pipeline and the standalone audit module is gone ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390), [#11180](https://github.com/ai-dynamo/dynamo/pull/11180)).
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Audit subsystem migrated into request trace** (`"log_type":"audit"` records and the `"Audit sinks ready"` readiness marker -> records carrying `"schema":"dynamo.request.trace.v1"` and the `"Request trace sinks ready"` marker). Payload logging is unified under the request-trace pipeline and the standalone audit module is gone ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390), [#11180](https://github.com/ai-dynamo/dynamo/pull/11180)).
 
   > **Migrate:** Update log pipelines that match on the `"Audit sinks ready"` marker or the `"log_type":"audit"` field to the new marker and the `"schema":"dynamo.request.trace.v1"` field. The `DYN_AUDIT_*` environment variables are still honored as legacy aliases of their request-trace replacements (for example `DYN_AUDIT_SINKS` -> `DYN_REQUEST_TRACE_SINKS`, `DYN_AUDIT_FORCE_LOGGING` -> `DYN_REQUEST_TRACE_RECORDS=request_payload`); move configuration to the new names.
 
@@ -195,9 +195,13 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Set `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` to the comma-separated header names you need recorded. Captured values are unredacted, so avoid allowlisting credential-bearing headers.
 
-<span className="dynref-badge dynref-badge--red">Removed</span> **Legacy DGDR Compatibility Retirement:** Stopped emitting legacy per-field `nvidia.com/dgdr-*` annotations during v1alpha1 to v1beta1 conversion, restoring v1alpha1-only profiling fields through typed API conversion instead ([#11531](https://github.com/ai-dynamo/dynamo/pull/11531)), then isolated the remaining read-only annotation compatibility layer and its fixtures into dedicated files ([#11598](https://github.com/ai-dynamo/dynamo/pull/11598)) before removing the legacy annotation readers so conversion relies exclusively on the structural `nvidia.com/dgdr-spec` and `nvidia.com/dgdr-status` payloads ([#11663](https://github.com/ai-dynamo/dynamo/pull/11663)). Reworked worker hashing to converge lazily to v2, computing the v1alpha1 hash only for incomplete migrations and avoiding an operator-upgrade-induced rollout for unchanged Dynamo 1.2 worker generations ([#11529](https://github.com/ai-dynamo/dynamo/pull/11529)).
+<span className="dynref-badge dynref-badge--red">Removed</span> **Legacy DGDR Compatibility Retirement:** Stopped emitting legacy per-field `nvidia.com/dgdr-*` annotations during v1alpha1 to v1beta1 conversion, restoring v1alpha1-only profiling fields through typed API conversion instead ([#11531](https://github.com/ai-dynamo/dynamo/pull/11531)). The remaining read-only annotation compatibility layer and its fixtures moved into dedicated files ([#11598](https://github.com/ai-dynamo/dynamo/pull/11598)), and the legacy annotation readers were then removed, so conversion relies exclusively on the structural `nvidia.com/dgdr-spec` and `nvidia.com/dgdr-status` payloads ([#11663](https://github.com/ai-dynamo/dynamo/pull/11663)). Reworked worker hashing to converge lazily to v2, computing the v1alpha1 hash only for incomplete migrations and avoiding an operator-upgrade-induced rollout for unchanged Dynamo 1.2 worker generations ([#11529](https://github.com/ai-dynamo/dynamo/pull/11529)).
 
-<span className="dynref-badge dynref-badge--red">Removed</span> **Unified Backend Engine Removal:** Removed the experimental per-backend unified backend engine implementations for vLLM, SGLang, and TensorRT-LLM in favor of the sidecar implementation, dropping the `--unified` launch flag together with the unified serve configs and engine-specific tests while retaining the Python `common/backend` and Rust `backend-common` interfaces for the sidecar path ([#11831](https://github.com/ai-dynamo/dynamo/pull/11831)), and backported the removal to `release/1.4.0`, preserving the release-specific vLLM and Fern documentation structure and deleting the stale unified-backend docs ([#12862](https://github.com/ai-dynamo/dynamo/pull/12862)).
+  > **Migrate:** Read DGDR state from the structural `nvidia.com/dgdr-spec` and `nvidia.com/dgdr-status` annotations. The per-field `nvidia.com/dgdr-*` annotations are no longer emitted.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Unified Backend Engine Removal:** Removed the experimental per-backend unified backend engine implementations for vLLM, SGLang, and TensorRT-LLM in favor of the sidecar implementation ([#11831](https://github.com/ai-dynamo/dynamo/pull/11831)). The `--unified` launch flag, the unified serve configs, and the engine-specific tests are gone, while the Python `common/backend` and Rust `backend-common` interfaces remain for the sidecar path. The removal was backported to `release/1.4.0`, preserving the release-specific vLLM and Fern documentation structure and deleting the stale unified-backend docs ([#12862](https://github.com/ai-dynamo/dynamo/pull/12862)).
+
+  > **Migrate:** Launch each backend through its standard entry point (`python -m dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`). The `--unified` flag no longer exists.
 
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **KV Block Manager (KVBM) Deprecated:** KVBM is deprecated in Dynamo v1.4.0; the shipped `agg_kvbm.yaml` example no longer deploys and KVBM paths are no longer maintained.
 
@@ -211,15 +215,15 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Pass `--disaggregation-mode prefill` or `--disaggregation-mode decode` instead of the removed boolean flags.
 
-<span className="dynref-badge dynref-badge--red">Removed</span> **Removed bundled software video decoders from the runtime images** — H.264/H.265 video inputs decode in hardware via NVDEC, and other codecs (or H.264/H.265 where NVDEC is unavailable) fail with an actionable error naming the missing package and installer command instead of decoding in software ([#11836](https://github.com/ai-dynamo/dynamo/pull/11836), [#12725](https://github.com/ai-dynamo/dynamo/pull/12725)).
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed bundled software video decoders from the runtime images**: H.264/H.265 video inputs decode in hardware via NVDEC ([#11836](https://github.com/ai-dynamo/dynamo/pull/11836)). Other codecs (or H.264/H.265 where NVDEC is unavailable) fail with an actionable error naming the missing package and installer command instead of decoding in software ([#12725](https://github.com/ai-dynamo/dynamo/pull/12725)).
 
   > **Migrate:** Grant containers the `video` NVIDIA driver capability for H.264/H.265 input, or install software decoders with `python -m dynamo.common.utils.install_media_decoders <vllm|sglang|trtllm>`.
 
-<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Common backend interfaces are no longer a published integration surface** — the Rust `dynamo-backend-common` crate is not published for v1.4.0 (last published as 1.2.1), and it is retained in-tree together with the Python `dynamo.common.backend` module solely for the in-development sidecar path following the unified backend engine removal ([#11831](https://github.com/ai-dynamo/dynamo/pull/11831)); treat these interfaces as internal and subject to change until the sidecar ships.
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Common backend interfaces are no longer a published integration surface**: the Rust `dynamo-backend-common` crate is not published for v1.4.0 (last published as 1.2.1). The crate and the Python `dynamo.common.backend` module remain in-tree solely for the in-development sidecar path following the unified backend engine removal ([#11831](https://github.com/ai-dynamo/dynamo/pull/11831)). Treat these interfaces as internal until the sidecar ships.
 
-<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Go-based EPP deprecated in favor of the Rust-based EPP** — the gateway-api-inference-extension-based Go Endpoint Picker under `deploy/inference-gateway/epp` is deprecated; the Rust ext-proc EPP introduced in v1.3.0 ([#8783](https://github.com/ai-dynamo/dynamo/pull/8783)) replaces it, and the default switches in an upcoming release.
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Go-based EPP deprecated in favor of the Rust-based EPP**: the Rust ext-proc EPP introduced in v1.3.0 ([#8783](https://github.com/ai-dynamo/dynamo/pull/8783)) replaces the Go Endpoint Picker under `deploy/inference-gateway/epp` (built on gateway-api-inference-extension), and the default switches in an upcoming release.
 
-<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Namespace-restricted operator mode deprecated** — the operator's namespace-restricted mode is deprecated and will be removed in a future release; run the cluster-wide operator instead. Namespace-restricted installs already depend on the cluster-wide operator for CRDs (`dynamo-operator.upgradeCRD=false`).
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Namespace-restricted operator mode deprecated**: the mode will be removed in a future release, so run the cluster-wide operator instead. Namespace-restricted installs already depend on the cluster-wide operator for CRDs (`dynamo-operator.upgradeCRD=false`).
 
 <a id="v130"></a>
 
@@ -262,7 +266,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend nvext / admin-API master switches renamed to opt-out** (`DYN_ENABLE_FRONTEND_{NVEXT,ADMIN_API}` -> `DYN_DISABLE_*`) ([#11123](https://github.com/ai-dynamo/dynamo/pull/11123)).
 
-  **Migrate:** The `nvext` and frontend admin-API surfaces are now on by default; disable them with `DYN_DISABLE_FRONTEND_NVEXT` / `DYN_DISABLE_FRONTEND_ADMIN_API` instead of enabling with `DYN_ENABLE_*`.
+  > **Migrate:** The `nvext` and frontend admin-API surfaces are now on by default; disable them with `DYN_DISABLE_FRONTEND_NVEXT` / `DYN_DISABLE_FRONTEND_ADMIN_API` instead of enabling with `DYN_ENABLE_*`.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Requests carrying `nvext.agent_context` are now rejected** — the `nvext` OpenAI-API extension no longer accepts the `agent_context` object (previously used to pass agent/trajectory identity); it is refused as an unknown field ([#10808](https://github.com/ai-dynamo/dynamo/pull/10808)).
 
@@ -282,7 +286,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Router `enforce-disagg` deprecated** ([#11295](https://github.com/ai-dynamo/dynamo/pull/11295)).
 
-  **Migrate:** Remove `enforce-disagg` from router configuration; disaggregated routing is selected through the standard router modes.
+  > **Migrate:** Remove `enforce-disagg` from router configuration; disaggregated routing is selected through the standard router modes.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Removed the standalone `dynamo-gaie` Helm chart and gateway CRD install script for the inference gateway (EPP)** — the Endpoint Picker (EPP) inference-gateway extension now installs through the operator, so the standalone chart (`deploy/inference-gateway/standalone/helm/dynamo-gaie`) and the `install_gaie_crd_kgateway.sh` script are removed ([#10001](https://github.com/ai-dynamo/dynamo/pull/10001)).
 
@@ -428,35 +432,35 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 | `--track-output-blocks` | `--router-track-output-blocks` |
 | `--router-ttl` / `DYN_ROUTER_TTL` | `--router-ttl-secs` / `DYN_ROUTER_TTL_SECS` |
 
-**Migrate:** Update all CLI invocations, env vars, and deployment YAMLs to use the new names.
+  > **Migrate:** Update all CLI invocations, env vars, and deployment YAMLs to use the new names.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Disagg Flag Inverted** ([#6515](https://github.com/ai-dynamo/dynamo/pull/6515)): `--enforce-disagg` replaced by `--decode-fallback` with inverted semantics — disaggregated mode is now enforced by default.
 
-  **Migrate:** Replace `--enforce-disagg` with `--decode-fallback`. If you need fallback to aggregated mode, explicitly pass `--decode-fallback` or `DYN_DECODE_FALLBACK=true`. In the EPP plugin, update from `DYN_ENFORCE_DISAGG` to `DYN_DECODE_FALLBACK` with inverted boolean.
+  > **Migrate:** Replace `--enforce-disagg` with `--decode-fallback`. If you need fallback to aggregated mode, explicitly pass `--decode-fallback` or `DYN_DECODE_FALLBACK=true`. In the EPP plugin, update from `DYN_ENFORCE_DISAGG` to `DYN_DECODE_FALLBACK` with inverted boolean.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Migration Limit Moved to Frontend** ([#5918](https://github.com/ai-dynamo/dynamo/pull/5918)): The `--migration-limit` CLI flag has been removed from all backend workers (vLLM, SGLang, TRT-LLM) and is now set on the Frontend only.
 
-  **Migrate:** Remove `--migration-limit` from backend launch commands; pass it to the Frontend instead.
+  > **Migrate:** Remove `--migration-limit` from backend launch commands; pass it to the Frontend instead.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Connector Flag Replaced** ([#6450](https://github.com/ai-dynamo/dynamo/pull/6450)): The `--connector` flag is removed. Disaggregated prefill workers now require explicit `--kv-transfer-config` with a JSON value.
 
-  **Migrate:** Replace `--connector nixl` with `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`. Update all deployment YAMLs and launch scripts accordingly.
+  > **Migrate:** Replace `--connector nixl` with `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`. Update all deployment YAMLs and launch scripts accordingly.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **KV Events Now Opt-In** ([#6404](https://github.com/ai-dynamo/dynamo/pull/6404)): KV cache events are no longer auto-created when prefix caching is enabled. Users must explicitly opt in via `--kv-events-config`.
 
-  **Migrate:** Add `--kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` to worker launch commands. Replace `DYN_VLLM_KV_EVENT_PORT` env var with the CLI flag.
+  > **Migrate:** Add `--kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` to worker launch commands. Replace `DYN_VLLM_KV_EVENT_PORT` env var with the CLI flag.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Local Indexer Now Default** ([#5941](https://github.com/ai-dynamo/dynamo/pull/5941), [#6073](https://github.com/ai-dynamo/dynamo/pull/6073)): Default event transport changed from JetStream to NATS Core/Event Plane with Local Indexer. The `--enable-local-indexer` flag is removed.
 
-  **Migrate:** If you relied on JetStream persistence, add `--durable-kv-events` on both frontend and all workers. Remove any `--enable-local-indexer` flags.
+  > **Migrate:** If you relied on JetStream persistence, add `--durable-kv-events` on both frontend and all workers. Remove any `--enable-local-indexer` flags.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Omni Flags Prefixed** ([#6476](https://github.com/ai-dynamo/dynamo/pull/6476)): 14 diffusion/omni CLI flags renamed with `--omni-` prefix (e.g., `--enforce-eager` → `--omni-enforce-eager`).
 
-  **Migrate:** Update CLI invocations to use the `--omni-` prefixed names.
+  > **Migrate:** Update CLI invocations to use the `--omni-` prefixed names.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Multimodal Worker Flag Removed** ([#6060](https://github.com/ai-dynamo/dynamo/pull/6060)): `--multimodal-encode-prefill-worker` removed from vLLM backend.
 
-  **Migrate:** Use `--multimodal-encode-worker`, `--multimodal-worker`, or `--multimodal-decode-worker` instead.
+  > **Migrate:** Use `--multimodal-encode-worker`, `--multimodal-worker`, or `--multimodal-decode-worker` instead.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Output Modalities Required** ([#6270](https://github.com/ai-dynamo/dynamo/pull/6270)): vLLM omni mode no longer auto-registers image endpoints; you must pass `--output-modalities image` explicitly.
 
@@ -498,7 +502,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Component/Namespace/CancellationToken Removed** ([#6403](https://github.com/ai-dynamo/dynamo/pull/6403), [#6386](https://github.com/ai-dynamo/dynamo/pull/6386), [#6405](https://github.com/ai-dynamo/dynamo/pull/6405)): `Component`, `Namespace`, and `CancellationToken` classes removed from the Python API.
 
-  **Migrate:** Replace `runtime.namespace('ns').component('comp').endpoint('ep')` with `runtime.endpoint('ns.comp.ep')`. Replace `token.cancel()` with `HttpService.shutdown()`. Pass `DistributedRuntime` directly to service `.run()` methods.
+  > **Migrate:** Replace `runtime.namespace('ns').component('comp').endpoint('ep')` with `runtime.endpoint('ns.comp.ep')`. Replace `token.cancel()` with `HttpService.shutdown()`. Pass `DistributedRuntime` directly to service `.run()` methods.
 
 <span className="dynref-badge dynref-badge--red">Removed</span>
 

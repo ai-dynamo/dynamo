@@ -41,11 +41,11 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 
 <ReleaseSummaryCards
   cards={[
-        {
+    {
       area: "Router",
       title: "Reservation Replay & Multi-DC Indexing",
       body: "Dynamo Router adds experimental cross-datacenter prefix routing this release. A new in-process selection cache lets peers replay booking decisions instead of re-sending long prompts ([#11416](https://github.com/ai-dynamo/dynamo/pull/11416), [#12335](https://github.com/ai-dynamo/dynamo/pull/12335)). A sequenced datacenter-scoped KV relay extends prefix routing across multiple datacenters ([#11793](https://github.com/ai-dynamo/dynamo/pull/11793)), and event transport becomes endpoint-scoped so consumers aggregate explicit endpoints rather than inferring ownership from broadcasts ([#11841](https://github.com/ai-dynamo/dynamo/pull/11841)). Cache-salt-aware KV routing isolates tenants: requests carrying a tenant namespace never reuse another tenant's KV cache while keeping prefix reuse within the tenant ([#8197](https://github.com/ai-dynamo/dynamo/pull/8197)). Session affinity now synchronizes across Router replicas ([#11750](https://github.com/ai-dynamo/dynamo/pull/11750)).",
-      anchor: "router",
+      anchor: "scheduling",
     },
     {
       area: "Frontend",
@@ -57,25 +57,25 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
       area: "Multimodal",
       title: "NIXL Disaggregation & Unified Serving",
       body: "vLLM-Omni autoregressive-to-diffusion pipelines gain NIXL RDMA tensor transport, taking models like GLM-Image from shared-memory single-node serving to true multi-node disaggregation ([#10071](https://github.com/ai-dynamo/dynamo/pull/10071), [#12984](https://github.com/ai-dynamo/dynamo/pull/12984)). The unified vLLM backend now serves image, video, and audio through one pipeline ([#11267](https://github.com/ai-dynamo/dynamo/pull/11267)), with modality-aware routing so unified models such as Gemma 4 route each content type correctly ([#10375](https://github.com/ai-dynamo/dynamo/pull/10375)). A pluggable custom vision encoder interface lets deployments swap in their own in-process encoders ([#10910](https://github.com/ai-dynamo/dynamo/pull/10910), [#10832](https://github.com/ai-dynamo/dynamo/pull/10832), [#11847](https://github.com/ai-dynamo/dynamo/pull/11847)), and an experimental realtime worker streams transcripts and output audio ([#10166](https://github.com/ai-dynamo/dynamo/pull/10166)).",
-      anchor: "multimodal",
+      anchor: "multimodal-diffusion",
     },
     {
       area: "Performance Modeling",
       title: "Spica Simulation & Native Mocker G1",
       body: "The experimental **Spica** discrete-event simulation framework moves into the Dynamo repository under `aisimulate/`, bringing capacity planning and what-if analysis of Dynamo deployments without GPUs into the main development loop ([#11923](https://github.com/ai-dynamo/dynamo/pull/11923)). Dynamo Mocker defaults to a native G1 block manager that preserves KV event order ([#12033](https://github.com/ai-dynamo/dynamo/pull/12033), [#12222](https://github.com/ai-dynamo/dynamo/pull/12222)) and gains streamlined SGLang radix scheduling ([#12043](https://github.com/ai-dynamo/dynamo/pull/12043)), keeping simulated scheduling faithful to the engines it models.",
-      anchor: "performance-modeling",
+      anchor: "performance-modeling-replay",
     },
     {
       area: "Kubernetes",
       title: "Standalone EPP & Inference Gateway",
       body: "The inference-gateway EPP moves toward standalone operation: it discovers and reconciles raw worker topology with the embedded selector ([#11074](https://github.com/ai-dynamo/dynamo/pull/11074)) and gains a vLLM render client ([#11827](https://github.com/ai-dynamo/dynamo/pull/11827)). Dynamo Operator stops bundling CRDs in the Helm subchart for cleaner lifecycle management ([#11689](https://github.com/ai-dynamo/dynamo/pull/11689)) and adds Volcano scheduler support for Grove ([#8225](https://github.com/ai-dynamo/dynamo/pull/8225)).",
-      anchor: "kubernetes",
+      anchor: "kubernetes-deployment",
     },
     {
       area: "Observability",
       title: "Multimodal Metrics & Request Tracing",
       body: "Operators get substantially more visibility this release. Prometheus histograms report images, videos, and audio parts per request ([#11166](https://github.com/ai-dynamo/dynamo/pull/11166)) and calculated image-token counts ([#12065](https://github.com/ai-dynamo/dynamo/pull/12065)). Inter-token-latency collection is buffered to cut its on-CPU cost by 71.9% while preserving the existing schema ([#11569](https://github.com/ai-dynamo/dynamo/pull/11569)). Request payload auditing unifies into a single `dynamo.request.trace.v1` stream configured by `DYN_REQUEST_TRACE_*` variables ([#11180](https://github.com/ai-dynamo/dynamo/pull/11180)). The stream exports through a standard OpenTelemetry Collector ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390)) and captures operator-allowlisted HTTP headers so requests join with upstream gateway identifiers without leaking non-allowlisted headers ([#11386](https://github.com/ai-dynamo/dynamo/pull/11386)).",
-      anchor: "observability",
+      anchor: "fault-tolerance-observability",
     },
     {
       area: "Developer Experience",
@@ -119,7 +119,7 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 - **Pluggable Custom Vision Encoder:** Added a `VisionEncoderBackend` ABC, the `build_mixed_embeds` assembler, and a `--custom-encoder-class` flag ([#10910](https://github.com/ai-dynamo/dynamo/pull/10910)), then wired the contract into serving so an aggregated `dynamo.vllm` worker runs a user-supplied encoder in-process without a separate encode worker ([#10832](https://github.com/ai-dynamo/dynamo/pull/10832)). Added adapters that build the final vLLM `EmbedsPrompt` or `TokensPrompt` directly ([#11847](https://github.com/ai-dynamo/dynamo/pull/11847)).
 - **Cached Multimodal UUID Passthrough:** Added `UuidOnly` and `multi_modal_uuids` support, preserving user-provided image UUIDs and image-slot alignment through the vLLM worker ([#11943](https://github.com/ai-dynamo/dynamo/pull/11943)), rejected non-null multimodal UUIDs on the SGLang and TensorRT-LLM paths ([#11944](https://github.com/ai-dynamo/dynamo/pull/11944)), and parsed canonical and deprecated image UUID forms in the Rust and Python frontends ([#11958](https://github.com/ai-dynamo/dynamo/pull/11958)).
 - **Media Decoder Installer And Diagnostics:** Added an operator-run installer for the media-decoder packages the runtime images omit, invoked as `python -m dynamo.common.utils.install_media_decoders <vllm|sglang|trtllm>` with `--packages`, `--pip-args`, `--timeout-s`, and `--dry-run` flags ([#12051](https://github.com/ai-dynamo/dynamo/pull/12051)). Reworked decode errors to name the missing package, installer command, and hardware alternative ([#12725](https://github.com/ai-dynamo/dynamo/pull/12725)).
-- **NVDEC Hardware Video Decode:** H.264/H.265 video inputs now decode on the GPU via NVDEC through PyNvVideoCodec, keeping video decode off the SMs beyond YUV-to-RGB conversion; `DYN_DISABLE_NVDEC` opts out and `DYN_NVDEC_GPU_ID` selects the decode GPU ([#11836](https://github.com/ai-dynamo/dynamo/pull/11836)).
+- **NVDEC Hardware Video Decode:** H.264/H.265 video inputs now decode on the GPU via NVDEC through PyNvVideoCodec, keeping decode work off the SMs beyond YUV-to-RGB conversion. `DYN_DISABLE_NVDEC` opts out and `DYN_NVDEC_GPU_ID` selects the decode GPU ([#11836](https://github.com/ai-dynamo/dynamo/pull/11836)).
 - **Encode-Worker Request Routing:** Added a backend-agnostic encoder routing hop that sends multimodal requests to a surface-less Encode worker before aggregated or prefill execution, with an optional round-robin `EncoderRouter` ([#11460](https://github.com/ai-dynamo/dynamo/pull/11460)). Forced the vLLM V1 model runner in the disaggregated EPD encode worker to work around a vLLM 0.25.1 startup crash ([#11913](https://github.com/ai-dynamo/dynamo/pull/11913)).
 - **Video Embedding Cache Benchmark:** Added a video-understanding benchmark workload for SGLang multimodal embedding cache reuse, including `video-single-turn` and `video-sliding-window` JSONL generation and an E/PD sweep config comparing cache-off vs cache-on, letting users evaluate SGLang video cache performance ([#10000](https://github.com/ai-dynamo/dynamo/pull/10000)).
 - **NIXL Connector for vLLM-Omni:** Added a NIXL RDMA-based tensor transport connector for vLLM-Omni, enabling autoregressive-to-diffusion (AR->DIT) pipelines such as GLM-Image to run disaggregated across multiple nodes and device types instead of requiring shared memory on a single machine ([#10071](https://github.com/ai-dynamo/dynamo/pull/10071)).
@@ -226,7 +226,7 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 
 - **Graph-Aware Self-Benchmark Sampling:** Replaced linear per-request sweeps in the vLLM self-benchmark with deterministic prefill and decode sampling derived from the resolved PIECEWISE/FULL CUDA Graph configuration ([#11509](https://github.com/ai-dynamo/dynamo/pull/11509)). Added an option to override the benchmark grid ([#11713](https://github.com/ai-dynamo/dynamo/pull/11713)) and filtered infeasible EAGLE prefill KV-read coordinates ([#12836](https://github.com/ai-dynamo/dynamo/pull/12836)).
 - **Unified Backend Elastic EP:** Added headless multi-node worker support and live elastic expert-parallel (EP) scaling via `scale_elastic_ep` to the vLLM unified backend, bringing it to parity with the legacy path and letting deployments scale data-parallel size up or down without restarting service ([#10834](https://github.com/ai-dynamo/dynamo/pull/10834)).
-- **VLLM Multiple Served Names:** Enabled the vLLM backend to accept multiple `--served-model-name` values, registering the first as primary and the rest as aliases, matching SGLang. A single worker now serves several model names, with `/v1/models` and chat completions resolving aliases to the primary ([#11611](https://github.com/ai-dynamo/dynamo/pull/11611)).
+- **vLLM Multiple Served Names:** Enabled the vLLM backend to accept multiple `--served-model-name` values, registering the first as primary and the rest as aliases, matching SGLang. A single worker now serves several model names, with `/v1/models` and chat completions resolving aliases to the primary ([#11611](https://github.com/ai-dynamo/dynamo/pull/11611)).
 - **vLLM Render Client Support:** Added a pooled HTTP client in the standalone External Processor (EPP) that calls vLLM's `/v1/chat/completions/render` endpoint for tokenization, configurable via `DYN_EPP_VLLM_RENDER_URL` and `DYN_EPP_TOKENIZATION_TIMEOUT_MS`, replacing an earlier offline tokenizer approach and classifying failures as typed Unavailable, Timeout, UpstreamStatus, or InvalidResponse errors ([#11827](https://github.com/ai-dynamo/dynamo/pull/11827)).
 
 #### SGLang
@@ -308,7 +308,7 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 ### Multimodal & Diffusion
 
 - **Preserved Media URL Client Errors:** Fixed audio and video loaders to preserve URL-validation and HTTP-status errors during per-item and batch handling, so intentional client rejections keep their 4xx status instead of flattening into generic failures ([#12407](https://github.com/ai-dynamo/dynamo/pull/12407), [#13193](https://github.com/ai-dynamo/dynamo/pull/13193)).
-- **GLM-Image NIXL Deploy Config:** Migrated the GLM-Image AR to DiT NIXL disaggregation stage config off vllm-omni's legacy `stage_args` schema to the stages deploy schema ([#12984](https://github.com/ai-dynamo/dynamo/pull/12984)), following a fix that declared the entry stage's `engine_input_source` after vllm-omni v0.26.0rc1 removed its default ([#12709](https://github.com/ai-dynamo/dynamo/pull/12709)).
+- **GLM-Image NIXL Deploy Config:** Migrated the GLM-Image AR to DiT NIXL disaggregation stage config off `vllm-omni`'s legacy `stage_args` schema to the stages deploy schema ([#12984](https://github.com/ai-dynamo/dynamo/pull/12984)), following a fix that declared the entry stage's `engine_input_source` after `vllm-omni` v0.26.0rc1 removed its default ([#12709](https://github.com/ai-dynamo/dynamo/pull/12709)).
 - **Multimodal Trust-Remote-Code Fix:** Fixed multimodal and encode workers across vLLM, SGLang, and TensorRT-LLM to thread `trust_remote_code` from the engine config instead of hardcoding `True`, so custom model repo code no longer executes on load unless the operator explicitly enabled it ([#10738](https://github.com/ai-dynamo/dynamo/pull/10738)).
 - **SSRF-Blocked Media URL Status:** Fixed multimodal image loading to return HTTP 400 instead of 500 when an image URL is blocked by the SSRF guard, preserving the `UrlValidationError` so clients get the block reason ([#11312](https://github.com/ai-dynamo/dynamo/pull/11312)).
 
@@ -331,7 +331,7 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 - **LWS Worker GPU Validation:** Removed the hardcoded GPU limit check from LWS worker pod template generation, letting Kubernetes and device admission decide pod validity so CPU-only deployments no longer fail to render ([#11115](https://github.com/ai-dynamo/dynamo/pull/11115)).
 - **Duplicate Compilation Cache Mounts:** Fixed pod generation to reuse an existing writable compilation-cache mount instead of appending a duplicate one, and rejected mount-path conflicts and read-only cache mounts, preventing Grove PodCliqueSet validation failures on converted v1alpha1 components ([#11264](https://github.com/ai-dynamo/dynamo/pull/11264)).
 - **EPP DiskPressure Resilience:** Set default CPU, memory, and ephemeral storage requests for the EndPoint Picker (EPP) and lowered the default RUST_LOG level to info, preventing kubelet from evicting EPP under node DiskPressure and stalling InferencePool deployments ([#11550](https://github.com/ai-dynamo/dynamo/pull/11550)).
-- **Multi-Node TRTLLM Env Relay:** Fixed multi-node TensorRT-LLM launch commands to forward the CPATH and TRITON_PTXAS_PATH environment variables and avoid duplicate forwarding, preventing build and compilation failures on multi-node deployments ([#11999](https://github.com/ai-dynamo/dynamo/pull/11999)).
+- **Multi-Node TensorRT-LLM Env Relay:** Fixed multi-node TensorRT-LLM launch commands to forward the CPATH and TRITON_PTXAS_PATH environment variables and avoid duplicate forwarding, preventing build and compilation failures on multi-node deployments ([#11999](https://github.com/ai-dynamo/dynamo/pull/11999)).
 - **DGDSA Replica Ownership Fix:** Fixed a reconciliation race between the DynamoGraphDeployment and DynamoGraphDeploymentScalingAdapter (DGDSA) controllers by replacing full-spec DGDSA synchronization with a patch that preserves DGDSA-owned replica counts, preventing stale DGD values from overwriting scaling adapter replicas during serve, unserve, and scaling operations ([#12087](https://github.com/ai-dynamo/dynamo/pull/12087)).
 - **Event Channel Metadata Compatibility:** Fixed DynamoWorkerMetadata deserialization by reconstructing legacy `namespace`/`component` fields alongside the current `scope` field for Kubernetes event channels, preventing rolling upgrades from rejecting worker records due to version mismatches ([#12708](https://github.com/ai-dynamo/dynamo/pull/12708)).
 
@@ -458,6 +458,6 @@ Dynamo v1.4.0 includes contributions from 127 developers, 29 of whom made their 
 - [@shwetha-krishnamurthy](https://github.com/shwetha-krishnamurthy) added vLLM agentic targets to the GPT-OSS-120B recipe ([#11980](https://github.com/ai-dynamo/dynamo/pull/11980))
 - [@pskiran1](https://github.com/pskiran1) enforced parallel_tool_calls: false in chat completions ([#12201](https://github.com/ai-dynamo/dynamo/pull/12201))
 
-If you would like to get involved, please see our [Contribution Guide](https://docs.nvidia.com/dynamo/dev/contributing/contribution-guide).
+If you would like to get involved, please see our [Contribution Guide](../../../community/contributing/overview.md).
 
 </Accordion>
