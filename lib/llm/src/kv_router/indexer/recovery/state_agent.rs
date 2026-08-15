@@ -359,7 +359,7 @@ async fn run_state_agent_router(
                     )>,
                 >,
             ),
-            Recovery(Option<OwnerRecoveryResult>),
+            Recovery(Option<Box<OwnerRecoveryResult>>),
             Observation,
             Cancelled,
         }
@@ -382,7 +382,7 @@ async fn run_state_agent_router(
                     None => std::future::pending().await,
                 }
             } => Input::Events(event),
-            result = recovery_rx.recv() => Input::Recovery(result),
+            result = recovery_rx.recv() => Input::Recovery(result.map(Box::new)),
             changed = observation_rx.changed() => {
                 if changed.is_err() { Input::Cancelled } else { Input::Observation }
             },
@@ -475,7 +475,7 @@ async fn run_state_agent_router(
                 let publisher_id = result.publisher_id();
                 recovery_lane.finish((owner, result.schedule_generation()));
                 if let Err(error) = finish_owner_recovery(
-                    result,
+                    *result,
                     &indexer,
                     transport.as_ref(),
                     &membership,
@@ -1143,9 +1143,9 @@ async fn finish_owner_recovery(
     if !owner_recovery_is_current(plan, membership, sources, attachments, observation_revision) {
         return Ok(());
     }
-    if !tails
+    if tails
         .get(&plan.owner)
-        .is_some_and(|tail| tail.schedule_generation == plan.schedule_generation)
+        .is_none_or(|tail| tail.schedule_generation != plan.schedule_generation)
     {
         return Ok(());
     }
