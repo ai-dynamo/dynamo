@@ -85,7 +85,7 @@ layout = reference.get("layout")
 if layout is None:
     layout = next(
         (
-            variant["layout"]
+            variant.get("layout")
             for variant in reference.get("variants", [])
             if variant.get("title") == "General"
         ),
