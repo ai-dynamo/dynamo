@@ -7,8 +7,9 @@ from dynamo.experimental.workflow import (
     DeploymentSpec,
     EdgePlan,
     ExecutionPlan,
-    LocalBinding,
+    InlineBinding,
     StageContract,
+    StreamSpec,
     ValueRef,
     ValueSpec,
     Workflow,
@@ -41,28 +42,47 @@ def _workflow() -> Workflow:
 
 
 def test_execution_plan_contains_only_in_memory_decisions() -> None:
-    plan = compile_workflow(_workflow(), DeploymentSpec.local(normalize="normalizer"))
+    plan = compile_workflow(_workflow(), DeploymentSpec.inline(normalize="normalizer"))
 
-    assert plan.bindings == {"normalize": LocalBinding(runner_key="normalizer")}
+    assert plan.bindings == {"normalize": InlineBinding(runner_key="normalizer")}
     assert plan.edges == (
         EdgePlan(
             source=ValueRef.for_input("text"),
             target_stage="normalize",
             target_port="text",
-            carrier="local",
+            carrier="in_process",
         ),
     )
 
 
-def test_compilation_defaults_to_stage_id_local_bindings() -> None:
+def test_compilation_defaults_to_stage_id_inline_bindings() -> None:
     plan = compile_workflow(_workflow())
 
-    assert plan.bindings == {"normalize": LocalBinding(runner_key="normalize")}
-    assert all(edge.carrier == "local" for edge in plan.edges)
+    assert plan.bindings == {"normalize": InlineBinding(runner_key="normalize")}
+    assert all(edge.carrier == "in_process" for edge in plan.edges)
+
+
+def test_compilation_rejects_declared_stream_execution() -> None:
+    chunks = StreamSpec(item=ValueSpec(type="json"))
+    workflow = Workflow("stream-plan")
+    source = workflow.input("chunks", chunks)
+    stage = workflow.stage(
+        "stream",
+        StageContract(
+            id="stream",
+            inputs={"chunks": chunks},
+            outputs={"chunks": chunks},
+        ),
+        chunks=source,
+    )
+    workflow.output("chunks", stage.chunks)
+
+    with pytest.raises(WorkflowValidationError, match="not supported"):
+        compile_workflow(workflow)
 
 
 def test_execution_plan_rejects_invalid_physical_edges() -> None:
-    plan = compile_workflow(_workflow(), DeploymentSpec.local(normalize="normalizer"))
+    plan = compile_workflow(_workflow(), DeploymentSpec.inline(normalize="normalizer"))
 
     with pytest.raises(WorkflowValidationError, match="does not match"):
         ExecutionPlan(
@@ -73,7 +93,7 @@ def test_execution_plan_rejects_invalid_physical_edges() -> None:
                     source=ValueRef.for_input("other"),
                     target_stage="normalize",
                     target_port="text",
-                    carrier="local",
+                    carrier="in_process",
                 ),
             ),
         )

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
-from dynamo.experimental.workflow.plan import ExecutionPlan, LocalBinding
+from dynamo.experimental.workflow.plan import ExecutionPlan, InlineBinding
 from dynamo.experimental.workflow.runtime import (
     StageContext,
     StageRunner,
@@ -25,30 +25,30 @@ class StageDispatcher:
     def __init__(
         self,
         plan: ExecutionPlan,
-        local_runners: Mapping[str, StageRunner],
+        inline_runners: Mapping[str, StageRunner],
     ) -> None:
         if not isinstance(plan, ExecutionPlan):
             raise TypeError("plan must use ExecutionPlan")
-        if not isinstance(local_runners, Mapping):
-            raise TypeError("local_runners must be a mapping")
+        if not isinstance(inline_runners, Mapping):
+            raise TypeError("inline_runners must be a mapping")
 
         expected_keys = {
             binding.runner_key
             for binding in plan.bindings.values()
-            if isinstance(binding, LocalBinding)
+            if isinstance(binding, InlineBinding)
         }
-        actual_keys = set(local_runners)
+        actual_keys = set(inline_runners)
         if actual_keys != expected_keys:
             raise WorkflowValidationError(
-                "local runners differ from execution plan; "
+                "inline runners differ from execution plan; "
                 f"missing={sorted(expected_keys - actual_keys)}, "
                 f"extra={sorted(actual_keys - expected_keys)}"
             )
 
-        runners = dict(local_runners)
+        runners = dict(inline_runners)
         for stage_id, contract in plan.stage_contracts.items():
             binding = plan.bindings[stage_id]
-            if not isinstance(binding, LocalBinding):
+            if not isinstance(binding, InlineBinding):
                 raise WorkflowValidationError(
                     f"dispatcher does not support binding for stage {stage_id!r}"
                 )
@@ -64,7 +64,7 @@ class StageDispatcher:
                 )
 
         self._plan = plan
-        self._local_runners = MappingProxyType(runners)
+        self._inline_runners = MappingProxyType(runners)
 
     async def call(
         self,
@@ -90,9 +90,9 @@ class StageDispatcher:
             )
 
         binding = self._plan.bindings[stage_id]
-        if not isinstance(binding, LocalBinding):
+        if not isinstance(binding, InlineBinding):
             raise WorkflowExecutionError(f"unsupported binding for stage {stage_id!r}")
-        result = await self._local_runners[binding.runner_key].run(
+        result = await self._inline_runners[binding.runner_key].run(
             MappingProxyType(dict(inputs)), context
         )
         if not isinstance(result, Mapping):

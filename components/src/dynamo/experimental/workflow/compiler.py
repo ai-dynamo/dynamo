@@ -12,13 +12,13 @@ from typing import Mapping, Optional, Union
 from dynamo.experimental.workflow.builder import Workflow
 from dynamo.experimental.workflow.ir import WorkflowIR
 from dynamo.experimental.workflow.plan import (
-    LOCAL_CARRIER,
+    IN_PROCESS_CARRIER,
     Binding,
     EdgePlan,
     ExecutionPlan,
-    LocalBinding,
+    InlineBinding,
 )
-from dynamo.experimental.workflow.types import WorkflowValidationError, validate_name
+from dynamo.experimental.workflow.types import StreamSpec, WorkflowValidationError, validate_name
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class DeploymentSpec:
         bindings: dict[str, Binding] = {}
         for stage_id, binding in sorted(self.bindings.items()):
             validate_name(stage_id, "deployment stage id")
-            if not isinstance(binding, LocalBinding):
+            if not isinstance(binding, InlineBinding):
                 raise WorkflowValidationError(
                     f"binding for stage {stage_id!r} uses an unsupported type"
                 )
@@ -41,12 +41,12 @@ class DeploymentSpec:
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
     @classmethod
-    def local(cls, **runner_keys: str) -> "DeploymentSpec":
-        """Build local bindings whose values name executor runner keys."""
+    def inline(cls, **runner_keys: str) -> "DeploymentSpec":
+        """Build bindings to runners in the orchestrator process."""
 
         return cls(
             bindings={
-                stage_id: LocalBinding(runner_key)
+                stage_id: InlineBinding(runner_key)
                 for stage_id, runner_key in runner_keys.items()
             }
         )
@@ -56,14 +56,29 @@ def compile_workflow(
     workflow: Union[Workflow, WorkflowIR],
     deployment: Optional[DeploymentSpec] = None,
 ) -> ExecutionPlan:
-    """Compile one logical workflow, defaulting every stage to local placement."""
+    """Compile one logical workflow, defaulting every stage to inline placement."""
 
     workflow_ir = workflow.build() if isinstance(workflow, Workflow) else workflow
     if not isinstance(workflow_ir, WorkflowIR):
         raise TypeError("workflow must be a Workflow or WorkflowIR")
+    port_specs = [
+        *workflow_ir.inputs.values(),
+        *(
+            spec
+            for stage in workflow_ir.stages
+            for spec in (
+                *stage.contract.inputs.values(),
+                *stage.contract.outputs.values(),
+            )
+        ),
+    ]
+    if any(isinstance(spec, StreamSpec) for spec in port_specs):
+        raise WorkflowValidationError(
+            "stream ports are declarative only; workflow stream execution is not supported"
+        )
     stage_ids = tuple(stage.id for stage in workflow_ir.stages)
     if deployment is None:
-        deployment = DeploymentSpec.local(
+        deployment = DeploymentSpec.inline(
             **{stage_id: stage_id for stage_id in stage_ids}
         )
     if not isinstance(deployment, DeploymentSpec):
@@ -82,7 +97,7 @@ def compile_workflow(
             source=source,
             target_stage=stage.id,
             target_port=port,
-            carrier=LOCAL_CARRIER,
+            carrier=IN_PROCESS_CARRIER,
         )
         for stage in workflow_ir.stages
         for port, source in stage.inputs.items()
