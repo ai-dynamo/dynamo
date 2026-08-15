@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dynamo.workflow import ValueSpec, Workflow
+from dynamo.experimental.workflow import ValueSpec, Workflow
 from examples.custom_backend.workflow_remote.stages import (
     KeywordClassifier,
     TextEncoder,

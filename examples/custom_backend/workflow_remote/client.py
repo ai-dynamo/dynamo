@@ -4,7 +4,7 @@
 import asyncio
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.workflow import DeploymentSpec, WorkflowOrchestrator, compile_workflow
+from dynamo.experimental.workflow import DeploymentSpec, WorkflowOrchestrator, compile_workflow
 from examples.custom_backend.workflow_remote.workflow import define_workflow
 
 
