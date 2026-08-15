@@ -23,6 +23,7 @@ from dynamo.workflow import (
 )
 from dynamo.workflow.dispatcher import StageDispatcher
 from dynamo.workflow.generate import GenerateEndpointInvoker, collect_generation
+from dynamo.workflow.plan import validate_binding_contract
 
 pytestmark = [
     pytest.mark.unit,
@@ -45,6 +46,11 @@ GENERATOR = StageContract(
         "encoder_features": TENSOR,
         "encoder_metadata": ValueSpec(type="json"),
     },
+    outputs={"completion": ValueSpec(type="json")},
+)
+REQUEST_GENERATOR = StageContract(
+    id="request-generator",
+    inputs={"request": ValueSpec(type="json")},
     outputs={"completion": ValueSpec(type="json")},
 )
 
@@ -84,6 +90,70 @@ def test_generate_binding_compiles_with_remote_stage_protocols() -> None:
         "generator.encoder_features": "nixl",
         "generator.encoder_metadata": "inline",
     }
+
+
+def test_generate_binding_accepts_request_only_profile() -> None:
+    workflow = Workflow("request-only")
+    request = workflow.input("request", ValueSpec(type="json"))
+    generator = workflow.stage("generator", REQUEST_GENERATOR, request=request)
+    workflow.output("completion", generator.completion)
+
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                "generator": GenerateEndpointBinding(
+                    "models.decoder.generate", tensor_carrier=None
+                )
+            }
+        ),
+    )
+
+    assert plan.bindings["generator"].tensor_carrier is None
+    assert {edge.transfer_id: edge.carrier for edge in plan.edges} == {
+        "generator.request": "inline"
+    }
+
+
+def test_external_encoder_generate_binding_requires_nixl() -> None:
+    with pytest.raises(WorkflowValidationError, match="require.*NIXL"):
+        validate_binding_contract(
+            GenerateEndpointBinding("models.decoder.generate", tensor_carrier=None),
+            GENERATOR,
+        )
+
+
+def test_generate_binding_rejects_partial_external_encoder_profile() -> None:
+    partial = StageContract(
+        id="partial-generator",
+        inputs={
+            "request": ValueSpec(type="json"),
+            "encoder_features": TENSOR,
+        },
+        outputs={"completion": ValueSpec(type="json")},
+    )
+    workflow = Workflow("partial-external-encoder")
+    request = workflow.input("request", ValueSpec(type="json"))
+    encoder = workflow.stage("encoder", ENCODER, request=request)
+    generator = workflow.stage(
+        "generator",
+        partial,
+        request=request,
+        encoder_features=encoder.encoder_features,
+    )
+    workflow.output("completion", generator.completion)
+    with pytest.raises(WorkflowValidationError, match="exact external-encoder"):
+        compile_workflow(
+            workflow,
+            DeploymentSpec(
+                {
+                    "encoder": RemoteBinding(
+                        "workflows.encoder.generate", tensor_carrier="nixl"
+                    ),
+                    "generator": GenerateEndpointBinding("models.decoder.generate"),
+                }
+            ),
+        )
 
 
 def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
@@ -210,6 +280,7 @@ async def test_generate_invoker_opens_stream_and_collector_folds_deltas() -> Non
     )
     stream = await GenerateEndpointInvoker(transport).open(
         "generator",
+        GENERATOR,
         {
             "request": {
                 "token_ids": [1, 2],
@@ -245,6 +316,33 @@ async def test_generate_invoker_opens_stream_and_collector_folds_deltas() -> Non
     assert "multi_modal_uuids" not in transport.request
     assert "mm_processor_kwargs" not in transport.request
     assert "mm_routing_info" not in transport.request
+
+
+async def test_request_only_generate_invoker_forwards_request_unchanged() -> None:
+    transport = _Client([{"token_ids": [42], "index": 0, "finish_reason": "stop"}])
+    request = {
+        "token_ids": [1, 2],
+        "sampling_options": {"n": 1, "temperature": 0.5},
+        "output_options": {},
+        "multi_modal_data": {"image_url": [{"Url": "image"}]},
+        "multi_modal_uuids": ["uuid"],
+        "mm_processor_kwargs": {"max_pixels": 1024},
+        "mm_routing_info": {"mm_hashes": ["hash"]},
+        "nvext": {"custom": "value"},
+    }
+
+    result = await GenerateEndpointInvoker(transport).run(
+        "generator",
+        REQUEST_GENERATOR,
+        {"request": request},
+        _context(),
+        {},
+    )
+
+    assert result["completion"]["token_ids"] == [42]
+    assert transport.request == request
+    assert transport.request is not request
+    assert "encoder_result" not in transport.request
 
 
 async def test_generate_client_accepts_null_n_as_the_frontend_default() -> None:

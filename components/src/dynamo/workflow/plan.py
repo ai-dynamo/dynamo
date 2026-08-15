@@ -72,13 +72,6 @@ class GenerateEndpointBinding(RemoteBinding):
 
     tensor_carrier: Optional[str] = NIXL_CARRIER
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.tensor_carrier != NIXL_CARRIER:
-            raise WorkflowValidationError(
-                "Generate endpoint bindings require the NIXL tensor carrier"
-            )
-
 
 Binding = Union[InlineBinding, RemoteBinding]
 
@@ -88,7 +81,8 @@ def validate_binding_contract(binding: Binding, contract: StageContract) -> None
 
     if not isinstance(binding, GenerateEndpointBinding):
         return
-    expected_inputs = {
+    request_inputs = {"request": "json"}
+    external_encoder_inputs = {
         "request": "json",
         "encoder_features": "tensor",
         "encoder_metadata": "json",
@@ -97,10 +91,19 @@ def validate_binding_contract(binding: Binding, contract: StageContract) -> None
         name: _require_value_spec(spec, f"Generate endpoint input {name!r}").type
         for name, spec in contract.inputs.items()
     }
-    if actual_inputs != expected_inputs:
+    if actual_inputs not in (request_inputs, external_encoder_inputs):
         raise WorkflowValidationError(
-            "Generate endpoint stage inputs must be request:json, "
-            "encoder_features:tensor, and encoder_metadata:json"
+            "Generate endpoint stage inputs must be either request:json or the "
+            "exact external-encoder profile request:json, "
+            "encoder_features:tensor, encoder_metadata:json"
+        )
+    if (
+        actual_inputs == external_encoder_inputs
+        and binding.tensor_carrier != NIXL_CARRIER
+    ):
+        raise WorkflowValidationError(
+            "external-encoder Generate endpoint bindings require the NIXL "
+            "tensor carrier"
         )
     actual_outputs = {
         name: _require_value_spec(spec, f"Generate endpoint output {name!r}").type

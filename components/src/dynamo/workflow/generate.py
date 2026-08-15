@@ -64,6 +64,7 @@ class GenerateEndpointInvoker:
     async def open(
         self,
         stage_id: str,
+        contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
     ) -> GenerateEndpointStream:
@@ -74,28 +75,30 @@ class GenerateEndpointInvoker:
         if not isinstance(request_value, Mapping):
             raise WorkflowExecutionError("Generate endpoint request must be an object")
         request = dict(request_value)
-        if "encoder_result" in request:
-            raise WorkflowExecutionError(
-                "Generate endpoint request already contains encoder_result"
-            )
         _validate_request_options(request)
-        for field_name in (
-            "multi_modal_data",
-            "multi_modal_uuids",
-            "mm_processor_kwargs",
-            "mm_routing_info",
-        ):
-            request.pop(field_name, None)
+        input_profile = _input_profile(contract)
+        if input_profile == "external_encoder":
+            if "encoder_result" in request:
+                raise WorkflowExecutionError(
+                    "Generate endpoint request already contains encoder_result"
+                )
+            for field_name in (
+                "multi_modal_data",
+                "multi_modal_uuids",
+                "mm_processor_kwargs",
+                "mm_routing_info",
+            ):
+                request.pop(field_name, None)
 
-        features = NixlTensorRef.from_dict(inputs[GENERATE_FEATURES_PORT]).to_dict()
-        metadata = inputs[GENERATE_METADATA_PORT]
-        try:
-            encoder_result = ExternalEncoderResult.from_parts(
-                features, metadata
-            ).to_dict()
-        except ValueError as error:
-            raise WorkflowExecutionError(str(error)) from error
-        request["encoder_result"] = encoder_result
+            features = NixlTensorRef.from_dict(inputs[GENERATE_FEATURES_PORT]).to_dict()
+            metadata = inputs[GENERATE_METADATA_PORT]
+            try:
+                encoder_result = ExternalEncoderResult.from_parts(
+                    features, metadata
+                ).to_dict()
+            except ValueError as error:
+                raise WorkflowExecutionError(str(error)) from error
+            request["encoder_result"] = encoder_result
 
         transport_context = None
         if context.request_context is not None:
@@ -124,13 +127,12 @@ class GenerateEndpointInvoker:
         context: StageContext,
         output_transfers: Mapping[str, tuple[str, ...]],
     ) -> Mapping[str, Any]:
-        del contract
         if output_transfers:
             raise WorkflowExecutionError(
                 f"Generate endpoint stage {stage_id!r} cannot export tensor outputs"
             )
 
-        stream = await self.open(stage_id, inputs, context)
+        stream = await self.open(stage_id, contract, inputs, context)
         try:
             completion = await collect_generation(stream, stage_id)
         except BaseException:
@@ -138,6 +140,30 @@ class GenerateEndpointInvoker:
             raise
         await stream.aclose()
         return {GENERATE_OUTPUT_PORT: completion}
+
+
+def _input_profile(contract: StageContract) -> str:
+    actual_outputs = {
+        name: getattr(spec, "type", None) for name, spec in contract.outputs.items()
+    }
+    if actual_outputs != {GENERATE_OUTPUT_PORT: "json"}:
+        raise WorkflowExecutionError(
+            "Generate endpoint stage contract has an unsupported output profile"
+        )
+    actual_inputs = {
+        name: getattr(spec, "type", None) for name, spec in contract.inputs.items()
+    }
+    if actual_inputs == {GENERATE_REQUEST_PORT: "json"}:
+        return "request"
+    if actual_inputs == {
+        GENERATE_REQUEST_PORT: "json",
+        GENERATE_FEATURES_PORT: "tensor",
+        GENERATE_METADATA_PORT: "json",
+    }:
+        return "external_encoder"
+    raise WorkflowExecutionError(
+        "Generate endpoint stage contract has an unsupported input profile"
+    )
 
 
 def _validate_request_options(request: Mapping[str, Any]) -> None:

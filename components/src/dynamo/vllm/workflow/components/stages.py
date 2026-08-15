@@ -193,7 +193,21 @@ class EncoderStage:
 class DynamoVllmStage:
     """Contracts implemented by a stock aggregated Dynamo vLLM worker."""
 
-    complete_contract = StageContract(
+    request_complete_contract = StageContract(
+        id="dynamo-vllm-request-complete",
+        inputs={"request": REQUEST},
+        outputs={"completion": ValueSpec(type="json")},
+    )
+
+    # This declares the intended streaming ABI. The workflow compiler rejects
+    # StreamSpec execution until scheduling and frontend propagation are added.
+    request_stream_contract = StageContract(
+        id="dynamo-vllm-request-stream",
+        inputs={"request": REQUEST},
+        outputs={"chunks": StreamSpec(item=ValueSpec(type="json"))},
+    )
+
+    external_encoder_complete_contract = StageContract(
         id="dynamo-vllm-complete",
         inputs={
             "request": REQUEST,
@@ -205,7 +219,7 @@ class DynamoVllmStage:
 
     # This declares the intended streaming ABI. The workflow compiler rejects
     # StreamSpec execution until scheduling and frontend propagation are added.
-    stream_contract = StageContract(
+    external_encoder_stream_contract = StageContract(
         id="dynamo-vllm-stream",
         inputs={
             "request": REQUEST,
@@ -214,3 +228,8 @@ class DynamoVllmStage:
         },
         outputs={"chunks": StreamSpec(item=ValueSpec(type="json"))},
     )
+
+    # Preserve the original names for external-encoder workflows built on the
+    # first version of these components.
+    complete_contract = external_encoder_complete_contract
+    stream_contract = external_encoder_stream_contract

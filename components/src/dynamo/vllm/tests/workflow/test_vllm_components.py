@@ -48,10 +48,20 @@ def _context() -> SimpleNamespace:
 def test_dynamo_vllm_stage_matches_generate_endpoint_contract():
     validate_binding_contract(
         GenerateEndpointBinding("workflows.generator.generate"),
+        DynamoVllmStage.request_complete_contract,
+    )
+    validate_binding_contract(
+        GenerateEndpointBinding("workflows.generator.generate"),
         DynamoVllmStage.complete_contract,
     )
 
     assert DynamoVllmStage.complete_contract.id == "dynamo-vllm-complete"
+    assert (
+        DynamoVllmStage.complete_contract
+        is DynamoVllmStage.external_encoder_complete_contract
+    )
+    assert set(DynamoVllmStage.request_complete_contract.inputs) == {"request"}
+    assert DynamoVllmStage.request_stream_contract.outputs["chunks"].item.type == "json"
     assert DynamoVllmStage.stream_contract.outputs["chunks"].item.type == "json"
 
 
