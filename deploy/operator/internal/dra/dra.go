@@ -80,18 +80,29 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 		})
 	}
 
-	claim := corev1.PodResourceClaim{
-		Name:                      ClaimName,
-		ResourceClaimTemplateName: &claimTemplateName,
-	}
+	EnsurePodClaim(podSpec, claimTemplateName)
+	return nil
+}
+
+// EnsurePodClaim adds the operator-managed GMS claim unless the pod already
+// binds the same pod-local claim name to a concrete ResourceClaim.
+func EnsurePodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
 	for i := range podSpec.ResourceClaims {
 		if podSpec.ResourceClaims[i].Name == ClaimName {
-			podSpec.ResourceClaims[i] = claim
-			return nil
+			if podSpec.ResourceClaims[i].ResourceClaimName != nil {
+				return
+			}
+			podSpec.ResourceClaims[i] = corev1.PodResourceClaim{
+				Name:                      ClaimName,
+				ResourceClaimTemplateName: &claimTemplateName,
+			}
+			return
 		}
 	}
-	podSpec.ResourceClaims = append(podSpec.ResourceClaims, claim)
-	return nil
+	podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
+		Name:                      ClaimName,
+		ResourceClaimTemplateName: &claimTemplateName,
+	})
 }
 
 // ResourceClaimTemplateName returns the deterministic name for the

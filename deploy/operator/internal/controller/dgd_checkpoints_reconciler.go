@@ -441,17 +441,7 @@ func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName stri
 		})
 	}
 
-	podClaim := corev1.PodResourceClaim{
-		Name:                      dra.ClaimName,
-		ResourceClaimTemplateName: &claimTemplateName,
-	}
-	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == dra.ClaimName {
-			podSpec.ResourceClaims[i] = podClaim
-			return
-		}
-	}
-	podSpec.ResourceClaims = append(podSpec.ResourceClaims, podClaim)
+	dra.EnsurePodClaim(podSpec, claimTemplateName)
 }
 
 func (r *dgdCheckpointsReconciler) deleteAutoCheckpointsForDGD(
