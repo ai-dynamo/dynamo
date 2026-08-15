@@ -81,6 +81,45 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 - Embeddings are sent as base64-encoded PyTorch tensors via the `prompt_embeds` field in the Completions API
 - NATS must be configured with a 15MB max payload for large embeddings (already set in default deployments)
 
+## KV Transfer Connectors for Disaggregated Serving
+
+Disaggregated serving moves the KV cache from the prefill worker to the decode worker over a connector you select with `--kv-transfer-config`. Dynamo supports two NIXL connectors, which differ in who moves the blocks:
+
+| Connector | Direction | Handoff |
+|-----------|-----------|---------|
+| `NixlConnector` | Decode READs from prefill | Decode learns prefill's block locations from the prefill response |
+| `NixlPushConnector` | Prefill WRITEs into decode | Decode registers its allocated blocks with prefill, which pushes into them |
+
+Configure the same connector on both the prefill and decode workers:
+
+```bash
+python -m dynamo.vllm ... \
+  --kv-transfer-config '{"kv_connector":"NixlPushConnector","kv_role":"kv_both"}'
+```
+
+Push mode lets the two legs overlap. Because decode never needs anything computed during prefill — only the prefill engine's identity — the frontend dispatches both legs at once, so decode is already holding allocated blocks when prefill finishes and the transfer starts immediately. Pull mode cannot overlap: its handoff carries block IDs that do not exist until prefill has run.
+
+To make that possible, a prefill worker running `NixlPushConnector` publishes its NIXL side-channel address and engine ID to discovery. If it cannot, the handoff falls back to running sequentially — still correct, because the prefill worker holds its finished blocks until decode's late registration arrives, but without the overlap.
+
+> [!NOTE]
+> Push mode reports no cached-prompt-token details in usage, and does not short-circuit a request that reaches a stop condition during the one-token prefill step. Both follow from dispatching decode before the prefill response exists, and apply equally to SGLang's bootstrap handoff.
+
+### Data Parallelism and Push Mode
+
+vLLM gives each data-parallel rank its own NIXL side channel, at `VLLM_NIXL_SIDE_CHANNEL_PORT` plus the rank index. A Dynamo worker registers one address, so it can only advertise push coordinates when it fronts exactly one rank.
+
+This is satisfied by every deployment except vLLM's *internal* DP load balancing with `--data-parallel-size` greater than 1, where a single worker process fronts all ranks:
+
+| Deployment | Ranks per worker | Advertises |
+|------------|------------------|------------|
+| No data parallelism | 1 | ✅ |
+| External DP load balancing | 1 | ✅ |
+| Hybrid DP load balancing, one local rank | 1 | ✅ |
+| Hybrid DP load balancing, several local ranks | many | ❌ |
+| Internal DP load balancing, `--data-parallel-size` > 1 | all | ❌ |
+
+A worker that cannot advertise logs a warning at startup and runs the sequential handoff. Push mode still works — it just loses the overlap — so this is a performance limitation, not a correctness one. Use external or hybrid DP load balancing with one rank per worker to get the overlapped path; both are recommended for multi-worker DP deployments regardless.
+
 ## Hashing Consistency for KV Events
 
 When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:
