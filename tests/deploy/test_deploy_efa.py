@@ -312,10 +312,13 @@ def read_efa_device_counters(pod) -> dict:
         for line in result.stdout.decode().splitlines():
             line = line.strip()
             if line.startswith("{"):
-                return json.loads(line)
-    except Exception as e:  # noqa: BLE001 - capability-gated by the caller
+                parsed = json.loads(line)
+                parsed["_status"] = "ok"
+                return parsed
+    except Exception as e:  # noqa: BLE001 - classified as a scrape failure below
         logger.warning("EFA device counters unavailable for %s: %s", pod.name, e)
-    return {}
+        return {"_status": "scrape_failed"}
+    return {"_status": "empty"}
 
 
 def assert_efa_device_traffic(before: dict, after: dict, min_bytes: int) -> None:
@@ -325,18 +328,30 @@ def assert_efa_device_traffic(before: dict, after: dict, min_bytes: int) -> None
     adapter, not from NIXL, so it cannot be satisfied by a transfer that took a
     different transport. Measured idle noise on an assigned NIC is zero.
     """
-    if not before or not after:
-        logger.warning(
-            "EFA device counters unavailable (efa-node-exporter not reachable) — "
-            "falling back to the NIXL agent counter and the backend gates."
-        )
-        return
+    # Fails closed. This guards the only backend-independent proof in the test, so
+    # an unreachable exporter or a renamed counter must not quietly turn it into a
+    # no-op. The efa-node-exporter DaemonSet runs on both aws-dev-02 (8 nodes) and
+    # aws-dev-01 (13 nodes), so there is no lane where leniency here is justified.
+    failed = sorted(
+        role
+        for snap in (before, after)
+        for role, c in snap.items()
+        if c.get("_status") != "ok"
+    )
+    assert not failed, (
+        f"EFA traffic NOT confirmed: could not read EFA device counters for {failed}. "
+        f"The efa-node-exporter DaemonSet publishes them on :{EFA_EXPORTER_PORT} of each "
+        "node; an unreachable exporter is an infrastructure failure, not a platform "
+        "without EFA telemetry."
+    )
 
     for role, counter in EFA_COUNTER_BY_ROLE.items():
         b, a = before.get(role, {}), after.get(role, {})
-        if counter not in b or counter not in a:
-            logger.warning("counter %s missing for %s; skipping", counter, role)
-            continue
+        assert counter in b and counter in a, (
+            f"EFA traffic NOT confirmed: counter {counter} missing for {role} "
+            f"(device {a.get('_ibdev') or b.get('_ibdev')}). Skipping it would leave "
+            "the adapter-level proof unasserted."
+        )
         delta = a[counter] - b[counter]
         assert delta >= min_bytes, (
             f"EFA traffic NOT confirmed on {role} ({a.get('_ibdev')}): {counter} rose "
