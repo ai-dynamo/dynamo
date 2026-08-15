@@ -579,24 +579,6 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
-  # The EFA deploy test runs on a real EFA cluster (aws-dev-02) rather than the
-  # Azure deploy-test vCluster, but it still pulls its image the same way every
-  # other deploy test does — from ACR, for which the shared dynamo-deploy-test
-  # namespace already holds acr-token-secret. The -efa builds only push to ECR,
-  # hence this copy.
-  vllm-efa-copy-to-acr:
-    name: vllm-runtime-efa-nightly
-    needs: [compute-release-mode, vllm-efa-build]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ format('{0}-nightly', needs.vllm-efa-build.outputs.target_tag_plain) }}
-      cuda_version: '["13.0"]'
-      # Matches the sibling runtime copies; the shared-copy default of 10 is not
-      # enough for a multi-arch runtime image.
-      copy_timeout_minutes: 20
-    secrets: inherit
-
   deploy-operator:
     needs: [compute-release-mode, operator-build, resolve-source-sha]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
@@ -703,7 +685,7 @@ jobs:
   # dynamo-deploy-test namespace, and what it injects differs per cluster.
   efa-deploy-test-vllm:
     name: vLLM EFA Deploy Test
-    needs: [compute-release-mode, operator-build, resolve-source-sha, vllm-efa-copy-to-acr]
+    needs: [compute-release-mode, operator-build, resolve-source-sha, vllm-efa-build]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     runs-on: prod-deploy-tester-v1
     # Generous on purpose. The test itself carries @pytest.mark.timeout(1200), so
@@ -766,7 +748,11 @@ jobs:
           test_name: vllm_efa
           test_file: tests/deploy/test_deploy_efa.py
           extra_pytest_args: -m framework_with_efa
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-efa-copy-to-acr.outputs.image_tag }}
+          # Pulled straight from ECR, no copy-to-ACR hop and no imagePullSecret:
+          # aws-dev-02 is an AWS cluster whose node instance role already grants
+          # ECR read. Tag shape must stay in sync with calculate-target-tag in
+          # shared-build-image.yml (cuda13 is the default, so it adds no suffix).
+          image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.vllm-efa-build.outputs.target_tag_plain }}-nightly
           platform_arch: amd64
 
       - name: Teardown vCluster
