@@ -440,7 +440,12 @@ impl DistributedRuntime {
             .quic_response_server
             .get_or_try_init(async {
                 let tcp_server = self.tcp_server().await?;
-                let address = tcp_server.local_address()?;
+                let tcp_address = tcp_server.local_address()?;
+                // Keep the selected interface, but let the UDP stack choose a
+                // free port. A TCP ephemeral port can already be in use by an
+                // unrelated UDP socket because the two protocols allocate
+                // ports independently.
+                let address = std::net::SocketAddr::new(tcp_address.ip(), 0);
                 crate::pipeline::network::quic_response::QuicResponseServer::new(
                     address,
                     address,

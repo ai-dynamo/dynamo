@@ -543,6 +543,8 @@ struct PendingResponse {
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
     bundle_id: Option<Uuid>,
     deferred: DeferredResponse,
+    monitor_cancel: CancellationToken,
+    monitor_response: Option<oneshot::Sender<mpsc::Sender<Bytes>>>,
 }
 
 struct ActiveResponse {
@@ -754,6 +756,8 @@ impl QuicResponseServer {
                     connection: pending_tx,
                     bundle_id: None,
                     deferred: DeferredResponse::default(),
+                    monitor_cancel: CancellationToken::new(),
+                    monitor_response: None,
                 },
             );
 
@@ -851,7 +855,9 @@ fn bind_reuseport_udp(address: SocketAddr) -> std::io::Result<UdpSocket> {
 
 fn remove_registration_data(state: &ServerState, registration_id: Uuid) {
     let mut registration = state.registration(registration_id).lock();
-    registration.pending.remove(&registration_id);
+    if let Some(pending) = registration.pending.remove(&registration_id) {
+        pending.monitor_cancel.cancel();
+    }
     if let Some(active) = registration.active.remove(&registration_id) {
         active.monitor_cancel.cancel();
     }
@@ -885,6 +891,7 @@ fn fail_registration(state: &ServerState, registration_id: Uuid, reason: &str) {
 
     let mut registration = state.registration(registration_id).lock();
     if let Some(pending) = registration.pending.remove(&registration_id) {
+        pending.monitor_cancel.cancel();
         let _ = pending.connection.send(Err(reason.to_string()));
     }
     if let Some(active) = registration.active.remove(&registration_id) {
@@ -1074,7 +1081,7 @@ async fn process_server_frame(
             if !frame.payload.is_empty() {
                 bail!("QUIC response Register frame carried a payload");
             }
-            {
+            let monitor = {
                 let mut registration = state.registration(frame.registration_id).lock();
                 let Some(pending) = registration.pending.get_mut(&frame.registration_id) else {
                     send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
@@ -1092,29 +1099,50 @@ async fn process_server_frame(
                     Some(_) => {}
                     None => pending.bundle_id = Some(bundle_id),
                 }
-            }
+                if pending.monitor_response.is_none() {
+                    let (response_tx, response_rx) = oneshot::channel();
+                    pending.monitor_response = Some(response_tx);
+                    Some((
+                        pending.context.clone(),
+                        response_rx,
+                        pending.monitor_cancel.clone(),
+                    ))
+                } else {
+                    None
+                }
+            };
             // Bundle ownership is visible before the worker is allowed to call
             // generate(), so a pre-prologue bundle failure can resolve the
             // pending provider with an error.
             send_control(control_tx, FrameKind::Registered, frame.registration_id)?;
+            if let Some((context, response_rx, monitor_cancel)) = monitor {
+                spawn_response_monitor(
+                    context,
+                    response_rx,
+                    frame.registration_id,
+                    control_tx.clone(),
+                    monitor_cancel,
+                );
+            }
         }
         FrameKind::Prologue => {
             if !frame.payload.is_empty() {
                 bail!("QUIC response Prologue frame carried a payload");
             }
             let (response_tx, response_rx) = mpsc::channel(response_buffer_capacity);
-            let monitor_cancel = CancellationToken::new();
-            let (pending_context, pending_connection) = {
+            let (pending_connection, monitor_response) = {
                 let mut registration = state.registration(frame.registration_id).lock();
                 let Some(pending) = registration.pending.remove(&frame.registration_id) else {
                     send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                     return Ok(());
                 };
                 let PendingResponse {
-                    context,
+                    context: _,
                     connection,
                     bundle_id: pending_bundle,
                     deferred,
+                    monitor_cancel,
+                    monitor_response,
                 } = pending;
                 if pending_bundle != Some(bundle_id) {
                     bail!(
@@ -1134,8 +1162,15 @@ async fn process_server_frame(
                         deferred,
                     },
                 );
-                (context, connection)
+                (connection, monitor_response)
             };
+            let Some(monitor_response) = monitor_response else {
+                bail!(
+                    "QUIC response registration {} had no cancellation monitor",
+                    frame.registration_id
+                );
+            };
+            let _ = monitor_response.send(response_tx.clone());
             if pending_connection
                 .send(Ok(StreamReceiver { rx: response_rx }))
                 .is_err()
@@ -1144,14 +1179,6 @@ async fn process_server_frame(
                 send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
                 return Ok(());
             }
-
-            spawn_response_monitor(
-                pending_context,
-                response_tx,
-                frame.registration_id,
-                control_tx.clone(),
-                monitor_cancel,
-            );
         }
         FrameKind::Error => {
             let error = String::from_utf8(frame.payload.to_vec())
@@ -1335,11 +1362,32 @@ async fn process_server_frame(
                 _ => unreachable!(),
             }
         }
-        FrameKind::Stop
-        | FrameKind::Kill
-        | FrameKind::Reset
-        | FrameKind::Registered
-        | FrameKind::Bundle => {
+        FrameKind::Reset => {
+            if !frame.payload.is_empty() {
+                bail!("QUIC response Reset frame carried a payload");
+            }
+            let registration = state.registration(frame.registration_id).lock();
+            let registered_bundle = registration
+                .pending
+                .get(&frame.registration_id)
+                .and_then(|pending| pending.bundle_id)
+                .or_else(|| {
+                    registration
+                        .active
+                        .get(&frame.registration_id)
+                        .map(|active| active.bundle_id)
+                });
+            if registered_bundle != Some(bundle_id) {
+                bail!(
+                    "QUIC response registration {} was not registered to bundle {}",
+                    frame.registration_id,
+                    bundle_id
+                );
+            }
+            drop(registration);
+            remove_registration(state, frame.registration_id);
+        }
+        FrameKind::Stop | FrameKind::Kill | FrameKind::Registered | FrameKind::Bundle => {
             bail!("worker sent reverse-only control frame {:?}", frame.kind)
         }
     }
@@ -1411,7 +1459,7 @@ async fn drain_deferred_response(
 
 fn spawn_response_monitor(
     context: Arc<dyn AsyncEngineContext>,
-    response_tx: mpsc::Sender<Bytes>,
+    response_rx: oneshot::Receiver<mpsc::Sender<Bytes>>,
     registration_id: Uuid,
     control_tx: mpsc::Sender<Frame>,
     cancel: CancellationToken,
@@ -1419,9 +1467,31 @@ fn spawn_response_monitor(
     tokio::spawn(async move {
         let killed = context.killed();
         let stopped = context.stopped();
-        let closed = response_tx.closed();
-        tokio::pin!(killed, stopped, closed);
+        tokio::pin!(killed, stopped, response_rx);
         let mut stop_sent = false;
+        let response_tx = loop {
+            let kind = tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = &mut killed => Some(FrameKind::Kill),
+                _ = &mut stopped, if !stop_sent => Some(FrameKind::Stop),
+                response = &mut response_rx => match response {
+                    Ok(response_tx) => break response_tx,
+                    Err(_) => return,
+                },
+            };
+            let Some(kind) = kind else { unreachable!() };
+            if send_control(&control_tx, kind, registration_id).is_err() {
+                return;
+            }
+            if kind == FrameKind::Stop {
+                stop_sent = true;
+            } else {
+                return;
+            }
+        };
+
+        let closed = response_tx.closed();
+        tokio::pin!(closed);
         loop {
             let kind = tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -1569,11 +1639,12 @@ impl QuicResponseClientPool {
         connection
             .contexts
             .lock()
-            .insert(info.registration_id, response_context);
-        let sender = QuicResponseSender {
+            .insert(info.registration_id, response_context.clone());
+        let mut sender = QuicResponseSender {
             lane: lanes.ordered.clone(),
             priority_lane: lanes.priority.clone(),
             contexts: connection.contexts.clone(),
+            response_context,
             registration_id: info.registration_id,
             prologue_sent: false,
             terminated: false,
@@ -1591,22 +1662,24 @@ impl QuicResponseClientPool {
             return Err(error);
         }
 
-        let killed = context.killed();
-        let stopped = context.stopped();
-        tokio::pin!(killed, stopped);
-        let registered = tokio::select! {
-            result = registered_rx => result
-                .map_err(|_| anyhow!("QUIC response registration acknowledgement was dropped"))?,
-            _ = &mut killed => Err("QUIC response registration was killed".to_string()),
-            _ = &mut stopped => Err("QUIC response registration was stopped".to_string()),
-        };
+        // Register ownership before generate(), even if cancellation raced the
+        // handshake. The registered response monitor then propagates that
+        // cancellation, and generate() keeps its established cancellation
+        // semantics instead of being skipped by transport setup.
+        let registered = registered_rx
+            .await
+            .map_err(|_| anyhow!("QUIC response registration acknowledgement was dropped"))?;
         if let Err(error) = registered {
-            connection.contexts.lock().remove(&info.registration_id);
-            let _ = sender.priority_lane.sender.try_send(Frame::new(
-                FrameKind::Error,
-                info.registration_id,
-                Bytes::from(error.clone()),
-            ));
+            if context.is_stopped() && !context.is_killed() {
+                let _ = sender.abort().await;
+            } else {
+                connection.contexts.lock().remove(&info.registration_id);
+                let _ = sender.priority_lane.sender.try_send(Frame::new(
+                    FrameKind::Error,
+                    info.registration_id,
+                    Bytes::from(error.clone()),
+                ));
+            }
             bail!(error);
         }
         Ok(sender)
@@ -1798,13 +1871,18 @@ async fn run_client_writer(
             }
         }
         send.write_all_chunks(&mut chunks).await?;
-        if batch
-            .iter()
-            .any(|frame| matches!(frame.kind, FrameKind::Error | FrameKind::End))
-        {
+        if batch.iter().any(|frame| {
+            matches!(
+                frame.kind,
+                FrameKind::Error | FrameKind::End | FrameKind::Reset
+            )
+        }) {
             let mut contexts = contexts.lock();
             for frame in &batch {
-                if matches!(frame.kind, FrameKind::Error | FrameKind::End) {
+                if matches!(
+                    frame.kind,
+                    FrameKind::Error | FrameKind::End | FrameKind::Reset
+                ) {
                     contexts.remove(&frame.registration_id);
                 }
             }
@@ -1880,6 +1958,7 @@ pub struct QuicResponseSender {
     lane: Arc<Lane>,
     priority_lane: Arc<Lane>,
     contexts: Arc<Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>>,
+    response_context: Arc<ClientResponseContext>,
     registration_id: Uuid,
     prologue_sent: bool,
     terminated: bool,
@@ -1941,6 +2020,18 @@ impl QuicResponseSender {
             bail!("QUIC response sender is not open for data");
         }
         let first_data = !self.first_data_sent.swap(true, Ordering::AcqRel);
+        if first_data
+            && self.response_context.context.is_stopped()
+            && !self.response_context.context.is_killed()
+        {
+            self.response_context.record_cancellation();
+            self.enqueue_on(
+                &self.priority_lane,
+                Frame::new(FrameKind::Reset, self.registration_id, Bytes::new()),
+            )
+            .await?;
+            bail!("QUIC response context stopped before its first response");
+        }
         let frame = if first_data {
             Frame::new(FrameKind::FirstData, self.registration_id, payload)
         } else {
@@ -1967,6 +2058,29 @@ impl QuicResponseSender {
         self.enqueue_on(
             &self.lane,
             Frame::new(FrameKind::End, self.registration_id, Bytes::new()),
+        )
+        .await?;
+        self.terminated = true;
+        Ok(())
+    }
+
+    /// Close one cancelled logical response without ending its shared lane.
+    pub async fn abort(&mut self) -> Result<()> {
+        if self.terminated {
+            return Ok(());
+        }
+        if !self.prologue_sent {
+            self.enqueue_on(
+                &self.priority_lane,
+                Frame::new(FrameKind::Prologue, self.registration_id, Bytes::new()),
+            )
+            .await?;
+            self.prologue_sent = true;
+        }
+        self.response_context.record_cancellation();
+        self.enqueue_on(
+            &self.priority_lane,
+            Frame::new(FrameKind::Reset, self.registration_id, Bytes::new()),
         )
         .await?;
         self.terminated = true;
@@ -2631,6 +2745,31 @@ mod tests {
             Err(error) => assert_eq!(error, "generate failed"),
             Ok(_) => panic!("terminal error unexpectedly opened a response stream"),
         }
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn cancelled_sender_closes_only_its_logical_response() {
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
+
+        let cancelled = PipelineContext::new(());
+        let registered = server.register_response(cancelled.context());
+        let (info, provider) = registered.into_parts();
+        let mut sender = pool.sender(cancelled.context(), info).await.unwrap();
+        sender.abort().await.unwrap();
+        let mut receiver = provider.await.unwrap().unwrap();
+        assert!(receiver.rx.recv().await.is_none());
+
+        let sibling = PipelineContext::new(());
+        let registered = server.register_response(sibling.context());
+        let (info, provider) = registered.into_parts();
+        let mut sibling_sender = pool.sender(sibling.context(), info).await.unwrap();
+        sibling_sender.send_prologue(None).await.unwrap();
+        sibling_sender.finish().await.unwrap();
+        let mut receiver = provider.await.unwrap().unwrap();
+        assert!(receiver.rx.recv().await.is_none());
+        assert!(only_bundle(&pool).is_healthy());
         shutdown.cancel();
     }
 

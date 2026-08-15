@@ -242,6 +242,12 @@ where
                 break;
             }
         }
+        // The TCP response writer exits without its clean sentinel when the
+        // worker context is stopped. Preserve that behavior on QUIC: the
+        // caller sends a logical reset instead of a clean terminal frame.
+        if context.is_stopped() && !context.is_killed() {
+            send_complete_final = false;
+        }
         if send_complete_final {
             let encoded = match self
                 .payload_adapter
@@ -622,6 +628,7 @@ where
             frontend_send_ts_ns,
             payload_codec,
         } = self.parse_and_build_request(payload).await?;
+        let request_context = request.context();
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -697,14 +704,23 @@ where
                     tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
-                let _result = publisher.send_prologue(Some(error_string)).await;
+                if request_context.is_stopped() && !request_context.is_killed() {
+                    let _result = publisher.abort().await;
+                } else {
+                    let _result = publisher.send_prologue(Some(error_string)).await;
+                }
                 Err(e)?
             }
         };
 
         self.pump_response_stream(stream, &publisher, payload_codec)
             .await;
-        publisher.finish().await.map_err(|error| {
+        let finish = if request_context.is_stopped() && !request_context.is_killed() {
+            publisher.abort().await
+        } else {
+            publisher.finish().await
+        };
+        finish.map_err(|error| {
             PipelineError::Generic(format!("Failed to finish QUIC response stream: {error}"))
         })?;
 
