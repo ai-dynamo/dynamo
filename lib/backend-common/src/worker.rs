@@ -1709,6 +1709,9 @@ async fn build_local_model(
             Some(DisaggregatedEndpoint {
                 bootstrap_host: Some(host.clone()),
                 bootstrap_port: Some(port),
+                // Bootstrap-style handoff; the NIXL push connector is a vLLM
+                // concern and publishes its coordinates from the Python worker.
+                nixl_push: None,
             })
         }
         _ => None,
