@@ -165,6 +165,31 @@ async def test_eager_drain_pulls_all_queued_when_free():
     assert ["a", "b", "c"] in batches
 
 
+async def test_queue_wait_coalesces_request_arriving_after_first_item():
+    batches: list[list[str]] = []
+
+    def fn(items):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, queue_wait_s=0.05)
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["first"]))
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(b.submit(["second"]))
+        assert await asyncio.gather(first, second) == [["first"], ["second"]]
+        assert batches == [["first", "second"]]
+    finally:
+        b.shutdown()
+
+
+@pytest.mark.parametrize("queue_wait_s", [-1, float("inf"), float("nan"), True])
+def test_queue_wait_rejects_invalid_values(queue_wait_s):
+    with pytest.raises(ValueError, match="queue_wait_s"):
+        ThreadedMicroBatcher(_echo, queue_wait_s=queue_wait_s)
+
+
 async def test_cost_budget_caps_each_batch():
     """costs ride on submit; with budget 5, batches never exceed summed cost 5.
 

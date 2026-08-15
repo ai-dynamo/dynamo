@@ -17,6 +17,7 @@ ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_e
 CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE:-$REPO_ROOT/examples/custom_encoder/templates/qwen_vl.jinja}"
 NIXL_SEND_POOL_CAPACITY="${DYN_NIXL_SEND_POOL_CAPACITY:-0}"
 NIXL_SEND_POOL_BYTES="${DYN_NIXL_SEND_POOL_BYTES:-0}"
+ENCODER_BATCH_QUEUE_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_WAIT_MS:-2}"
 DECODER_GPU="${DYN_DECODER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 MAX_MODEL_LEN="${DYN_MAX_MODEL_LEN:-4096}"
@@ -52,7 +53,8 @@ python3 -m dynamo.vllm.workflow.components.encoder_worker \
     --model "$ENCODER_MODEL" \
     --custom-encoder-class "$ENCODER_CLASS" \
     --nixl-send-pool-capacity "$NIXL_SEND_POOL_CAPACITY" \
-    --nixl-send-pool-bytes "$NIXL_SEND_POOL_BYTES" &
+    --nixl-send-pool-bytes "$NIXL_SEND_POOL_BYTES" \
+    --batch-queue-wait-ms "$ENCODER_BATCH_QUEUE_WAIT_MS" &
 
 CUDA_VISIBLE_DEVICES= \
 DYN_SYSTEM_PORT="${DYN_CLASSIFIER_SYSTEM_PORT:-8082}" \

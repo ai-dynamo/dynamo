@@ -122,11 +122,13 @@ class _Connector:
 
 class _IsolatedNixlModule(_NixlModule):
     connectors = []
+    connector_options = []
 
     @classmethod
-    def Connector(cls):
+    def Connector(cls, **options):
         connector = _Connector()
         cls.connectors.append(connector)
+        cls.connector_options.append(options)
         return connector
 
 
@@ -205,6 +207,7 @@ async def test_one_logical_tensor_can_have_independent_consumer_leases() -> None
 
 async def test_default_carrier_isolates_each_exported_edge() -> None:
     _IsolatedNixlModule.connectors = []
+    _IsolatedNixlModule.connector_options = []
     carrier = NixlTensorCarrier(
         nixl_module=_IsolatedNixlModule,
         torch_module=torch,
@@ -218,6 +221,11 @@ async def test_default_carrier_isolates_each_exported_edge() -> None:
     # One long-lived connector receives tensors; each exported edge gets an
     # immutable transfer agent so concurrent registrations cannot race.
     assert len(_IsolatedNixlModule.connectors) == 3
+    assert _IsolatedNixlModule.connector_options == [
+        {"enable_progress_thread": False},
+        {"enable_progress_thread": False},
+        {"enable_progress_thread": False},
+    ]
     assert not _IsolatedNixlModule.connectors[0].readables
     assert len(_IsolatedNixlModule.connectors[1].readables) == 1
     assert len(_IsolatedNixlModule.connectors[2].readables) == 1

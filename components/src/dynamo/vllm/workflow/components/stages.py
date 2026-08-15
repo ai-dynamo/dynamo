@@ -52,6 +52,7 @@ class EncoderStage:
         backend: VisionEncoderBackend[Any, Any, torch.Tensor],
         *,
         model: str,
+        batch_queue_wait_s: float = 0.0,
         name: str = "workflow-vision-encoder",
     ) -> "EncoderStage":
         """Load an author-provided linear-embedding backend into this stage."""
@@ -66,7 +67,9 @@ class EncoderStage:
                 "encoder backend requires a non-negative integer image_token_id"
             )
         encoder: AsyncVisionEncoder[Any, Any, torch.Tensor] = AsyncVisionEncoder(
-            backend, name=name
+            backend,
+            batch_queue_wait_s=batch_queue_wait_s,
+            name=name,
         )
         try:
             encoder.load(model)
