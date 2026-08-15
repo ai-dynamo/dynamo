@@ -124,3 +124,27 @@ func TestMustGateFromPanicsWithoutGate(t *testing.T) {
 	}()
 	MustGateFrom(context.Background())
 }
+
+func TestEnabledPanicsOnUnknownGate(t *testing.T) {
+	gates := allEnabledGates()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Enabled(unknown) did not panic")
+		}
+		if msg, ok := r.(string); !ok || msg != "unknown feature gate \"nonexistent\"" {
+			t.Errorf("panic = %v, want %q", r, "unknown feature gate \"nonexistent\"")
+		}
+	}()
+	_ = gates.Enabled(Name("nonexistent"))
+}
+
+func TestEnabledCoversEveryKnownGate(t *testing.T) {
+	gates := allEnabledGates()
+	for _, name := range allNames {
+		// Every declared gate must route to its field and return the set value.
+		if !gates.Enabled(name) {
+			t.Errorf("Enabled(%q) = false, want true", name)
+		}
+	}
+}
