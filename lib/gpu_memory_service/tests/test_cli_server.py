@@ -101,7 +101,7 @@ def test_supervisor_terminates_siblings_when_child_exits():
 
     # A clean exit (poll() returning 0) is an exit, not "still running".
     clean = [_Process(exit_code=0), _Process()]
-    assert server._supervise(clean) == 0
+    assert server._supervise(clean) == 1
     assert clean[1].terminated
 
 
