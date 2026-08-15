@@ -676,23 +676,33 @@ jobs:
   # KV transfer rode NIXL -> LIBFABRIC -> EFA instead of silently falling back to
   # UCX.
   #
-  # It cannot reuse shared-deploy-test.yml: that workflow pins its own runner and
-  # timeout and has no way to select a kube context, and this needs the Teleport
-  # kubeconfig pointed at aws-dev-02.
+  # It cannot reuse shared-deploy-test.yml: that workflow hardcodes its runner,
+  # timeout, ACR image reference and `-m framework_only` selector, and forwards no
+  # kube context, and this needs the Teleport kubeconfig pointed at aws-dev-02.
   #
   # No tolerations or nodeSelector appear in tests/deploy/efa/disagg-efa.yaml --
   # the cluster's Kyverno deploy-test-pod-policy injects them for GPU pods in the
   # dynamo-deploy-test namespace, and what it injects differs per cluster.
-  efa-deploy-test-vllm:
-    name: vLLM EFA Deploy Test
-    needs: [compute-release-mode, operator-build, resolve-source-sha, vllm-efa-build]
+  #
+  # Split setup / test / cleanup into three jobs, matching deploy-operator ->
+  # deploy-test-* -> deploy-cleanup above. Two properties of that shape matter and
+  # neither survives collapsing it into one job:
+  #
+  #   * Setup carries no timeout-minutes. setup-dynamo-operator's own waits
+  #     (vCluster 900s, CRD 1800s, operator readiness 1800s) can exceed any
+  #     reasonable job ceiling, so a ceiling spanning setup + test can expire
+  #     before the test even starts.
+  #   * Cleanup is a separate job with job-level `if: always()` over `needs:`, so
+  #     it fires however the upstream ended -- including job timeout, cancellation
+  #     and a dead runner, none of which a step-level `if: always()` survives.
+  #     That matters here because setup-dynamo-operator deliberately skips the
+  #     nscleanup/ttl label for dynamo-deploy-test, so a leaked vCluster holds p5
+  #     GPUs and EFA interfaces on a shared cluster with no automated reaper.
+  efa-deploy-operator:
+    name: vLLM EFA Deploy Operator
+    needs: [compute-release-mode, operator-build, resolve-source-sha]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     runs-on: prod-deploy-tester-v1
-    # Generous on purpose. The test itself carries @pytest.mark.timeout(1200), so
-    # pytest fails the test with a report before this fires; a job-level timeout
-    # would cancel the run instead, losing the junit XML and skipping the
-    # always() cleanup, which leaks the DGD and its GPUs.
-    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -707,13 +717,7 @@ jobs:
           ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
 
       - name: Set kubectl context to aws-dev-02
-        shell: bash
-        run: |
-          set -euo pipefail
-          KUBECONFIG_PATH="${RUNNER_TEMP}/kubeconfig-aws-dev-02.yaml"
-          cp /teleport/kubeconfig.yaml "${KUBECONFIG_PATH}"
-          kubectl --kubeconfig="${KUBECONFIG_PATH}" config use-context "${KUBE_CONTEXT}"
-          echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "$GITHUB_ENV"
+        uses: ./.github/actions/set-kube-context
 
       # An empty vcluster_namespace makes the action resolve the shared
       # dynamo-deploy-test namespace, which is what aws-dev-02 expects.
@@ -729,12 +733,36 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
+  efa-deploy-test-vllm:
+    name: vLLM EFA Deploy Test
+    needs: [compute-release-mode, operator-build, resolve-source-sha, vllm-efa-build, efa-deploy-operator]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    runs-on: prod-deploy-tester-v1
+    # Setup is already done in efa-deploy-operator, so this bounds the test alone.
+    # The test carries @pytest.mark.timeout(1200) and its readiness wait is capped
+    # at 900s below that, so pytest fails with a report first; this is the backstop
+    # for a hang outside pytest. Safe to keep tight now that teardown is a separate
+    # always() job rather than a step this would skip.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
         with:
-          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
-          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
 
       - name: Run EFA deploy test
         uses: ./.github/actions/dynamo-deploy-test
@@ -755,21 +783,30 @@ jobs:
           image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.vllm-efa-build.outputs.target_tag_plain }}-nightly
           platform_arch: amd64
 
-      - name: Teardown vCluster
-        if: always() && steps.setup.outputs.vcluster_name != ''
-        uses: ./.github/actions/teardown-dynamo-operator
-        env:
-          # The dynamo-deploy-test action exports KUBECONFIG=<workspace>/.kubeconfig
-          # (the vCluster) into $GITHUB_ENV, and that persists for the rest of the
-          # job. Teardown takes no kubeconfig here, so without this override it
-          # would run against the vCluster, find no dynamo-deploy-test namespace,
-          # report "nothing to delete" and leave the vCluster -- and its GPUs --
-          # running on the host. Every other teardown in this file is a separate
-          # job with a fresh environment, which is why they do not need this.
-          KUBECONFIG: ${{ runner.temp }}/kubeconfig-aws-dev-02.yaml
+  efa-deploy-cleanup:
+    name: vLLM EFA Deploy Cleanup
+    if: always()
+    needs: [resolve-source-sha, efa-deploy-operator, efa-deploy-test-vllm]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
-          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
+          persist-credentials: false
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      - name: Teardown vCluster
+        if: needs.efa-deploy-operator.outputs.vcluster_name != '' && needs.efa-deploy-operator.outputs.namespace != ''
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
 
   # ============================================================================
   # COMPLIANCE
