@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "clap",
  "dynamo-backend-common",
