@@ -17,7 +17,11 @@ from dynamo.workflow.plan import (
     InlineBinding,
     RemoteBinding,
 )
-from dynamo.workflow.types import StreamSpec, WorkflowValidationError, validate_name
+from dynamo.workflow.types import (
+    StreamSpec,
+    WorkflowValidationError,
+    validate_name,
+)
 
 
 @dataclass(frozen=True)

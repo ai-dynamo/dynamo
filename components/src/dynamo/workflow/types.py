@@ -161,6 +161,16 @@ class StreamSpec:
 PortSpec = Union[ValueSpec, StreamSpec]
 
 
+def _require_value_spec(spec: PortSpec, location: str) -> ValueSpec:
+    """Narrow a port used by the current non-streaming execution path."""
+
+    if isinstance(spec, StreamSpec):
+        raise WorkflowValidationError(
+            f"{location} uses a stream port, but stream execution is not supported"
+        )
+    return spec
+
+
 def compatibility_error(producer: PortSpec, consumer: PortSpec) -> Optional[str]:
     """Explain why a producer cannot satisfy a consumer, or return ``None``."""
 
