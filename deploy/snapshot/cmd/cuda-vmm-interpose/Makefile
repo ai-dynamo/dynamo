@@ -7,8 +7,8 @@ BUILD_DIR ?= build
 
 INTERPOSER := $(BUILD_DIR)/libsnapshot_cuda_vmm.so
 COORDINATOR := $(BUILD_DIR)/snapshot-cuda-vmm
-INTERPOSER_SOURCES := interpose.c posix.c util.c
-INTERPOSER_HEADERS := posix.h protocol.h util.h
+INTERPOSER_SOURCES := interpose.c multicast.c posix.c util.c
+INTERPOSER_HEADERS := multicast.h posix.h protocol.h util.h
 COORDINATOR_SOURCES := coordinator.c util.c
 COORDINATOR_HEADERS := protocol.h util.h
 COMMON_FLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror
