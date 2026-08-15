@@ -436,7 +436,6 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	sglangDGD.Name = "test-sglang-dgd"
 	sglangDGD.UID = types.UID("sglang-dgd-uid")
 	sglangComponent := component.DeepCopy()
-	sglangComponent.Failover = nil
 	sglangComponent.Checkpoint.Identity.BackendFramework = string(dynamo.BackendFrameworkSGLang)
 	sglangComponent.ExtraPodSpec.MainContainer.Args = []string{"-m", "dynamo.sglang", "--tp", "1"}
 

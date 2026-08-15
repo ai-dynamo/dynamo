@@ -617,11 +617,17 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_SupportsSGLangAndRejectsUnknownBackend(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang, failoverEngineCount)
+	require.NoError(t, buildFailoverPod(&ps, 1, BackendFrameworkSGLang, failoverEngineCount))
+	require.Len(t, ps.Containers, 3)
+	assert.Equal(t, "engine-0", ps.Containers[0].Name)
+	assert.Equal(t, "engine-1", ps.Containers[1].Name)
+
+	ps = intraPodFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM, failoverEngineCount)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+	assert.Contains(t, err.Error(), "currently supported only for vLLM and SGLang")
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
@@ -833,6 +839,17 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(twoShadows, string(BackendFrameworkVLLM)))
 	})
 
+	t.Run("accepts SGLang TP1 snapshot failover", func(t *testing.T) {
+		sglang := component.DeepCopy()
+		sglang.PodTemplate.Spec.Containers[0].Args = []string{"-m", sglangModuleName, "--tp", "1"}
+
+		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(sglang, string(BackendFrameworkSGLang)))
+
+		target := sglang.DeepCopy()
+		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
+		require.Empty(t, ValidateAutomaticFailoverCheckpointTarget(target, string(BackendFrameworkSGLang), true))
+	})
+
 	t.Run("rejects unsupported shadow counts", func(t *testing.T) {
 		for _, count := range []int32{-1, 3} {
 			invalid := component.DeepCopy()
@@ -919,6 +936,23 @@ func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
 	})
 }
 
+func TestPrepareSGLangAutomaticFailoverSnapshotSource(t *testing.T) {
+	container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
+	container.Args = []string{"-m", sglangModuleName, "--tp", "1"}
+	container.Env = []corev1.EnvVar{
+		{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "9100"},
+		{Name: "KEEP_ME", Value: "yes"},
+	}
+
+	require.NoError(t, PrepareSGLangAutomaticFailoverSnapshotSource(&container))
+
+	env := envToMap(container.Env)
+	assert.NotContains(t, env, "DYN_FORWARDPASS_METRIC_PORT")
+	assert.Equal(t, "true", env[sglangGMSV1EnvVar])
+	assert.Equal(t, "tcp", env["DYN_REQUEST_PLANE"])
+	assert.Equal(t, "yes", env["KEEP_ME"])
+}
+
 func TestIsDGDControlled(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", UID: types.UID("graph-uid")},
@@ -998,7 +1032,7 @@ func validAutomaticFailoverComponent() *v1beta1.DynamoComponentDeploymentSharedS
 
 func vllmFlagValue(t *testing.T, args []string, flag string) string {
 	t.Helper()
-	value, _, _, found, err := tokenizedVLLMFlag(args, flag)
+	value, _, _, found, err := tokenizedFlag(args, flag)
 	require.NoError(t, err)
 	require.True(t, found)
 	return value
