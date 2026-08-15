@@ -11,6 +11,7 @@ source "$REPO_ROOT/examples/common/launch_utils.sh"
 trap dynamo_exit_trap EXIT
 
 MODEL="${DYN_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+SERVED_MODEL_NAME="${DYN_SERVED_MODEL_NAME:-$MODEL}"
 ENCODER_MODEL="${DYN_ENCODER_MODEL:-$MODEL}"
 ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder}"
 CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE:-$REPO_ROOT/examples/custom_encoder/templates/qwen_vl.jinja}"
@@ -36,6 +37,9 @@ export DYN_CUSTOM_JINJA_TEMPLATE="$CUSTOM_JINJA_TEMPLATE"
 
 python3 -m dynamo.frontend \
     --http-port "$HTTP_PORT" \
+    --model-path "$MODEL" \
+    --model-name "$SERVED_MODEL_NAME" \
+    --custom-jinja-template "$CUSTOM_JINJA_TEMPLATE" \
     --workflow-provider \
     examples.custom_backend.user_ensemble.remote.provider:provide_workflow &
 

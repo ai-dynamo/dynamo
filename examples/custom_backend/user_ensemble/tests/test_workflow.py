@@ -20,11 +20,11 @@ pytest.importorskip(
 import torch  # noqa: E402
 
 from dynamo.workflow import ValueRef  # noqa: E402
-from examples.custom_backend.user_ensemble.stages import DummyClassifier  # noqa: E402
-from examples.custom_backend.user_ensemble.workflow import (  # noqa: E402
-    adapt_workflow_result,
-    define_workflow,
+from examples.custom_backend.user_ensemble.stages import (  # noqa: E402
+    DummyClassifier,
+    EnsembleResponseStage,
 )
+from examples.custom_backend.user_ensemble.workflow import define_workflow  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -46,14 +46,14 @@ def test_workflow_declares_encoder_fanout_to_classifier_and_stock_generator():
         "encoder",
         "classifier",
         "generator",
+        "response",
     ]
-    assert workflow.outputs["scores"] == ValueRef.for_stage_output(
-        "classifier", "scores"
-    )
-    assert workflow.outputs["chunk"] == ValueRef.for_stage_output("generator", "chunk")
+    assert set(workflow.outputs) == {"chunk"}
+    assert workflow.outputs["chunk"] == ValueRef.for_stage_output("response", "chunk")
     encoder = workflow.stages[0]
     classifier = workflow.stages[1]
     generator = workflow.stages[2]
+    response = workflow.stages[3]
     assert classifier.inputs["encoder_features"] == ValueRef.for_stage_output(
         encoder.id, "encoder_features"
     )
@@ -62,6 +62,12 @@ def test_workflow_declares_encoder_fanout_to_classifier_and_stock_generator():
     )
     assert generator.inputs["encoder_metadata"] == ValueRef.for_stage_output(
         encoder.id, "encoder_metadata"
+    )
+    assert response.inputs["completion"] == ValueRef.for_stage_output(
+        generator.id, "completion"
+    )
+    assert response.inputs["scores"] == ValueRef.for_stage_output(
+        classifier.id, "scores"
     )
 
 
@@ -75,19 +81,22 @@ async def test_classifier_consumes_the_packed_tensor():
     assert sum(result["scores"].values()) == pytest.approx(1.0)
 
 
-def test_result_adapter_preserves_chunk_and_attaches_classifier_scores():
-    chunk = {
+async def test_inline_response_stage_preserves_completion_and_attaches_scores():
+    completion = {
         "token_ids": [4, 2],
         "engine_data": {"ensemble": {"decoder": "stock-vllm"}},
     }
 
-    adapted = adapt_workflow_result({"chunk": chunk, "scores": {"positive-mean": 0.9}})
+    result = await EnsembleResponseStage().run(
+        {"completion": completion, "scores": {"positive-mean": 0.9}},
+        _context(),
+    )
 
-    assert chunk == {
+    assert completion == {
         "token_ids": [4, 2],
         "engine_data": {"ensemble": {"decoder": "stock-vllm"}},
     }
-    assert adapted["engine_data"]["ensemble"] == {
+    assert result["chunk"]["engine_data"]["ensemble"] == {
         "decoder": "stock-vllm",
         "classifier_scores": {"positive-mean": 0.9},
     }
