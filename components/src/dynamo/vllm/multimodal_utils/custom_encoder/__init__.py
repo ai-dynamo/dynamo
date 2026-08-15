@@ -16,6 +16,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     Preprocessed,
     RawT,
     VisionEncoderBackend,
+    resolve_vision_encoder_backend_class,
 )
 
 __all__ = [
@@ -28,5 +29,6 @@ __all__ = [
     "Preprocessed",
     "Qwen3VLImageEncoding",
     "RawT",
+    "resolve_vision_encoder_backend_class",
     "VisionEncoderBackend",
 ]
