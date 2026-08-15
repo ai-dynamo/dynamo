@@ -675,12 +675,6 @@ def pytest_collection_modifyitems(config, items):
         if importlib.util.find_spec(module_name) is None:
             skip = pytest.mark.skip(reason=f"{module_name} is not installed")
             for item in items:
-                # Deploy tests drive an image on a cluster and never import the
-                # framework in the runner's own interpreter. Skipping them for a
-                # missing local import turns a real failure into a silently
-                # green job, so exempt them.
-                if _item_has_marker(item, "deploy"):
-                    continue
                 if _item_has_marker(item, marker_name):
                     item.add_marker(skip)
 

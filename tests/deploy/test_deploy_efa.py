@@ -22,10 +22,9 @@ The deployment name is fixed, so the namespace must be clear of a previous
 run before starting a new one -- back-to-back manual runs collide with the
 prior teardown. CI is unaffected: every nightly gets a fresh vCluster.
 
-Runs nightly, against the nightly -efa image. EFA changes are sparse, so a
-cluster-backed test on every commit would cost far more than the risk warrants;
-tests/container/test_efa_image.py is the cheap per-image packaging gate and this
-is the functional one.
+Runs nightly, against the nightly -efa image, rather than per-commit: EFA
+changes are sparse and this needs a real EFA cluster, two GPUs and roughly three
+minutes, which is far more than the per-commit risk warrants.
 """
 
 import json
@@ -451,11 +450,17 @@ def assert_deployment_cleaned_up(
 
 
 @pytest.mark.framework_with_efa
-@pytest.mark.vllm
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.nightly
 @pytest.mark.e2e
+# Two GPUs total: one prefill, one decode. No framework marker -- the nightly job
+# selects with -m framework_with_efa, and carrying @pytest.mark.vllm would both
+# require an exemption in tests/conftest.py's framework auto-skip and make this
+# test collectable by the multi-GPU jobs, whose selectors are
+# "vllm and (gpu_2 or gpu_4)" with no lifecycle filter.
+@pytest.mark.gpu_2
+@pytest.mark.core
 @pytest.mark.timeout(1200)
 async def test_efa_deployment(
     image: str,
