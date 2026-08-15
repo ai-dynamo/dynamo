@@ -5,6 +5,7 @@
 name = "kvbm-logical"
 version = "1.4.0"
 edition.workspace = true
+description.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
