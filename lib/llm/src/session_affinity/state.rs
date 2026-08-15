@@ -13,6 +13,18 @@ pub(super) struct AffinityRevision {
     pub(super) router_id: u64,
 }
 
+impl AffinityRevision {
+    // Compatibility with v1.2-v1.3 routers during v1.4-v1.5 rolling upgrades.
+    // TODO(v1.6): Remove revision-zero handling when those routers leave the N-2 window.
+    pub(super) const fn is_legacy(self) -> bool {
+        self.sequence == 0
+    }
+
+    pub(super) const fn is_versioned(self) -> bool {
+        !self.is_legacy()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ReplicaBinding {
     pub(super) target: AffinityTarget,
@@ -47,12 +59,12 @@ pub(super) fn apply_replica_binding(
     ttl: Duration,
 ) -> ReplicaApplyOutcome {
     normalize_expired_replica_fence(binding, now);
-    if revision.sequence == 0 {
+    if revision.is_legacy() {
         let refreshed = binding.target == target && binding.legacy_fence.is_some();
         let pending_versioned_target = binding
             .legacy_fence
             .and_then(|fence| fence.pending_versioned_target)
-            .or((binding.revision.sequence != 0).then_some(binding.target));
+            .or(binding.revision.is_versioned().then_some(binding.target));
         binding.target = target;
         binding.legacy_fence = Some(LegacyFence {
             deadline: now + ttl,

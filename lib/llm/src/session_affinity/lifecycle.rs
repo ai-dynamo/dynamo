@@ -103,7 +103,7 @@ impl AffinityAcquire {
                 target, mut lease, ..
             } => {
                 if target == selected_target {
-                    if lease.revision.sequence == 0 {
+                    if lease.revision.is_legacy() {
                         lease.rebind(selected_target);
                     }
                     lease.publish(selected_target);
@@ -284,7 +284,7 @@ impl AffinityLease {
             else {
                 return;
             };
-            (*generation == self.generation && revision.sequence != 0 && legacy_fence.is_none())
+            (*generation == self.generation && revision.is_versioned() && legacy_fence.is_none())
                 .then_some((*target, *revision))
         };
         if let Some((target, revision)) = update {
@@ -372,7 +372,7 @@ impl AffinityLease {
             *idle_deadline = Instant::now() + inner.ttl;
             (*target, *revision, legacy_fence.is_some())
         };
-        if revision.sequence != 0 && !fenced {
+        if revision.is_versioned() && !fenced {
             inner.publish_replica_update(&self.session_id, target, revision);
         }
     }

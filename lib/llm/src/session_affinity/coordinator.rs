@@ -576,7 +576,7 @@ impl AffinityCoordinatorInner {
         // A legacy conflict wins so old and new routers do not split the session
         // while old routers cannot understand versioned migration updates.
         // TODO(v1.6): Remove revision-zero handling when those routers leave the N-2 window.
-        let legacy_revision = revision.sequence == 0;
+        let legacy_revision = revision.is_legacy();
         match self.entries.entry(session_id) {
             Entry::Vacant(entry) => {
                 if !self.reserve_entry() {
