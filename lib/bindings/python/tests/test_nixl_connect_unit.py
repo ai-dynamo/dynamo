@@ -135,6 +135,31 @@ async def test_wait_for_completion_raises_on_errored_status(testable_active_op):
 
 
 @pytest.mark.asyncio
+async def test_connector_can_disable_nixl_progress_thread(nixl_mocks):
+    """Actively polled callers can avoid an otherwise redundant agent thread."""
+    from dynamo.nixl_connect import Connector
+
+    nixl_api, _, agent = nixl_mocks
+    config = MagicMock()
+    nixl_api.nixl_agent_config.return_value = config
+
+    connection = await Connector(
+        "actively-polled", enable_progress_thread=False
+    )._create_connection()
+
+    nixl_api.nixl_agent_config.assert_called_once_with(enable_prog_thread=False)
+    nixl_api.nixl_agent.assert_called_once_with("actively-polled-1", config)
+    assert connection._nixl is agent
+
+
+def test_connector_rejects_non_boolean_progress_thread_option(nixl_mocks):
+    from dynamo.nixl_connect import Connector
+
+    with pytest.raises(TypeError, match="enable_progress_thread"):
+        Connector("consumer", enable_progress_thread=0)
+
+
+@pytest.mark.asyncio
 async def test_remote_agent_is_loaded_once_while_operations_overlap(nixl_mocks):
     """Overlapping reads from one producer must share its loaded metadata."""
     from dynamo.nixl_connect import Connector, Remote
