@@ -42,6 +42,18 @@ class _Metadata:
 class _Descriptor:
     def __init__(self, tensor):
         self.tensor = tensor
+        self.connection = None
+
+    @property
+    def is_registered(self):
+        return self.connection is not None
+
+    def register_with_connector(self, connection):
+        self.connection = connection
+
+    def deregister_with_connector(self, connection):
+        assert self.connection is connection
+        self.connection = None
 
 
 class _Readable:
@@ -68,7 +80,9 @@ class _Read:
         self.released = False
 
     async def wait_for_completion(self):
-        self.destination.tensor.copy_(self.source.descriptor.tensor)
+        destination = self.destination.tensor.view(torch.uint8).flatten()
+        source = self.source.descriptor.tensor.view(torch.uint8).flatten()
+        destination.copy_(source[: destination.numel()])
         self.source.completed.set()
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -97,10 +111,23 @@ class _Connector:
         self.readables[key] = readable
         return readable
 
+    async def _create_connection(self):
+        return self
+
     async def begin_read(self, metadata, descriptor):
         read = _Read(self.readables[metadata["key"]], descriptor)
         self.reads.append(read)
         return read
+
+
+class _IsolatedNixlModule(_NixlModule):
+    connectors = []
+
+    @classmethod
+    def Connector(cls):
+        connector = _Connector()
+        cls.connectors.append(connector)
+        return connector
 
 
 async def _wait_for_no_leases(carrier):
@@ -174,6 +201,59 @@ async def test_one_logical_tensor_can_have_independent_consumer_leases() -> None
     await _wait_for_no_leases(carrier)
     assert connector.readables["transfer-0"].released
     assert connector.readables["transfer-1"].released
+
+
+async def test_default_carrier_isolates_each_exported_edge() -> None:
+    _IsolatedNixlModule.connectors = []
+    carrier = NixlTensorCarrier(
+        nixl_module=_IsolatedNixlModule,
+        torch_module=torch,
+    )
+
+    await carrier.export_tensor_fanout(
+        torch.ones((2, 8), dtype=torch.float16),
+        ("classifier.embedding", "generator.embedding"),
+    )
+
+    # One long-lived connector receives tensors; each exported edge gets an
+    # immutable transfer agent so concurrent registrations cannot race.
+    assert len(_IsolatedNixlModule.connectors) == 3
+    assert not _IsolatedNixlModule.connectors[0].readables
+    assert len(_IsolatedNixlModule.connectors[1].readables) == 1
+    assert len(_IsolatedNixlModule.connectors[2].readables) == 1
+    for connector in _IsolatedNixlModule.connectors[1:]:
+        next(iter(connector.readables.values())).completed.set()
+    await _wait_for_no_leases(carrier)
+
+
+async def test_send_pool_reuses_slot_after_all_fanout_reads() -> None:
+    connector = _Connector()
+    carrier = NixlTensorCarrier(
+        connector=connector,
+        nixl_module=_NixlModule,
+        torch_module=torch,
+        send_pool_capacity=1,
+        send_pool_bytes=64,
+    )
+    source = torch.ones((2, 8), dtype=torch.float16)
+
+    await carrier.export_tensor_fanout(
+        source, ("classifier.embedding", "generator.embedding")
+    )
+    blocked = asyncio.create_task(carrier.export_tensor(source, "next.embedding"))
+    await asyncio.sleep(0)
+    assert not blocked.done()
+
+    first_readables = list(connector.readables.values())
+    first_readables[0].completed.set()
+    await asyncio.sleep(0)
+    assert not blocked.done()
+    first_readables[1].completed.set()
+    await blocked
+    next_readable = list(connector.readables.values())[-1]
+    next_readable.completed.set()
+    await _wait_for_no_leases(carrier)
+    await carrier.close()
 
 
 async def test_lease_registry_retains_unread_operation_after_timeout() -> None:

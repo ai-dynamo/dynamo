@@ -23,6 +23,8 @@ async def encoder_worker(
     model: str,
     custom_encoder_class: str,
     stage_id: str = "encoder",
+    nixl_send_pool_capacity: int = 0,
+    nixl_send_pool_bytes: int = 0,
 ) -> None:
     """Load and serve one configured remote encoder stage."""
 
@@ -34,7 +36,10 @@ async def encoder_worker(
     )
     carrier: NixlTensorCarrier | None = None
     try:
-        carrier = NixlTensorCarrier()
+        carrier = NixlTensorCarrier(
+            send_pool_capacity=nixl_send_pool_capacity,
+            send_pool_bytes=nixl_send_pool_bytes,
+        )
         server = RemoteStageServer(stage_id, stage, carrier)
         await runtime.endpoint(endpoint_id).serve_endpoint(server.generate)
     finally:
@@ -54,6 +59,8 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--custom-encoder-class", required=True)
     parser.add_argument("--stage-id", default="encoder")
+    parser.add_argument("--nixl-send-pool-capacity", type=int, default=0)
+    parser.add_argument("--nixl-send-pool-bytes", type=int, default=0)
     args = parser.parse_args()
     asyncio.run(
         encoder_worker(
@@ -61,6 +68,8 @@ def main() -> None:
             args.model,
             args.custom_encoder_class,
             args.stage_id,
+            args.nixl_send_pool_capacity,
+            args.nixl_send_pool_bytes,
         )
     )
 
