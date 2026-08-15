@@ -18,8 +18,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
-    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
-    WorkerPlacement,
+    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueArrival, QueueSnapshot,
+    ScheduleMode, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
@@ -577,30 +577,35 @@ impl OfflineReplayRouter {
         let pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
-        let (class_index, snapshot) = match self
-            .profile
-            .direct_class_index(pending.policy_class.as_deref())
-        {
-            Some(class_index) => (class_index, None),
-            None => {
-                let snapshot = self.snapshot_for(&pending);
-                (
-                    self.profile.resolve_class_index(
-                        pending.policy_class.as_deref(),
-                        snapshot.uncached_tokens,
-                    ),
-                    Some(snapshot),
-                )
-            }
+        // Only an absent or empty value means "no preference"; every other value
+        // is matched exactly, so a padded name is unknown rather than silently
+        // normalized.
+        let requested_class = pending
+            .policy_class
+            .as_deref()
+            .filter(|name| !name.is_empty());
+        let Some(class_index) = self.profile.resolve_class_index(requested_class) else {
+            anyhow::bail!(
+                "unknown router policy class {:?}",
+                requested_class.unwrap_or_default()
+            );
         };
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
 
         if should_queue {
-            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
-            let priority_jump = pending.priority_jump;
-            let strict_priority = pending.strict_priority;
+            let snapshot = self.snapshot_for(&pending);
+            // Replay arrival and the class-queue admission check share one
+            // virtual instant, so a positive class SLO can only be missed later,
+            // while the request waits. `drain_pending` owns that check.
+            let arrival = QueueArrival::new(
+                decay_now,
+                now_ms.max(0.0) / 1000.0,
+                pending.priority_jump,
+                pending.strict_priority,
+                class,
+            );
             self.pending
                 .enqueue(
                     class_index,
@@ -608,9 +613,7 @@ impl OfflineReplayRouter {
                         .len()
                         .saturating_mul(self.dp_size as usize),
                     snapshot,
-                    now_ms.max(0.0) / 1000.0,
-                    priority_jump,
-                    strict_priority,
+                    arrival,
                     WorkerPlacement::Any,
                     pending,
                 )
@@ -739,9 +742,12 @@ impl OfflineReplayRouter {
     #[cfg(test)]
     pub(crate) fn debug_snapshot(&self, now_ms: f64) -> OfflineRouterSnapshot {
         let decay_now = self.decay_now(now_ms);
-        let mut pending = self
-            .pending
-            .entries()
+        // `PolicyQueueEntry` orders ascending by urgency, so sorting the entries
+        // first lists the snapshot in the order the scheduler would dispatch it.
+        let mut entries = self.pending.entries().collect::<Vec<_>>();
+        entries.sort_unstable();
+        let pending = entries
+            .into_iter()
             .map(|entry| {
                 let mut overlap_blocks_by_worker = entry
                     .payload()
@@ -752,19 +758,13 @@ impl OfflineReplayRouter {
                     .collect::<Vec<_>>();
                 overlap_blocks_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
 
-                (
-                    entry,
-                    OfflinePendingRequestSnapshot {
-                        uuid: entry.payload().uuid,
-                        expected_output_tokens: entry.payload().expected_output_tokens,
-                        overlap_blocks_by_worker,
-                    },
-                )
+                OfflinePendingRequestSnapshot {
+                    uuid: entry.payload().uuid,
+                    expected_output_tokens: entry.payload().expected_output_tokens,
+                    overlap_blocks_by_worker,
+                }
             })
             .collect::<Vec<_>>();
-        pending.sort_unstable_by(|(left_entry, _), (right_entry, _)| {
-            left_entry.cmp(right_entry).reverse()
-        });
 
         let mut active_blocks_by_worker = self
             .slots
@@ -783,7 +783,7 @@ impl OfflineReplayRouter {
         active_tokens_by_worker.sort_unstable_by_key(|(worker_id, _)| *worker_id);
 
         OfflineRouterSnapshot {
-            pending: pending.into_iter().map(|(_, snapshot)| snapshot).collect(),
+            pending,
             active_blocks_by_worker,
             active_tokens_by_worker,
             indexer: self.indexer.debug_snapshot(),
@@ -932,12 +932,29 @@ impl OfflineReplayRouter {
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         let mut admissions = Vec::new();
+        let mut expired = Vec::new();
         loop {
             let active_tokens = self.slots.active_tokens(decay_now);
             let workers = &self.workers_with_configs;
-            let Some(popped) = self.pending.pop_next(|_, class, _| {
-                !Self::all_workers_busy_with(&active_tokens, workers, class)
-            }) else {
+            let popped = self
+                .pending
+                .pop_next(decay_now, &mut expired, |_, class, _| {
+                    !Self::all_workers_busy_with(&active_tokens, workers, class)
+                });
+            // Offline replay has no client to answer, so a missed class deadline
+            // is a configuration error rather than a modeled outcome: silently
+            // dropping the request would desynchronize replay admission counts
+            // from the workload being replayed.
+            if let Some(entry) = expired.pop() {
+                let class = self.profile.class(entry.class_index());
+                anyhow::bail!(
+                    "replayed request {} exceeded the {}ms SLO of router policy class {:?} while queued",
+                    entry.payload().uuid,
+                    class.slo().unwrap_or_default().as_millis(),
+                    class.name,
+                );
+            }
+            let Some(popped) = popped else {
                 break;
             };
             let request = popped.into_payload();
@@ -1041,6 +1058,7 @@ mod tests {
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
         WorkerId,
     };
+    use dynamo_kv_router::scheduling::QueueRejection;
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
     use tempfile::NamedTempFile;
@@ -1381,50 +1399,28 @@ mod tests {
     }
 
     #[test]
-    fn policy_mapping_and_model_selection_use_shared_replay_queue_logic() {
+    fn flat_policy_classes_and_model_selection_use_shared_replay_queue_logic() {
         let path =
             std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
         std::fs::write(
             &path,
             r#"
-default_policy_family: root
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: root
 policy_classes:
   - name: root
-    policy_family: root
-    cache_bucket: all
+    slo_ms: 600000
     quantum: 1
 models:
   replay-model:
-    default_policy_family: latency
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: cached
-      - min_tokens: 32
-        bucket: uncached
+    default_policy_class: latency
     policy_classes:
-      - name: latency_cached
-        policy_family: latency
-        cache_bucket: cached
+      - name: latency
+        slo_ms: 600000
         quantum: 1
         prefill_busy_threshold: 0
         request_queue_limit_per_worker: 1
-      - name: latency_uncached
-        policy_family: latency
-        cache_bucket: uncached
-        quantum: 1
-        prefill_busy_threshold: 0
-        request_queue_limit_per_worker: 0
-      - name: batch_cached
-        policy_family: batch
-        cache_bucket: cached
-        quantum: 4
-        prefill_busy_threshold: 1024
-      - name: batch_uncached
-        policy_family: batch
-        cache_bucket: uncached
+      - name: batch
+        slo_ms: 600000
         quantum: 4
         prefill_busy_threshold: 1024
 "#,
@@ -1449,57 +1445,61 @@ models:
             1
         );
 
-        let mut mapped_batch = request(2, 2);
-        mapped_batch.policy_class = Some("batch".to_string());
+        let mut named_batch = request(2, 2);
+        named_batch.policy_class = Some("batch".to_string());
         assert_eq!(
             router
-                .on_request_arrival(&mapped_batch, None, 0.0)
+                .on_request_arrival(&named_batch, None, 0.0)
                 .unwrap()
                 .admissions
                 .len(),
             1,
-            "the batch family should select batch_uncached and use its higher busy threshold"
+            "an exactly named class must use its own busy threshold"
         );
 
-        let mut cached_latency = request(3, 3);
-        cached_latency.policy_class = Some("latency".to_string());
-        let cached_hashes =
-            ReplayRequestHashes::from_tokens(&cached_latency.tokens, router.block_size);
-        router
-            .on_kv_events(vec![store_event(
-                0,
-                1,
-                cached_hashes.local_block_hashes[0].0,
-                StorageTier::Device,
-            )])
-            .unwrap();
+        let mut implicit_default = request(3, 3);
+        implicit_default.policy_class = None;
         assert!(
             router
-                .on_request_arrival(&cached_latency, Some(cached_hashes.clone()), 0.0)
+                .on_request_arrival(&implicit_default, None, 0.0)
                 .unwrap()
                 .admissions
                 .is_empty(),
-            "the latency family should select latency_cached from observed cache state"
+            "an absent class must use the model profile's default_policy_class"
         );
 
-        let mut ordinary_class_name = request(4, 4);
-        ordinary_class_name.policy_class = Some("latency_cached".to_string());
+        let mut root_class_name = request(4, 4);
+        root_class_name.policy_class = Some("root".to_string());
         let error = router
-            .on_request_arrival(&ordinary_class_name, None, 0.0)
+            .on_request_arrival(&root_class_name, None, 0.0)
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<QueueRejection>().is_none(),
+            "a root-profile class name is unknown to the model profile, not a queue rejection"
+        );
+        assert!(
+            error.to_string().contains("unknown router policy class"),
+            "unexpected error: {error}"
+        );
+
+        let mut over_limit = request(5, 5);
+        over_limit.policy_class = Some("latency".to_string());
+        let error = router
+            .on_request_arrival(&over_limit, None, 0.0)
             .unwrap_err();
         let rejection = error
-            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .downcast_ref::<QueueRejection>()
             .expect("replay should preserve the typed queue rejection");
-        assert_eq!(rejection.policy_class, "latency_uncached");
-        assert_eq!(rejection.current, 0);
-        assert_eq!(rejection.limit, 0);
+        assert_eq!(rejection.policy_class, "latency");
+        assert_eq!(rejection.current, 1);
+        assert_eq!(rejection.limit, 1);
 
         router.add_worker(1).unwrap();
-        let mut scaled_latency = request(5, 3);
+        let mut scaled_latency = request(6, 6);
         scaled_latency.policy_class = Some("latency".to_string());
         assert!(
             router
-                .on_request_arrival(&scaled_latency, Some(cached_hashes.clone()), 0.0)
+                .on_request_arrival(&scaled_latency, None, 0.0)
                 .unwrap()
                 .admissions
                 .is_empty(),
@@ -1508,13 +1508,13 @@ models:
         assert_eq!(router.pending_count(), 2);
 
         router.remove_worker(1).unwrap();
-        let mut rejected_after_shrink = request(6, 3);
+        let mut rejected_after_shrink = request(7, 7);
         rejected_after_shrink.policy_class = Some("latency".to_string());
         let error = router
-            .on_request_arrival(&rejected_after_shrink, Some(cached_hashes), 0.0)
+            .on_request_arrival(&rejected_after_shrink, None, 0.0)
             .unwrap_err();
         let rejection = error
-            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .downcast_ref::<QueueRejection>()
             .expect("worker removal should retain the typed queue rejection");
         assert_eq!(rejection.current, 2);
         assert_eq!(rejection.limit, 1);
@@ -1522,29 +1522,73 @@ models:
     }
 
     #[test]
-    fn replay_cache_bucket_ignores_removed_worker_entries() {
+    /// Replay must resolve a requested class exactly like the live router, so a
+    /// padded name is unknown rather than normalized onto the class it does not
+    /// spell.
+    fn replay_padded_policy_class_name_is_unknown_rather_than_normalized() {
         let path =
             std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
         std::fs::write(
             &path,
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
+default_policy_class: latency
 policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
+  - name: latency
+    slo_ms: 600000
     quantum: 1
     prefill_busy_threshold: 0
-  - name: uncached
-    policy_family: standard
-    cache_bucket: uncached
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        for (uuid, requested) in [(1u128, " latency "), (2, "  ")] {
+            let mut padded = request(uuid, uuid as u32);
+            padded.policy_class = Some(requested.to_string());
+            let error = router
+                .on_request_arrival(&padded, None, 0.0)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("unknown router policy class {requested:?}")),
+                "the error must echo the name the trace actually carried: {error}"
+            );
+        }
+
+        // Only an empty value carries no name, so it means "no preference" and
+        // selects default_policy_class.
+        let mut empty = request(3, 3);
+        empty.policy_class = Some(String::new());
+        router
+            .on_request_arrival(&empty, None, 0.0)
+            .expect("an empty class name must select default_policy_class");
+
+        let mut exact = request(4, 4);
+        exact.policy_class = Some("latency".to_string());
+        router
+            .on_request_arrival(&exact, None, 0.0)
+            .expect("the exact class name must resolve");
+    }
+
+    #[test]
+    fn replay_queue_snapshot_ignores_removed_worker_cache_entries() {
+        let path =
+            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_class: standard
+policy_classes:
+  - name: standard
+    slo_ms: 600000
     quantum: 1
-    prefill_busy_threshold: 1024
+    prefill_busy_threshold: 0
+    cached_token_queue_limit_per_worker: 1
 "#,
         )
         .unwrap();
@@ -1570,15 +1614,20 @@ policy_classes:
         router
             .on_request_arrival(&request(1, 1), None, 0.0)
             .unwrap();
-        let effects = router
-            .on_request_arrival(&target, Some(target_hashes), 0.0)
-            .unwrap();
-        assert_eq!(
-            effects.admissions.len(),
-            1,
-            "cache state from a removed worker must not select the cached queue"
+        assert!(
+            router
+                .on_request_arrival(&target, Some(target_hashes), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
         );
-        assert_eq!(router.pending_count(), 0);
+        // The only cached tokens for `target` live on the removed worker, so the
+        // queue snapshot must record none of them. Counting them would put the
+        // class at its one-token cached cap and reject the next arrival.
+        router
+            .on_request_arrival(&request(3, 3), None, 0.0)
+            .expect("a removed worker's cache must not consume the cached-token cap");
+        assert_eq!(router.pending_count(), 2);
     }
 
     #[test]

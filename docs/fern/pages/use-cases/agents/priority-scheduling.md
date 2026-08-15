@@ -10,6 +10,13 @@ Priority scheduling lets a client mark one request as more important than anothe
 - `nvext.agent_hints.priority` is a soft priority used by router policy scoring and supported backend engines.
 - `nvext.agent_hints.strict_priority` is an unsigned router pending-queue tier. Higher tiers always precede lower tiers.
 
+Both router-queue effects apply only when the router falls back to its synthetic class, which happens
+whenever no configured profile applies to the model being served: `--router-policy-config` omitted, a
+file that defines only `worker_selection`, or a file that defines only `models:` entries and names
+none that match this model. When a configured profile does apply, its policy class orders the queue
+by `(deadline, arrival sequence)` derived from that class's `slo_ms` and ignores both hints. Backend
+engine priority is unaffected either way.
+
 For HTTP requests, send the same values in `x-dynamo-request-priority` and
 `x-dynamo-request-strict-priority`. Header values override the corresponding `nvext.agent_hints`
 fields.
@@ -36,7 +43,7 @@ Priority can affect three different layers. They are configured separately.
 | Layer | What It Controls | Required Configuration | Deep Details |
 |-------|------------------|------------------------|--------------|
 | Frontend API | The user-facing request schema and priority polarity. | Send `priority` for soft router and engine priority, or `strict_priority` for a router-only pending tier. | [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#agent-hints) |
-| Router queue | Which waiting request is dispatched first when the router queue is non-empty. | KV routing plus `--router-queue-threshold` set to a value that actually causes queueing. | [`--router-queue-threshold`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior), [`--router-queue-policy`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior) |
+| Router queue | Which waiting request is dispatched first when the router queue is non-empty. | KV routing plus `--router-queue-threshold` set to a value that actually causes queueing, and no configured policy profile applying to this model. | [`--router-queue-threshold`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior), [`--router-queue-policy`](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior) |
 | Backend engine | Which admitted request the engine schedules first. | Backend-specific priority scheduling flag, such as vLLM `--scheduling-policy priority` or SGLang `--enable-priority-scheduling`. | [vLLM priority scheduling](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md#priority-scheduling), [SGLang priority scheduling](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-scheduling) |
 | KV cache policy | Which cached blocks are retained or evicted first under memory pressure. | Backend-specific cache priority configuration, such as SGLang `--radix-eviction-policy priority`. | [SGLang priority-based KV cache eviction](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-based-kv-cache-eviction) |
 
@@ -46,7 +53,9 @@ These layers are additive. `strict_priority` does not propagate to backend engin
 
 The router queue only matters when requests are held before dispatch. If a request can be routed immediately, there is no pending queue to reorder and the priority hint will not change TTFT at the router layer.
 
-`--router-queue-threshold` controls when the router starts holding requests. A request waits in the router queue while every eligible worker is above the configured threshold. The queue drains when capacity is available, and higher-priority requests are selected according to the queue key:
+`--router-queue-threshold` controls when the router starts holding requests. A request waits in the router queue while every eligible worker is above the configured threshold. The queue drains when capacity is available.
+
+When the synthetic fallback class is in use, higher-priority requests are selected according to the queue key:
 
 ```text
 (strict_priority, configured_policy_key)
@@ -55,6 +64,8 @@ The router queue only matters when requests are held before dispatch. If a reque
 The strict tier is compared first. FCFS, LCFS, or Weighted Shortest Processing Time (WSPT) still computes the secondary key and orders requests within the same tier.
 
 The default policy is `fcfs`, which uses the priority value as a positive arrival-time bump. Higher values move the request earlier in the queue. Negative priority values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come, first-served ordering by sending a negative priority.
+
+When a configured profile applies to this model, neither hint reorders the queue. Each class orders by `(deadline, arrival sequence)`, where the deadline is the request's router arrival plus that class's `slo_ms`. Use the `x-dynamo-meta-policy-class` header to place a request in a tighter-SLO class instead. See [Policy-Class Queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues).
 
 For the flag-level semantics, default value, and backend caveats, see [Router Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#routing-behavior).
 

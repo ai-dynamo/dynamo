@@ -286,8 +286,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-queue-policy" type="string" default="fcfs">
-  Queue scheduling policy. `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average
-  TTFT.
+  Queue scheduling policy for the synthetic fallback class, used when no configured policy profile
+  applies to the model being served. `fcfs` optimizes tail Time To First Token (TTFT); `wspt`
+  optimizes average TTFT. A configured policy class ignores this and orders by its own `slo_ms`
+  deadline.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>wspt</Badge></span>
 
@@ -295,9 +297,14 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
-  `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
-  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/advanced-customizations/custom-worker-selection.mdx).
+  Startup-only YAML for policy-class queues and custom worker-selection instances. It defines flat
+  named classes, one `default_policy_class`, and a required positive `slo_ms` per class; a class
+  maps an exact requested name or the default, orders by `(deadline, arrival sequence)`, and ignores
+  `--router-queue-policy` and per-request priority hints. Profiles resolve as exact model profile,
+  then root profile; when neither applies to the model being served — no config, a config with only
+  `worker_selection`, or a model-only config that does not name this model — `--router-queue-threshold`
+  and `--router-queue-policy` define one synthetic fallback class that keeps the legacy FCFS/WSPT and
+  priority ordering. Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/advanced-customizations/custom-worker-selection.mdx).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>

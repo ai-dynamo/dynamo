@@ -1815,13 +1815,24 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set a numeric value to enable queueing.
-            router_policy_config: Startup-only policy-family and cache-bucket queue
-                YAML path. When omitted, router_queue_threshold and
-                router_queue_policy define one synthetic policy class.
+            router_policy_config: Startup-only policy-class queue YAML path. It
+                defines flat named policy classes, one default_policy_class, and
+                a required positive slo_ms per class; each class orders by
+                (deadline, arrival sequence) and ignores router_queue_policy and
+                per-request priority hints. Profiles resolve as exact model
+                profile, then root profile; when neither applies to the model
+                being served — no config, a config with only worker_selection, or
+                a model-only config that does not name this model —
+                router_queue_threshold and router_queue_policy define one
+                synthetic fallback class that keeps the legacy FCFS/WSPT and
+                priority ordering.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
-            router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
+            router_queue_policy: Scheduling policy for the synthetic fallback class,
+                used when no configured policy profile applies to the model being
+                served (default: "fcfs").
+                A configured policy class ignores this and orders by its own slo_ms deadline.
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
@@ -2956,9 +2967,9 @@ class KvRouter:
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
             cache_namespace: Optional cache namespace used in block hash computation.
-            policy_class: Requested policy family, or an exact explicit class.
-                          Missing, unknown, and ordinary physical-class names use the
-                          configured default family before cache-bucket resolution.
+            policy_class: Exact name of a configured router policy class. Omit it
+                          to use the profile's default_policy_class; a name the
+                          profile does not configure is rejected.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:

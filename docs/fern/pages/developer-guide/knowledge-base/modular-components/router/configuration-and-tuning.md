@@ -23,44 +23,77 @@ For the routing cost model and worker-selection behavior, see
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
-- `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only YAML path for policy-class queues and custom worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx) for the linked-policy schema.
+- `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. When the synthetic fallback class is in use, `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier and `nvext.agent_hints.priority` adjusts ordering within the configured policy; a configured policy class ignores both and orders by its `slo_ms` deadline. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-policy`: Scheduling policy for the synthetic fallback class, used when no configured profile applies to this model: `fcfs` (default) or `wspt`.
+- `--router-policy-config`: Startup-only YAML path for policy-class queues and custom worker-selection instances. It defines flat named classes, one `default_policy_class`, and a required positive `slo_ms` per class; a class maps an exact requested name or the default, orders by `(deadline, arrival sequence)`, and ignores `--router-queue-policy` and per-request priority hints. When no configured profile applies to this model, `--router-queue-threshold` and `--router-queue-policy` define one synthetic fallback class that keeps the legacy FCFS/WSPT and priority ordering. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
-`fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
-`wspt` orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
-`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. Both the CLI and policy-class
-YAML accept only `fcfs` and `wspt`.
+`--router-queue-policy` applies to the synthetic fallback class, which the router uses whenever no
+configured profile applies to the model it is serving. That is the case when `--router-policy-config`
+is omitted, when the file defines only `worker_selection`, and also when the file defines only
+`models:` entries and none of them names this model. See
+[Policy-Class Queues](#policy-class-queues) for the full resolution order. `fcfs` orders by adjusted arrival time
+(`priority_jump - arrival_offset`) and optimizes tail TTFT. `wspt` orders by
+`(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
+`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. The CLI accepts only `fcfs`
+and `wspt`. For that fallback class the complete pending-queue key is
+`(strict_priority, policy_key)`: higher strict tiers always win, and the selected policy orders
+requests within a tier.
 
-For each policy, the complete pending-queue key is
-`(strict_priority, policy_key)`. Higher strict tiers always win; the selected
-policy orders requests within a tier.
+Configured policy classes do not use this key. They order by SLO deadline; see
+[Policy-Class Queues](#policy-class-queues).
 
 ### Policy-Class Queues
 
-YAML profiles define a matrix from client-requested policy family and
-router-observed cache bucket to a physical policy-class queue. Clients send the
-requested family through `x-dynamo-meta-policy-class`. The router computes
-uncached ISL as `raw ISL - best cached tokens across eligible workers`, selects
-the highest matching `uncached_isl_buckets` floor, and resolves the
-family/bucket pair to one configured class.
+YAML profiles define a flat list of named policy classes and one
+`default_policy_class`. Clients select a class by exact name through the
+`x-dynamo-meta-policy-class` header. A request that sends no class name, or an
+empty one, uses `default_policy_class`. A request that names a class this
+profile does not configure is rejected with HTTP 400 and
+`unknown router policy class`, so a client typo cannot silently run under
+another class's SLO and DRR weight.
 
-An exact header matching a class with neither `policy_family` nor
-`cache_bucket` selects that explicit class directly and intentionally bypasses
-cache-derived classification. A recognized family selects that family.
-Missing, empty, unknown, or ordinary physical-class names use
-`default_policy_family`, so a client cannot bypass cache bucketing by naming a
-matrix class directly.
+Every class configures one required, positive `slo_ms`. The router captures one
+monotonic arrival timestamp when it accepts the request and computes that
+request's deadline once, as `arrival + slo_ms`. The same deadline is carried
+through deferral, wake-up, queue insertion, and dispatch; it is never recomputed
+from a later clock reading, so time spent waiting always counts against the SLO.
 
-Each class owns a shared FCFS or WSPT heap plus one heap for each exact-worker
-lane, along with its busy thresholds, queue limits, quantum, deficit, and
-counters. Arbitration compares the shared head with the currently dispatchable
-exact-worker lane heads. Absolute and fractional busy thresholds use OR
-semantics. A class queues only when at least one threshold is configured and
-every eligible worker is busy for that class, but a new arrival cannot bypass
-an existing backlog in the same class.
+Each class owns exactly one runnable queue, ordered by `(deadline, arrival
+sequence)`. The earliest deadline is served first, and requests that arrived at
+the same instant are served first-in-first-out. Because a class SLO is fixed,
+that makes a class first-come-first-served. Only the head of a class is tested
+for dispatch, so a head that cannot run yet, such as one pinned to a busy
+worker, holds its class's line until it can; deficit round robin keeps the other
+classes moving. Per-request `strict_priority` and `priority` hints do not
+reorder a configured class.
+
+The router rejects work whose deadline has already passed rather than
+dispatching it, at three points:
+
+- **Admission**, immediately before the request enters queue storage. Requests
+  dispatched without queueing never reach this check.
+- **Deferred wake-up**, when a custom queue-admission policy releases work whose
+  deadline passed while it was parked.
+- **Dispatch**, at each deficit-round-robin poll of a class, which sheds every
+  expired head until the next head is inside its deadline or the class queue is
+  empty.
+
+Expired work is rejected with HTTP 529 and a structured body naming the class,
+the stage, the class SLO, and how far past the deadline it was. It never spends
+class deficit and never advances the DRR cursor. Each rejection increments
+`dynamo_frontend_router_queue_deadline_expired_total` with a `stage` label of
+`admission`, `deferred_wake`, or `dispatch`.
+
+Absolute and fractional busy thresholds use OR semantics. A class queues on
+busy-threshold pressure only when at least one threshold is configured and every
+eligible worker is busy for that class, but a new arrival cannot bypass an
+existing backlog in the same class. A class with an `slo_ms` and no busy
+threshold never queues for capacity; it can still hold work when a custom
+[queue admission policy](../../../advanced-customizations/custom-worker-selection.mdx)
+returns `Defer`, and that deferred work is checked against the same deadline
+when the policy wakes it.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
@@ -71,22 +104,28 @@ so the request that crosses a limit is accepted and the next queued request is
 rejected with HTTP 529 and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
 DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
-and uncached snapshots remain unchanged for limits, WSPT, counters, and later
+and uncached snapshots remain unchanged for limits, counters, and later
 dispatch. For the ring cursor, deficit charging, weighted bursts, and bounded
 bulk-credit behavior, see
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
 
-Every matrix class must identify both `policy_family` and `cache_bucket`; a
-class with neither field is explicit, while specifying only one is invalid.
-Every configured family must have exactly one physical class for every bucket.
-Bucket floors begin at zero and increase strictly.
-Class, family, and bucket names use metric-safe identifiers.
+Every class must set a `name`, a positive `slo_ms`, and a positive `quantum`.
+Class names are unique within a profile and use metric-safe identifiers.
+`default_policy_class` must name a class configured in the same profile.
 
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root
-profile; fields, buckets, families, and classes are not inherited. With no
-YAML, the router uses a synthetic `default` class and does not compute cache
-state for classification. The synthetic class queues only when
+profile; no field or class is inherited, so a class name that exists only in the
+root profile is unknown to a model that defines its own classes.
+
+When neither step matches, the router falls back to a synthetic `default` class.
+That happens with no YAML at all, with a YAML that defines only
+`worker_selection`, and — importantly — with a YAML that defines only `models:`
+entries when the model being served matches none of them. In every one of those
+cases the synthetic class has no SLO, keeps its `--router-queue-policy` and
+strict-priority ordering, never expires work, and ignores the
+`x-dynamo-meta-policy-class` header. Add a root profile if you want every model
+to be covered by configured classes. That fallback class queues only when
 `--router-queue-threshold` is set. See the tested
 [sample policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policy-class-queues.yaml).
 
@@ -99,20 +138,22 @@ python -m dynamo.frontend \
 For a minimal two-class walkthrough showing how one request class can receive
 a larger service share without starving another, see
 [Prioritize Premium Requests with Policy Classes](deficit-round-robin.md#prioritize-premium-requests-with-policy-classes).
+For the matching walkthrough of a queued request rejected once its class
+objective passes, see
+[Reject Late Work with a Class SLO](deficit-round-robin.md#reject-late-work-with-a-class-slo).
 
-The previous missing-ISL global admission cap is removed. Cache-derived bucket
-selection now resolves directly to an ordinary policy class, and that class
-owns the queue threshold, ordering, DRR weight, counters, and limits. There is
-no separate first-stage admission queue or global cross-class cap.
+The previous missing-ISL global admission cap is removed. A class owns the queue
+threshold, ordering, SLO, DRR weight, counters, and limits. There is no separate
+first-stage admission queue or global cross-class cap.
 
 This is intentionally not behavior preserving. Class limits are worker-scaled
 and class-local rather than global; rejection returns the structured
 policy-class HTTP 529 response rather than the previous overload 429 path; and
-it does not exclude the entire router instance. The previous flat
-`default_policy_class` and `uncached_isl_policy_class_tiers` schema is not
-accepted, and ordinary physical classes are no longer direct header
-overrides. The sample is a Baseten-oriented continuing-session starting point,
-not a compatibility profile.
+it does not exclude the entire router instance. The `default_policy_family`,
+`uncached_isl_buckets`, `policy_family`, `cache_bucket`, and per-class
+`queue_policy` fields are not accepted: a profile names its classes directly and
+each one sets `slo_ms`. The sample is a Baseten-oriented continuing-session
+starting point, not a compatibility profile.
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 
@@ -331,7 +372,7 @@ The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`
 
 Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config; see [AIC Prefill Load Model](#aic-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
 
-Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
+Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT. Both apply only to the synthetic fallback class; a configured class orders by its own `slo_ms` deadline instead.
 
 ## Prometheus Metrics
 

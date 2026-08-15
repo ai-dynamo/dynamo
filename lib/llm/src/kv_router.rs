@@ -258,7 +258,17 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
-fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
+pub(crate) fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
+    // A policy class shedding work whose SLO deadline passed is admission
+    // control, like a queue-limit rejection, so it travels the same way: the
+    // typed value stays at the head of the chain and the HTTP boundary turns it
+    // into the same structured overload response. Retrying elsewhere cannot
+    // recover time that has already passed, and a bare typed error is not
+    // migratable.
+    if let scheduling::KvSchedulerError::QueueDeadlineExceeded(expiry) = error {
+        return expiry.into();
+    }
+
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
     // would just bounce the request around. A filter rejection is unavailable,
@@ -271,6 +281,10 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
             (ErrorType::ResourceExhausted, true)
         }
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
+        // The client named a policy class this router does not configure.
+        scheduling::KvSchedulerError::UnknownPolicyClass { .. } => {
+            (ErrorType::InvalidArgument, false)
+        }
         _ => return error.into(),
     };
 

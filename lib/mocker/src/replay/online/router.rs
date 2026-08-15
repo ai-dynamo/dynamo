@@ -593,19 +593,14 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: latency
 policy_classes:
   - name: latency
-    policy_family: latency
-    cache_bucket: all
+    slo_ms: 600000
     quantum: 1
     prefill_busy_threshold: 0
   - name: batch
-    policy_family: batch
-    cache_bucket: all
+    slo_ms: 600000
     quantum: 4
     prefill_busy_threshold: 1024
 "#,

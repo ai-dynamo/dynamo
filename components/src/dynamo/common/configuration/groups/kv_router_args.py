@@ -417,10 +417,16 @@ class KvRouterArgGroup(ArgGroup):
             default=None,
             help=(
                 "KV Router: Startup-only YAML configuration for policy-class queues "
-                "and custom worker-selection instances. "
-                "When omitted, router_queue_threshold and router_queue_policy define "
-                "one synthetic policy class; queueing remains disabled unless "
-                "router_queue_threshold is set."
+                "and custom worker-selection instances. Defines flat named classes, "
+                "one default_policy_class, and a required positive slo_ms per class; "
+                "a class orders by (deadline, arrival sequence) and ignores "
+                "--router-queue-policy and per-request priority hints. "
+                "Profiles resolve as exact model profile, then root profile; when "
+                "neither applies to the model being served — no config, a config with "
+                "only worker_selection, or a model-only config that does not name this "
+                "model — router_queue_threshold and router_queue_policy define one "
+                "synthetic fallback class that keeps the legacy FCFS/WSPT and priority "
+                "ordering. Queueing remains disabled unless router_queue_threshold is set."
             ),
             arg_type=str,
         )
@@ -442,9 +448,11 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_QUEUE_POLICY",
             default="fcfs",
             help=(
-                "KV Router: Scheduling policy for the router queue. "
+                "KV Router: Scheduling policy for the synthetic fallback class, used "
+                "when no configured policy profile applies to the model being served. "
                 "'fcfs' (default): first-come first-served with priority bumps — optimizes tail TTFT. "
-                "'wspt': weighted shortest processing time (Smith's rule) — optimizes average TTFT."
+                "'wspt': weighted shortest processing time (Smith's rule) — optimizes average TTFT. "
+                "Configured policy classes ignore this and order by their own slo_ms deadline."
             ),
             arg_type=str,
             choices=["fcfs", "wspt"],

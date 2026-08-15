@@ -317,7 +317,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Router queue metrics
 
-The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, which is the class the request was scheduled under.
 
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
   Requests pending in the router scheduler queue.
@@ -333,6 +333,10 @@ The frontend registers these metrics when queueing is enabled by `--router-queue
 
 <ParamField path="dynamo_frontend_router_queue_backpressure_total" type="counter">
   Queue rejections by configured limit reason. Also labeled by `reason`.
+</ParamField>
+
+<ParamField path="dynamo_frontend_router_queue_deadline_expired_total" type="counter">
+  Requests rejected because their policy class SLO deadline passed before they could be dispatched. Also labeled by `stage`.
 </ParamField>
 
 ### KV indexer metrics

@@ -4,6 +4,7 @@
 pub mod config;
 mod filter;
 mod local;
+mod min_max_heap;
 pub mod overlap;
 pub mod overlap_refresh;
 pub mod policy;
@@ -27,11 +28,12 @@ pub use overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, TieredOverlapRefresher,
 };
 pub use policy_config::{
-    PolicyClassConfig, PolicyProfile, RouterPolicyConfig, RouterPolicyConfigError,
-    WorkerSelectionConfig, WorkerSelectionInstance,
+    PolicyClassConfig, PolicyClassOrdering, PolicyProfile, RouterPolicyConfig,
+    RouterPolicyConfigError, WorkerSelectionConfig, WorkerSelectionInstance,
 };
 pub use policy_queue::{
-    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
+    DeadlineStage, PolicyQueue, PolicyQueueEntry, QueueArrival, QueueDeadlineExceeded,
+    QueueLimitKind, QueueRejection, QueueSnapshot,
 };
 pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,

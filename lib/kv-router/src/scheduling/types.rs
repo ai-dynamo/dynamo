@@ -18,7 +18,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::router_hint::RouterHintRootCandidates;
-use crate::scheduling::policy_queue::QueueRejection;
+use crate::scheduling::policy_queue::{QueueDeadlineExceeded, QueueRejection};
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -71,6 +71,18 @@ pub enum KvSchedulerError {
 
     #[error(transparent)]
     QueueRejected(#[from] QueueRejection),
+
+    /// The request could not be scheduled inside its policy class's SLO, so the
+    /// router shed it instead of dispatching work that had already missed its
+    /// deadline.
+    #[error(transparent)]
+    QueueDeadlineExceeded(#[from] QueueDeadlineExceeded),
+
+    /// Request metadata named a policy class this profile does not configure.
+    /// Serving it under the default class would hide a client typo behind
+    /// another class's SLO and quantum.
+    #[error("unknown router policy class {policy_class:?}")]
+    UnknownPolicyClass { policy_class: String },
 
     #[error("all eligible workers are overloaded")]
     AllEligibleWorkersOverloaded,

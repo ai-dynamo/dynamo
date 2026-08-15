@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+default_policy_class: standard
+# The two class configurations differ only in `slo_ms`; no other class
+# configuration field differs, so quantum, busy threshold, and queue limit are
+# identical.
+# `prefill_busy_threshold: 0` uses a strict comparison, so the worker counts as
+# busy as soon as it holds any active prefill token. One long request therefore
+# forces every later arrival into its class queue.
+# The queue limits are far above the two requests this scenario sends, so a
+# rejection can only be a deadline expiry, never a queue-limit rejection.
+policy_classes:
+  - name: standard
+    # Ten times the other class, and the blocking request is dispatched without
+    # queueing, so no expiry is expected here.
+    slo_ms: 30000
+    quantum: 512
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 32
+  - name: latency
+    # Short enough that a request queued behind the blocker cannot begin
+    # service before this deadline passes.
+    slo_ms: 3000
+    quantum: 512
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 32

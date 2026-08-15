@@ -93,9 +93,9 @@ Mooncake-style JSONL traces contain one request per line. A basic row accepts:
 | `input_length` or `input_tokens` | Input token count |
 | `output_length` or `output_tokens` | Output token count |
 | `hash_ids` | Prefix-block identifiers from the source trace |
-| `priority` | Optional signed soft-priority hint |
-| `strict_priority` | Optional unsigned queue tier; larger values run first |
-| `policy_class` | Optional requested policy family or exact explicit class |
+| `priority` | Optional signed soft-priority hint; applies only when no configured policy profile applies to the replayed model |
+| `strict_priority` | Optional unsigned queue tier, larger values run first; applies only when no configured policy profile applies to the replayed model |
+| `policy_class` | Optional exact name of a configured router policy class; omit it to use `default_policy_class` |
 
 Example:
 
@@ -216,7 +216,7 @@ fall back to `MockEngineArgs::default()` and `KvRouterConfig::default()`.
 </ParamField>
 
 <ParamField path="--router-policy-config" type="path" default="null">
-  Startup-only policy-family and cache-bucket queue YAML. Overrides `router_policy_config` inside
+  Startup-only policy-class queue YAML. Overrides `router_policy_config` inside
   `--router-config`. When omitted, DynoSim checks `DYN_ROUTER_POLICY_CONFIG`.
 </ParamField>
 
@@ -225,10 +225,10 @@ fall back to `MockEngineArgs::default()` and `KvRouterConfig::default()`.
   used.
 </ParamField>
 
-Requests can set `policy_class` in Mooncake JSONL rows. A recognized policy family combines with the
-router-observed uncached Input Sequence Length (ISL) bucket to select a physical queue. An exact
-explicit class bypasses cache bucketing. Missing, unknown, and ordinary physical-class names use the
-selected profile's `default_policy_family`. For the YAML schema and queue behavior, see
+Requests can set `policy_class` in Mooncake JSONL rows. The value names a policy class in the
+selected profile exactly. A row that sets no class uses the profile's `default_policy_class`, and a
+row naming a class the profile does not configure fails the replay run. For the YAML schema and
+queue behavior, see
 [Router Configuration](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues).
 
 ### Engine-timing AIC fields (engine-args JSON)

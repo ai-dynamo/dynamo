@@ -331,25 +331,46 @@ where
     }
 
     fn observe_schedule_result(&self, response: &Result<SchedulingResponse, KvSchedulerError>) {
-        if let Err(KvSchedulerError::QueueRejected(rejection)) = response
-            && let Some(metrics) = self
-                .queue_metric_indices
-                .get(&rejection.policy_class)
-                .and_then(|index| self.queue_metrics.get(*index))
-        {
-            match rejection.limit_kind {
-                dynamo_kv_router::scheduling::QueueLimitKind::Requests => {
-                    metrics.request_limit_rejections.inc();
-                }
-                dynamo_kv_router::scheduling::QueueLimitKind::RawIslTokens => {
-                    metrics.raw_isl_limit_rejections.inc();
-                }
-                dynamo_kv_router::scheduling::QueueLimitKind::CachedTokens => {
-                    metrics.cached_token_limit_rejections.inc();
+        match response {
+            Err(KvSchedulerError::QueueRejected(rejection)) => {
+                if let Some(metrics) = self.class_metrics(&rejection.policy_class) {
+                    match rejection.limit_kind {
+                        dynamo_kv_router::scheduling::QueueLimitKind::Requests => {
+                            metrics.request_limit_rejections.inc();
+                        }
+                        dynamo_kv_router::scheduling::QueueLimitKind::RawIslTokens => {
+                            metrics.raw_isl_limit_rejections.inc();
+                        }
+                        dynamo_kv_router::scheduling::QueueLimitKind::CachedTokens => {
+                            metrics.cached_token_limit_rejections.inc();
+                        }
+                    }
                 }
             }
+            Err(KvSchedulerError::QueueDeadlineExceeded(expiry)) => {
+                if let Some(metrics) = self.class_metrics(&expiry.policy_class) {
+                    match expiry.stage {
+                        dynamo_kv_router::scheduling::DeadlineStage::Admission => {
+                            metrics.admission_deadline_expiries.inc();
+                        }
+                        dynamo_kv_router::scheduling::DeadlineStage::DeferredWake => {
+                            metrics.deferred_wake_deadline_expiries.inc();
+                        }
+                        dynamo_kv_router::scheduling::DeadlineStage::Dispatch => {
+                            metrics.dispatch_deadline_expiries.inc();
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         self.update_queue_metrics();
+    }
+
+    fn class_metrics(&self, policy_class: &str) -> Option<&RouterQueueMetricHandles> {
+        self.queue_metric_indices
+            .get(policy_class)
+            .and_then(|index| self.queue_metrics.get(*index))
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.

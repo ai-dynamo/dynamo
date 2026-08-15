@@ -104,24 +104,22 @@ The router observes request admission, prefill completion, and sequence release.
 prompt-side load from token counts or an AIConfigurator timing model. These estimates influence
 worker selection but do not replace the engine scheduler's own queue and KV-cache behavior.
 
-Policy-class replay uses the same policy-family and cache-bucket model as the live router:
+Policy-class replay uses the same flat named classes as the live router:
 
 ```mermaid
 flowchart LR
     R["Replay request"] --> C{"policy_class"}
-    C -->|Exact explicit class| Q["Physical policy queue"]
-    C -->|Known family| B["Observed uncached-ISL bucket"]
-    C -->|Missing or unknown| F["default_policy_family"]
-    F --> B
-    B --> Q
+    C -->|Configured class name| Q["Policy class queue"]
+    C -->|Absent| F["default_policy_class"]
+    C -->|Unconfigured name| E["Rejected"]
+    F --> Q
     Q --> D["Deficit round-robin dispatch"]
 ```
 
 The replay CLI loads the startup-only policy YAML, selects an exact model profile when `--model-name`
-is set, and otherwise uses the root profile. A recognized family combines with the router-observed
-uncached Input Sequence Length (ISL) bucket. An exact explicit class bypasses bucketing. Ordinary
-physical-class names do not bypass classification; they fall back to the selected profile's default
-family.
+is set, and otherwise uses the root profile. Each class holds one queue ordered by its fixed
+`slo_ms` deadline. Replay has no client to answer, so a queued request that outlives its class SLO
+fails the run rather than being silently dropped.
 
 ## Planner simulation adapter
 

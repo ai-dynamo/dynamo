@@ -547,14 +547,17 @@ pub fn register_worker_load_metrics(
 // Router queue metrics (gauge)
 // ---------------------------------------------------------------------------
 
-/// Gauge tracking the number of requests pending in the router's scheduler queue.
-/// Labeled by `worker_type` ("prefill" or "decode") to distinguish queues in
-/// disaggregated mode. At most 2 label combinations.
+/// Router scheduler queue state and admission rejections.
+///
+/// Every series is labeled by `model`, `worker_type` ("prefill" or "decode"),
+/// and `policy_class`, so cardinality is bounded by the configured policy
+/// profile rather than by request input.
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
     pub pending_isl_tokens: IntGaugeVec,
     pub pending_cached_tokens: IntGaugeVec,
     pub backpressure_total: IntCounterVec,
+    pub deadline_expired_total: IntCounterVec,
 }
 
 #[derive(Clone)]
@@ -565,10 +568,13 @@ pub struct RouterQueueMetricHandles {
     pub request_limit_rejections: IntCounter,
     pub raw_isl_limit_rejections: IntCounter,
     pub cached_token_limit_rejections: IntCounter,
+    pub admission_deadline_expiries: IntCounter,
+    pub deferred_wake_deadline_expiries: IntCounter,
+    pub dispatch_deadline_expiries: IntCounter,
 }
 
-pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
-    LazyLock::new(|| RouterQueueMetrics {
+pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> = LazyLock::new(|| {
+    RouterQueueMetrics {
         pending_requests: IntGaugeVec::new(
             Opts::new(
                 format!(
@@ -608,7 +614,19 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
         )
         .expect("Failed to create router_queue_backpressure_total counter"),
-    });
+        deadline_expired_total: IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "{}_router_queue_deadline_expired_total",
+                    name_prefix::FRONTEND
+                ),
+                "Total number of requests rejected because their router policy class SLO deadline passed",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "stage"],
+        )
+        .expect("Failed to create router_queue_deadline_expired_total counter"),
+    }
+});
 
 impl RouterQueueMetrics {
     pub fn handles(
@@ -622,6 +640,15 @@ impl RouterQueueMetrics {
             self.backpressure_total
                 .with_label_values(&[model, worker_type, policy_class, reason])
         };
+        // Stage label values mirror `DeadlineStage`'s serde/Display form.
+        let expiry = |stage| {
+            self.deadline_expired_total.with_label_values(&[
+                model,
+                worker_type,
+                policy_class,
+                stage,
+            ])
+        };
         RouterQueueMetricHandles {
             pending_requests: self.pending_requests.with_label_values(&queue_labels),
             pending_isl_tokens: self.pending_isl_tokens.with_label_values(&queue_labels),
@@ -629,6 +656,9 @@ impl RouterQueueMetrics {
             request_limit_rejections: rejection("request_limit"),
             raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
             cached_token_limit_rejections: rejection("cached_token_limit"),
+            admission_deadline_expiries: expiry("admission"),
+            deferred_wake_deadline_expiries: expiry("deferred_wake"),
+            dispatch_deadline_expiries: expiry("dispatch"),
         }
     }
 }
@@ -643,6 +673,7 @@ pub fn register_router_queue_metrics(
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     registry.register(Box::new(m.pending_cached_tokens.clone()))?;
     registry.register(Box::new(m.backpressure_total.clone()))?;
+    registry.register(Box::new(m.deadline_expired_total.clone()))?;
     Ok(())
 }
 
@@ -1240,6 +1271,17 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
             )
             .unwrap(),
+            deadline_expired_total: IntCounterVec::new(
+                Opts::new(
+                    format!(
+                        "{}_router_queue_deadline_expired_total",
+                        name_prefix::FRONTEND
+                    ),
+                    "Total number of requests rejected because their router policy class SLO deadline passed",
+                ),
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "stage"],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.pending_requests.clone()))
@@ -1253,11 +1295,15 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         registry
             .register(Box::new(metrics.backpressure_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.deadline_expired_total.clone()))
+            .unwrap();
 
         let handles = metrics.handles("model", "decode", "default");
         handles.pending_requests.set(5);
         handles.pending_isl_tokens.set(1024);
         handles.pending_cached_tokens.set(512);
+        handles.dispatch_deadline_expiries.inc();
 
         let output = gather_pef(&registry);
         let expected = "\
@@ -1266,6 +1312,11 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"cached_token_limit\",worker_type=\"decode\"} 0
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"raw_isl_token_limit\",worker_type=\"decode\"} 0
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"request_limit\",worker_type=\"decode\"} 0
+# HELP dynamo_frontend_router_queue_deadline_expired_total Total number of requests rejected because their router policy class SLO deadline passed
+# TYPE dynamo_frontend_router_queue_deadline_expired_total counter
+dynamo_frontend_router_queue_deadline_expired_total{model=\"model\",policy_class=\"default\",stage=\"admission\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_deadline_expired_total{model=\"model\",policy_class=\"default\",stage=\"deferred_wake\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_deadline_expired_total{model=\"model\",policy_class=\"default\",stage=\"dispatch\",worker_type=\"decode\"} 1
 # HELP dynamo_frontend_router_queue_pending_cached_tokens Estimated cached tokens for requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_cached_tokens gauge
 dynamo_frontend_router_queue_pending_cached_tokens{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 512

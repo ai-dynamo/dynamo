@@ -1076,14 +1076,10 @@ async fn threshold_free_policy_does_not_require_max_num_batched_tokens() {
     std::fs::write(
         policy_file.path(),
         r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: standard
 policy_classes:
   - name: standard
-    policy_family: standard
-    cache_bucket: all
+    slo_ms: 10000
     quantum: 1
 "#,
     )
@@ -1321,22 +1317,15 @@ async fn standalone_policy_classes_apply_header_thresholds_and_structured_reject
     std::fs::write(
         policy_file.path(),
         r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: latency
 policy_classes:
   - name: latency
-    policy_family: latency
-    cache_bucket: all
-    queue_policy: fcfs
+    slo_ms: 1000
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 0
   - name: batch
-    policy_family: batch
-    cache_bucket: all
-    queue_policy: wspt
+    slo_ms: 600000
     quantum: 4
     prefill_busy_threshold: 1024
 "#,

@@ -68,8 +68,13 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
         KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
+        // Both queue-admission sheds speak with one voice: the router declined
+        // to serve this request now, and the body carries the typed reason.
+        KvSchedulerError::QueueRejected(_) | KvSchedulerError::QueueDeadlineExceeded(_) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        KvSchedulerError::PinnedWorkerNotAllowed { .. }
+        | KvSchedulerError::UnknownPolicyClass { .. } => StatusCode::BAD_REQUEST,
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
     }
 }
@@ -86,12 +91,21 @@ fn sequence_error_status(error: &SequenceError) -> StatusCode {
 
 impl IntoResponse for SelectionError {
     fn into_response(self) -> Response {
-        if let Self::Scheduler(KvSchedulerError::QueueRejected(rejection)) = &self {
+        let details = match &self {
+            Self::Scheduler(KvSchedulerError::QueueRejected(rejection)) => {
+                serde_json::to_value(rejection).ok()
+            }
+            Self::Scheduler(KvSchedulerError::QueueDeadlineExceeded(expiry)) => {
+                serde_json::to_value(expiry).ok()
+            }
+            _ => None,
+        };
+        if let Some(details) = details {
             return (
                 self.status(),
                 Json(serde_json::json!({
                     "error": self.to_string(),
-                    "details": rejection,
+                    "details": details,
                 })),
             )
                 .into_response();

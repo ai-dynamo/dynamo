@@ -241,6 +241,23 @@ fn find_queue_rejection_in_chain<'a>(
     None
 }
 
+/// A router policy class shedding work whose SLO deadline passed is admission
+/// control, like a queue limit rejection, so it gets the same structured body.
+fn find_queue_deadline_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_kv_router::scheduling::QueueDeadlineExceeded> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(expiry) =
+            error.downcast_ref::<dynamo_kv_router::scheduling::QueueDeadlineExceeded>()
+        {
+            return Some(expiry);
+        }
+        current = error.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -428,6 +445,20 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    metric_error_type: None,
+                }),
+            );
+        }
+
+        if let Some(expiry) = find_queue_deadline_in_chain(err.as_ref()) {
+            let code = overload_status_code();
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: expiry.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                    details: serde_json::to_value(expiry).ok().map(Box::new),
                     metric_error_type: None,
                 }),
             );
@@ -5114,6 +5145,78 @@ mod tests {
                 "current": 2048,
                 "limit": 1024,
             }))
+        );
+    }
+
+    #[test]
+    fn queue_deadline_expiry_maps_to_structured_http_529() {
+        use dynamo_kv_router::scheduling::{DeadlineStage, QueueDeadlineExceeded};
+
+        let expiry = QueueDeadlineExceeded {
+            policy_class: "latency".to_string(),
+            stage: DeadlineStage::Dispatch,
+            slo_ms: 1_000,
+            overdue_ms: 250,
+        };
+        let response = ErrorMessage::from_anyhow(anyhow::Error::new(expiry), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
+        assert_eq!(
+            response.1.details.as_deref(),
+            Some(&serde_json::json!({
+                "policy_class": "latency",
+                "stage": "dispatch",
+                "slo_ms": 1_000,
+                "overdue_ms": 250,
+            }))
+        );
+    }
+
+    #[test]
+    fn scheduler_deadline_error_keeps_its_typed_detail_through_mapping() {
+        use dynamo_kv_router::scheduling::{
+            DeadlineStage, KvSchedulerError, QueueDeadlineExceeded,
+        };
+
+        let error = crate::kv_router::map_scheduler_error(KvSchedulerError::QueueDeadlineExceeded(
+            QueueDeadlineExceeded {
+                policy_class: "batch".to_string(),
+                stage: DeadlineStage::DeferredWake,
+                slo_ms: 5_000,
+                overdue_ms: 12,
+            },
+        ));
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(
+            response.1.details.as_deref(),
+            Some(&serde_json::json!({
+                "policy_class": "batch",
+                "stage": "deferred_wake",
+                "slo_ms": 5_000,
+                "overdue_ms": 12,
+            })),
+            "the scheduler-to-HTTP mapping must preserve the typed expiry detail"
+        );
+    }
+
+    #[test]
+    fn unknown_policy_class_maps_to_http_400() {
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+
+        let error = crate::kv_router::map_scheduler_error(KvSchedulerError::UnknownPolicyClass {
+            policy_class: "typo".to_string(),
+        });
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0.as_u16(), 400);
+        assert!(
+            response.1.message.contains("unknown router policy class"),
+            "{}",
+            response.1.message
         );
     }
 

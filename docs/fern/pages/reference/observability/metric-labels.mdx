@@ -86,11 +86,15 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="policy_class" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved physical scheduler queue. With policy-family or cache-bucket configuration, this can differ from the family requested by the client.
+  `[Shared]` On `dynamo_frontend_router_queue_*` — the scheduler queue the request was placed in. This is the class named by the client, or `default_policy_class` when the client named none. Deployments without policy classes report the synthetic `default` class.
 </ParamField>
 
 <ParamField path="reason" type="string">
   `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request.
+</ParamField>
+
+<ParamField path="stage" type="string">
+  `[Shared]` On `dynamo_frontend_router_queue_deadline_expired_total` — where the missed class deadline was detected: `admission`, `deferred_wake`, or `dispatch`.
 </ParamField>
 
 <ParamField path="migration_type" type="string">

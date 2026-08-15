@@ -70,8 +70,8 @@ Before scoring, the router filters candidates by request allow-lists, exact pins
 To replace only the scoring and picking stage with statically linked Rust code, see [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
 
 When requests wait in policy-class queues, weighted
-[Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the
-physical class to dispatch before worker scoring runs.
+[Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the class
+to dispatch from before worker scoring runs.
 
 ## Using the KV Cache Router
 

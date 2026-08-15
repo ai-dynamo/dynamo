@@ -441,25 +441,17 @@ mod tests {
             r#"
 models:
   queueing-model:
-    default_policy_family: standard
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
+    default_policy_class: queued
     policy_classes:
       - name: queued
-        policy_family: standard
-        cache_bucket: all
+        slo_ms: 30000
         quantum: 1
         prefill_busy_threshold: 1
   threshold-free-model:
-    default_policy_family: standard
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
+    default_policy_class: direct
     policy_classes:
       - name: direct
-        policy_family: standard
-        cache_bucket: all
+        slo_ms: 30000
         quantum: 1
 "#,
         )

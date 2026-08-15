@@ -665,7 +665,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--router-policy-config",
         default=os.environ.get("DYN_ROUTER_POLICY_CONFIG"),
         help=(
-            "startup-only policy-family and cache-bucket queue YAML path; "
+            "startup-only policy-class queue YAML path; "
             "overrides router_policy_config inside --router-config"
         ),
     )

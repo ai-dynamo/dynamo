@@ -302,8 +302,8 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
 | `expected_output_tokens()` | Optional expected output length |
-| `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
-| `strict_priority()` | Strict integer priority. The queue orders larger values first |
+| `priority_jump()` | Scheduler priority boost. The synthetic fallback queue, used when no configured policy profile applies to this model, treats negative values as zero; a configured policy class ignores it |
+| `strict_priority()` | Strict integer priority. The synthetic fallback queue, used when no configured policy profile applies to this model, orders larger values first; a configured policy class ignores it |
 | `router_temperature_override()` | Optional per-request router temperature override |
 
 ### Session Context
