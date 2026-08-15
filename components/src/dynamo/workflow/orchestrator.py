@@ -20,7 +20,7 @@ from dynamo.workflow.runtime import (
     _validate_value,
 )
 from dynamo.workflow.scheduler import GraphScheduler
-from dynamo.workflow.types import ValueSpec
+from dynamo.workflow.types import PortSpec
 
 
 class WorkflowOrchestrator:
@@ -103,7 +103,7 @@ class WorkflowOrchestrator:
 
 
 def _validate_result(
-    specs: Mapping[str, ValueSpec], result: Mapping[str, Any]
+    specs: Mapping[str, PortSpec], result: Mapping[str, Any]
 ) -> dict[str, Any]:
     if not isinstance(result, Mapping):
         raise WorkflowExecutionError("workflow returned a non-mapping result")
