@@ -15,7 +15,7 @@ import { PinnedEnvironment } from "@/components/PinnedEnvironment";
 
 <ReleaseHeader version="v1.4.0" />
 
-Dynamo v1.4.0 is the 17th feature release of the open-source distributed inference platform, spanning 640 merged PRs from 127 contributors. It takes **Dynamo Router** multi-datacenter with a sequenced KV relay, peer reservation replay, and endpoint-scoped event transport, and opens an experimental vLLM-compatible **`/inference/v1/generate`** token-in/token-out endpoint on the Dynamo Frontend alongside a default-on tokenizer prefix cache. **vLLM-Omni** pipelines gain NIXL RDMA disaggregation for true multi-node autoregressive-to-diffusion serving, the **Spica** discrete-event simulation framework joins the repository, and the engine fleet moves to vLLM v0.26.0, SGLang v0.5.16, TensorRT-LLM 1.3.0rc22, and NIXL v1.3.x. The release also ships a rebuilt **documentation website** with tab-based navigation and native Simplified Chinese localization, and marks the start of Dynamo's availability in **NVIDIA AI Enterprise**.
+Dynamo v1.4.0 is the 17th feature release of the open-source distributed inference platform, spanning 640 merged PRs from 127 contributors. It takes **Dynamo Router** multi-datacenter with a sequenced KV relay, peer reservation replay, and endpoint-scoped event transport. It opens an experimental vLLM-compatible **`/inference/v1/generate`** token-in/token-out endpoint on the Dynamo Frontend alongside a default-on tokenizer prefix cache. **vLLM-Omni** pipelines gain NIXL RDMA disaggregation for true multi-node autoregressive-to-diffusion serving, the **Spica** discrete-event simulation framework joins the repository, and the engine fleet moves to vLLM v0.26.0, SGLang v0.5.16, TensorRT-LLM 1.3.0rc22, and NIXL v1.3.x. The release also ships a rebuilt **documentation website** with tab-based navigation and native Simplified Chinese localization.
 
 <Note>
 Breaking changes and deprecations for this release are tracked on the [Deprecations](deprecations.mdx#v140) ledger; known issues on the [Known Issues](known-issues.mdx#v140) page. Key dependency pins live on [Compatibility](../compatibility.mdx); shipped artifacts on [Release Artifacts](../release-artifacts.mdx). Model early access builds (`vX.Y.Z-<model>-dev.N`) are tracked in [Model Early Access Builds](../model-early-access-builds.mdx).
@@ -41,16 +41,10 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 
 <ReleaseSummaryCards
   cards={[
-    {
-      area: "NVIDIA AI Enterprise",
-      title: "Dynamo in NVIDIA AI Enterprise",
-      body: "Starting with v1.4.0, Dynamo is available through [**NVIDIA AI Enterprise (NVAIE)**](https://www.nvidia.com/en-us/data-center/products/ai-enterprise/). Enterprise-supported builds of the Dynamo runtime images, Dynamo Operator, and Dynamo Frontend are published on dedicated NGC container lines, separate from the community container tags, giving production deployments an enterprise support path on the same open-source codebase.",
-      anchor: "nvidia-ai-enterprise",
-    },
-    {
+        {
       area: "Router",
       title: "Reservation Replay & Multi-DC Indexing",
-      body: "Dynamo Router extends beyond a single datacenter this release. A new in-process selection cache lets peers replay booking decisions instead of re-sending long prompts ([#11416](https://github.com/ai-dynamo/dynamo/pull/11416), [#12335](https://github.com/ai-dynamo/dynamo/pull/12335)), a sequenced datacenter-scoped KV relay extends prefix routing across multiple datacenters ([#11793](https://github.com/ai-dynamo/dynamo/pull/11793)), and event transport becomes endpoint-scoped so consumers aggregate explicit endpoints rather than inferring ownership from broadcasts ([#11841](https://github.com/ai-dynamo/dynamo/pull/11841)). Cache-salt-aware KV routing isolates tenants: requests carrying a tenant namespace never reuse another tenant's KV cache while keeping prefix reuse within the tenant ([#8197](https://github.com/ai-dynamo/dynamo/pull/8197)). Session affinity now synchronizes across Router replicas ([#11750](https://github.com/ai-dynamo/dynamo/pull/11750)).",
+      body: "Dynamo Router adds experimental cross-datacenter prefix routing this release. A new in-process selection cache lets peers replay booking decisions instead of re-sending long prompts ([#11416](https://github.com/ai-dynamo/dynamo/pull/11416), [#12335](https://github.com/ai-dynamo/dynamo/pull/12335)). A sequenced datacenter-scoped KV relay extends prefix routing across multiple datacenters ([#11793](https://github.com/ai-dynamo/dynamo/pull/11793)), and event transport becomes endpoint-scoped so consumers aggregate explicit endpoints rather than inferring ownership from broadcasts ([#11841](https://github.com/ai-dynamo/dynamo/pull/11841)). Cache-salt-aware KV routing isolates tenants: requests carrying a tenant namespace never reuse another tenant's KV cache while keeping prefix reuse within the tenant ([#8197](https://github.com/ai-dynamo/dynamo/pull/8197)). Session affinity now synchronizes across Router replicas ([#11750](https://github.com/ai-dynamo/dynamo/pull/11750)).",
       anchor: "router",
     },
     {
@@ -80,7 +74,7 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
     {
       area: "Observability",
       title: "Multimodal Metrics & Request Tracing",
-      body: "Operators get substantially more visibility this release. Prometheus histograms report images, videos, and audio parts per request ([#11166](https://github.com/ai-dynamo/dynamo/pull/11166)) and calculated image-token counts ([#12065](https://github.com/ai-dynamo/dynamo/pull/12065)), and inter-token-latency collection is buffered to cut its on-CPU cost by 71.9% while preserving the existing schema ([#11569](https://github.com/ai-dynamo/dynamo/pull/11569)). Request payload auditing unifies into a single `dynamo.request.trace.v1` stream configured by `DYN_REQUEST_TRACE_*` variables ([#11180](https://github.com/ai-dynamo/dynamo/pull/11180)), exports through a standard OpenTelemetry Collector ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390)), and captures operator-allowlisted HTTP headers so requests join with upstream gateway identifiers without leaking non-allowlisted headers ([#11386](https://github.com/ai-dynamo/dynamo/pull/11386)).",
+      body: "Operators get substantially more visibility this release. Prometheus histograms report images, videos, and audio parts per request ([#11166](https://github.com/ai-dynamo/dynamo/pull/11166)) and calculated image-token counts ([#12065](https://github.com/ai-dynamo/dynamo/pull/12065)). Inter-token-latency collection is buffered to cut its on-CPU cost by 71.9% while preserving the existing schema ([#11569](https://github.com/ai-dynamo/dynamo/pull/11569)). Request payload auditing unifies into a single `dynamo.request.trace.v1` stream configured by `DYN_REQUEST_TRACE_*` variables ([#11180](https://github.com/ai-dynamo/dynamo/pull/11180)). The stream exports through a standard OpenTelemetry Collector ([#9390](https://github.com/ai-dynamo/dynamo/pull/9390)) and captures operator-allowlisted HTTP headers so requests join with upstream gateway identifiers without leaking non-allowlisted headers ([#11386](https://github.com/ai-dynamo/dynamo/pull/11386)).",
       anchor: "observability",
     },
     {
