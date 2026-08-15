@@ -339,32 +339,6 @@ func ownedEnvtestCutoverDCDs(
 	return owned
 }
 
-func markEnvtestCutoverDCDsReady(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) {
-	for _, dcd := range ownedEnvtestCutoverDCDs(ctx, dgd) {
-		replicas := ptr.Deref(dcd.Spec.Replicas, int32(1))
-		dcd.Status.ObservedGeneration = dcd.Generation
-		dcd.Status.Conditions = []metav1.Condition{{
-			Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: dcd.Generation,
-			Reason:             "CutoverTestReady",
-			LastTransitionTime: metav1.Now(),
-		}}
-		dcd.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{
-			ComponentKind:     nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
-			ComponentNames:    []string{dcd.Name + "-0"},
-			Replicas:          replicas,
-			UpdatedReplicas:   replicas,
-			ReadyReplicas:     ptr.To(replicas),
-			AvailableReplicas: ptr.To(replicas),
-		}
-		Expect(k8sClient.Status().Update(ctx, &dcd)).To(Succeed())
-	}
-}
-
 func envtestCutoverServiceUIDs(ctx context.Context, namespace string, expected map[string]types.UID) map[string]types.UID {
 	uids := make(map[string]types.UID, len(expected))
 	for name := range expected {
