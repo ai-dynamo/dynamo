@@ -9,12 +9,14 @@ import pytest
 
 from dynamo.experimental.workflow import (
     DeploymentSpec,
+    InlineBinding,
+    RemoteBinding,
     StageContext,
     StageContract,
     ValueSpec,
     Workflow,
     WorkflowExecutionError,
-    WorkflowExecutor,
+    WorkflowOrchestrator,
     WorkflowValidationError,
     compile_workflow,
 )
@@ -317,6 +319,11 @@ TEXT_GENERATOR = StageContract(
     inputs={"tokens": TOKENS},
     outputs={"text": ValueSpec(type="text")},
 )
+RESPONSE = StageContract(
+    id="response",
+    inputs={"scores": ValueSpec(type="json"), "text": ValueSpec(type="text")},
+    outputs={"chunk": ValueSpec(type="json")},
+)
 
 
 class _TextEncoder:
@@ -354,6 +361,16 @@ class _TextGenerator:
     ) -> Mapping[str, Any]:
         context.raise_if_cancelled()
         return {"text": " ".join(reversed(inputs["tokens"]))}
+
+
+class _Response:
+    contract = RESPONSE
+
+    async def run(
+        self, inputs: Mapping[str, Any], context: StageContext
+    ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
+        return {"chunk": {"text": inputs["text"], "scores": inputs["scores"]}}
 
 
 class _LoopbackClient:
@@ -418,7 +435,7 @@ async def test_three_remote_stages_fan_out_and_join_through_envelopes() -> None:
         for stage_id, runner in runners.items()
     }
     runtime = _Runtime(clients)
-    executor = await WorkflowExecutor.bind(plan, runtime=runtime)
+    executor = await WorkflowOrchestrator.bind(plan, runtime=runtime)
 
     result = await executor.run(
         {"text": "Dynamo workflow runs across processes"},
@@ -431,3 +448,59 @@ async def test_three_remote_stages_fan_out_and_join_through_envelopes() -> None:
     }
     assert encoder_runner.calls == 1
     assert runtime.endpoint_ids == sorted(endpoint_ids.values())
+
+
+async def test_remote_branches_join_in_an_inline_response_stage() -> None:
+    workflow = Workflow("mixed-text-fanout")
+    text = workflow.input("text", ValueSpec(type="text"))
+    encoder = workflow.stage("encoder", TEXT_ENCODER, text=text)
+    classifier = workflow.stage("classifier", KEYWORD_CLASSIFIER, tokens=encoder.tokens)
+    generator = workflow.stage("generator", TEXT_GENERATOR, tokens=encoder.tokens)
+    response = workflow.stage(
+        "response",
+        RESPONSE,
+        scores=classifier.scores,
+        text=generator.text,
+    )
+    workflow.output("chunk", response.chunk)
+
+    endpoint_ids = {
+        "encoder": "workflows.encoder.generate",
+        "classifier": "workflows.classifier.generate",
+        "generator": "workflows.generator.generate",
+    }
+    runners = {
+        "encoder": _TextEncoder(),
+        "classifier": _KeywordClassifier(),
+        "generator": _TextGenerator(),
+    }
+    clients = {
+        endpoint_ids[stage_id]: _LoopbackClient(RemoteStageServer(stage_id, runner))
+        for stage_id, runner in runners.items()
+    }
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                **{
+                    stage_id: RemoteBinding(endpoint_id)
+                    for stage_id, endpoint_id in endpoint_ids.items()
+                },
+                "response": InlineBinding("response"),
+            }
+        ),
+    )
+    orchestrator = await WorkflowOrchestrator.bind(
+        plan,
+        runtime=_Runtime(clients),
+        inline_runners={"response": _Response()},
+    )
+
+    result = await orchestrator.run({"text": "Dynamo workflow"})
+
+    assert result == {
+        "chunk": {
+            "text": "workflow dynamo",
+            "scores": {"workflow": 0.5, "other": 0.5},
+        }
+    }
