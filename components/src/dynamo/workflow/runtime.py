@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
-from dynamo.workflow.types import StageContract, ValueSpec
+from dynamo.workflow.types import PortSpec, StageContract, StreamSpec
 
 
 class WorkflowExecutionError(RuntimeError):
@@ -87,7 +87,11 @@ class _ImageValue(Protocol):
     size: Any
 
 
-def _validate_value(spec: ValueSpec, value: Any, location: str) -> None:
+def _validate_value(spec: PortSpec, value: Any, location: str) -> None:
+    if isinstance(spec, StreamSpec):
+        raise WorkflowExecutionError(
+            f"{location} uses a stream port, but stream execution is not supported"
+        )
     if spec.type == "text" and not isinstance(value, str):
         raise WorkflowExecutionError(f"{location} must be text")
     if spec.type == "bytes" and not isinstance(value, (bytes, bytearray, memoryview)):
