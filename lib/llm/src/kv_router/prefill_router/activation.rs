@@ -42,7 +42,15 @@ struct PrefillAdvertisement {
     router_mode: RouterMode,
     /// `None` when the card declared nothing, so the decode set's tuning applies.
     kv_router_config: Option<KvRouterConfig>,
+    /// Taken from an advertised `router_config` whole, `None` included -- an
+    /// advertisement replaces the decode set's configuration rather than
+    /// merging with it. `None` here when nothing was advertised at all.
+    session_affinity_ttl: Option<Option<std::time::Duration>>,
     is_eagle: bool,
+    /// The prefill workers' own block size, which is what their KV events are
+    /// keyed on. The decode set's value would index this pool at the wrong
+    /// granularity if the two ever differ.
+    kv_cache_block_size: u32,
 }
 
 /// A prefill worker that declares its own `router_config` governs this hop;
@@ -68,7 +76,13 @@ fn resolve_advertisement_from_cards(
             .router_config
             .as_ref()
             .map(|config| config.kv_router_config.clone()),
+        session_affinity_ttl: first.router_config.as_ref().map(|config| {
+            config
+                .session_affinity_ttl_secs
+                .map(std::time::Duration::from_secs)
+        }),
         is_eagle: first.runtime_config.enable_eagle,
+        kv_cache_block_size: first.kv_cache_block_size,
     };
 
     // A fleet mid-rolling-update can disagree. First card wins, but a silent
@@ -292,8 +306,20 @@ where
             decode_router_mode = ?context.decode_router_mode,
             advertised = advertisement.kv_router_config.is_some(),
             is_eagle = advertisement.is_eagle,
+            block_size = advertisement.kv_cache_block_size,
             "Activating prefill router"
         );
+
+        // Everything the hop uses comes from the prefill card when it says so,
+        // falling back to the decode set. A block size of 0 means the card never
+        // declared one, so it cannot be trusted over the decode set's.
+        let prefill_block_size = match advertisement.kv_cache_block_size {
+            0 => kv_cache_block_size,
+            advertised => advertised,
+        };
+        let prefill_session_affinity_ttl = advertisement
+            .session_affinity_ttl
+            .unwrap_or(context.session_affinity_ttl);
 
         // A prefill card that declares a mode may declare KV tuning alongside it;
         // honoring only half of its `RouterConfig` would be a trap. Whichever
@@ -319,7 +345,7 @@ where
                 .model_manager
                 .kv_chooser_for_with_selector(
                     &endpoint,
-                    kv_cache_block_size,
+                    prefill_block_size,
                     selector,
                     prefill_kv_config,
                     context.prefill_load_estimator.clone(),
@@ -333,7 +359,7 @@ where
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
             let affinity =
-                create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
+                create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
             let prefill_client = client.clone();
 
             // Build the PushRouter for prefill with KV mode using the shared client
@@ -357,7 +383,7 @@ where
             // Create client for simple router
             let client = endpoint.client().await?;
             let affinity =
-                create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
+                create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
             let prefill_client = client.clone();
 
             // Create simple push router with the resolved prefill router mode
@@ -626,6 +652,12 @@ mod tests {
         card
     }
 
+    fn card_with_block_size(block_size: u32) -> ModelDeploymentCard {
+        let mut card = card(None);
+        card.kv_cache_block_size = block_size;
+        card
+    }
+
     #[test]
     fn inherits_decode_mode_when_card_advertises_nothing() {
         // The pre-override behavior: a prefill worker that says nothing is
@@ -666,6 +698,40 @@ mod tests {
         let resolved =
             resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
         assert_eq!(resolved.router_mode, RouterMode::KV);
+    }
+
+    #[test]
+    fn block_size_comes_from_the_prefill_card() {
+        // The prefill pool's KV events are keyed on its own block size. Taking
+        // the decode set's would index this pool at the wrong granularity.
+        let cards = vec![card_with_block_size(64)];
+        let resolved = resolve_advertisement_from_cards(&cards, RouterMode::KV).expect("resolves");
+        assert_eq!(resolved.kv_cache_block_size, 64);
+    }
+
+    #[test]
+    fn session_affinity_ttl_is_taken_whole_or_not_at_all() {
+        // An advertisement replaces the decode set's configuration rather than
+        // merging, so a card that advertises without a TTL means "no affinity",
+        // not "inherit the frontend's". A card advertising nothing means inherit.
+        let advertised = vec![card(Some(RouterConfig::new(
+            RouterMode::KV,
+            KvRouterConfig::default(),
+        )))];
+        assert_eq!(
+            resolve_advertisement_from_cards(&advertised, RouterMode::KV)
+                .expect("resolves")
+                .session_affinity_ttl,
+            Some(None),
+        );
+
+        let silent = vec![card(None)];
+        assert_eq!(
+            resolve_advertisement_from_cards(&silent, RouterMode::KV)
+                .expect("resolves")
+                .session_affinity_ttl,
+            None,
+        );
     }
 
     #[test]
