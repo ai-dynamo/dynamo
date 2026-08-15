@@ -388,27 +388,22 @@ def assert_efa_rdma_traffic(
     before_status, rx_before = before
     after_status, rx_after = after
 
-    failed = [s for s in (before_status, after_status) if s == "scrape_failed"]
-    assert not failed, (
-        f"EFA RDMA traffic NOT confirmed: scraping NIXL {NIXL_RX_BYTES_METRIC} failed "
-        f"(before={before_status}, after={after_status}). The exporter on "
-        f":{NIXL_TELEMETRY_PORT} is expected to work on this lane, so this is an "
-        "infrastructure failure, not a platform without telemetry."
-    )
-
-    if before_status == "absent" and after_status == "absent":
-        logger.warning(
-            "NIXL %s absent from a successfully scraped endpoint on both samples — "
-            "skipping the RDMA-traffic assertion and relying on the libfabric log "
-            "evidence. This is unexpected on this lane; check NIXL_TELEMETRY_ENABLE=y.",
-            NIXL_RX_BYTES_METRIC,
-        )
-        return
-
-    assert rx_before is not None and rx_after is not None, (
-        f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} was present on "
-        f"only one of the two samples (before={before_status}, after={after_status}). "
-        "Treating the missing one as zero would be a false pass."
+    # No silent-pass path. If either sample is anything other than a reading of
+    # the counter, we cannot say the KV moved through the NIXL agent -- and with
+    # that unknown we cannot claim the transfer used EFA RDMA at all. An exporter
+    # that is up but omits its principal counter is broken, not a platform
+    # without telemetry, so both cases fail here rather than being tolerated.
+    not_ok = {
+        k: v
+        for k, v in (("before", before_status), ("after", after_status))
+        if v != "ok"
+    }
+    assert not not_ok, (
+        f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} unreadable "
+        f"({not_ok}). 'scrape_failed' means the exporter on :{NIXL_TELEMETRY_PORT} "
+        "was unreachable; 'absent' means it responded without the counter, which "
+        "indicates NIXL_TELEMETRY_ENABLE did not take effect or the metric was "
+        "renamed. Either way there is no evidence KV moved."
     )
 
     assert rx_after > rx_before, (
