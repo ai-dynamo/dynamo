@@ -15,8 +15,8 @@ from dynamo.experimental.workflow import (
     StageContract,
     ValueSpec,
     Workflow,
-    WorkflowOrchestrator,
     WorkflowExecutionError,
+    WorkflowOrchestrator,
     compile_workflow,
 )
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
