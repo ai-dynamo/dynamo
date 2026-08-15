@@ -16,6 +16,14 @@ runtime schedules the two consumers concurrently. The generator binding calls a
 normal aggregated `dynamo.vllm` Generate endpoint; that worker imports the
 tensor and creates its mixed `EmbedsPrompt` without a workflow-specific decoder.
 
+Dynamo supplies `EncoderStage`, `DynamoVllmStage`, and the remote encoder
+launcher. This application owns the custom encoder selection, classifier,
+workflow, endpoint bindings, result adaptation, and process deployment. Set
+`DYN_ENCODER_CLASS` to any compatible zero-argument `VisionEncoderBackend`
+subclass; it must return one nonempty 2D CPU tensor per image and declare
+`image_token_id`. `DYN_ENCODER_MODEL` may select encoder weights independently
+and defaults to `DYN_MODEL`.
+
 From the repository root, run:
 
 ```bash
