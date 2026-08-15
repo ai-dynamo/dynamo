@@ -301,15 +301,6 @@ where
         let advertisement = Self::resolve_prefill_advertisement(context, &endpoint).await?;
         let prefill_router_mode = advertisement.router_mode;
 
-        tracing::info!(
-            ?prefill_router_mode,
-            decode_router_mode = ?context.decode_router_mode,
-            advertised = advertisement.kv_router_config.is_some(),
-            is_eagle = advertisement.is_eagle,
-            block_size = advertisement.kv_cache_block_size,
-            "Activating prefill router"
-        );
-
         // Everything the hop uses comes from the prefill card when it says so,
         // falling back to the decode set. A block size of 0 means the card never
         // declared one, so it cannot be trusted over the decode set's.
@@ -325,6 +316,7 @@ where
         // honoring only half of its `RouterConfig` would be a trap. Whichever
         // config wins, `router_track_active_blocks` stays off: prefill routing is
         // prompt-side, and crediting decode blocks here would double-count load.
+        let advertised_kv_tuning = advertisement.kv_router_config.is_some();
         let prefill_kv_config = match advertisement.kv_router_config {
             Some(mut advertised) => {
                 advertised.router_track_active_blocks = false;
@@ -332,6 +324,22 @@ where
             }
             None => kv_router_config,
         };
+
+        // Logged once per activation, and deliberately the *resolved* values
+        // rather than what the card asked for. An advertisement replaces the
+        // decode set's configuration rather than merging with it, so a worker
+        // that names a mode without restating tuning silently gets defaults --
+        // this line is what makes that answerable without a rebuild.
+        tracing::info!(
+            ?prefill_router_mode,
+            decode_router_mode = ?context.decode_router_mode,
+            advertised = advertised_kv_tuning,
+            is_eagle = advertisement.is_eagle,
+            block_size = prefill_block_size,
+            session_affinity_ttl = ?prefill_session_affinity_ttl,
+            kv_tuning = ?prefill_kv_config,
+            "Activating prefill router"
+        );
 
         let inner_router = if prefill_router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint (this is a prefill router)
