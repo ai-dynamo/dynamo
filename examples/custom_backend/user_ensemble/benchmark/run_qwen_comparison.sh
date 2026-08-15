@@ -78,10 +78,10 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     validate-workload "$WORKLOAD_ROOT" \
     --output "$OUTPUT_ROOT/workload_audit.json"
 
-SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-SOURCE_BRANCH="$(git -C "$REPO_ROOT" branch --show-current)"
+SOURCE_COMMIT="${DYN_BENCH_SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
+SOURCE_BRANCH="${DYN_BENCH_SOURCE_BRANCH:-$(git -C "$REPO_ROOT" branch --show-current)}"
 SOURCE_BRANCH="${SOURCE_BRANCH:-detached}"
-WORKING_DIFF_SHA256="$(git -C "$REPO_ROOT" diff --binary HEAD | sha256sum | awk '{print $1}')"
+WORKING_DIFF_SHA256="${DYN_BENCH_WORKING_DIFF_SHA256:-$(git -C "$REPO_ROOT" diff --binary HEAD | sha256sum | awk '{print $1}')}"
 GPU_INFO="$(nvidia-smi \
     -i 0 \
     --query-gpu=name,power.limit,clocks.max.sm,memory.total \
