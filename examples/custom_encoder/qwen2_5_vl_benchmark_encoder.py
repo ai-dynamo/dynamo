@@ -125,10 +125,15 @@ _TIMING_ENABLED = os.environ.get("DYN_CUSTOM_ENCODER_TIMING", "").lower() in {
 _DISPATCH_LOG_ENABLED = os.environ.get(
     "DYN_CUSTOM_ENCODER_DISPATCH_LOG", ""
 ).lower() in {"1", "true", "yes"}
-if _DISPATCH_LOG_ENABLED:
-    # Keep the audited dispatch records when the surrounding benchmark lowers
-    # Dynamo's high-volume framework logs to warning.
-    logger.setLevel(logging.INFO)
+
+
+def _benchmark_record(message: str, *args: object) -> None:
+    """Keep audit records visible while suppressing framework request logs."""
+
+    if _DISPATCH_LOG_ENABLED:
+        print(message % args, flush=True)
+    else:
+        logger.info(message, *args)
 
 
 @dataclass(frozen=True)
@@ -701,7 +706,7 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
                     patches_per_item=patches_per_item,
                     tokens_per_item=tokens_per_item,
                 )
-                logger.info(
+                _benchmark_record(
                     "[Qwen2_5VLBenchmarkEncoder] captured CUDA graph: "
                     "grid=%s bucket=%d input_patches=%d output_tokens=%d",
                     grid_key,
@@ -711,7 +716,7 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
                 )
         torch.cuda.synchronize(self._device)
         free_after, _ = torch.cuda.mem_get_info(self._device)
-        logger.info(
+        _benchmark_record(
             "[Qwen2_5VLBenchmarkEncoder] CUDA graph capture complete: "
             "grids=%s buckets=%s graphs=%d device_memory_delta_gib=%.3f",
             sorted(templates),
@@ -809,7 +814,7 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         patch_cost = self._batch_patch_cost(items)
         self._dispatch_counts[("eager", len(items), None)] += 1
         if _DISPATCH_LOG_ENABLED:
-            logger.info(
+            _benchmark_record(
                 "custom_encoder_dispatch mode=eager batch_size=%d bucket=None "
                 "patch_cost=%d padded_patch_cost=%d grids=%s",
                 len(items),
@@ -871,7 +876,7 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         padded_patch_cost = target_bucket * entry.patches_per_item
         self._dispatch_counts[("graph", len(items), target_bucket)] += 1
         if _DISPATCH_LOG_ENABLED:
-            logger.info(
+            _benchmark_record(
                 "custom_encoder_dispatch mode=graph batch_size=%d bucket=%d "
                 "grid=%dx%dx%d patch_cost=%d padded_patch_cost=%d",
                 len(items),
