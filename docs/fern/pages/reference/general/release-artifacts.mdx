@@ -105,13 +105,13 @@ Current stable release: v1.4.0 (container tag `1.4.0`, wheel version `1.4.0`).
 | helm | snapshot | Snapshot DaemonSet for fast GPU worker recovery | - | `helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.4.0.tgz` |
 | crate | dynamo-runtime | Core distributed runtime library | MSRV Rust v1.82 | `cargo add dynamo-runtime@1.4.0` |
 | crate | dynamo-llm | LLM inference engine | MSRV Rust v1.82 | `cargo add dynamo-llm@1.4.0` |
-| crate | dynamo-protocols | Async OpenAI-compatible API client | Own release line | `cargo add dynamo-protocols@5.0.1` |
+| crate | dynamo-protocols | Async OpenAI-compatible API client | Independently versioned | `cargo add dynamo-protocols@5.0.1` |
 | crate | dynamo-async-openai (Deprecated) | Legacy OpenAI client; use dynamo-protocols | MSRV Rust v1.82 · final release | `cargo add dynamo-async-openai@1.0.2` |
-| crate | dynamo-parsers | Protocol parsers (SSE, JSON streaming) | Own release line | `cargo add dynamo-parsers@7.0.1` |
+| crate | dynamo-parsers | Protocol parsers (SSE, JSON streaming) | Independently versioned | `cargo add dynamo-parsers@7.0.1` |
 | crate | dynamo-memory | Memory management utilities | MSRV Rust v1.82 | `cargo add dynamo-memory@1.4.0` |
 | crate | dynamo-config | Configuration management | MSRV Rust v1.82 | `cargo add dynamo-config@1.2.1` |
 | crate | dynamo-tokens | Tokenizer bindings for LLM inference | MSRV Rust v1.82 | `cargo add dynamo-tokens@1.4.0` |
-| crate | dynamo-tokenizers | Tokenizer library for LLM inference | Own release line | `cargo add dynamo-tokenizers@1.5.4` |
+| crate | dynamo-tokenizers | Tokenizer library for LLM inference | Independently versioned | `cargo add dynamo-tokenizers@1.5.4` |
 | crate | dynamo-mocker | Inference engine simulator for benchmarking | MSRV Rust v1.82 | `cargo add dynamo-mocker@1.4.0` |
 | crate | dynamo-kv-router | KV-aware request routing library | MSRV Rust v1.82 | `cargo add dynamo-kv-router@1.4.0` |
 | crate | kvbm-logical | Logical layer for the KV Block Manager | MSRV Rust v1.82 | `cargo add kvbm-logical@1.4.0` |
@@ -125,9 +125,9 @@ Current stable release: v1.4.0 (container tag `1.4.0`, wheel version `1.4.0`).
 | crate | kvbm-kernels | CUDA kernels for the KV Block Manager | MSRV Rust v1.82 | `cargo add kvbm-kernels@1.4.0` |
 | crate | kvbm-physical | Physical block layer for the KV Block Manager | MSRV Rust v1.82 | `cargo add kvbm-physical@1.4.0` |
 | crate | kvbm-engine | Distributed coordination primitives for KVBM | MSRV Rust v1.82 | `cargo add kvbm-engine@1.4.0` |
-| crate | dynamo-renderer | Chat-template rendering used by the Dynamo Frontend | Own release line | `cargo add dynamo-renderer@4.0.0` |
-| crate | dynamo-parsers-v2 | Second-generation protocol parsers consumed by the Frontend | Own release line | `cargo add dynamo-parsers-v2@0.1.23` |
-| crate | fastokens | High-performance Rust tokenizer backend consumed by the Frontend | Own release line | `cargo add fastokens@0.2.0` |
+| crate | dynamo-renderer | Chat-template rendering used by the Dynamo Frontend | Independently versioned | `cargo add dynamo-renderer@4.0.0` |
+| crate | dynamo-parsers-v2 | Successor parser line to dynamo-parsers, consumed by the Frontend | Independently versioned | `cargo add dynamo-parsers-v2@0.1.23` |
+| crate | fastokens | Rust BPE tokenizer backend consumed by the Frontend | Independently versioned | `cargo add fastokens@0.2.0` |
 
 **Known artifact issues**
 
