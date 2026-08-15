@@ -22,7 +22,7 @@ from dynamo.workflow import (
     compile_workflow,
 )
 from dynamo.workflow.dispatcher import StageDispatcher
-from dynamo.workflow.generate import GenerateEndpointClient
+from dynamo.workflow.generate import GenerateEndpointInvoker, collect_generation
 
 pytestmark = [
     pytest.mark.unit,
@@ -45,7 +45,7 @@ GENERATOR = StageContract(
         "encoder_features": TENSOR,
         "encoder_metadata": ValueSpec(type="json"),
     },
-    outputs={"chunk": ValueSpec(type="json")},
+    outputs={"completion": ValueSpec(type="json")},
 )
 
 
@@ -60,7 +60,7 @@ def _workflow(generator_contract: StageContract = GENERATOR) -> Workflow:
         encoder_features=encoder.encoder_features,
         encoder_metadata=encoder.encoder_metadata,
     )
-    workflow.output("chunk", generator.chunk)
+    workflow.output("completion", generator.completion)
     return workflow
 
 
@@ -90,7 +90,7 @@ def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
     incompatible = StageContract(
         id="generator",
         inputs=GENERATOR.inputs,
-        outputs={"chunk": ValueSpec(type="text")},
+        outputs={"completion": ValueSpec(type="text")},
     )
     with pytest.raises(WorkflowValidationError, match="stage output"):
         compile_workflow(
@@ -134,6 +134,7 @@ class _Client:
         self.responses = responses
         self.request: Mapping[str, Any] | None = None
         self.context: Any = None
+        self.stream_closed = False
 
     async def wait_for_instances(self) -> None:
         return None
@@ -146,8 +147,11 @@ class _Client:
         self.context = context
 
         async def stream():
-            for response in self.responses:
-                yield response
+            try:
+                for response in self.responses:
+                    yield response
+            finally:
+                self.stream_closed = True
 
         return stream()
 
@@ -168,7 +172,7 @@ class _Runtime:
         return _Endpoint(self._clients[endpoint_id])
 
 
-def _context() -> StageContext:
+def _context(request_context=None) -> StageContext:
     return StageContext(
         workflow_name="external-encoder",
         stage_id="generator",
@@ -176,19 +180,36 @@ def _context() -> StageContext:
         invocation_id="request-1:generator",
         deadline=None,
         _cancelled=asyncio.Event(),
+        request_context=request_context,
     )
 
 
-async def test_generate_client_packs_encoder_result_and_folds_token_deltas() -> None:
+class _TransportContext:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop_generating(self) -> None:
+        self.stopped = True
+
+
+class _ParentContext:
+    def __init__(self) -> None:
+        self.child = _TransportContext()
+
+    def detached(self, context_id: str) -> _TransportContext:
+        assert context_id == "request-1:generator"
+        return self.child
+
+
+async def test_generate_invoker_opens_stream_and_collector_folds_deltas() -> None:
     transport = _Client(
         [
             {"token_ids": [7], "index": 0},
             {"token_ids": [8, 9], "index": 0, "finish_reason": "stop"},
         ]
     )
-    result = await GenerateEndpointClient(transport).run(
+    stream = await GenerateEndpointInvoker(transport).open(
         "generator",
-        GENERATOR,
         {
             "request": {
                 "token_ids": [1, 2],
@@ -206,11 +227,14 @@ async def test_generate_client_packs_encoder_result_and_folds_token_deltas() -> 
             },
         },
         _context(),
-        {},
     )
+    completion = await collect_generation(stream, "generator")
+    await stream.aclose()
 
-    assert result == {
-        "chunk": {"token_ids": [7, 8, 9], "index": 0, "finish_reason": "stop"}
+    assert completion == {
+        "token_ids": [7, 8, 9],
+        "index": 0,
+        "finish_reason": "stop",
     }
     assert transport.request is not None
     encoder_result = ExternalEncoderResult.from_dict(
@@ -226,7 +250,7 @@ async def test_generate_client_packs_encoder_result_and_folds_token_deltas() -> 
 async def test_generate_client_accepts_null_n_as_the_frontend_default() -> None:
     transport = _Client([{"token_ids": [42], "index": 0, "finish_reason": "stop"}])
 
-    result = await GenerateEndpointClient(transport).run(
+    result = await GenerateEndpointInvoker(transport).run(
         "generator",
         GENERATOR,
         {
@@ -245,7 +269,36 @@ async def test_generate_client_accepts_null_n_as_the_frontend_default() -> None:
         {},
     )
 
-    assert result["chunk"]["token_ids"] == [42]
+    assert result["completion"]["token_ids"] == [42]
+
+
+async def test_generate_invoker_cancels_owned_stream_on_collection_error() -> None:
+    transport = _Client(
+        [
+            {"token_ids": [42], "index": 0, "finish_reason": "stop"},
+            {"token_ids": [43], "index": 0},
+        ]
+    )
+    parent = _ParentContext()
+
+    with pytest.raises(WorkflowExecutionError, match="after terminal"):
+        await GenerateEndpointInvoker(transport).run(
+            "generator",
+            GENERATOR,
+            {
+                "request": {"token_ids": [1], "output_options": {}},
+                "encoder_features": _reference().to_dict(),
+                "encoder_metadata": {
+                    "row_splits": [0, 2],
+                    "image_token_id": 151655,
+                },
+            },
+            _context(parent),
+            {},
+        )
+
+    assert parent.child.stopped
+    assert transport.stream_closed
 
 
 async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
@@ -287,7 +340,7 @@ async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
         _context(),
     )
 
-    assert result["chunk"]["token_ids"] == [42]
+    assert result["completion"]["token_ids"] == [42]
     assert generator_client.request is not None
     assert "encoder_result" in generator_client.request
 
@@ -303,7 +356,7 @@ async def test_generate_client_rejects_unsupported_frontend_options(
     request_value: Mapping[str, Any], message: str
 ) -> None:
     with pytest.raises(WorkflowExecutionError, match=message):
-        await GenerateEndpointClient(_Client([])).run(
+        await GenerateEndpointInvoker(_Client([])).run(
             "generator",
             GENERATOR,
             {
