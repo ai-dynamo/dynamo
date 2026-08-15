@@ -1493,6 +1493,7 @@ fn spawn_response_monitor(
             if send_control(&control_tx, kind, registration_id).is_err() {
                 return;
             }
+            tracing::debug!(control_msg = ?kind, "issued control message");
             if kind == FrameKind::Stop {
                 stop_sent = true;
             } else {
@@ -1512,6 +1513,7 @@ fn spawn_response_monitor(
             if send_control(&control_tx, kind, registration_id).is_err() {
                 return;
             }
+            tracing::debug!(control_msg = ?kind, "issued control message");
             if kind == FrameKind::Stop {
                 stop_sent = true;
             } else {
