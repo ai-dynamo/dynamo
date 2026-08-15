@@ -2024,12 +2024,6 @@ impl QuicResponseSender {
             && self.response_context.context.is_stopped()
             && !self.response_context.context.is_killed()
         {
-            self.response_context.record_cancellation();
-            self.enqueue_on(
-                &self.priority_lane,
-                Frame::new(FrameKind::Reset, self.registration_id, Bytes::new()),
-            )
-            .await?;
             bail!("QUIC response context stopped before its first response");
         }
         let frame = if first_data {
