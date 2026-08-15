@@ -2036,7 +2036,7 @@
       "prs": 640,
       "contributors": 127,
       "firstTimers": 29,
-      "breaking": 52,
+      "breaking": 51,
       "knownIssues": 20
     },
     "v1.3.0": {
