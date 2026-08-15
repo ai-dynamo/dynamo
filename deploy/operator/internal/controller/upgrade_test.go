@@ -912,6 +912,9 @@ spec:
 			t.Log("compare old and new child specs; a change here would trigger a rollout")
 			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should not change the child spec hash")
 
+			t.Log("confirm the legacy child is not enrolled in generation-scoped topology management")
+			require.NotContains(t, newChild.GetAnnotations(), commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped)
+
 			t.Log("assert worker pod labels keep the legacy worker identity")
 			for site, subComponentType := range tt.expectedWorkerSites {
 				oldLabels, ok := oldPodLabels[site]

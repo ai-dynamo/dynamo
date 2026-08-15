@@ -35,7 +35,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8slabels "k8s.io/apimachinery/pkg/labels"
@@ -311,14 +310,12 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 // scopeWorkerTopologySpreadConstraints mutates eligible constraints to select the template's exact worker generation.
 // podTemplate must be non-nil and carry its finalized workload labels.
 func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
-	podLabels := podTemplate.Labels
-	workerHash := podLabels[commonconsts.KubeLabelDynamoWorkerHash]
-
 	// Skip templates that are not hash-versioned worker components.
-	if !dynamo.IsWorkerComponent(podLabels[commonconsts.KubeLabelDynamoComponentType]) ||
-		workerHash == "" {
+	if !isHashVersionedWorkerTemplate(podTemplate) {
 		return
 	}
+	podLabels := podTemplate.Labels
+	workerHash := podLabels[commonconsts.KubeLabelDynamoWorkerHash]
 
 	// Scope only constraints whose explicit selectors match the finalized pod labels.
 	for i := range podTemplate.Spec.TopologySpreadConstraints {
@@ -346,16 +343,37 @@ func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
 	}
 }
 
-// workerTopologySpreadConstraintsWereScoped reports whether existing retains the scoped form of desired.
-// Both templates must be non-nil and carry their finalized workload labels.
-func workerTopologySpreadConstraintsWereScoped(existing, desired *corev1.PodTemplateSpec) bool {
-	scopedDesired := desired.DeepCopy()
-	scopeWorkerTopologySpreadConstraints(scopedDesired)
+// scopeWorkerTopologySpreadWorkload marks a new-style workload and scopes each finalized worker template.
+// workload must be non-nil; nil pod templates are ignored.
+func scopeWorkerTopologySpreadWorkload(workload metav1.Object, podTemplates ...*corev1.PodTemplateSpec) {
+	hasWorkerTemplate := false
 
-	return equality.Semantic.DeepEqual(
-		existing.Spec.TopologySpreadConstraints,
-		scopedDesired.Spec.TopologySpreadConstraints,
-	)
+	// Scope every hash-versioned template that belongs to the workload.
+	for _, podTemplate := range podTemplates {
+		if !isHashVersionedWorkerTemplate(podTemplate) {
+			continue
+		}
+		hasWorkerTemplate = true
+		scopeWorkerTopologySpreadConstraints(podTemplate)
+	}
+
+	// Mark only worker workloads so later reconciles can retain the scoped mode durably.
+	if !hasWorkerTemplate {
+		return
+	}
+	annotations := workload.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped] = commonconsts.KubeLabelValueTrue
+	workload.SetAnnotations(annotations)
+}
+
+// isHashVersionedWorkerTemplate reports whether a finalized pod template belongs to a worker generation.
+func isHashVersionedWorkerTemplate(podTemplate *corev1.PodTemplateSpec) bool {
+	return podTemplate != nil &&
+		dynamo.IsWorkerComponent(podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType]) &&
+		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] != ""
 }
 
 func labelSelectorReferencesKey(selector *metav1.LabelSelector, key string) bool {

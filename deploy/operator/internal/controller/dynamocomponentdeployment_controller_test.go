@@ -972,6 +972,10 @@ func TestGenerateDeploymentScopesTopologySpreadToWorkerGeneration(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.False(t, toDelete)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		deployment.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
 
 	t.Log("Verify only the explicit matching selector gains the worker hash")
 	require.Equal(t,
@@ -992,6 +996,47 @@ func TestGenerateDeploymentScopesTopologySpreadToWorkerGeneration(t *testing.T) 
 	require.NoError(t, err)
 	require.False(t, toDelete)
 	require.Equal(t, deployment.Spec.Template, rerendered.Spec.Template)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		rerendered.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
+
+	t.Log("Change a user-owned field on the already-scoped topology constraint")
+	updatedDCD := dcd.DeepCopy()
+	updatedDCD.Spec.PodTemplate.Spec.TopologySpreadConstraints[0].MaxSkew = 2
+	updated, toDelete, err := reconciler.generateDeployment(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: updatedDCD,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t, int32(2), updated.Spec.Template.Spec.TopologySpreadConstraints[0].MaxSkew)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		updated.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
+	require.Equal(t,
+		"db6b6891",
+		updated.Spec.Template.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash],
+	)
+
+	t.Log("Persist the topology edit and verify generation scoping remains stable")
+	stored := &appsv1.Deployment{}
+	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(deployment), stored))
+	updated.ResourceVersion = stored.ResourceVersion
+	require.NoError(t, reconciler.Update(t.Context(), updated))
+	rerendered, toDelete, err = reconciler.generateDeployment(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: updatedDCD,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t,
+		updated.Spec.Template.Spec.TopologySpreadConstraints,
+		rerendered.Spec.Template.Spec.TopologySpreadConstraints,
+	)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		rerendered.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
 }
 
 func TestRenderMultinodeTopologySpreadConstraintsUsesFinalRoleLabels(t *testing.T) {
@@ -1061,6 +1106,10 @@ func TestRenderMultinodeTopologySpreadConstraintsUsesFinalRoleLabels(t *testing.
 	})
 	require.NoError(t, err)
 	require.False(t, toDelete)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		lws.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
 	leaderTemplate := lws.Spec.LeaderWorkerTemplate.LeaderTemplate
 	workerTemplate := &lws.Spec.LeaderWorkerTemplate.WorkerTemplate
 
@@ -1092,6 +1141,57 @@ func TestRenderMultinodeTopologySpreadConstraintsUsesFinalRoleLabels(t *testing.
 	require.NoError(t, err)
 	require.False(t, toDelete)
 	require.Equal(t, lws.Spec.LeaderWorkerTemplate, rerendered.Spec.LeaderWorkerTemplate)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		rerendered.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
+
+	t.Log("Change a user-owned field on the already-scoped topology constraints")
+	updatedDCD := dcd.DeepCopy()
+	updatedDCD.Spec.PodTemplate.Spec.TopologySpreadConstraints[0].MaxSkew = 2
+	updated, toDelete, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: updatedDCD,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		updated.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
+	updatedLeaderTemplate := updated.Spec.LeaderWorkerTemplate.LeaderTemplate
+	updatedWorkerTemplate := &updated.Spec.LeaderWorkerTemplate.WorkerTemplate
+	require.Equal(t, int32(2), updatedWorkerTemplate.Spec.TopologySpreadConstraints[0].MaxSkew)
+	require.Equal(t,
+		"db6b6891",
+		updatedWorkerTemplate.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash],
+	)
+	require.Equal(t,
+		"db6b6891",
+		updatedLeaderTemplate.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash],
+	)
+
+	t.Log("Persist the topology edit and verify both role templates remain stable")
+	stored := &leaderworkersetv1.LeaderWorkerSet{}
+	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(lws), stored))
+	updated.ResourceVersion = stored.ResourceVersion
+	require.NoError(t, reconciler.Update(t.Context(), updated))
+	rerendered, toDelete, err = reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{
+		dynamoComponentDeployment: updatedDCD,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t,
+		updated.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec.TopologySpreadConstraints,
+		rerendered.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec.TopologySpreadConstraints,
+	)
+	require.Equal(t,
+		updated.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.TopologySpreadConstraints,
+		rerendered.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.TopologySpreadConstraints,
+	)
+	require.Equal(t,
+		commonconsts.KubeLabelValueTrue,
+		rerendered.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped],
+	)
 }
 
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWithoutWorkerHash(t *testing.T) {
