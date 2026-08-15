@@ -41,7 +41,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.workflow import WorkflowTokenEngine, load_workflow_frontend_application
+from dynamo.workflow import WorkflowTokenEngine, load_workflow_orchestrator
 
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
@@ -400,6 +400,8 @@ async def async_main():
         kwargs["model_name"] = config.model_name
     if config.model_path:
         kwargs["model_path"] = config.model_path
+    if config.custom_jinja_template:
+        kwargs["custom_template_path"] = config.custom_jinja_template
     if config.tls_cert_path:
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
@@ -444,15 +446,10 @@ async def async_main():
 
     engine_type = EngineType.Dynamic
     if config.workflow_provider is not None:
-        application = await load_workflow_frontend_application(
-            config.workflow_provider, runtime, config
+        orchestrator = await load_workflow_orchestrator(
+            config.workflow_provider, runtime
         )
-        kwargs["model_path"] = application.model_path
-        if config.model_name is None and application.model_name is not None:
-            kwargs["model_name"] = application.model_name
-        if application.custom_template_path is not None:
-            kwargs["custom_template_path"] = application.custom_template_path
-        token_engine = WorkflowTokenEngine(application)
+        token_engine = WorkflowTokenEngine(orchestrator)
         kwargs["in_process_token_engine"] = PythonAsyncEngine(
             token_engine.generate, loop
         )

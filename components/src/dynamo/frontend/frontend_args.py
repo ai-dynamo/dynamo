@@ -52,6 +52,17 @@ def validate_model_path(value: str) -> str:
     return value
 
 
+def validate_custom_jinja_template(value: str) -> str:
+    """Resolve and validate a custom chat-template file."""
+
+    expanded = os.path.abspath(os.path.expanduser(os.path.expandvars(value)))
+    if not os.path.isfile(expanded):
+        raise argparse.ArgumentTypeError(
+            f"custom-jinja-template must be a readable file, got: {value}"
+        )
+    return expanded
+
+
 class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
@@ -74,6 +85,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     migration_max_seq_len: Optional[int]
     model_name: Optional[str]
     model_path: Optional[str]
+    custom_jinja_template: Optional[str]
     metrics_prefix: Optional[str] = None
 
     kserve_grpc_server: bool
@@ -139,6 +151,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--workflow-provider must use a 'module:callable' path"
                 )
+            if self.model_path is None:
+                raise ValueError("--workflow-provider requires --model-path")
             if self.chat_processor != "dynamo":
                 raise ValueError(
                     "--workflow-provider currently requires --dyn-chat-processor=dynamo"
@@ -416,6 +430,14 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
             arg_type=validate_model_path,
+        )
+        add_argument(
+            g,
+            flag_name="--custom-jinja-template",
+            env_var="DYN_CUSTOM_JINJA_TEMPLATE",
+            default=None,
+            help="Path to a custom Jinja chat template used by the frontend.",
+            arg_type=validate_custom_jinja_template,
         )
         add_argument(
             g,

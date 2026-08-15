@@ -5,11 +5,7 @@
 
 from dynamo.workflow.builder import StageHandle, Workflow
 from dynamo.workflow.compiler import DeploymentSpec, compile_workflow
-from dynamo.workflow.frontend import (
-    WorkflowFrontendApplication,
-    WorkflowTokenEngine,
-    load_workflow_frontend_application,
-)
+from dynamo.workflow.frontend import WorkflowTokenEngine, load_workflow_orchestrator
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.orchestrator import WorkflowOrchestrator
 from dynamo.workflow.plan import ExecutionPlan, InlineBinding, RemoteBinding
@@ -29,7 +25,6 @@ __all__ = [
     "WorkflowIR",
     "WorkflowExecutionError",
     "WorkflowOrchestrator",
-    "WorkflowFrontendApplication",
     "WorkflowTokenEngine",
     "WorkflowValidationError",
     "ExecutionPlan",
@@ -38,5 +33,5 @@ __all__ = [
     "RemoteStageClient",
     "RemoteStageServer",
     "compile_workflow",
-    "load_workflow_frontend_application",
+    "load_workflow_orchestrator",
 ]
