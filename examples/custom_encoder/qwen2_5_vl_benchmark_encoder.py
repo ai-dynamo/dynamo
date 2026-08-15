@@ -125,6 +125,10 @@ _TIMING_ENABLED = os.environ.get("DYN_CUSTOM_ENCODER_TIMING", "").lower() in {
 _DISPATCH_LOG_ENABLED = os.environ.get(
     "DYN_CUSTOM_ENCODER_DISPATCH_LOG", ""
 ).lower() in {"1", "true", "yes"}
+if _DISPATCH_LOG_ENABLED:
+    # Keep the audited dispatch records when the surrounding benchmark lowers
+    # Dynamo's high-volume framework logs to warning.
+    logger.setLevel(logging.INFO)
 
 
 @dataclass(frozen=True)
