@@ -227,7 +227,7 @@ Dynamo 提供完整的基准测试工具：
 cargo run -p dynamo-llm --bin generate-frontend-openapi
 ```
 
-该命令会写入 `docs/reference/api/openapi.json`。
+该命令会写入 `docs/frontends/openapi.json`。
 
 ## 服务发现与消息传递
 

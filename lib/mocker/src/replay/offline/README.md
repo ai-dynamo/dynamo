@@ -4,7 +4,7 @@ This directory contains the in-process offline replay harness used by `dynamo_mo
 
 The goal is to simulate trace execution without spinning up async runtimes, network planes, or real worker tasks. Instead, the harness advances a logical clock, steps mock engine cores directly, and records request/token timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`.
 
-For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/fern/pages/cli/operations/dynosim/dynosim-replay.mdx`](../../../../../docs/fern/pages/cli/operations/dynosim/dynosim-replay.mdx). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
+For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/fern/pages/cli/operations/simulation-with-dynosim/dynosim-replay.mdx`](../../../../../docs/fern/pages/cli/operations/simulation-with-dynosim/dynosim-replay.mdx). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
 
 ## Where It Sits
 

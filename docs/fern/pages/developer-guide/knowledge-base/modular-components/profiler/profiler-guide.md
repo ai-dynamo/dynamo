@@ -308,7 +308,7 @@ require the helper.
 Use a binary from the same Dynamo release as the profiler. The profiler checks
 the binary protocol before applying an override and rejects incompatible versions.
 For supported DGD versions and merge behavior, see
-[Generated DGD Overrides](../../../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md#generated-dgd-overrides).
+[Optional: Customize the generated DGD](../../../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md#optional-customize-the-generated-dgd).
 
 Registry credentials are namespace-scoped. The operator chart's
 `imagePullSecrets` pull the operator Pod only. A profiling Job that needs

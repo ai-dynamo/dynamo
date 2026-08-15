@@ -256,7 +256,7 @@ For Llama-3-70B with vLLM (Aggregated), an example of integration with the Infer
 
 First, deploy the Dynamo Graph per instructions above.
 
-Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
+Then follow the [Gateway API Inference Extension guide](../docs/fern/pages/kubernetes/kv-aware-routing/gateway-api.mdx) to install GAIE.
 
 Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<version>` e.g. `nvcr.io/nvidia/ai-dynamo/frontend:0.9.0`
 The recipe assumes you are using Kubernetes discovery backend and sets the `DYN_DISCOVERY_BACKEND` env variable in the epp deployment. If you want to use etcd enable the lines below and remove the DYN_DISCOVERY_BACKEND env var.
