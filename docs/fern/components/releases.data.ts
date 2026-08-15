@@ -93,7 +93,7 @@ export const RELEASES: Release[] = [
     delta:
       "Audit subsystem migrated into request trace (DYN_AUDIT_* honored as legacy aliases); HTTP header capture in trace records is an explicit fail-closed allowlist; deprecated multimodal worker flags and vLLM worker-role flags removed; UCX 1.21.x.",
     notesSummary:
-      "Media-ready runtimes with actionable codec errors and NVDEC video decode, per-worker request-codec negotiation, conversation-affinity rank routing for TensorRT-LLM, and the v1beta1 operator surface as default.",
+      "Experimental cross-datacenter prefix routing and reservation replay in the Router, a vLLM-compatible generate token endpoint, tokenizer L1 prefix cache on by default, NIXL disaggregation for vLLM-Omni pipelines, and the Spica deployment simulator.",
   },
   {
     version: "v1.3.1",
