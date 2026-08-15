@@ -19,54 +19,89 @@ use super::ingress::unified_server::RequestPlaneServer;
 use crate::distributed::RequestPlaneMode;
 use anyhow::Result;
 use async_once_cell::OnceCell;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use tokio_util::sync::CancellationToken;
 
-/// Global storage for the actual TCP RPC port after binding.
-/// Uses OnceLock since the port is set once when the server binds and never changes.
-static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
-
-/// Global storage for the shared TCP server instance.
+/// TCP server state shared by all managers running on the same Tokio runtime.
 ///
 /// When multiple workers run in the same process, they must share a single TCP server
 /// to ensure all endpoints are registered on the same server. Without this, each worker
 /// would create its own server on a different port, but all would publish the same port
-/// (from ACTUAL_TCP_RPC_PORT) to discovery, causing "No handler found" errors.
+/// to discovery, causing "No handler found" errors.
 ///
-/// Uses `tokio::sync::OnceCell` to support async initialization (binding the TCP socket).
-static GLOBAL_TCP_SERVER: tokio::sync::OnceCell<Arc<SharedTcpServer>> =
-    tokio::sync::OnceCell::const_new();
-
-/// Process-wide cancellation token for the global TCP server.
-///
-/// This token is independent of any individual runtime's cancellation token so that
-/// component Drop impls (e.g. KvRouter::drop → cancel) don't kill the shared accept
-/// loop while the OnceCell still hands out the (now-dead) server to later runtimes.
-static GLOBAL_TCP_SERVER_TOKEN: std::sync::LazyLock<CancellationToken> =
-    std::sync::LazyLock::new(CancellationToken::new);
-
-/// Get the actual TCP RPC port that the server is listening on.
-pub fn get_actual_tcp_rpc_port() -> anyhow::Result<u16> {
-    ACTUAL_TCP_RPC_PORT.get().copied().ok_or_else(|| {
-        tracing::error!(
-            "TCP RPC port not set - request_plane_server() must be called before get_actual_tcp_rpc_port()"
-        );
-        anyhow::anyhow!(
-            "TCP RPC port not initialized. This is not expected."
-        )
-    })
+/// The server's background tasks are spawned onto the current Tokio runtime, so this
+/// state cannot be process-global: a test (or embedding application) may tear down one
+/// runtime and create another in the same process. The second runtime must not inherit
+/// the first runtime's now-dead server.
+struct RuntimeTcpScope {
+    server: tokio::sync::OnceCell<Arc<SharedTcpServer>>,
+    actual_port: OnceLock<u16>,
+    cancellation_token: CancellationToken,
+    runtime_alive: AtomicBool,
 }
 
-/// Set the actual TCP RPC port (called internally after server binds).
-fn set_actual_tcp_rpc_port(port: u16) {
-    if let Err(existing) = ACTUAL_TCP_RPC_PORT.set(port) {
-        tracing::warn!(
-            existing_port = existing,
-            new_port = port,
-            "TCP RPC port already set, ignoring new value"
-        );
+impl RuntimeTcpScope {
+    fn new() -> Arc<Self> {
+        let scope = Arc::new(Self {
+            server: tokio::sync::OnceCell::const_new(),
+            actual_port: OnceLock::new(),
+            cancellation_token: CancellationToken::new(),
+            runtime_alive: AtomicBool::new(true),
+        });
+
+        // Tokio runtime IDs may be reused after shutdown. Mark this scope dead when
+        // the runtime drops so a retained NetworkManager cannot make a later runtime
+        // with the same ID inherit this server.
+        let guard = RuntimeShutdownGuard(Arc::downgrade(&scope));
+        let cancellation_token = scope.cancellation_token.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            cancellation_token.cancelled().await;
+        });
+
+        scope
     }
+}
+
+impl Drop for RuntimeTcpScope {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
+}
+
+struct RuntimeShutdownGuard(Weak<RuntimeTcpScope>);
+
+impl Drop for RuntimeShutdownGuard {
+    fn drop(&mut self) {
+        if let Some(scope) = self.0.upgrade() {
+            scope.runtime_alive.store(false, Ordering::Release);
+            scope.cancellation_token.cancel();
+        }
+    }
+}
+
+/// Weak entries avoid keeping a TCP scope alive after its managers are dropped.
+/// Runtime IDs are only unique among live runtimes, so dead scopes are replaced.
+static RUNTIME_TCP_SCOPES: LazyLock<Mutex<HashMap<tokio::runtime::Id, Weak<RuntimeTcpScope>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn current_runtime_tcp_scope() -> Arc<RuntimeTcpScope> {
+    let runtime_id = tokio::runtime::Handle::current().id();
+    let mut scopes = RUNTIME_TCP_SCOPES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    if let Some(scope) = scopes.get(&runtime_id).and_then(Weak::upgrade)
+        && scope.runtime_alive.load(Ordering::Acquire)
+    {
+        return scope;
+    }
+
+    let scope = RuntimeTcpScope::new();
+    scopes.insert(runtime_id, Arc::downgrade(&scope));
+    scope
 }
 
 /// Network configuration loaded from environment variables
@@ -140,6 +175,7 @@ pub struct NetworkManager {
     mode: RequestPlaneMode,
     config: NetworkConfig,
     server: Arc<OnceCell<Arc<dyn RequestPlaneServer>>>,
+    tcp_scope: OnceLock<Arc<RuntimeTcpScope>>,
     cancellation_token: CancellationToken,
     component_registry: crate::component::Registry,
 }
@@ -192,6 +228,7 @@ impl NetworkManager {
             mode,
             config,
             server: Arc::new(OnceCell::new()),
+            tcp_scope: OnceLock::new(),
             cancellation_token,
             component_registry,
         }
@@ -249,6 +286,20 @@ impl NetworkManager {
         self.mode
     }
 
+    /// Return the OS-assigned TCP port after the request-plane server has started.
+    pub fn actual_tcp_rpc_port(&self) -> Result<u16> {
+        self.tcp_scope
+            .get()
+            .and_then(|scope| scope.actual_port.get())
+            .copied()
+            .ok_or_else(|| {
+                tracing::error!(
+                    "TCP RPC port not set - request_plane_server() must be called before actual_tcp_rpc_port()"
+                );
+                anyhow::anyhow!("TCP RPC port not initialized. This is not expected.")
+            })
+    }
+
     // ============================================================================
     // PRIVATE: Server Creation
     // ============================================================================
@@ -261,9 +312,14 @@ impl NetworkManager {
     }
 
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
-        // Use the global TCP server to ensure all workers in the same process share
-        // a single server. This is critical for correct endpoint routing.
-        let server = GLOBAL_TCP_SERVER
+        // Share one TCP server among all managers on this Tokio runtime. Its background
+        // tasks cannot safely outlive or be reused by a different runtime.
+        let tcp_scope = self
+            .tcp_scope
+            .get_or_init(current_runtime_tcp_scope)
+            .clone();
+        let server = tcp_scope
+            .server
             .get_or_try_init(|| async {
                 // Use configured port if specified, otherwise use port 0 (OS assigns free port)
                 let port = self.config.tcp_port.unwrap_or(0);
@@ -277,13 +333,20 @@ impl NetworkManager {
                     "Creating TCP request plane server"
                 );
 
-                let server = SharedTcpServer::new(bind_addr, GLOBAL_TCP_SERVER_TOKEN.clone())?;
+                let server =
+                    SharedTcpServer::new(bind_addr, tcp_scope.cancellation_token.clone())?;
 
                 // Bind and start server, getting the actual bound address
                 let actual_addr = server.clone().bind_and_start().await?;
 
-                // Store the actual bound port globally so build_transport_type() can access it
-                set_actual_tcp_rpc_port(actual_addr.port());
+                // Store the actual port in the same runtime scope as the server.
+                if let Err(existing) = tcp_scope.actual_port.set(actual_addr.port()) {
+                    tracing::warn!(
+                        existing_port = existing,
+                        new_port = actual_addr.port(),
+                        "TCP RPC port already set for this runtime, ignoring new value"
+                    );
+                }
 
                 tracing::info!(
                     actual_addr = %actual_addr,
@@ -346,6 +409,8 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+    use std::time::Duration;
 
     fn manager_for(mode: RequestPlaneMode) -> NetworkManager {
         NetworkManager::new(
@@ -371,5 +436,57 @@ mod tests {
             ),
             Err(err) => assert!(err.to_string().contains("NATS client required")),
         }
+    }
+
+    async fn start_and_probe_tcp_server() -> SocketAddr {
+        let manager = manager_for(RequestPlaneMode::Tcp);
+        let server = manager.server().await.unwrap();
+        let address = server
+            .address()
+            .strip_prefix("tcp://")
+            .unwrap()
+            .parse::<SocketAddr>()
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await
+        .expect("TCP server did not accept a connection before the deadline")
+        .expect("TCP server address was not reachable");
+
+        address
+    }
+
+    #[test]
+    fn tcp_server_is_not_reused_after_its_tokio_runtime_drops() {
+        let first_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        first_runtime.block_on(start_and_probe_tcp_server());
+        drop(first_runtime);
+
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        second_runtime.block_on(start_and_probe_tcp_server());
+    }
+
+    #[tokio::test]
+    async fn tcp_managers_share_server_within_one_tokio_runtime() {
+        let first_manager = manager_for(RequestPlaneMode::Tcp);
+        let second_manager = manager_for(RequestPlaneMode::Tcp);
+
+        let first_server = first_manager.server().await.unwrap();
+        let second_server = second_manager.server().await.unwrap();
+
+        assert_eq!(first_server.address(), second_server.address());
+        assert_eq!(
+            first_manager.actual_tcp_rpc_port().unwrap(),
+            second_manager.actual_tcp_rpc_port().unwrap()
+        );
     }
 }
