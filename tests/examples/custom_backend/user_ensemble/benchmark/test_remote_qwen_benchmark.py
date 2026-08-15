@@ -105,7 +105,7 @@ def test_runner_waits_for_real_generation_without_touching_encoder_counts() -> N
         / "examples/custom_backend/user_ensemble/benchmark/run_qwen_comparison.sh"
     ).read_text(encoding="utf-8")
 
-    assert "wait_control_plane \"$output_dir\"\n    wait_generation_ready" in runner
+    assert 'wait_control_plane "$output_dir"\n    wait_generation_ready' in runner
     readiness = runner.split("wait_generation_ready()", maxsplit=1)[1].split(
         "run_cell()", maxsplit=1
     )[0]
