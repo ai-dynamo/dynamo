@@ -58,3 +58,7 @@
 # docs.rs pages for the 1.4.0 crates exist only after the GA crates publish.
 # Remove after v1.4.0 crates are on crates.io.
 ^https://docs\.rs/[a-z0-9-]+/1\.4\.0$
+# First-time crates in the 1.4.0 publish list; their crates.io pages exist
+# only after GA publish. Remove after v1.4.0 crates are on crates.io.
+^https://crates\.io/crates/dynamo-truthy(/.*)?$
+^https://crates\.io/crates/dynamo-backend-common(/.*)?$

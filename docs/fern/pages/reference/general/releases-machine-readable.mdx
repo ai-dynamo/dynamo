@@ -167,16 +167,30 @@ Release highlights (stable releases):
 | helm | snapshot | Snapshot DaemonSet for fast GPU worker recovery | - | `helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.4.0.tgz` |
 | crate | dynamo-runtime | Core distributed runtime library | MSRV Rust v1.82 | `cargo add dynamo-runtime@1.4.0` |
 | crate | dynamo-llm | LLM inference engine | MSRV Rust v1.82 | `cargo add dynamo-llm@1.4.0` |
-| crate | dynamo-protocols | Async OpenAI-compatible API client | MSRV Rust v1.82 | `cargo add dynamo-protocols@5.0.1` |
+| crate | dynamo-protocols (Consumed) | Async OpenAI-compatible API client | Registry dependency · own release line | `cargo add dynamo-protocols@5.0.1` |
 | crate | dynamo-async-openai (Deprecated) | Legacy OpenAI client; use dynamo-protocols | MSRV Rust v1.82 · final release | `cargo add dynamo-async-openai@1.0.2` |
-| crate | dynamo-parsers | Protocol parsers (SSE, JSON streaming) | MSRV Rust v1.82 | `cargo add dynamo-parsers@7.0.1` |
+| crate | dynamo-parsers (Consumed) | Protocol parsers (SSE, JSON streaming) | Registry dependency · own release line | `cargo add dynamo-parsers@7.0.1` |
 | crate | dynamo-memory | Memory management utilities | MSRV Rust v1.82 | `cargo add dynamo-memory@1.4.0` |
 | crate | dynamo-config | Configuration management | MSRV Rust v1.82 | `cargo add dynamo-config@1.2.1` |
 | crate | dynamo-tokens | Tokenizer bindings for LLM inference | MSRV Rust v1.82 | `cargo add dynamo-tokens@1.4.0` |
-| crate | dynamo-tokenizers | Tokenizer library for LLM inference | MSRV Rust v1.82 | `cargo add dynamo-tokenizers@1.5.4` |
+| crate | dynamo-tokenizers (Consumed) | Tokenizer library for LLM inference | Registry dependency · own release line | `cargo add dynamo-tokenizers@1.5.4` |
 | crate | dynamo-mocker | Inference engine simulator for benchmarking | MSRV Rust v1.82 | `cargo add dynamo-mocker@1.4.0` |
 | crate | dynamo-kv-router | KV-aware request routing library | MSRV Rust v1.82 | `cargo add dynamo-kv-router@1.4.0` |
 | crate | kvbm-logical | Logical layer for the KV Block Manager | MSRV Rust v1.82 | `cargo add kvbm-logical@1.4.0` |
+| crate | dynamo-kv-hashing | Request-to-lineage-hash contract for KV cache identity | MSRV Rust v1.82 | `cargo add dynamo-kv-hashing@1.4.0` |
+| crate | dynamo-data-gen | Schemas and primitives for Dynamo data generation and replay traces | MSRV Rust v1.82 | `cargo add dynamo-data-gen@1.4.0` |
+| crate | dynamo-rl | Dynamo RL worker discovery API | MSRV Rust v1.82 | `cargo add dynamo-rl@1.4.0` |
+| crate | dynamo-bench | Lightweight HTTP benchmarks for Dynamo endpoints | MSRV Rust v1.82 | `cargo add dynamo-bench@1.4.0` |
+| crate | dynamo-backend-common | Shared runtime glue for Rust LLM backends | MSRV Rust v1.82 | `cargo add dynamo-backend-common@1.4.0` |
+| crate | dynamo-truthy | Canonical truthy/falsy boolean flag parsing | MSRV Rust v1.82 | `cargo add dynamo-truthy@1.4.0` |
+| crate | kvbm-common | Shared types for the KV Block Manager | MSRV Rust v1.82 | `cargo add kvbm-common@1.4.0` |
+| crate | kvbm-config | KVBM configuration for Tokio, Rayon, and Messenger runtimes | MSRV Rust v1.82 | `cargo add kvbm-config@1.4.0` |
+| crate | kvbm-kernels | CUDA kernels for the KV Block Manager | MSRV Rust v1.82 | `cargo add kvbm-kernels@1.4.0` |
+| crate | kvbm-physical | Physical block layer for the KV Block Manager | MSRV Rust v1.82 | `cargo add kvbm-physical@1.4.0` |
+| crate | kvbm-engine | Distributed coordination primitives for KVBM | MSRV Rust v1.82 | `cargo add kvbm-engine@1.4.0` |
+| crate | dynamo-renderer (Consumed) | Chat-template rendering used by the Dynamo Frontend | Registry dependency · own release line | `cargo add dynamo-renderer@4.0.0` |
+| crate | dynamo-parsers-v2 (Consumed) | Second-generation protocol parsers consumed by the Frontend | Registry dependency · own release line | `cargo add dynamo-parsers-v2@0.1.23` |
+| crate | fastokens (Consumed) | High-performance Rust tokenizer backend consumed by the Frontend | Registry dependency · own release line | `cargo add fastokens@0.2.0` |
 
 ## Known artifact issues
 
