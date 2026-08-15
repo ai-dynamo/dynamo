@@ -170,3 +170,42 @@ def test_declared_nixl_carrier_lowers_tensor_fanout_per_consumer() -> None:
         "classifier.embedding": "nixl",
         "generator.embedding": "nixl",
     }
+
+
+def test_nixl_does_not_cross_the_orchestrator_process() -> None:
+    tensor = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 8))
+    producer_contract = StageContract(
+        id="producer",
+        inputs={"request": ValueSpec(type="json")},
+        outputs={"embedding": tensor},
+    )
+    consumer_contract = StageContract(
+        id="consumer",
+        inputs={"embedding": tensor},
+        outputs={"result": ValueSpec(type="json")},
+    )
+    workflow = Workflow("unsupported-mixed-tensor")
+    request = workflow.input("request", ValueSpec(type="json"))
+    producer = workflow.stage("producer", producer_contract, request=request)
+    consumer = workflow.stage(
+        "consumer", consumer_contract, embedding=producer.embedding
+    )
+    workflow.output("result", consumer.result)
+
+    placements = (
+        {
+            "producer": InlineBinding("producer"),
+            "consumer": RemoteBinding(
+                "workflows.consumer.generate", tensor_carrier="nixl"
+            ),
+        },
+        {
+            "producer": RemoteBinding(
+                "workflows.producer.generate", tensor_carrier="nixl"
+            ),
+            "consumer": InlineBinding("consumer"),
+        },
+    )
+    for bindings in placements:
+        with pytest.raises(WorkflowValidationError, match="no common declared carrier"):
+            compile_workflow(workflow, DeploymentSpec(bindings))
