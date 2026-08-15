@@ -69,7 +69,18 @@ snapshot_vmm_posix_read_capability(int fd, struct snapshot_vmm_posix_capability*
       capability->creator_endpoint[0] != '/' ||
       memchr(capability->creator_endpoint, '\0', sizeof(capability->creator_endpoint)) == NULL ||
       zero_bytes(capability->authorization, sizeof(capability->authorization)) ||
+      !zero_bytes(capability->reserved_alignment, sizeof(capability->reserved_alignment)) ||
+      (capability->resource_kind != SNAPSHOT_VMM_RESOURCE_UNICAST &&
+       capability->resource_kind != SNAPSHOT_VMM_RESOURCE_MULTICAST) ||
       !zero_bytes(capability->reserved_identity, sizeof(capability->reserved_identity)))
+    return -1;
+  if (capability->resource_kind == SNAPSHOT_VMM_RESOURCE_UNICAST &&
+      (capability->num_devices != 0 || capability->allocation_size != 0 || capability->handle_types != 0 ||
+       capability->object_flags != 0))
+    return -1;
+  if (capability->resource_kind == SNAPSHOT_VMM_RESOURCE_MULTICAST &&
+      (capability->num_devices == 0 || capability->allocation_size == 0 ||
+       capability->handle_types != SNAPSHOT_VMM_POSIX_HANDLE_TYPE))
     return -1;
   return 0;
 }
@@ -91,6 +102,7 @@ snapshot_vmm_posix_request_export(
   request.magic = SNAPSHOT_VMM_MAGIC;
   request.version = SNAPSHOT_VMM_VERSION;
   request.operation = SNAPSHOT_VMM_EXPORT;
+  request.resource_kind = capability->resource_kind;
   snprintf(request.participant_id, sizeof(request.participant_id), "%s", capability->creator_participant);
   memcpy(request.authorization, capability->authorization, sizeof(request.authorization));
   memcpy(request.allocation_id, capability->allocation_id, sizeof(request.allocation_id));
@@ -106,7 +118,8 @@ snapshot_vmm_posix_request_export(
   }
   if (!snapshot_vmm_header_strings_terminated(&response) || response.magic != SNAPSHOT_VMM_MAGIC ||
       response.version != SNAPSHOT_VMM_VERSION || response.operation != SNAPSHOT_VMM_EXPORT || response.count != 0 ||
-      response.payload_size != 0 || strcmp(response.participant_id, capability->creator_participant) != 0) {
+      response.payload_size != 0 || strcmp(response.participant_id, capability->creator_participant) != 0 ||
+      response.resource_kind != capability->resource_kind) {
     if (error != NULL && error_size != 0)
       snprintf(error, error_size, "%s", "invalid creator export response");
     if (*output >= 0) {

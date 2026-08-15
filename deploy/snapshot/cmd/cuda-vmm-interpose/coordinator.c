@@ -31,6 +31,26 @@ struct participant {
   uint32_t count;
 };
 
+struct multicast {
+  uint8_t id[SNAPSHOT_VMM_ALLOCATION_ID_SIZE];
+  char creator[SNAPSHOT_VMM_ID_SIZE];
+  uint64_t size;
+  uint64_t handle_types;
+  uint64_t flags;
+  uint32_t num_devices;
+  uint32_t creators;
+  uint32_t devices;
+  uint32_t bindings;
+  struct multicast_device* device_list;
+  struct multicast* next;
+};
+
+struct multicast_device {
+  int32_t device;
+  bool bound;
+  struct multicast_device* next;
+};
+
 struct allocation {
   uint8_t id[SNAPSHOT_VMM_ALLOCATION_ID_SIZE];
   char creator[SNAPSHOT_VMM_ID_SIZE];
@@ -57,6 +77,45 @@ connect_endpoint(const char* endpoint)
     return -1;
   }
   return fd;
+}
+
+static struct multicast*
+find_multicast(struct multicast* multicasts, const uint8_t id[SNAPSHOT_VMM_ALLOCATION_ID_SIZE])
+{
+  struct multicast* multicast;
+
+  for (multicast = multicasts; multicast != NULL; multicast = multicast->next) {
+    if (memcmp(multicast->id, id, SNAPSHOT_VMM_ALLOCATION_ID_SIZE) == 0)
+      return multicast;
+  }
+  return NULL;
+}
+
+static struct multicast_device*
+find_multicast_device(struct multicast* multicast, int32_t device)
+{
+  struct multicast_device* current;
+
+  for (current = multicast->device_list; current != NULL; current = current->next) {
+    if (current->device == device)
+      return current;
+  }
+  return NULL;
+}
+
+static void
+free_multicasts(struct multicast* multicasts)
+{
+  while (multicasts != NULL) {
+    struct multicast* next = multicasts->next;
+    while (multicasts->device_list != NULL) {
+      struct multicast_device* device_next = multicasts->device_list->next;
+      free(multicasts->device_list);
+      multicasts->device_list = device_next;
+    }
+    free(multicasts);
+    multicasts = next;
+  }
 }
 
 static int
@@ -127,6 +186,7 @@ static int
 validate_topology(struct participant* participants, size_t participant_count, struct allocation** output)
 {
   struct allocation* allocations = NULL;
+  struct multicast* multicasts = NULL;
   const char* reason = NULL;
   uint64_t value = UINT64_MAX;
   size_t participant_index;
@@ -154,6 +214,7 @@ validate_topology(struct participant* participants, size_t participant_count, st
     for (record_index = 0; record_index < participant->count; record_index++) {
       const struct snapshot_vmm_record* record = &participant->records[record_index];
       struct allocation* allocation = find_allocation(allocations, record->allocation_id);
+      struct multicast* multicast = find_multicast(multicasts, record->allocation_id);
 
       if (record->kind == SNAPSHOT_VMM_ALLOCATION) {
         if (allocation == NULL) {
@@ -210,6 +271,88 @@ validate_topology(struct participant* participants, size_t participant_count, st
         }
         if ((record->flags & SNAPSHOT_VMM_CREATOR) != 0)
           allocation->creator_mapping = true;
+      } else if (record->kind == SNAPSHOT_VMM_MULTICAST) {
+        if (record->handle_types != SNAPSHOT_VMM_POSIX_HANDLE_TYPE || record->num_devices == 0 ||
+            record->allocation_size == 0 || !snapshot_vmm_is_lower_hex_id(record->creator_participant)) {
+          reason = "invalid multicast properties";
+          goto failed;
+        }
+        if (multicast == NULL) {
+          multicast = calloc(1, sizeof(*multicast));
+          if (multicast == NULL) {
+            reason = "multicast metadata allocation failed";
+            goto failed;
+          }
+          memcpy(multicast->id, record->allocation_id, sizeof(multicast->id));
+          multicast->size = record->allocation_size;
+          multicast->handle_types = record->handle_types;
+          multicast->flags = record->object_flags;
+          multicast->num_devices = record->num_devices;
+          snprintf(multicast->creator, sizeof(multicast->creator), "%s", record->creator_participant);
+          multicast->next = multicasts;
+          multicasts = multicast;
+        } else if (
+            multicast->size != record->allocation_size || multicast->handle_types != record->handle_types ||
+            multicast->flags != record->object_flags || multicast->num_devices != record->num_devices ||
+            strcmp(multicast->creator, record->creator_participant) != 0) {
+          reason = "inconsistent multicast properties";
+          goto failed;
+        }
+        if ((record->flags & SNAPSHOT_VMM_CREATOR) != 0) {
+          if (strcmp(participant->id, multicast->creator) != 0) {
+            reason = "invalid multicast creator";
+            goto failed;
+          }
+          multicast->creators++;
+        }
+      } else if (record->kind == SNAPSHOT_VMM_MULTICAST_DEVICE) {
+        struct multicast_device* device;
+        if (multicast == NULL) {
+          reason = "multicast device precedes object";
+          goto failed;
+        }
+        if (find_multicast_device(multicast, record->device) != NULL) {
+          reason = "duplicate multicast device";
+          goto failed;
+        }
+        device = calloc(1, sizeof(*device));
+        if (device == NULL) {
+          reason = "multicast device metadata allocation failed";
+          goto failed;
+        }
+        device->device = record->device;
+        device->next = multicast->device_list;
+        multicast->device_list = device;
+        multicast->devices++;
+      } else if (record->kind == SNAPSHOT_VMM_MULTICAST_BINDING) {
+        struct allocation* member = find_allocation(allocations, record->member_id);
+        struct multicast_device* device;
+        if (multicast == NULL || record->size == 0 || record->offset > multicast->size ||
+            record->size > multicast->size - record->offset ||
+            (record->binding_kind != SNAPSHOT_VMM_MULTICAST_BIND_MEM &&
+             record->binding_kind != SNAPSHOT_VMM_MULTICAST_BIND_ADDR) ||
+            (record->api_version != 1 && record->api_version != 2)) {
+          reason = "invalid multicast binding";
+          goto failed;
+        }
+        if ((record->binding_kind == SNAPSHOT_VMM_MULTICAST_BIND_MEM && (member == NULL || record->address != 0)) ||
+            (record->binding_kind == SNAPSHOT_VMM_MULTICAST_BIND_ADDR && record->address == 0)) {
+          reason = "invalid multicast member";
+          goto failed;
+        }
+        device = find_multicast_device(multicast, record->device);
+        if (device == NULL) {
+          reason = "multicast binding device is absent";
+          goto failed;
+        }
+        device->bound = true;
+        multicast->bindings++;
+      } else if (record->kind == SNAPSHOT_VMM_MULTICAST_MAPPING) {
+        if (multicast == NULL || record->address == 0 || record->size == 0 || record->offset > multicast->size ||
+            record->size > multicast->size - record->offset || record->access_count > SNAPSHOT_VMM_MAX_ACCESS) {
+          reason = "invalid multicast mapping";
+          goto failed;
+        }
       } else {
         reason = "unknown record kind";
         value = record->kind;
@@ -248,7 +391,38 @@ validate_topology(struct participant* participants, size_t participant_count, st
       }
     }
   }
+  {
+    struct multicast* multicast;
+    for (multicast = multicasts; multicast != NULL; multicast = multicast->next) {
+      if (multicast->creators != 1) {
+        reason = "multicast group must have exactly one creator";
+        value = multicast->creators;
+        goto failed;
+      }
+      if (multicast->devices != multicast->num_devices) {
+        reason = "incomplete multicast device group";
+        value = multicast->devices;
+        goto failed;
+      }
+      if (multicast->bindings < multicast->num_devices) {
+        reason = "incomplete multicast binding group";
+        value = multicast->bindings;
+        goto failed;
+      }
+      {
+        struct multicast_device* device;
+        for (device = multicast->device_list; device != NULL; device = device->next) {
+          if (!device->bound) {
+            reason = "multicast device has no binding";
+            value = (uint64_t)(uint32_t)device->device;
+            goto failed;
+          }
+        }
+      }
+    }
+  }
   *output = allocations;
+  free_multicasts(multicasts);
   return 0;
 failed:
   if (value != UINT64_MAX)
@@ -268,6 +442,7 @@ failed:
     free(allocations);
     allocations = next;
   }
+  free_multicasts(multicasts);
   return -1;
 }
 
@@ -332,7 +507,7 @@ write_state(struct participant* participants, size_t count, FILE* output)
   size_t index;
 
   qsort(participants, count, sizeof(*participants), participant_compare);
-  if (fprintf(output, "snapshot-cuda-posix-v1\n") < 0)
+  if (fprintf(output, "snapshot-cuda-posix-v2\n") < 0)
     return -1;
   for (index = 0; index < count; index++) {
     struct participant* participant = &participants[index];
@@ -388,7 +563,7 @@ read_state(FILE* input, struct participant** output, size_t* output_count)
   struct participant* participants = NULL;
   size_t count = 0;
 
-  if (fgets(line, sizeof(line), input) == NULL || strcmp(line, "snapshot-cuda-posix-v1\n") != 0)
+  if (fgets(line, sizeof(line), input) == NULL || strcmp(line, "snapshot-cuda-posix-v2\n") != 0)
     return -1;
   while (fgets(line, sizeof(line), input) != NULL) {
     struct participant* participant;
@@ -625,6 +800,10 @@ main(int argc, char** argv)
       fprintf(stderr, "prepare failed: checkpoint carrier creation\n");
       goto done;
     }
+    if (command_all(participants, participant_count, SNAPSHOT_VMM_PREPARE_MULTICAST) != 0) {
+      fprintf(stderr, "prepare failed: multicast teardown\n");
+      goto done;
+    }
     if (command_all(participants, participant_count, SNAPSHOT_VMM_PREPARE) != 0) {
       fprintf(stderr, "prepare failed: participant prepare\n");
       goto done;
@@ -645,7 +824,11 @@ main(int argc, char** argv)
         same_participants(expected, expected_count, participants, participant_count) != 0)
       goto done;
     if (command_all(participants, participant_count, SNAPSHOT_VMM_RESTORE_CREATORS) != 0 ||
-        command_all(participants, participant_count, SNAPSHOT_VMM_RESTORE_IMPORTERS) != 0) {
+        command_all(participants, participant_count, SNAPSHOT_VMM_RESTORE_IMPORTERS) != 0 ||
+        command_all(participants, participant_count, SNAPSHOT_VMM_RESTORE_MULTICAST_CREATORS) != 0 ||
+        command_all(participants, participant_count, SNAPSHOT_VMM_RESTORE_MULTICAST_IMPORTERS) != 0 ||
+        command_all(participants, participant_count, SNAPSHOT_VMM_RESTORE_MULTICAST_DEVICES) != 0 ||
+        command_all(participants, participant_count, SNAPSHOT_VMM_RESTORE_MULTICAST) != 0) {
       goto done;
     }
     for (index = 0; index < participant_count; index++) {
