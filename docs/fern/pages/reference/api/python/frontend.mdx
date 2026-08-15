@@ -52,7 +52,7 @@ Frontend configuration parameters.
 from dynamo.frontend.frontend_args import FrontendArgGroup
 ```
 
-[`components/src/dynamo/frontend/frontend_args.py#L177`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L177)
+[`components/src/dynamo/frontend/frontend_args.py#L212`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L212)
 
 **Public methods**
 
@@ -64,7 +64,7 @@ add_arguments(parser) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L180)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L215)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-frontend-args-frontendconfig" title="FrontendConfig (class)">
@@ -74,7 +74,7 @@ Configuration for the Dynamo frontend.
 from dynamo.frontend.frontend_args import FrontendConfig
 ```
 
-[`components/src/dynamo/frontend/frontend_args.py#L54`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L54)
+[`components/src/dynamo/frontend/frontend_args.py#L55`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L55)
 
 **Public methods**
 
@@ -86,7 +86,7 @@ validate() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L99)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L100)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-preprocesserror" title="PreprocessError (class)">
@@ -420,7 +420,7 @@ async_main()
 Initializes the distributed runtime, configures routing, and starts
 the HTTP server or interactive mode based on command-line arguments.
 
-[`components/src/dynamo/frontend/main.py#L322`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L322)
+[`components/src/dynamo/frontend/main.py#L320`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L320)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-build-response-format-guided-decoding" title="build_response_format_guided_decoding (function)">
@@ -565,7 +565,7 @@ graceful_shutdown(runtime: DistributedRuntime) -> None
 The DistributedRuntime instance to shut down.
 </ParamField>
 
-[`components/src/dynamo/frontend/main.py#L483`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L483)
+[`components/src/dynamo/frontend/main.py#L460`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L460)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-handle-engine-error" title="handle_engine_error (function)">
@@ -598,7 +598,7 @@ load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendRoute
 Each value is either a name registered under the ``dynamo.frontend.routes``
 entry-point group (preferred) or a direct ``module:function`` path.
 
-[`components/src/dynamo/frontend/main.py#L217`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L217)
+[`components/src/dynamo/frontend/main.py#L215`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L215)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-main" title="main (function)">
@@ -612,7 +612,7 @@ from dynamo.frontend.main import main
 main() -> None
 ```
 
-[`components/src/dynamo/frontend/main.py#L492`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L492)
+[`components/src/dynamo/frontend/main.py#L469`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L469)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-make-backend-error" title="make_backend_error (function)">
@@ -686,7 +686,7 @@ parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]
 
 - `tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]` — Tuple of (FrontendConfig, vllm_flags, sglang_flags).
 
-[`components/src/dynamo/frontend/main.py#L245`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L245)
+[`components/src/dynamo/frontend/main.py#L243`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L243)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
@@ -838,7 +838,7 @@ from dynamo.frontend.main import setup_engine_factory
 setup_engine_factory(config: FrontendConfig, vllm_flags: Namespace) -> EngineFactory
 ```
 
-[`components/src/dynamo/frontend/main.py#L100`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L100)
+[`components/src/dynamo/frontend/main.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L98)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-setup-sglang-engine-factory" title="setup_sglang_engine_factory (function)">
@@ -852,7 +852,7 @@ from dynamo.frontend.main import setup_sglang_engine_factory
 setup_sglang_engine_factory(config: FrontendConfig, sglang_flags: Optional[Namespace] = None)
 ```
 
-[`components/src/dynamo/frontend/main.py#L113`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L113)
+[`components/src/dynamo/frontend/main.py#L111`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L111)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-frontend-args-validate-model-name" title="validate_model_name (function)">
@@ -866,7 +866,7 @@ from dynamo.frontend.frontend_args import validate_model_name
 validate_model_name(value: str) -> str
 ```
 
-[`components/src/dynamo/frontend/frontend_args.py#L36`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L36)
+[`components/src/dynamo/frontend/frontend_args.py#L37`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L37)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-frontend-args-validate-model-path" title="validate_model_path (function)">
@@ -880,7 +880,7 @@ from dynamo.frontend.frontend_args import validate_model_path
 validate_model_path(value: str) -> str
 ```
 
-[`components/src/dynamo/frontend/frontend_args.py#L45`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L45)
+[`components/src/dynamo/frontend/frontend_args.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L46)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-worker-warmup" title="worker_warmup (function)">
