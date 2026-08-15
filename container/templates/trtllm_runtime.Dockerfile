@@ -56,8 +56,11 @@ WORKDIR /workspace
 
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
-# for shells, not K8s python3 launches), swap upstream's single-binary etcd
-# for dynamo_base's directory, and symlink system libstdc++ to a stable
+# for shells, not K8s python3 launches), swap upstream's standalone etcd
+# tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
+# carries a single copy of each tool, drop the unused wandb developer tooling
+# the DLFW base carries (upstream removes it on main, Dockerfile.multi), and
+# symlink system libstdc++ to a stable
 # path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
 # NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
 # older copy.
@@ -83,9 +86,33 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         /usr/local/bin/etcd \
         /usr/local/bin/etcdctl \
         /usr/local/bin/etcdutl && \
+    /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
+    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ] && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
@@ -344,6 +371,9 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
     /usr/local/bin/etcdutl \
+    /usr/local/bin/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb-* \
     /usr/local/lib/python3.12/dist-packages/cv2 \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
@@ -365,7 +395,8 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
     /usr/local/lib/python3.12/dist-packages/attrs-* && \
-    ! /usr/bin/python3 -c "import cv2" 2>/dev/null
+    ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
 
 # Post-overlay guard for the DALI whiteout above. This is the only stage where

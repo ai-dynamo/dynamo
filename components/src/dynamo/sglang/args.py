@@ -19,6 +19,11 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
@@ -41,7 +46,13 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 
     component: str
     diffusion_worker: bool = False
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool = False
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -345,9 +356,17 @@ async def parse_args(args: list[str]) -> Config:
             continue
         sg._group_actions.append(action)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto DynamoConfig: the router's --router-kv-events lands on
+    # `use_kv_events`, which DynamoConfig already uses for "this worker
+    # publishes KV events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     dynamo_args, unknown = parser.parse_known_args(args)
 
     dynamo_config = DynamoConfig.from_cli_args(dynamo_args)
+    # Consume the router flags before the SGLang parser sees the remainder.
+    dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
     dynamo_config.validate()
 
     # Dealing with SGLang native configs

@@ -7,6 +7,7 @@ use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
 };
 
+/// Register every policy type supplied by this example catalog.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {

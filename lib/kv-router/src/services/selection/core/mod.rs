@@ -47,6 +47,7 @@ use super::types::{
     WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerSelectionPolicyFactory;
+use crate::WorkerType;
 
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -504,7 +505,7 @@ impl SelectionCore {
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
-                    |factory| factory(&self.kv_router_config, WORKER_TYPE, key.as_ref()),
+                    |factory| factory(&self.kv_router_config, WorkerType::Aggregated, key.as_ref()),
                 );
                 let profile = self
                     .kv_router_config
