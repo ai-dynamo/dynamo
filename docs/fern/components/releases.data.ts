@@ -731,8 +731,8 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-protocols",
     description: "Async OpenAI-compatible API client",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-protocols/1.4.0",
-    tags: [{ label: "cargo add dynamo-protocols@1.4.0", clipboard: "cargo add dynamo-protocols@1.4.0" }],
+    href: "https://crates.io/crates/dynamo-protocols/5.0.1",
+    tags: [{ label: "cargo add dynamo-protocols@5.0.1", clipboard: "cargo add dynamo-protocols@5.0.1" }],
   },
   {
     category: "crate",
@@ -748,8 +748,8 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-parsers",
     description: "Protocol parsers (SSE, JSON streaming)",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-parsers/1.4.0",
-    tags: [{ label: "cargo add dynamo-parsers@1.4.0", clipboard: "cargo add dynamo-parsers@1.4.0" }],
+    href: "https://crates.io/crates/dynamo-parsers/7.0.1",
+    tags: [{ label: "cargo add dynamo-parsers@7.0.1", clipboard: "cargo add dynamo-parsers@7.0.1" }],
   },
   {
     category: "crate",
@@ -781,8 +781,8 @@ export const ARTIFACTS: Artifact[] = [
     name: "dynamo-tokenizers",
     description: "Tokenizer library for LLM inference",
     meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-tokenizers/1.4.0",
-    tags: [{ label: "cargo add dynamo-tokenizers@1.4.0", clipboard: "cargo add dynamo-tokenizers@1.4.0" }],
+    href: "https://crates.io/crates/dynamo-tokenizers/1.5.4",
+    tags: [{ label: "cargo add dynamo-tokenizers@1.5.4", clipboard: "cargo add dynamo-tokenizers@1.5.4" }],
   },
   {
     category: "crate",
