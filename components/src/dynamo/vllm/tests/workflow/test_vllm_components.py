@@ -13,7 +13,13 @@ from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.multimodal_utils.custom_encoder import VisionEncoderBackend
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import loader
 from dynamo.vllm.workflow.components import DynamoVllmStage, EncoderStage
-from dynamo.workflow import GenerateEndpointBinding
+from dynamo.workflow import (
+    GenerateEndpointBinding,
+    ValueSpec,
+    Workflow,
+    WorkflowValidationError,
+    compile_workflow,
+)
 from dynamo.workflow.plan import validate_binding_contract
 
 pytestmark = [
@@ -42,10 +48,29 @@ def _context() -> SimpleNamespace:
 def test_dynamo_vllm_stage_matches_generate_endpoint_contract():
     validate_binding_contract(
         GenerateEndpointBinding("workflows.generator.generate"),
-        DynamoVllmStage.contract,
+        DynamoVllmStage.complete_contract,
     )
 
-    assert DynamoVllmStage.contract.id == "dynamo-vllm"
+    assert DynamoVllmStage.complete_contract.id == "dynamo-vllm-complete"
+    assert DynamoVllmStage.stream_contract.outputs["chunks"].item.type == "json"
+
+
+def test_dynamo_vllm_stream_contract_is_declared_but_not_executable() -> None:
+    workflow = Workflow("future-streaming-vllm")
+    request = workflow.input("request", ValueSpec(type="json"))
+    features = workflow.input("encoder_features", ValueSpec(type="tensor"))
+    metadata = workflow.input("encoder_metadata", ValueSpec(type="json"))
+    generator = workflow.stage(
+        "generator",
+        DynamoVllmStage.stream_contract,
+        request=request,
+        encoder_features=features,
+        encoder_metadata=metadata,
+    )
+    workflow.output("chunks", generator.chunks)
+
+    with pytest.raises(WorkflowValidationError, match="stream execution"):
+        compile_workflow(workflow)
 
 
 async def test_encoder_stage_packs_dynamic_image_rows_and_metadata():
