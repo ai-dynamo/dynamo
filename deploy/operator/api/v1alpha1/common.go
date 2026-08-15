@@ -56,7 +56,7 @@ type VolumeMount struct {
 }
 
 // Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+// with HPA, KEDA, or Planner for autoscaling instead. See docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md
 // for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
 	// Deprecated: This field is ignored.
