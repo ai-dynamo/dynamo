@@ -73,5 +73,7 @@ def validate_binding_contract(binding: Binding, contract: StageContract) -> None
             "Generate endpoint stage inputs must be request, encoder_features, "
             "and encoder_metadata"
         )
-    if contract.outputs != {"chunk"}:
-        raise WorkflowValidationError("Generate endpoint stage output must be chunk")
+    if contract.outputs != {"completion"}:
+        raise WorkflowValidationError(
+            "Generate endpoint stage output must be completion"
+        )

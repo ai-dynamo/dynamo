@@ -16,7 +16,7 @@ from dynamo.experimental.workflow.bindings import (
     RemoteBinding,
     validate_binding_contract,
 )
-from dynamo.experimental.workflow.generate import GenerateEndpointClient
+from dynamo.experimental.workflow.generate import GenerateEndpointInvoker
 from dynamo.experimental.workflow.ir import WorkflowIR
 from dynamo.experimental.workflow.remote import RemoteStageClient
 from dynamo.experimental.workflow.runtime import StageContext, WorkflowExecutionError
@@ -153,7 +153,7 @@ class StageDispatcher:
             client = await endpoint.client()
             await client.wait_for_instances()
             clients[endpoint_id] = (
-                GenerateEndpointClient(client)
+                GenerateEndpointInvoker(client)
                 if protocols == {GenerateEndpointBinding}
                 else RemoteStageClient(client)
             )
