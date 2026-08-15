@@ -383,6 +383,10 @@ def test_request_cancellation_vllm_aggregated(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=worker.system_port,
                     expected_count=idx + 1,
+                    # The worker logs the engine abort before the TCP request
+                    # reader increments cancellation_total. Poll the observable
+                    # counter instead of racing that asynchronous teardown.
+                    max_wait_ms=5000,
                 )
 
 
