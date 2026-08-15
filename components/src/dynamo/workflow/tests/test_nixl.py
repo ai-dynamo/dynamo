@@ -280,6 +280,36 @@ async def test_send_pool_reuses_slot_after_all_fanout_reads() -> None:
     await carrier.close()
 
 
+async def test_receive_pool_reuses_registration_for_one_transfer_size() -> None:
+    connector = _Connector()
+    carrier = NixlTensorCarrier(
+        connector=connector,
+        nixl_module=_NixlModule,
+        torch_module=torch,
+        receive_pool_capacity=1,
+        receive_pool_max_bytes=64,
+        receive_pool_max_size_classes=1,
+    )
+
+    pooled_descriptor = None
+    for value in (1.0, 2.0):
+        source = torch.full((2, 8), value, dtype=torch.float16)
+        reference = await carrier.export_tensor(source, f"consumer-{value}")
+        received = await carrier.import_tensor(reference)
+        await _wait_for_no_leases(carrier)
+        assert torch.equal(received, source)
+
+        pool = next(iter(carrier._receive_pools.values()))
+        if pooled_descriptor is None:
+            pooled_descriptor = pool.descriptors[0]
+        assert pool.descriptors[0] is pooled_descriptor
+        assert pooled_descriptor.is_registered
+
+    await carrier.close()
+    assert pooled_descriptor is not None
+    assert not pooled_descriptor.is_registered
+
+
 async def test_lease_registry_retains_unread_operation_after_timeout() -> None:
     registry = NixlLeaseRegistry(timeout_s=0.01)
     operation = _Readable("never-read", _Descriptor(torch.ones(1)))
