@@ -444,9 +444,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #
 # This is the runtime image with the same default execution contract
 # (entrypoint/cmd), running as root so the agent can restore into it. It ships
-# NO checkpoint/restore tooling: criu, nsrestore, the cuda-checkpoint binaries,
-# their shared libraries, and the criu plugins are all bind-mounted on demand
-# from the agent's /snapshot-binaries bundle at restore time (internal/nsmount).
+# cuda-checkpoint because launch-job wrapping requires it in the source image.
+# CRIU, nsrestore, helper binaries, shared libraries, and CRIU plugins are
+# bind-mounted from the agent at restore time (internal/nsmount).
 # The mount destination is created by the ns-bind-mount helper inside this
 # namespace, so nothing needs pre-provisioning here.
 #
@@ -468,11 +468,6 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # before the workload creates shared allocations. The remaining restore
 # toolchain is still injected from the agent bundle.
 #
-# cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
-# When used, the source workload image must have cuda-checkpoint at the same
-# path as it runs from — CRIU restores file-backed mappings by path, not via
-# PATH search — and so must this placeholder image (same BASE_IMAGE).
-#
 # Dynamo backend entrypoints run a restore standby path when the operator
 # injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
 # snapshot-agent restores into the container.
@@ -493,9 +488,11 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
 # is provisioned here; see the stage comment above.
 RUN mkdir -p /checkpoints
 
+COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=cuda-helper-builder /snapshot-cuda-vmm /usr/local/bin/snapshot-cuda-vmm
 COPY --from=cuda-helper-builder /libsnapshot_cuda_vmm.so /usr/local/lib/snapshot/libsnapshot_cuda_vmm.so
 COPY --from=cuda-helper-builder /workspace/cmd/cuda-vmm-interpose/launch.sh /usr/local/bin/snapshot-cuda-vmm-launch
-RUN chmod 0755 /usr/local/bin/snapshot-cuda-vmm \
+RUN chmod 0755 /usr/local/sbin/cuda-checkpoint \
+    /usr/local/bin/snapshot-cuda-vmm \
     /usr/local/bin/snapshot-cuda-vmm-launch \
     && chmod 0644 /usr/local/lib/snapshot/libsnapshot_cuda_vmm.so
