@@ -26,7 +26,7 @@ from dynamo.workflow import (  # noqa: E402
     WorkflowExecutor,
 )
 from examples.custom_backend.user_ensemble.remote import (  # noqa: E402
-    worker as remote_worker_module,
+    classifier_worker as classifier_worker_module,
 )
 from examples.custom_backend.user_ensemble.remote.bindings import (  # noqa: E402
     CLASSIFIER_ENDPOINT,
@@ -144,16 +144,11 @@ async def test_classifier_worker_serves_workflow_protocol_and_closes_carrier():
     carrier = _FakeTensorCarrier()
 
     with patch.object(
-        remote_worker_module,
+        classifier_worker_module,
         "NixlTensorCarrier",
         return_value=carrier,
     ):
-        await remote_worker_module.remote_worker.__wrapped__(
-            runtime,
-            "classifier",
-            "unused-model",
-            "unused-encoder",
-        )
+        await classifier_worker_module.classifier_worker.__wrapped__(runtime)
 
     assert runtime.endpoint_ids == [CLASSIFIER_ENDPOINT]
     assert runtime.created_endpoint.handler is not None

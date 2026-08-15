@@ -6,12 +6,9 @@
 from collections.abc import Mapping
 from typing import Any
 
+from dynamo.vllm.workflow.components import DynamoVllmStage, EncoderStage
 from dynamo.workflow import ValueSpec, Workflow
-from examples.custom_backend.user_ensemble.stages import (
-    DummyClassifier,
-    EncoderStage,
-    StockVllmGenerator,
-)
+from examples.custom_backend.user_ensemble.stages import DummyClassifier
 
 
 def define_workflow() -> Workflow:
@@ -25,7 +22,7 @@ def define_workflow() -> Workflow:
     )
     generator = workflow.stage(
         "generator",
-        StockVllmGenerator.contract,
+        DynamoVllmStage.contract,
         request=request,
         encoder_features=encoder.encoder_features,
         encoder_metadata=encoder.encoder_metadata,
