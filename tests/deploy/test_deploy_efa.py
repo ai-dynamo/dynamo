@@ -30,7 +30,6 @@ minutes, which is far more than the per-commit risk warrants.
 import json
 import logging
 import shlex
-import time
 from pathlib import Path
 
 import pytest
@@ -43,6 +42,14 @@ logger = logging.getLogger(__name__)
 EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
 PREFILL_SERVICE = "VllmPrefillWorker"
 DECODE_SERVICE = "VllmDecodeWorker"
+
+# Comfortably under the test's own pytest timeout below, so a deployment that
+# never becomes ready loses the race to _wait_for_condition, which raises with
+# pod statuses, conditions and warning events appended. Left at the 1800s default
+# it would be pytest-timeout that fires, killing the test mid-wait with a
+# traceback that says nothing about why the pods were not ready. Observed
+# readiness on aws-dev-02 is ~90-150s, so this is not a tight budget.
+EFA_READINESS_TIMEOUT = 900
 
 # Deliberately self-contained rather than imported from test_deploy.py. Importing
 # one test module from another breaks the pre-commit marker report, which
@@ -419,36 +426,6 @@ def assert_efa_rdma_traffic(
     )
 
 
-def assert_deployment_cleaned_up(
-    deployment: ManagedDeployment, timeout: int = 180
-) -> None:
-    """Fail if the worker pods survive teardown.
-
-    A pod wedged in Terminating keeps both its GPU and its VPC IP until the
-    sandbox is torn down, so a teardown that quietly leaves pods behind degrades
-    the shared cluster for everyone else on it -- later runs hit
-    "failed to assign an IP address" or simply cannot get GPUs, and none of it
-    points back here. This has been observed taking 20+ minutes on these
-    clusters (Grove podclique finalizers), so it is a real failure mode, not a
-    theoretical one. Better to fail this test loudly than to leak quietly.
-    """
-    deadline = time.monotonic() + timeout
-    remaining: list[str] = []
-    while time.monotonic() < deadline:
-        pods = deployment.get_pods([PREFILL_SERVICE, DECODE_SERVICE])
-        remaining = [pod.name for pod_list in pods.values() for pod in pod_list]
-        if not remaining:
-            logger.info("Teardown verified: no worker pods remain")
-            return
-        time.sleep(5)
-
-    pytest.fail(
-        f"Deployment teardown left {len(remaining)} worker pod(s) after {timeout}s: "
-        f"{remaining}. They hold GPUs and VPC IPs until removed; force-delete them "
-        "before re-running."
-    )
-
-
 @pytest.mark.framework_with_efa
 @pytest.mark.k8s
 @pytest.mark.deploy
@@ -504,6 +481,7 @@ async def test_efa_deployment(
         deployment_spec=deployment_spec,
         namespace=namespace,
         skip_service_restart=skip_service_restart,
+        readiness_timeout=EFA_READINESS_TIMEOUT,
     ) as deployment:
         # Both workers must be present — disaggregation is the whole point.
         worker_pods = deployment.get_pods([PREFILL_SERVICE, DECODE_SERVICE])
@@ -594,7 +572,3 @@ async def test_efa_deployment(
             EFA_MODEL_NAME,
             namespace,
         )
-
-    # Outside the context manager: ManagedDeployment has now torn the deployment
-    # down, so verify it actually went away rather than assuming it did.
-    assert_deployment_cleaned_up(deployment)

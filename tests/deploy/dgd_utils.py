@@ -789,6 +789,10 @@ class ManagedDeployment:
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
+    # Readiness budget for __aenter__. Tests carrying a pytest timeout should set
+    # this below it, so _wait_for_condition raises with pod-status diagnostics
+    # instead of pytest-timeout killing the test mid-wait with a bare traceback.
+    readiness_timeout: int = 1800
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1668,7 +1672,7 @@ class ManagedDeployment:
             await asyncio.gather(*tasks)
 
             await self._create_deployment()
-            await self._wait_for_ready()
+            await self._wait_for_ready(timeout=self.readiness_timeout)
 
         except:
             await self._cleanup()
