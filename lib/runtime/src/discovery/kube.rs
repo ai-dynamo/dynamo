@@ -401,7 +401,7 @@ impl Discovery for KubeDiscoveryClient {
         );
 
         // Clone the watch receiver
-        let mut watch_rx = self.metadata_watch.clone();
+        let watch_rx = self.metadata_watch.clone();
 
         // Create output stream
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -409,155 +409,186 @@ impl Discovery for KubeDiscoveryClient {
         // Generate unique stream identifier for tracing
         let stream_id = uuid::Uuid::new_v4();
 
-        // Spawn task to process snapshots
-        tokio::spawn(async move {
-            // Initialize from current snapshot state
-            // This is critical: watch_rx.changed() only fires on FUTURE changes,
-            // so we must capture the current state first to detect removals correctly
-            let initial_snapshot = watch_rx.borrow_and_update().clone();
-
-            // Build initial map: DiscoveryInstanceId -> DiscoveryInstance
-            let initial: HashMap<DiscoveryInstanceId, DiscoveryInstance> = initial_snapshot
-                .instances
-                .values()
-                .flat_map(|metadata| metadata.filter(&query))
-                .map(|instance| (instance.id(), instance))
-                .collect();
-
-            tracing::debug!(
-                stream_id = %stream_id,
-                initial_count = initial.len(),
-                "Watch started for query={:?}",
-                query
-            );
-
-            // Emit initial Added events (the "list" part of list_and_watch)
-            for instance in initial.values() {
-                tracing::info!(
-                    stream_id = %stream_id,
-                    instance_id = format!("{:x}", instance.instance_id()),
-                    "Emitting initial Added event"
-                );
-                if event_tx
-                    .send(Ok(DiscoveryEvent::Added(instance.clone())))
-                    .is_err()
-                {
-                    tracing::debug!(
-                        stream_id = %stream_id,
-                        "Watch receiver dropped during initial sync"
-                    );
-                    return;
-                }
-            }
-
-            // Track complete values so same-ID model taint updates are observable.
-            let mut known = initial;
-
-            loop {
-                tracing::trace!(
-                    stream_id = %stream_id,
-                    known_count = known.len(),
-                    "Watch loop waiting for changes"
-                );
-
-                // Wait for next snapshot or cancellation
-                let watch_result = if let Some(ref token) = cancel_token {
-                    tokio::select! {
-                        result = watch_rx.changed() => result,
-                        _ = token.cancelled() => {
-                            tracing::info!(
-                                stream_id = %stream_id,
-                                "Watch cancelled via cancel token"
-                            );
-                            break;
-                        }
-                    }
-                } else {
-                    watch_rx.changed().await
-                };
-
-                match watch_result {
-                    Ok(()) => {
-                        // Get latest snapshot
-                        let snapshot = watch_rx.borrow_and_update().clone();
-
-                        // Build current map: DiscoveryInstanceId -> DiscoveryInstance
-                        let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = snapshot
-                            .instances
-                            .values()
-                            .flat_map(|metadata| metadata.filter(&query))
-                            .map(|instance| (instance.id(), instance))
-                            .collect();
-
-                        tracing::debug!(
-                            stream_id = %stream_id,
-                            seq = snapshot.sequence,
-                            current_count = current.len(),
-                            known_count = known.len(),
-                            "Watch received snapshot update"
-                        );
-
-                        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
-
-                        // Log diff results (even if empty, for debugging)
-                        if events.is_empty() {
-                            tracing::debug!(
-                                stream_id = %stream_id,
-                                seq = snapshot.sequence,
-                                "Watch snapshot received but no diff detected"
-                            );
-                        } else {
-                            tracing::debug!(
-                                stream_id = %stream_id,
-                                seq = snapshot.sequence,
-                                emitted_events = events.len(),
-                                total = reconciled.len(),
-                                "Watch detected changes"
-                            );
-                        }
-
-                        for event in events {
-                            let (event_kind, instance_id) = match &event {
-                                DiscoveryEvent::Added(instance) => ("added", instance.id()),
-                                DiscoveryEvent::ModelTaintsUpdated(update) => (
-                                    "model_taints_updated",
-                                    DiscoveryInstanceId::Model(update.id.clone()),
-                                ),
-                                DiscoveryEvent::Removed(id) => ("removed", id.clone()),
-                            };
-                            tracing::info!(
-                                stream_id = %stream_id,
-                                event_kind,
-                                ?instance_id,
-                                "Emitting discovery event"
-                            );
-                            tracing::debug!(
-                                stream_id = %stream_id,
-                                ?event,
-                                "Discovery event detail"
-                            );
-                            if event_tx.send(Ok(event)).is_err() {
-                                tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
-                                return;
-                            }
-                        }
-
-                        known = reconciled;
-                    }
-                    Err(_) => {
-                        tracing::info!(
-                            stream_id = %stream_id,
-                            "Watch channel closed (daemon stopped)"
-                        );
-                        break;
-                    }
-                }
-            }
-        });
+        tokio::spawn(run_metadata_watch(
+            watch_rx,
+            query,
+            cancel_token,
+            event_tx,
+            stream_id,
+        ));
 
         // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
+    }
+}
+
+/// Translate metadata snapshots into discovery events for one `list_and_watch` stream.
+///
+/// Runs until the first of: `event_tx` is closed by the consumer dropping the stream,
+/// `cancel_token` fires, or the daemon drops its snapshot sender.
+///
+/// This is a free function rather than an inline closure so it can be driven over synthetic
+/// channels in tests; `KubeDiscoveryClient` itself cannot be built without a live
+/// `kube::Client`.
+async fn run_metadata_watch(
+    mut watch_rx: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
+    query: DiscoveryQuery,
+    cancel_token: Option<CancellationToken>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<Result<DiscoveryEvent>>,
+    stream_id: uuid::Uuid,
+) {
+    // Initialize from current snapshot state
+    // This is critical: watch_rx.changed() only fires on FUTURE changes,
+    // so we must capture the current state first to detect removals correctly
+    let initial_snapshot = watch_rx.borrow_and_update().clone();
+
+    // Build initial map: DiscoveryInstanceId -> DiscoveryInstance
+    let initial: HashMap<DiscoveryInstanceId, DiscoveryInstance> = initial_snapshot
+        .instances
+        .values()
+        .flat_map(|metadata| metadata.filter(&query))
+        .map(|instance| (instance.id(), instance))
+        .collect();
+
+    tracing::debug!(
+        stream_id = %stream_id,
+        initial_count = initial.len(),
+        "Watch started for query={:?}",
+        query
+    );
+
+    // Emit initial Added events (the "list" part of list_and_watch)
+    for instance in initial.values() {
+        tracing::info!(
+            stream_id = %stream_id,
+            instance_id = format!("{:x}", instance.instance_id()),
+            "Emitting initial Added event"
+        );
+        if event_tx
+            .send(Ok(DiscoveryEvent::Added(instance.clone())))
+            .is_err()
+        {
+            tracing::debug!(
+                stream_id = %stream_id,
+                "Watch receiver dropped during initial sync"
+            );
+            return;
+        }
+    }
+
+    // Track complete values so same-ID model taint updates are observable.
+    let mut known = initial;
+
+    loop {
+        tracing::trace!(
+            stream_id = %stream_id,
+            known_count = known.len(),
+            "Watch loop waiting for changes"
+        );
+
+        // Wait for the next snapshot, for the consumer to drop the stream, or for
+        // cancellation. The cancellation arm degrades to a future that never resolves
+        // when no token was supplied, so the other two arms are always armed.
+        let watch_result = tokio::select! {
+            result = watch_rx.changed() => result,
+            _ = event_tx.closed() => {
+                tracing::debug!(
+                    stream_id = %stream_id,
+                    "Watch receiver dropped"
+                );
+                break;
+            }
+            _ = async {
+                match cancel_token.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                tracing::info!(
+                    stream_id = %stream_id,
+                    "Watch cancelled via cancel token"
+                );
+                break;
+            }
+        };
+
+        match watch_result {
+            Ok(()) => {
+                // Get latest snapshot
+                let snapshot = watch_rx.borrow_and_update().clone();
+
+                // Build current map: DiscoveryInstanceId -> DiscoveryInstance
+                let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = snapshot
+                    .instances
+                    .values()
+                    .flat_map(|metadata| metadata.filter(&query))
+                    .map(|instance| (instance.id(), instance))
+                    .collect();
+
+                tracing::debug!(
+                    stream_id = %stream_id,
+                    seq = snapshot.sequence,
+                    current_count = current.len(),
+                    known_count = known.len(),
+                    "Watch received snapshot update"
+                );
+
+                let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
+
+                // Log diff results (even if empty, for debugging)
+                if events.is_empty() {
+                    tracing::debug!(
+                        stream_id = %stream_id,
+                        seq = snapshot.sequence,
+                        "Watch snapshot received but no diff detected"
+                    );
+                } else {
+                    tracing::debug!(
+                        stream_id = %stream_id,
+                        seq = snapshot.sequence,
+                        emitted_events = events.len(),
+                        total = reconciled.len(),
+                        "Watch detected changes"
+                    );
+                }
+
+                for event in events {
+                    let (event_kind, instance_id) = match &event {
+                        DiscoveryEvent::Added(instance) => ("added", instance.id()),
+                        DiscoveryEvent::ModelTaintsUpdated(update) => (
+                            "model_taints_updated",
+                            DiscoveryInstanceId::Model(update.id.clone()),
+                        ),
+                        DiscoveryEvent::Removed(id) => ("removed", id.clone()),
+                    };
+                    tracing::info!(
+                        stream_id = %stream_id,
+                        event_kind,
+                        ?instance_id,
+                        "Emitting discovery event"
+                    );
+                    tracing::debug!(
+                        stream_id = %stream_id,
+                        ?event,
+                        "Discovery event detail"
+                    );
+                    if event_tx.send(Ok(event)).is_err() {
+                        tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
+                        return;
+                    }
+                }
+
+                known = reconciled;
+            }
+            Err(_) => {
+                tracing::info!(
+                    stream_id = %stream_id,
+                    "Watch channel closed (daemon stopped)"
+                );
+                break;
+            }
+        }
     }
 }
 
@@ -776,6 +807,95 @@ mod tests {
         assert_eq!(
             card_json["runtime_config"]["taints"],
             serde_json::json!(["old"])
+        );
+    }
+
+    fn snapshot_with(instances: Vec<DiscoveryInstance>, sequence: u64) -> Arc<MetadataSnapshot> {
+        let mut metadata = DiscoveryMetadata::new();
+        for instance in instances {
+            metadata.register_endpoint(instance).unwrap();
+        }
+        let mut snapshot = MetadataSnapshot::empty();
+        snapshot.instances.insert(1, Arc::new(metadata));
+        snapshot.generations.insert(1, sequence as i64);
+        snapshot.sequence = sequence;
+        Arc::new(snapshot)
+    }
+
+    fn spawn_producer(
+        watch_rx: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<Result<DiscoveryEvent>>,
+    ) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_metadata_watch(
+            watch_rx,
+            DiscoveryQuery::AllEndpoints,
+            None,
+            event_tx,
+            uuid::Uuid::new_v4(),
+        ));
+        (handle, event_rx)
+    }
+
+    async fn next_event(
+        event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Result<DiscoveryEvent>>,
+    ) -> DiscoveryEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timed out waiting for a discovery event")
+            .expect("producer closed the channel")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn kube_watch_producer_stops_when_stream_is_dropped() {
+        // The daemon's snapshot sender outlives any individual stream, so `_watch_tx` is held
+        // for the whole test: `watch_rx.changed()` can never resolve on its own here.
+        let (_watch_tx, watch_rx) = tokio::sync::watch::channel(snapshot_with(
+            vec![endpoint_instance(1, "127.0.0.1:8000")],
+            1,
+        ));
+        let (producer, mut event_rx) = spawn_producer(watch_rx);
+
+        assert!(matches!(
+            next_event(&mut event_rx).await,
+            DiscoveryEvent::Added(_)
+        ));
+
+        drop(event_rx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), producer)
+            .await
+            .expect("producer must stop when the discovery stream is dropped")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn kube_watch_producer_keeps_emitting_while_stream_is_held() {
+        let first = endpoint_instance(1, "127.0.0.1:8000");
+        let second = endpoint_instance(2, "127.0.0.1:9000");
+        let (watch_tx, watch_rx) =
+            tokio::sync::watch::channel(snapshot_with(vec![first.clone()], 1));
+        let (producer, mut event_rx) = spawn_producer(watch_rx);
+
+        let DiscoveryEvent::Added(initial) = next_event(&mut event_rx).await else {
+            panic!("expected an initial Added event");
+        };
+        assert_eq!(initial.id(), first.id());
+
+        watch_tx
+            .send(snapshot_with(vec![first, second.clone()], 2))
+            .unwrap();
+
+        let DiscoveryEvent::Added(added) = next_event(&mut event_rx).await else {
+            panic!("expected an Added event for the new instance");
+        };
+        assert_eq!(added.id(), second.id());
+        assert!(
+            !producer.is_finished(),
+            "producer must stay alive while the stream is held"
         );
     }
 }

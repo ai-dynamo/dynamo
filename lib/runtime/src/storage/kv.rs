@@ -335,7 +335,10 @@ impl Manager {
 
     /// Returns a receiver that will receive all the existing keys, and
     /// then block and receive new keys as they are created.
-    /// Starts a task that runs forever, watches the store.
+    ///
+    /// Starts a task that watches the store until the first of: the returned receiver is
+    /// dropped, `cancel_token` fires, or the backend watch stream ends. Callers that only
+    /// hold the receiver therefore do not need to cancel the token to reclaim the task.
     pub fn watch(
         self: Arc<Self>,
         bucket_name: &str,
@@ -359,9 +362,16 @@ impl Manager {
             // after a newer snapshot.
             let mut stream = bucket.watch().await?;
 
+            // `tx` is the only sender, so this resolves exactly when the receiver returned to
+            // the caller is dropped. Without it the task parks in `stream.next()` on an idle
+            // bucket and never learns that nobody is listening.
+            let receiver_closed = tx.closed();
+            tokio::pin!(receiver_closed);
+
             loop {
                 let event = tokio::select! {
                     _ = cancel_token.cancelled() => break,
+                    _ = &mut receiver_closed => break,
                     result = stream.next() => match result {
                         Some(event) => event,
                         None => break,
@@ -591,6 +601,41 @@ mod tests {
 
         cancel_token.cancel();
         watch_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_stops_when_receiver_is_dropped() {
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager
+            .get_or_create_bucket(BUCKET_NAME, None)
+            .await
+            .unwrap();
+        let key = Key::new("ns/worker/generate/1".to_string());
+        bucket.insert(&key, "value".into(), 1).await.unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone());
+
+        // Consume the initial snapshot so the task is parked waiting on an idle bucket.
+        let initial = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(initial, WatchEvent::Put(_)));
+
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(5), watch_task)
+            .await
+            .expect("watch task must stop when its receiver is dropped")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !cancel_token.is_cancelled(),
+            "termination must not depend on the cancellation token"
+        );
     }
 
     #[tokio::test]
