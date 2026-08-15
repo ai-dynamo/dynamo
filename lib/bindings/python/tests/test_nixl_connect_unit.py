@@ -137,15 +137,19 @@ async def test_wait_for_completion_raises_on_errored_status(testable_active_op):
 @pytest.mark.asyncio
 async def test_connector_can_disable_nixl_progress_thread(nixl_mocks):
     """Actively polled callers can avoid an otherwise redundant agent thread."""
-    from dynamo.nixl_connect import Connector
+    import dynamo.nixl_connect as nixl_connect
 
     nixl_api, _, agent = nixl_mocks
     config = MagicMock()
     nixl_api.nixl_agent_config.return_value = config
 
-    connection = await Connector(
-        "actively-polled", enable_progress_thread=False
-    )._create_connection()
+    # Other test modules may have imported dynamo.nixl_connect during
+    # collection, before the fixture patched sys.modules. Patch the module's
+    # binding directly so this assertion is collection-order independent.
+    with patch.object(nixl_connect, "nixl_api", nixl_api):
+        connection = await nixl_connect.Connector(
+            "actively-polled", enable_progress_thread=False
+        )._create_connection()
 
     nixl_api.nixl_agent_config.assert_called_once_with(enable_prog_thread=False)
     nixl_api.nixl_agent.assert_called_once_with("actively-polled-1", config)
