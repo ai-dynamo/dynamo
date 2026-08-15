@@ -31,6 +31,7 @@ from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_connector_protocols import NIXL_CONNECTOR_NAMES
 
 from . import envs
 
@@ -445,23 +446,26 @@ def create_kv_events_config(
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
-    """Check if the user-provided --kv-transfer-config uses NixlConnector.
+    """Check if the user-provided --kv-transfer-config uses a NIXL connector.
 
-    Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
-    "NixlConnector").
+    Covers both the pull-mode ``NixlConnector`` and the push-mode
+    ``NixlPushConnector``, in both direct usage (``kv_connector=...``) and
+    nested usage inside PdConnector (``kv_connector_extra_config.connectors``).
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
-    if kv_cfg.kv_connector == "NixlConnector":
+    if kv_cfg.kv_connector in NIXL_CONNECTOR_NAMES:
         return True
     # PdConnector wraps multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
     if kv_cfg.kv_connector == "PdConnector":
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
-            if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
+            if (
+                isinstance(entry, dict)
+                and entry.get("kv_connector") in NIXL_CONNECTOR_NAMES
+            ):
                 return True
     return False
 
