@@ -15,7 +15,7 @@ from dynamo.workflow import (
     ValueSpec,
     Workflow,
     WorkflowExecutionError,
-    WorkflowExecutor,
+    WorkflowOrchestrator,
     WorkflowValidationError,
     compile_workflow,
 )
@@ -63,12 +63,12 @@ def _workflow() -> Workflow:
 
 async def _compile_local(
     workflow: Workflow, **runners: StageRunner
-) -> WorkflowExecutor:
+) -> WorkflowOrchestrator:
     plan = compile_workflow(
         workflow,
-        DeploymentSpec.local(**{stage_id: stage_id for stage_id in runners}),
+        DeploymentSpec.inline(**{stage_id: stage_id for stage_id in runners}),
     )
-    return await WorkflowExecutor.bind(plan, local_runners=runners)
+    return await WorkflowOrchestrator.bind(plan, inline_runners=runners)
 
 
 @dataclass
@@ -268,20 +268,20 @@ async def test_caller_cancellation_cleans_up_running_stages():
 
 async def test_compile_requires_exact_bindings_and_matching_contracts():
     with pytest.raises(WorkflowValidationError, match="missing"):
-        compile_workflow(_workflow(), DeploymentSpec.local(encoder="encoder"))
+        compile_workflow(_workflow(), DeploymentSpec.inline(encoder="encoder"))
 
     wrong = SimpleNamespace(contract=CLASSIFIER, run=_Generator(object()).run)
     with pytest.raises(WorkflowValidationError, match="does not match"):
-        await WorkflowExecutor.bind(
+        await WorkflowOrchestrator.bind(
             compile_workflow(
                 _workflow(),
-                DeploymentSpec.local(
+                DeploymentSpec.inline(
                     encoder="encoder",
                     classifier="classifier",
                     generator="generator",
                 ),
             ),
-            local_runners={
+            inline_runners={
                 "encoder": _Encoder(object()),
                 "classifier": _Classifier(object()),
                 "generator": wrong,

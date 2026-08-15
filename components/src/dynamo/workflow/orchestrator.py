@@ -23,7 +23,7 @@ from dynamo.workflow.scheduler import GraphScheduler
 from dynamo.workflow.types import ValueSpec
 
 
-class WorkflowExecutor:
+class WorkflowOrchestrator:
     """Own one compiled workflow's request and result lifecycle."""
 
     def __init__(self, plan: ExecutionPlan, dispatcher: StageDispatcher) -> None:
@@ -35,11 +35,11 @@ class WorkflowExecutor:
         cls,
         plan: ExecutionPlan,
         *,
-        local_runners: Mapping[str, StageRunner] = MappingProxyType({}),
-    ) -> "WorkflowExecutor":
+        inline_runners: Mapping[str, StageRunner] = MappingProxyType({}),
+    ) -> "WorkflowOrchestrator":
         """Bind initialized resources to an immutable execution plan."""
 
-        return cls(plan, StageDispatcher(plan, local_runners))
+        return cls(plan, StageDispatcher(plan, inline_runners))
 
     @property
     def plan(self) -> ExecutionPlan:
