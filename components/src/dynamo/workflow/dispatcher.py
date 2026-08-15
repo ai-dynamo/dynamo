@@ -23,7 +23,12 @@ from dynamo.workflow.runtime import (
     WorkflowExecutionError,
     _validate_value,
 )
-from dynamo.workflow.types import StageContract, ValueRef, WorkflowValidationError
+from dynamo.workflow.types import (
+    StageContract,
+    ValueRef,
+    WorkflowValidationError,
+    _require_value_spec,
+)
 
 
 @runtime_checkable
@@ -182,17 +187,20 @@ class StageDispatcher:
             )
         binding = self._plan.bindings[stage_id]
         for input_name, spec in contract.inputs.items():
+            value_spec = _require_value_spec(
+                spec, f"stage {stage_id!r} input {input_name!r}"
+            )
             value = inputs[input_name]
             location = f"stage {stage_id!r} input {input_name!r}"
-            if isinstance(binding, RemoteBinding) and spec.type == "tensor":
+            if isinstance(binding, RemoteBinding) and value_spec.type == "tensor":
                 reference = NixlTensorRef.from_dict(value)
                 _validate_value(
-                    spec,
+                    value_spec,
                     SimpleNamespace(dtype=reference.dtype, shape=reference.shape),
                     location,
                 )
             else:
-                _validate_value(spec, value, location)
+                _validate_value(value_spec, value, location)
 
         frozen_inputs = MappingProxyType(dict(inputs))
         if isinstance(binding, InlineBinding):
@@ -221,7 +229,10 @@ class StageDispatcher:
             )
         outputs = dict(result)
         for output_name, spec in contract.outputs.items():
-            if isinstance(binding, RemoteBinding) and spec.type == "tensor":
+            value_spec = _require_value_spec(
+                spec, f"stage {stage_id!r} output {output_name!r}"
+            )
+            if isinstance(binding, RemoteBinding) and value_spec.type == "tensor":
                 fanout = NixlTensorFanout.from_dict(outputs[output_name])
                 expected_transfers = set(
                     self._output_transfers.get(stage_id, MappingProxyType({})).get(

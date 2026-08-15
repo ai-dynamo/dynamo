@@ -441,7 +441,10 @@ class RemoteStageServer:
 
             runner_inputs = dict(envelope.inputs)
             for name, spec in self._runner.contract.inputs.items():
-                if spec.type == "tensor":
+                value_spec = _require_value_spec(
+                    spec, f"remote stage {self._stage_id!r} input {name!r}"
+                )
+                if value_spec.type == "tensor":
                     if self._tensor_carrier is None:
                         raise WorkflowExecutionError(
                             f"remote stage {self._stage_id!r} has no NIXL tensor carrier"
@@ -450,7 +453,7 @@ class RemoteStageServer:
                         envelope.inputs[name]
                     )
                 _validate_value(
-                    spec,
+                    value_spec,
                     runner_inputs[name],
                     f"remote stage {self._stage_id!r} input {name!r}",
                 )
@@ -486,8 +489,11 @@ class RemoteStageServer:
                 )
             wire_outputs: dict[str, Any] = dict(outputs)
             for name, spec in self._runner.contract.outputs.items():
+                value_spec = _require_value_spec(
+                    spec, f"remote stage {self._stage_id!r} output {name!r}"
+                )
                 transfer_ids = envelope.output_transfers.get(name, ())
-                if spec.type != "tensor":
+                if value_spec.type != "tensor":
                     if transfer_ids:
                         raise WorkflowExecutionError(
                             f"remote stage {self._stage_id!r} received NIXL transfers "
