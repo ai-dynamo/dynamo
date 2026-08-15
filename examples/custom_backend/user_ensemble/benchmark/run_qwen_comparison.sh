@@ -193,6 +193,47 @@ raise SystemExit(
     return 1
 }
 
+wait_generation_ready() {
+    local output_dir="$1"
+    local payload
+    local response="$output_dir/readiness_response.json"
+    printf -v payload \
+        '{"model":"%s","messages":[{"role":"user","content":"readiness"}],"max_tokens":1,"temperature":0,"stream":false}' \
+        "$MODEL"
+
+    # /v1/models proves only that the frontend has registered the configured
+    # model. In workflow mode the orchestrator can be ready before its remote
+    # generator is discoverable, so require one text-only generation too. The
+    # probe deliberately has no image and therefore does not change the exact
+    # custom-encoder accounting for the 20 warmups + 1,000 measured requests.
+    for _ in $(seq 1 1200); do
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            sed -n '1,240p' "$output_dir/server.log" >&2
+            return 1
+        fi
+        if curl -fsS \
+            -H 'Content-Type: application/json' \
+            --data "$payload" \
+            "http://127.0.0.1:$HTTP_PORT/v1/chat/completions" \
+            > "$response.tmp" 2>/dev/null \
+            && python -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+raise SystemExit(
+    0 if payload.get("choices", [{}])[0].get("finish_reason") else 1
+)
+' < "$response.tmp"; then
+            mv "$response.tmp" "$response"
+            return 0
+        fi
+        sleep 1
+    done
+    rm -f "$response.tmp"
+    return 1
+}
+
 run_cell() {
     local request_rate="$1"
     local repetition="$2"
@@ -205,9 +246,10 @@ run_cell() {
     rm -f "${zmq_prefix}-warmup"* "${zmq_prefix}-measured"* || true
     launch_topology "$topology" "$output_dir"
     wait_control_plane "$output_dir"
+    wait_generation_ready "$output_dir"
 
-    # The warmup is also the real-inference readiness gate. The measured run is
-    # not started unless all 20 image-bearing requests complete successfully.
+    # The warmup validates the real image path after the text-only generation
+    # readiness gate. The measured run starts only when all 20 complete.
     "$AIPERF_BIN" profile "${common_aiperf_args[@]}" \
         --input-file "$WARMUP_INPUT" \
         --concurrency 20 \

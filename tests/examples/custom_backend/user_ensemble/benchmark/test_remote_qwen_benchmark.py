@@ -99,6 +99,20 @@ def test_profile_validation_supports_warmup_and_measured_counts(
         validate_profile(profile, expected_requests=1000)
 
 
+def test_runner_waits_for_real_generation_without_touching_encoder_counts() -> None:
+    runner = (
+        Path(__file__).parents[5]
+        / "examples/custom_backend/user_ensemble/benchmark/run_qwen_comparison.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "wait_control_plane \"$output_dir\"\n    wait_generation_ready" in runner
+    readiness = runner.split("wait_generation_ready()", maxsplit=1)[1].split(
+        "run_cell()", maxsplit=1
+    )[0]
+    assert '"content":"readiness"' in readiness
+    assert "image_url" not in readiness
+
+
 def _cell(wall_seconds: float, request_throughput: float) -> dict:
     return {
         "full_client_process_wall_s": wall_seconds,
