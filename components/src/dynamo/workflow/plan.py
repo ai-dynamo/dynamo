@@ -100,9 +100,9 @@ def validate_binding_contract(binding: Binding, contract: StageContract) -> None
             "encoder_features:tensor, and encoder_metadata:json"
         )
     actual_outputs = {name: spec.type for name, spec in contract.outputs.items()}
-    if actual_outputs != {"chunk": "json"}:
+    if actual_outputs != {"completion": "json"}:
         raise WorkflowValidationError(
-            "Generate endpoint stage output must be chunk:json"
+            "Generate endpoint stage output must be completion:json"
         )
 
 

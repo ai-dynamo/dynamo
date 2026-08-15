@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Protocol, runtime_checkable
 
-from dynamo.workflow.generate import GenerateEndpointClient
+from dynamo.workflow.generate import GenerateEndpointInvoker
 from dynamo.workflow.nixl import NixlTensorFanout, NixlTensorRef
 from dynamo.workflow.plan import (
     NIXL_CARRIER,
@@ -183,7 +183,7 @@ class StageDispatcher:
             client = await endpoint.client()
             await client.wait_for_instances()
             clients[endpoint_id] = (
-                GenerateEndpointClient(client)
+                GenerateEndpointInvoker(client)
                 if protocols == {GenerateEndpointBinding}
                 else RemoteStageClient(client)
             )

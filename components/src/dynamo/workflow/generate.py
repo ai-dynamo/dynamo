@@ -16,7 +16,7 @@ from dynamo.workflow.types import StageContract
 GENERATE_REQUEST_PORT = "request"
 GENERATE_FEATURES_PORT = "encoder_features"
 GENERATE_METADATA_PORT = "encoder_metadata"
-GENERATE_OUTPUT_PORT = "chunk"
+GENERATE_OUTPUT_PORT = "completion"
 
 
 class _DynamoClient(Protocol):
@@ -30,27 +30,46 @@ class _DynamoClient(Protocol):
         ...
 
 
-class GenerateEndpointClient:
-    """Invoke a stock token Generate endpoint as one terminal workflow stage."""
+class GenerateEndpointStream:
+    """Own one Generate transport stream and its cancellation context."""
+
+    def __init__(self, stream: AsyncIterator[Any], transport_context: Any) -> None:
+        self._stream = stream.__aiter__()
+        self._transport_context = transport_context
+        self._closed = False
+
+    def __aiter__(self) -> "GenerateEndpointStream":
+        return self
+
+    async def __anext__(self) -> Any:
+        return await self._stream.__anext__()
+
+    async def aclose(self, *, cancel: bool = False) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if cancel and self._transport_context is not None:
+            self._transport_context.stop_generating()
+        close = getattr(self._stream, "aclose", None)
+        if callable(close):
+            await close()
+
+
+class GenerateEndpointInvoker:
+    """Open or collect a stock token Generate endpoint invocation."""
 
     def __init__(self, client: _DynamoClient) -> None:
         self._client = client
 
-    async def run(
+    async def open(
         self,
         stage_id: str,
-        contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
-        output_transfers: Mapping[str, tuple[str, ...]],
-    ) -> Mapping[str, Any]:
-        del contract
-        context.raise_if_cancelled()
-        if output_transfers:
-            raise WorkflowExecutionError(
-                f"Generate endpoint stage {stage_id!r} cannot export tensor outputs"
-            )
+    ) -> GenerateEndpointStream:
+        """Prepare the Generate request and return its owned token stream."""
 
+        context.raise_if_cancelled()
         request_value = inputs[GENERATE_REQUEST_PORT]
         if not isinstance(request_value, Mapping):
             raise WorkflowExecutionError("Generate endpoint request must be an object")
@@ -87,19 +106,38 @@ class GenerateEndpointClient:
                 )
             transport_context = detach(context.invocation_id)
 
-        stream = await self._client.round_robin(
-            request, annotated=False, context=transport_context
-        )
         try:
-            chunk = await _fold_terminal_chunks(stream, stage_id)
+            stream = await self._client.round_robin(
+                request, annotated=False, context=transport_context
+            )
         except BaseException:
             if transport_context is not None:
                 transport_context.stop_generating()
-            close = getattr(stream, "aclose", None)
-            if callable(close):
-                await close()
             raise
-        return {GENERATE_OUTPUT_PORT: chunk}
+        return GenerateEndpointStream(stream, transport_context)
+
+    async def run(
+        self,
+        stage_id: str,
+        contract: StageContract,
+        inputs: Mapping[str, Any],
+        context: StageContext,
+        output_transfers: Mapping[str, tuple[str, ...]],
+    ) -> Mapping[str, Any]:
+        del contract
+        if output_transfers:
+            raise WorkflowExecutionError(
+                f"Generate endpoint stage {stage_id!r} cannot export tensor outputs"
+            )
+
+        stream = await self.open(stage_id, inputs, context)
+        try:
+            completion = await collect_generation(stream, stage_id)
+        except BaseException:
+            await stream.aclose(cancel=True)
+            raise
+        await stream.aclose()
+        return {GENERATE_OUTPUT_PORT: completion}
 
 
 def _validate_request_options(request: Mapping[str, Any]) -> None:
@@ -123,9 +161,11 @@ def _validate_request_options(request: Mapping[str, Any]) -> None:
         )
 
 
-async def _fold_terminal_chunks(
+async def collect_generation(
     stream: AsyncIterator[Any], stage_id: str
 ) -> dict[str, Any]:
+    """Fold one non-streaming workflow completion from Generate token deltas."""
+
     token_ids: list[int] = []
     terminal: dict[str, Any] | None = None
     async for value in stream:
