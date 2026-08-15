@@ -21,6 +21,8 @@ MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
 WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
 SERVER_PID=""
 SAMPLER_PID=""
+DEFAULT_CELL_PLAN="1:inline 1:remote 2:remote 2:inline 3:inline 3:remote"
+CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
     echo >&2 "DYN_BENCH_OUTPUT_ROOT already exists: $OUTPUT_ROOT"
@@ -45,6 +47,10 @@ export DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS=1,2,4,8,16,32,64
 export DYN_QWEN2_VL_GRAPH_IMAGE_SIZES=300x300,500x500
 export DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE=0
 export DYN_CUSTOM_ENCODER_DISPATCH_LOG=1
+export DYN_ENCODER_BATCH_QUEUE_WAIT_MS=2
+export DYN_NIXL_SEND_POOL_CAPACITY=64
+export DYN_NIXL_SEND_POOL_BYTES=4194304
+export DYN_LOG=warn
 export DYN_MAX_MODEL_LEN=2048
 export DYN_MAX_NUM_SEQS=64
 export DYN_VLLM_GPU_MEMORY_UTILIZATION=0.4
@@ -105,6 +111,9 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
 sha256sum \
     "$REPO_ROOT/examples/custom_backend/user_ensemble/workflow.py" \
     "$REPO_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh" \
+    "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/custom_encoder/batcher.py" \
+    "$REPO_ROOT/components/src/dynamo/workflow/nixl.py" \
+    "$REPO_ROOT/lib/bindings/python/src/dynamo/nixl_connect/__init__.py" \
     "$REPO_ROOT/examples/custom_encoder/qwen2_5_vl_benchmark_encoder.py" \
     > "$OUTPUT_ROOT/source_files_sha256.txt"
 sha256sum "$MEASURED_INPUT" "$WARMUP_INPUT" \
@@ -258,13 +267,19 @@ run_cell() {
     cleanup_cell
 }
 
-orders=("inline remote" "remote inline" "inline remote")
-for repetition in 1 2 3; do
-    read -r -a order <<< "${orders[$((repetition - 1))]}"
-    for topology in "${order[@]}"; do
-        run_cell "$repetition" "$topology"
-    done
+for cell in $CELL_PLAN; do
+    repetition="${cell%%:*}"
+    topology="${cell#*:}"
+    if [[ "$repetition" == "$cell" || ! "$repetition" =~ ^[1-9][0-9]*$ ]]; then
+        echo >&2 "invalid DYN_BENCH_CELL_PLAN entry: $cell"
+        exit 2
+    fi
+    run_cell "$repetition" "$topology"
 done
 
-python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
-    summarize "$OUTPUT_ROOT" | tee "$OUTPUT_ROOT/summary.log"
+if [[ "$CELL_PLAN" == "$DEFAULT_CELL_PLAN" ]]; then
+    python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+        summarize "$OUTPUT_ROOT" | tee "$OUTPUT_ROOT/summary.log"
+else
+    printf '%s\n' "$CELL_PLAN" > "$OUTPUT_ROOT/partial_cell_plan.txt"
+fi
