@@ -363,6 +363,7 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             packages[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             packages[package] = "not-installed"
+    packages["aiperf"] = args.aiperf_version
     return {
         "dynamo_commit": args.source_commit,
         "dynamo_branch": args.source_branch,
@@ -659,6 +660,7 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--gpu-info", required=True)
     metadata.add_argument("--torch-gpu-count", type=int, required=True)
     metadata.add_argument("--concurrency-cap", type=int, required=True)
+    metadata.add_argument("--aiperf-version", required=True)
 
     cell = subparsers.add_parser("validate-cell")
     cell.add_argument("--profile", type=Path, required=True)
