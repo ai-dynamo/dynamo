@@ -18,7 +18,12 @@ from dynamo.workflow.runtime import (
     WorkflowExecutionError,
     _validate_value,
 )
-from dynamo.workflow.types import StageContract, WorkflowValidationError, validate_name
+from dynamo.workflow.types import (
+    StageContract,
+    WorkflowValidationError,
+    _require_value_spec,
+    validate_name,
+)
 
 STAGE_REQUEST_SCHEMA = "dynamo.workflow.stage_request"
 STAGE_RESPONSE_SCHEMA = "dynamo.workflow.stage_response"
@@ -286,13 +291,18 @@ class RemoteStageServer:
         if not isinstance(runner, StageRunner):
             raise WorkflowValidationError("remote runner must implement StageRunner")
         unsupported_ports = sorted(
-            f"{direction}.{name}:{spec.type}"
+            f"{direction}.{name}:{value_spec.type}"
             for direction, ports in (
                 ("inputs", runner.contract.inputs),
                 ("outputs", runner.contract.outputs),
             )
             for name, spec in ports.items()
-            if spec.type not in REMOTE_VALUE_TYPES
+            if (
+                value_spec := _require_value_spec(
+                    spec, f"remote stage {stage_id!r} {direction}.{name}"
+                )
+            ).type
+            not in REMOTE_VALUE_TYPES
         )
         if unsupported_ports:
             raise WorkflowValidationError(
