@@ -11,7 +11,9 @@ from types import MappingProxyType
 from typing import Mapping, Optional, Sequence, Tuple, TypeVar, cast
 
 from dynamo.workflow.types import (
+    PortSpec,
     StageContract,
+    StreamSpec,
     ValueRef,
     ValueSpec,
     WorkflowValidationError,
@@ -54,7 +56,7 @@ class WorkflowIR:
     """A validated, deterministic workflow graph without placement details."""
 
     name: str
-    inputs: Mapping[str, ValueSpec]
+    inputs: Mapping[str, PortSpec]
     stages: Tuple[StageIR, ...]
     outputs: Mapping[str, ValueRef]
 
@@ -67,12 +69,12 @@ class WorkflowIR:
                 "workflow inputs and outputs must be mappings"
             )
 
-        inputs: dict[str, ValueSpec] = {}
+        inputs: dict[str, PortSpec] = {}
         for name, spec in sorted(self.inputs.items()):
             validate_name(name, "workflow input")
-            if not isinstance(spec, ValueSpec):
+            if not isinstance(spec, (ValueSpec, StreamSpec)):
                 raise WorkflowValidationError(
-                    f"workflow input {name!r} must use ValueSpec"
+                    f"workflow input {name!r} must use ValueSpec or StreamSpec"
                 )
             inputs[name] = spec
 
@@ -95,7 +97,7 @@ class WorkflowIR:
 
     @staticmethod
     def _validate_and_order(
-        workflow_inputs: Mapping[str, ValueSpec],
+        workflow_inputs: Mapping[str, PortSpec],
         stages: Sequence[StageIR],
         workflow_outputs: Mapping[str, ValueRef],
     ) -> Tuple[StageIR, ...]:
@@ -199,9 +201,9 @@ class WorkflowIR:
     @staticmethod
     def _resolve_reference(
         reference: ValueRef,
-        workflow_inputs: Mapping[str, ValueSpec],
+        workflow_inputs: Mapping[str, PortSpec],
         stages: Mapping[str, StageIR],
-    ) -> tuple[ValueSpec, Optional[str]]:
+    ) -> tuple[PortSpec, Optional[str]]:
         if reference.input_name is not None:
             if reference.input_name not in workflow_inputs:
                 raise WorkflowValidationError(
@@ -220,7 +222,7 @@ class WorkflowIR:
             )
         return stage.contract.outputs[output_name], stage_id
 
-    def output_spec(self, name: str) -> ValueSpec:
+    def output_spec(self, name: str) -> PortSpec:
         """Return the value description inferred for one workflow output."""
 
         if name not in self.outputs:

@@ -10,7 +10,9 @@ from typing import cast
 
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.types import (
+    PortSpec,
     StageContract,
+    StreamSpec,
     ValueRef,
     ValueSpec,
     WorkflowValidationError,
@@ -70,19 +72,21 @@ class Workflow:
         validate_name(name, "workflow name")
         self._name = name
         self._owner = object()
-        self._inputs: dict[str, ValueSpec] = {}
+        self._inputs: dict[str, PortSpec] = {}
         self._stages: dict[str, StageIR] = {}
         self._contracts: dict[str, StageContract] = {}
         self._outputs: dict[str, ValueRef] = {}
 
-    def input(self, name: str, spec: ValueSpec, /) -> ValueRef:
+    def input(self, name: str, spec: PortSpec, /) -> ValueRef:
         """Declare and reference a workflow input."""
 
         validate_name(name, "workflow input")
         if name in self._inputs:
             raise WorkflowValidationError(f"duplicate workflow input {name!r}")
-        if not isinstance(spec, ValueSpec):
-            raise WorkflowValidationError("workflow inputs must use ValueSpec")
+        if not isinstance(spec, (ValueSpec, StreamSpec)):
+            raise WorkflowValidationError(
+                "workflow inputs must use ValueSpec or StreamSpec"
+            )
         self._inputs[name] = spec
         return ValueRef.for_input(name, self._owner)
 
@@ -146,7 +150,7 @@ class Workflow:
             outputs=self._outputs,
         )
 
-    def _resolve_owned_reference(self, reference: ValueRef) -> ValueSpec:
+    def _resolve_owned_reference(self, reference: ValueRef) -> PortSpec:
         if not isinstance(reference, ValueRef) or reference._owner is not self._owner:
             raise WorkflowValidationError(
                 "value reference belongs to a different workflow"
