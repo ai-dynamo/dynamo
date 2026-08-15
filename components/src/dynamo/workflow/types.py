@@ -144,8 +144,33 @@ class ValueSpec:
                 )
 
 
-def compatibility_error(producer: ValueSpec, consumer: ValueSpec) -> Optional[str]:
+@dataclass(frozen=True)
+class StreamSpec:
+    """The item contract for a logical stream crossing a workflow port.
+
+    Streaming execution is intentionally not implemented by the current compiler.
+    """
+
+    item: ValueSpec
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item, ValueSpec):
+            raise WorkflowValidationError("stream items must use ValueSpec")
+
+
+PortSpec = Union[ValueSpec, StreamSpec]
+
+
+def compatibility_error(producer: PortSpec, consumer: PortSpec) -> Optional[str]:
     """Explain why a producer cannot satisfy a consumer, or return ``None``."""
+
+    if isinstance(producer, StreamSpec) or isinstance(consumer, StreamSpec):
+        if not isinstance(producer, StreamSpec):
+            return "value output does not satisfy a stream input"
+        if not isinstance(consumer, StreamSpec):
+            return "stream output does not satisfy a value input"
+        item_error = compatibility_error(producer.item, consumer.item)
+        return None if item_error is None else f"stream item {item_error}"
 
     if producer.type != consumer.type:
         return f"type {producer.type!r} does not satisfy {consumer.type!r}"
@@ -189,8 +214,8 @@ class StageContract:
     """The complete named input and output surface of a workflow stage."""
 
     id: str
-    inputs: Mapping[str, ValueSpec] = field(default_factory=dict)
-    outputs: Mapping[str, ValueSpec] = field(default_factory=dict)
+    inputs: Mapping[str, PortSpec] = field(default_factory=dict)
+    outputs: Mapping[str, PortSpec] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_name(self.id, "contract id")
@@ -203,15 +228,17 @@ class StageContract:
 
     @staticmethod
     def _freeze_ports(
-        ports: Mapping[str, ValueSpec], kind: str
-    ) -> Mapping[str, ValueSpec]:
+        ports: Mapping[str, PortSpec], kind: str
+    ) -> Mapping[str, PortSpec]:
         if not isinstance(ports, Mapping):
             raise WorkflowValidationError(f"{kind}s must be a mapping")
-        frozen: dict[str, ValueSpec] = {}
+        frozen: dict[str, PortSpec] = {}
         for name, spec in sorted(ports.items()):
             validate_name(name, kind)
-            if not isinstance(spec, ValueSpec):
-                raise WorkflowValidationError(f"{kind} {name!r} must use ValueSpec")
+            if not isinstance(spec, (ValueSpec, StreamSpec)):
+                raise WorkflowValidationError(
+                    f"{kind} {name!r} must use ValueSpec or StreamSpec"
+                )
             frozen[name] = spec
         return MappingProxyType(frozen)
 

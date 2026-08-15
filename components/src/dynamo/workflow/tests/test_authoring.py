@@ -9,6 +9,7 @@ import pytest
 from dynamo.workflow import (
     StageContract,
     StageIR,
+    StreamSpec,
     ValueRef,
     ValueSpec,
     Workflow,
@@ -175,6 +176,40 @@ def test_contracts_are_deeply_immutable():
         contract.outputs["other"] = ValueSpec(type="text")
     with pytest.raises(FrozenInstanceError):
         contract.id = "changed"
+
+
+def test_stream_specs_are_typed_and_connect_only_to_compatible_streams() -> None:
+    chunks = StreamSpec(item=ValueSpec(type="json"))
+    workflow = Workflow("stream-flow")
+    source = workflow.input("chunks", chunks)
+    consumer = workflow.stage(
+        "consumer",
+        StageContract(
+            id="stream-consumer",
+            inputs={"chunks": chunks},
+            outputs={"chunks": chunks},
+        ),
+        chunks=source,
+    )
+    workflow.output("chunks", consumer.chunks)
+
+    assert workflow.build().output_spec("chunks") == chunks
+
+    with pytest.raises(WorkflowValidationError, match="stream output"):
+        workflow.stage(
+            "value-consumer",
+            StageContract(
+                id="value-consumer",
+                inputs={"value": ValueSpec(type="json")},
+                outputs={"value": ValueSpec(type="json")},
+            ),
+            value=consumer.chunks,
+        )
+
+
+def test_stream_specs_require_value_items() -> None:
+    with pytest.raises(WorkflowValidationError, match="stream items"):
+        StreamSpec(item="json")
 
 
 @pytest.mark.parametrize(
