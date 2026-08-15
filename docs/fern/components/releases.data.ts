@@ -91,7 +91,7 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.16", trtllm: "1.3.0rc22", vllm: "0.26.0", nixlSglang: "1.3.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
     delta:
-      "Audit subsystem migrated into request trace (DYN_AUDIT_* honored as legacy aliases); HTTP header capture in trace records is an explicit fail-closed allowlist; deprecated multimodal worker flags and vLLM worker-role flags removed; UCX 1.21.x.",
+      "Audit subsystem migrated into request trace (DYN_AUDIT_* honored as legacy aliases); HTTP header capture in trace records is an explicit fail-closed allowlist; deprecated multimodal worker flags and vLLM worker-role flags removed; runtime images no longer bundle software video decoders (H.264/H.265 decodes via NVDEC); UCX 1.21.x.",
     notesSummary:
       "Experimental cross-datacenter prefix routing and reservation replay in the Router, a vLLM-compatible generate token endpoint, tokenizer L1 prefix cache on by default, NIXL disaggregation for vLLM-Omni pipelines, and the Spica deployment simulator.",
   },
